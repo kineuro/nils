@@ -445,3 +445,139 @@ fn each_handover_has_its_own_password_or_none_with_a_reason() {
     let db = std::fs::read(home_dir.path().join("registry.db")).unwrap();
     assert!(!db.windows(secret.len()).any(|w| w == secret.as_bytes()));
 }
+
+/// Wave 7b (the maintenance track): the folder of the newest finished
+/// version is not handed over while a newer release into it stopped (the
+/// folder is a mixture of two versions), or while a release lock is in it
+/// (a release is writing it, or died in it); the words say so and what to
+/// do. Once the release is run again to its end, the handover goes. The
+/// archiver is a stand-in that only says what it is: the refusal comes
+/// before an archive is packed.
+#[test]
+fn a_folder_a_newer_release_stopped_in_or_holds_a_lock_is_not_handed_over() {
+    use nils_release::lock;
+    use nils_release::policy::Uids;
+    use nils_release::run::Asked;
+
+    let source = tree();
+    let home_dir = TempDir::new("handover-home");
+    let out = TempDir::new("handover-out");
+    let ship = TempDir::new("handover-ship");
+    let (_home, mut reg) = released(&home_dir, &source, out.path());
+    let seven = home_dir.path().join("7z");
+    std::fs::write(
+        &seven,
+        "#!/bin/sh\necho '7-Zip (a) 23.01 a stand-in for the test'\n",
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&seven, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let archiver = Archiver::find(&seven).unwrap();
+    let password = nils_release::handover::password(KEY);
+    let s = settings(
+        ship.path(),
+        &archiver,
+        &password,
+        1 << 30,
+        Strategy::Ordered,
+    );
+
+    // a lock in the folder: a release is writing it, or died in it
+    std::fs::write(
+        lock::path(out.path()),
+        serde_json::to_string(&lock::Lock {
+            job: 77,
+            registry: None,
+            host: "a-node".to_string(),
+            pid: 1,
+            started_at: nils_registry::time::now_iso(),
+            beat_at: Some(nils_registry::time::now_iso()),
+        })
+        .unwrap(),
+    )
+    .unwrap();
+    let e = handover::run(&mut reg, &s).unwrap_err().to_string();
+    assert!(
+        e.contains("the folder holds a release lock: a release (job 77 on a-node) is writing it, or did not finish")
+            && e.ends_with("before handing it over"),
+        "{e}"
+    );
+    assert!(
+        !ship.path().join("handover.tsv").exists(),
+        "nothing was packed"
+    );
+    std::fs::remove_file(lock::path(out.path())).unwrap();
+
+    // a newer release into the folder, under another policy so every stack
+    // is rewritten, stopped after its first stack: the folder is a mixture
+    let remapped = Policy {
+        uids: Uids::Preserve,
+        ..Policy::default()
+    };
+    let scheme = SessionScheme::default();
+    let release = run::Settings {
+        name: "a cohort",
+        root: out.path(),
+        policy: &remapped,
+        policy_from: nils_release::policy::Source::Flags,
+        categories: categories::Category::every(),
+        selection: Selection::default(),
+        scheme: &scheme,
+        private: &[],
+        on_unknown: nils_release::burned::OnUnknown::Write,
+        actor: "a test",
+        key: KEY,
+        pack: pack(),
+        layout: Layout::Descriptive,
+        naming: nils_release::name::Naming::Full,
+        places: nils_release::bids::place::Options::default(),
+        converter: None,
+        compress: true,
+        observations: &[],
+        authors: &[],
+    };
+    let asked = std::sync::atomic::AtomicBool::new(false);
+    let stop = || match asked.load(std::sync::atomic::Ordering::SeqCst) {
+        true => Asked::Stop,
+        false => Asked::Nothing,
+    };
+    let stopped = run::run_with(&mut reg, &release, Some(&stop), &mut |_, _, done| {
+        if done == 1 {
+            asked.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+    })
+    .unwrap();
+    assert_eq!(stopped.stopped_after, Some(1), "{stopped:?}");
+    assert_eq!(stopped.stacks, 2);
+    let e = handover::run(&mut reg, &s).unwrap_err().to_string();
+    assert_eq!(
+        e,
+        "the folder holds a release that stopped after 1 of 2 stacks; run the release again to \
+         finish it before handing it over"
+    );
+    assert_eq!(
+        handover::refusal_for(reg.store(), "a cohort")
+            .unwrap()
+            .as_deref(),
+        Some(e.as_str())
+    );
+
+    // the release run again to its end: the folder is that version, and
+    // the handover has nothing to refuse
+    let again = run::run(&mut reg, &release).unwrap();
+    assert_eq!(again.stopped_after, None);
+    assert_eq!(again.version, stopped.version);
+    assert_eq!(
+        handover::refusal_for(reg.store(), "a cohort").unwrap(),
+        None
+    );
+    // and a release nobody finished refuses nothing here: the handover
+    // itself says there is no finished release
+    assert_eq!(
+        handover::refusal_for(reg.store(), "nobody's").unwrap(),
+        None
+    );
+}

@@ -1424,7 +1424,10 @@ fn run_release(
         }
     }
     if heart.asked() {
+        // nothing of this version is written, so nothing was restored
+        // either, and nothing is raised below for it
         report.stopped_after = Some(0);
+        report.restored = 0;
         jobs.clear();
         report.routes.clear();
         report.folders.clear();
@@ -1537,14 +1540,23 @@ fn run_release(
                 }
             }
             _ => {
-                // a stack rewritten in its place: its old files go now, and
-                // not a moment before (Wave 7b, the maintenance track)
-                if job.change == crate::version::Change::Rewritten
+                // A stack rewritten in its place keeps its old files until
+                // its new ones are staged whole (Wave 7b, the maintenance
+                // track): it is written under a scratch root beside the
+                // tree, then the old files go and the new ones are moved
+                // into place, so an abort or a kill mid-write leaves the old
+                // files or the new, never neither.
+                let in_place = job.change == crate::version::Change::Rewritten
                     && !leaving.contains(&job.stack)
-                    && let Some(was) = &job.was
-                {
-                    drop_files(settings.root, &was.files());
-                }
+                    && job.was.is_some();
+                let scratch = settings.root.join(REWRITE_DIR).join(job.stack.to_string());
+                let write_root: &Path = match in_place {
+                    true => {
+                        std::fs::remove_dir_all(&scratch).ok();
+                        &scratch
+                    }
+                    false => settings.root,
+                };
                 job.instances = instances_of(registry.store(), job.stack)?;
                 let code = job.code.clone();
                 let policy = &policies.all[job.policy];
@@ -1567,7 +1579,7 @@ fn run_release(
                         let dir = job.place.dir.clone();
                         let store = registry.store();
                         let mut tick = || heart.tick(store, "write");
-                        write_dicom(job, &plan, settings.root, &dir, &mut tick)
+                        write_dicom(job, &plan, write_root, &dir, &mut tick)
                     }
                     Layout::Bids => {
                         // the heart beats through a long conversion, from
@@ -1578,6 +1590,7 @@ fn run_release(
                             job,
                             &plan,
                             settings,
+                            write_root,
                             &mut report,
                             body_parts.get(&job.stack).map(String::as_str),
                             asl_contexts.get(&job.stack).map(String::as_str),
@@ -1587,7 +1600,7 @@ fn run_release(
                         )
                     }
                 };
-                let written = match outcome {
+                let mut written = match outcome {
                     Outcome::Files(written) => written,
                     Outcome::NotDone(why) => {
                         // Nothing is recorded of the stack: no state, no
@@ -1595,8 +1608,14 @@ fn run_release(
                         // it again. Asked to stop or abort, the release
                         // stops here, the stack not done; otherwise the
                         // stack is one the converter could not run on, which
-                        // the report says, and the release goes on.
+                        // the report says, and the release goes on. A stack
+                        // staged beside the tree is let go: its old files
+                        // are still in place.
                         job.instances.clear();
+                        if in_place {
+                            std::fs::remove_dir_all(&scratch).ok();
+                            prune(settings.root, scratch.parent());
+                        }
                         if heart.asked() {
                             report.stopped_after.get_or_insert(heart.done);
                             continue;
@@ -1607,7 +1626,48 @@ fn run_release(
                         watch(registry.store(), job_id, heart.done);
                         continue;
                     }
+                    Outcome::ConverterGone(why) => {
+                        // The converter cannot be run at all, so the release
+                        // stops with the error: what the stacks done wrote is
+                        // recorded, nothing of this one or of those after it,
+                        // and the row is left unfinished with the words, as a
+                        // stopped release's is, so the next run goes on under
+                        // the same version.
+                        job.instances.clear();
+                        if in_place {
+                            std::fs::remove_dir_all(&scratch).ok();
+                            prune(settings.root, scratch.parent());
+                        }
+                        let words = format!(
+                            "{why}: the release stopped after {} of {} stacks",
+                            heart.done, report.stacks
+                        );
+                        upsert_state(registry.store(), &rows)?;
+                        write_rows(
+                            registry.store(),
+                            "release_move",
+                            &["release_id", "stack_id", "action", "was", "now"],
+                            &moves,
+                        )?;
+                        forget_plan(registry.store(), report.release_id)?;
+                        close_row(registry.store(), &report, Some(&words))?;
+                        return Err(Error::Refused(words));
+                    }
                 };
+                if in_place && let Some(was) = &job.was {
+                    // staged whole: now the old files go and the new ones
+                    // take their place
+                    drop_files(settings.root, &was.files());
+                    for entry in written.iter_mut() {
+                        if let Ok(w) = &*entry
+                            && let Err(why) = place_staged(&scratch, settings.root, &w.wrote.path)
+                        {
+                            *entry = Err(why);
+                        }
+                    }
+                    std::fs::remove_dir_all(&scratch).ok();
+                    prune(settings.root, scratch.parent());
+                }
                 let mut wrote: Vec<Wrote> = Vec::new();
                 for w in written {
                     match w {
@@ -1800,7 +1860,12 @@ fn run_release(
             .collect::<Vec<_>>(),
     )?;
     write_changes(registry.store(), &report)?;
-    if !held.is_empty() {
+    // A release stopped before it wrote a stack (at the compare, or at the
+    // top of its first stack) raises nothing: the questions are the version's
+    // to ask, and the run that writes it asks them (Wave 7b, the maintenance
+    // track).
+    let wrote_nothing = report.stopped_after == Some(0);
+    if !held.is_empty() && !wrote_nothing {
         raise_review(registry.store(), &report, &held, &pixels)?;
     }
     // Record 37 S2. A refusal on its own would be blunt; the question is what
@@ -1810,14 +1875,16 @@ fn run_release(
     // whose names are settled with it so that a name never depends on what
     // a release took.
     let ours = of_version(&shared.groups, &in_version);
-    if settings.layout == Layout::Bids && !ours.is_empty() {
+    if settings.layout == Layout::Bids && !ours.is_empty() && !wrote_nothing {
         raise_shared(registry.store(), &report, &ours)?;
     }
     // §9.2. `func` requires `task` and no rule can invent one, so a person is
     // asked, **per study**: what the subject was doing is a property of the
     // occasion and not of a stack, and one answer settles every functional
     // stack of it.
-    ask_about_tasks(registry.store(), &report, &absent, settings)?;
+    if !wrote_nothing {
+        ask_about_tasks(registry.store(), &report, &absent, settings)?;
+    }
     forget_plan(registry.store(), report.release_id)?;
     // the row of a stopped release keeps what it did and says in its error
     // that it stopped, as the job's row does, and is left unfinished: a
@@ -3019,11 +3086,18 @@ fn acquisition_time((day, time): &(Day, Option<String>)) -> String {
 /// incident.
 fn preflight(root: &Path, wanted: i64) -> Result<(), Error> {
     // a refused release leaves no folder (Wave 7b, the maintenance track):
-    // what this made for the probe it takes away again when it refuses
-    let was_there = root.is_dir();
+    // what this made for the probe it takes away again when it refuses,
+    // down to the first directory that was not there before
+    let made = first_missing(root);
     let undo = || {
-        if !was_there {
-            std::fs::remove_dir(root).ok();
+        let Some(top) = &made else { return };
+        let mut here = Some(root);
+        while let Some(dir) = here {
+            std::fs::remove_dir(dir).ok();
+            if dir == top.as_path() {
+                break;
+            }
+            here = dir.parent();
         }
     };
     std::fs::create_dir_all(root)
@@ -3054,6 +3128,21 @@ fn preflight(root: &Path, wanted: i64) -> Result<(), Error> {
         )));
     }
     Ok(())
+}
+
+/// The topmost directory of `root` that is not there yet, if any: the first
+/// one `create_dir_all` would make, and the last one a refusal takes away.
+fn first_missing(root: &Path) -> Option<PathBuf> {
+    let mut top = None;
+    let mut here = Some(root);
+    while let Some(dir) = here {
+        if dir.exists() {
+            break;
+        }
+        top = Some(dir.to_path_buf());
+        here = dir.parent();
+    }
+    top
 }
 
 /// What the filesystem says it has, or nothing where it will not say.
@@ -3293,6 +3382,27 @@ fn move_them(root: &Path, jobs: &[Job], tick: &mut dyn FnMut()) -> std::collecti
 /// One file's journey through a move: where it was, where it waits, where
 /// it goes.
 type Leg = (PathBuf, PathBuf, PathBuf);
+
+/// Where a stack rewritten in its place is staged, under the root, by stack
+/// (Wave 7b, the maintenance track): `<root>/.nils-rewrite/<stack>/<the
+/// stack's own paths>`, moved into the tree once the stack is whole.
+const REWRITE_DIR: &str = ".nils-rewrite";
+
+/// Move one staged file of a rewritten stack from the scratch root into the
+/// tree, by the path it was written under, making the directories it needs.
+fn place_staged(scratch: &Path, root: &Path, path: &str) -> Result<(), String> {
+    let from = scratch.join(path);
+    let to = root.join(path);
+    if let Some(parent) = to.parent() {
+        std::fs::create_dir_all(parent).map_err(|_| "no directory to write into".to_string())?;
+    }
+    if std::fs::rename(&from, &to).is_ok() {
+        return Ok(());
+    }
+    std::fs::copy(&from, &to).map_err(|_| "could not be moved into place".to_string())?;
+    std::fs::remove_file(&from).ok();
+    Ok(())
+}
 
 /// Remove a stack's files, and any directory they leave empty.
 fn drop_files(root: &Path, files: &Files) {
@@ -4240,6 +4350,11 @@ enum Outcome {
     /// written of it stays, as every file written does; nothing is recorded
     /// of it, so the next run writes it again.
     NotDone(String),
+    /// The converter could not be started at all (gone, or not to be run),
+    /// although the release found it before it began: nothing is known of
+    /// the stack, no stack after it would fare better, and the release stops
+    /// with the words as its error.
+    ConverterGone(String),
 }
 
 /// One stack, as DICOM in a directory of its own: the descriptive layout and
@@ -4271,11 +4386,17 @@ fn write_dicom(
 /// `v1.0.20260724`, `-ba y` leaves `InstitutionName` and `AcquisitionTime` in
 /// the JSON. Converting the scrubbed file means the sidecar inherits the
 /// release's policy for free, including its dates.
+///
+/// `root` is where the stack's files go: the tree's root, or, for a stack
+/// rewritten in its place, a scratch root beside the tree under which the
+/// stack is staged whole before its old files go (Wave 7b, the maintenance
+/// track); the paths written are relative to it either way.
 #[allow(clippy::too_many_arguments)]
 fn write_bids(
     job: &mut Job,
     plan: &Plan,
     settings: &Settings,
+    root: &Path,
     report: &mut Report,
     body_part: Option<&str>,
     aslcontext: Option<&str>,
@@ -4283,7 +4404,6 @@ fn write_bids(
     every: std::time::Duration,
     tick: &mut crate::bids::convert::Tick<'_>,
 ) -> Outcome {
-    let root = settings.root;
     let staging = root.join(".nils-convert").join(job.stack.to_string());
     std::fs::remove_dir_all(&staging).ok();
     if std::fs::create_dir_all(&staging).is_err() {
@@ -4340,6 +4460,13 @@ fn write_bids(
         Err(crate::bids::convert::Fail::CouldNotRun(why)) => {
             std::fs::remove_dir_all(&staging).ok();
             return Outcome::NotDone(why);
+        }
+        // The converter could not be started at all, although the release
+        // found it before it began: no stack after this one would fare
+        // better, so the release stops with the error.
+        Err(crate::bids::convert::Fail::CouldNotStart(why)) => {
+            std::fs::remove_dir_all(&staging).ok();
+            return Outcome::ConverterGone(why);
         }
     };
     // Wave 7a §8.2: an image BIDS cannot admit from its headers alone is no
@@ -4496,7 +4623,7 @@ fn write_bids(
                     out.extend(written);
                     Outcome::Files(out)
                 }
-                not_done => not_done,
+                other => other,
             }
         }
     }
@@ -6749,6 +6876,43 @@ fn raise_shared(store: &mut Store, report: &Report, groups: &[&SharedGroup]) -> 
 mod tests {
     use super::*;
     use nils_dicom::synth::TempDir;
+
+    /// Wave 7b (the maintenance track): a preflight that refuses takes away
+    /// every directory it made for the probe, down to the first one that was
+    /// not there, and leaves the ones that were.
+    #[cfg(unix)]
+    #[test]
+    fn a_refused_preflight_takes_away_every_directory_it_made() {
+        let dir = TempDir::new("preflight");
+        // two levels missing: both go
+        let root = dir.path().join("a").join("tree");
+        let refused = preflight(&root, i64::MAX).unwrap_err();
+        assert!(
+            matches!(&refused, Error::Refused(words) if words.contains("free and this release")),
+            "{refused}"
+        );
+        assert!(
+            !dir.path().join("a").exists(),
+            "nothing of the probe is left"
+        );
+        assert!(dir.path().is_dir());
+        // the parent there before stays, the leaf goes
+        let kept = dir.path().join("kept");
+        std::fs::create_dir(&kept).unwrap();
+        let root = kept.join("tree");
+        preflight(&root, i64::MAX).unwrap_err();
+        assert!(kept.is_dir() && !root.exists());
+        // and a root that was there with something in it is left as it was
+        let full = dir.path().join("full");
+        std::fs::create_dir(&full).unwrap();
+        std::fs::write(full.join("a-file"), b"x").unwrap();
+        preflight(&full, i64::MAX).unwrap_err();
+        assert!(full.join("a-file").is_file());
+        // a preflight that passes leaves the root it made
+        let made = dir.path().join("b").join("tree");
+        preflight(&made, 1).unwrap();
+        assert!(made.is_dir());
+    }
 
     #[test]
     fn a_version_is_asked_only_about_the_names_it_writes() {

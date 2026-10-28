@@ -666,6 +666,22 @@ fn a_lock_of_a_running_release_refuses_a_second_writer_and_names_it() {
     assert_eq!(lock::read(out.path()).map(|l| l.job), Some(other));
     // and no job of this release was made: the other is the only one
     assert_eq!(the_release_job(&mut reg).id, other);
+
+    // the other release asked to stop and still at it: the words say to
+    // wait, not to cancel what is cancelled already
+    assert_eq!(
+        job::request_cancel(reg.store(), other).unwrap(),
+        Some(State::Cancelling)
+    );
+    let words = run::run(&mut reg, &settings(out.path(), &policy, &scheme))
+        .unwrap_err()
+        .to_string();
+    assert!(
+        words.contains(&format!("another release (job {other} on"))
+            && words.ends_with("it is stopping; wait for it and run again"),
+        "{words}"
+    );
+    assert_eq!(the_release_job(&mut reg).id, other);
 }
 
 /// (d) A lock naming a job that is over is taken over: the release runs,
@@ -689,12 +705,37 @@ fn a_lock_of_a_finished_release_is_taken_over_and_the_report_says_so() {
     )
     .unwrap();
     job::finish(reg.store(), other, State::Done, None).unwrap();
-    // fresh by its stamp; the registry's word that the job is over wins
+    let registry_id = reg.meta().registry_id.clone();
+    // a lock that names no registry is never looked up in this registry's
+    // job table, whatever job number it carries: its own beat is the word,
+    // and fresh it refuses
     plant(
         out.path(),
         &lock::Lock {
             job: other,
             registry: None,
+            host: "a-node".to_string(),
+            pid: 1,
+            started_at: nils_registry::time::now_iso(),
+            beat_at: Some(nils_registry::time::now_iso()),
+        },
+    )
+    .unwrap();
+    let refused = run::run(&mut reg, &settings(out.path(), &policy, &scheme)).unwrap_err();
+    let words = refused.to_string();
+    assert!(
+        words.contains(&format!(
+            "another release (job {other} on a-node, of a registry it does not name) is writing"
+        )),
+        "{words}"
+    );
+    // fresh by its stamp and of this registry: the registry's word that
+    // the job is over wins
+    plant(
+        out.path(),
+        &lock::Lock {
+            job: other,
+            registry: Some(registry_id),
             host: "a-node".to_string(),
             pid: 1,
             started_at: nils_registry::time::now_iso(),
@@ -911,4 +952,120 @@ fn a_store_failure_while_asking_about_the_lock_stays_a_store_failure() {
     reg.store().execute(&sql, &[]).unwrap();
     let found = lock::check(reg.store(), &registry_id, out.path());
     assert!(matches!(found, Err(Refusal::Store(_))), "{found:?}");
+}
+
+/// A stack rewritten in its place is staged whole beside the tree before
+/// its old files go (Wave 7b, the maintenance track): an abort midway
+/// through it leaves the old files, whole, never neither; and the run that
+/// goes on rewrites it.
+#[test]
+fn an_abort_mid_rewrite_leaves_the_old_files_or_the_new_never_neither() {
+    let source = tree_of(&[2, 2]);
+    let home_dir = TempDir::new("one-writer-home");
+    let out = TempDir::new("one-writer-out");
+    let (_home, mut reg) = registry(&home_dir, &source);
+    let scheme = SessionScheme::default();
+    let first = run::run(&mut reg, &settings(out.path(), &Policy::default(), &scheme)).unwrap();
+    assert_eq!((first.added, first.written), (2, 4));
+    let before: Vec<(std::path::PathBuf, Vec<u8>)> = files_under(out.path())
+        .into_iter()
+        .map(|p| {
+            let bytes = std::fs::read(&p).unwrap();
+            (p, bytes)
+        })
+        .collect();
+    assert_eq!(before.len(), 4);
+
+    // another policy: every stack is rewritten in its place; the abort
+    // comes in once the first stack's first new file is staged (five files
+    // under the root: the four old ones and the staged one)
+    let remapped = Policy {
+        uids: Uids::Preserve,
+        ..Policy::default()
+    };
+    let root = out.path().to_path_buf();
+    let stop = || match files_under(&root).len() >= 5 {
+        true => Asked::Abort,
+        false => Asked::Nothing,
+    };
+    let report = run::run_with(
+        &mut reg,
+        &settings(out.path(), &remapped, &scheme),
+        Some(&stop),
+        &mut |_, _, _| {},
+    )
+    .unwrap();
+    assert_eq!(report.stopped_after, Some(0), "{report:?}");
+    // the file staged before the abort is not counted: nothing of the
+    // stack is recorded
+    assert_eq!((report.rewritten, report.written), (0, 0), "{report:?}");
+    // the tree is the version before's, whole, and nothing staged is left
+    let after = files_under(out.path());
+    assert_eq!(after.len(), 4, "{after:?}");
+    for (path, bytes) in &before {
+        assert_eq!(std::fs::read(path).unwrap(), *bytes, "{}", path.display());
+    }
+    assert!(!out.path().join(".nils-rewrite").exists());
+    let (error, finished) = row_of(&mut reg, report.release_id);
+    assert_eq!(
+        error.as_deref(),
+        Some("stopped after 0 of 2 stacks; what was written stays written")
+    );
+    assert_eq!(finished, None);
+
+    // the run that goes on rewrites both, in their places, with new bytes
+    let again = run::run(&mut reg, &settings(out.path(), &remapped, &scheme)).unwrap();
+    assert_eq!(again.version, report.version);
+    assert_eq!((again.rewritten, again.written), (2, 4), "{again:?}");
+    let now = files_under(out.path());
+    assert_eq!(now.len(), 4);
+    assert_eq!(
+        now,
+        before.iter().map(|(p, _)| p.clone()).collect::<Vec<_>>(),
+        "the same paths"
+    );
+    for (path, bytes) in &before {
+        assert_ne!(std::fs::read(path).unwrap(), *bytes, "{}", path.display());
+    }
+    assert!(!out.path().join(".nils-rewrite").exists());
+}
+
+/// A stop read at the compare leaves nothing counted as restored: the
+/// version wrote nothing, so nothing of it was restored either (Wave 7b,
+/// the maintenance track).
+#[test]
+fn a_stop_at_the_compare_counts_nothing_restored() {
+    let source = tree(2);
+    let home_dir = TempDir::new("one-writer-home");
+    let out = TempDir::new("one-writer-out");
+    let (_home, mut reg) = registry(&home_dir, &source);
+    let policy = Policy::default();
+    let scheme = SessionScheme::default();
+    let first = run::run(&mut reg, &settings(out.path(), &policy, &scheme)).unwrap();
+    assert_eq!(first.added, 2);
+    // a stack of the version before is gone from the disk (its directory,
+    // which is the stack in this layout): a run that went on would restore it
+    let gone = files_under(out.path()).remove(0);
+    std::fs::remove_dir_all(gone.parent().unwrap()).unwrap();
+
+    let stop = || Asked::Stop;
+    let report = run::run_with(
+        &mut reg,
+        &settings(out.path(), &policy, &scheme),
+        Some(&stop),
+        &mut |_, _, _| panic!("no stack is handled"),
+    )
+    .unwrap();
+    assert_eq!(report.stopped_after, Some(0), "{report:?}");
+    assert_eq!(
+        (report.restored, report.rewritten, report.written),
+        (0, 0, 0)
+    );
+    assert!(!gone.exists(), "nothing was written");
+
+    // and the run that goes on restores it
+    let again = run::run(&mut reg, &settings(out.path(), &policy, &scheme)).unwrap();
+    assert_eq!(again.version, report.version);
+    assert_eq!((again.restored, again.rewritten), (1, 1), "{again:?}");
+    assert!(gone.is_file());
 }

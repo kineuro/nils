@@ -7,10 +7,11 @@
 //! beat, so the folder itself says whether the release that wrote it is
 //! still at it, whatever registry that release belongs to.
 //!
-//! A release that finds one reads it so: a lock of another registry, whose
-//! job this registry cannot ask about, refuses while its beat is within the
-//! freshness a claim allows ([`job::is_fresh`]), and is taken over once it
-//! is older. A lock of this registry asks the registry about the job it
+//! A release that finds one reads it so: a lock of another registry, or one
+//! that names no registry, whose job this registry cannot ask about (a job
+//! number of its own would be the wrong job), refuses while its beat is
+//! within the freshness a claim allows ([`job::is_fresh`]), and is taken
+//! over once it is older. A lock of this registry asks the registry about the job it
 //! names: a job that is over, or unknown, is taken over; a job the registry
 //! still calls running or cancelling refuses while the lock's beat is fresh
 //! or the registry has heard from it, and is taken over once both have gone
@@ -25,9 +26,11 @@
 //! into one root within the same second cannot both hold it: the second
 //! finds the first's file and refuses. A lock that `check` said may be
 //! taken over is put out of the way first, only while it still reads as the
-//! one `check` saw, and the exclusive create follows. After writing, the
-//! file is read back and must name this release, or the release refuses as
-//! a second writer. The lock is taken away only by the release whose whole
+//! one `check` saw, by a rename to a name of the taker's own (one step,
+//! which exactly one of two takers wins; the other finds nothing there and
+//! refuses), and the exclusive create follows. After writing, the file is
+//! read back and must name this release, or the release refuses as a second
+//! writer. The lock is taken away only by the release whose whole
 //! identity it carries, never on the job's number alone.
 //!
 //! The file is a guard beside the registry's claim, which is one job of the
@@ -55,7 +58,8 @@ pub struct Lock {
     /// The release job, in the registry the lock names.
     pub job: i64,
     /// The registry's identity, so a lock of another registry is known as
-    /// one this registry cannot ask about.
+    /// one this registry cannot ask about; a lock that names none is read
+    /// the same way, by its beat alone.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub registry: Option<String>,
     pub host: String,
@@ -175,9 +179,13 @@ enum Found {
 }
 
 fn found(root: &Path) -> Found {
-    let path = path(root);
-    let modified = || std::fs::metadata(&path).and_then(|m| m.modified()).ok();
-    let text = match std::fs::read_to_string(&path) {
+    found_at(&path(root))
+}
+
+/// What is in the file at `path`, read as a lock.
+fn found_at(path: &Path) -> Found {
+    let modified = || std::fs::metadata(path).and_then(|m| m.modified()).ok();
+    let text = match std::fs::read_to_string(path) {
         Ok(text) => text,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Found::Nothing,
         // anything else is a file that is there and cannot be read: never
@@ -241,13 +249,18 @@ pub fn check(
         }
         Found::Lock(lock) => lock,
     };
-    if let Some(theirs) = lock.registry.as_deref().filter(|id| *id != registry_id) {
-        // another registry's job: this one cannot ask about it, so the
-        // lock's own beat is the word
+    if lock.registry.as_deref() != Some(registry_id) {
+        // another registry's job, or one that names no registry: this one
+        // cannot ask about it (a job number of its own would be the wrong
+        // job), so the lock's own beat is the word
+        let theirs = match &lock.registry {
+            Some(id) => format!(", of registry {id}"),
+            None => ", of a registry it does not name".to_string(),
+        };
         return match job::is_fresh(lock.last()) {
             true => Err(Refusal::Refused(format!(
-                "another release (job {} on {}, of registry {theirs}) is writing this folder; \
-                 wait for it, or cancel it there and run again",
+                "another release (job {} on {}{theirs}) is writing this folder; wait for it, \
+                 or cancel it there and run again",
                 lock.job, lock.host
             ))),
             false => Ok(Some(TakenOver {
@@ -273,9 +286,13 @@ pub fn check(
         job::State::Running | job::State::Cancelling
             if job::is_fresh(lock.last()) || job::is_live(&found) =>
         {
+            // a job already asked to stop needs no second asking
+            let next = match found.state {
+                job::State::Cancelling => "it is stopping; wait for it and run again",
+                _ => "wait for it, or cancel it and run again",
+            };
             Err(Refusal::Refused(format!(
-                "another release (job {} on {host}) is writing this folder; wait for it, or \
-                 cancel it and run again",
+                "another release (job {} on {host}) is writing this folder; {next}",
                 found.id
             )))
         }
@@ -321,43 +338,98 @@ pub fn take(root: &Path, lock: &Lock, over: Option<&TakenOver>) -> Result<(), No
             .create_new(true)
             .open(&path)
     };
+    // what `check` saw is the one file this take may put out of the way
+    let saw = |what: &Found| match (what, over.and_then(|t| t.lock.as_ref())) {
+        (Found::Lock(now), Some(then)) => now == then,
+        (Found::Unreadable { .. }, None) => true,
+        _ => false,
+    };
+    let mut aside: Option<PathBuf> = None;
     let created = match exclusive() {
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists && over.is_some() => {
-            // still the lock `check` saw: out of the way, and the exclusive
-            // create once more; one that reads otherwise is someone else's
-            let still = match (found(root), over.and_then(|t| t.lock.as_ref())) {
-                (Found::Lock(now), Some(then)) => now == *then,
-                (Found::Unreadable { .. }, None) => true,
-                (Found::Nothing, _) => true,
-                _ => false,
-            };
-            if !still {
-                return Err(NotTaken::Theirs(read(root)));
+            match found(root) {
+                // gone meanwhile (taken over and released already): nothing
+                // to put out of the way, and the exclusive create decides
+                Found::Nothing => exclusive(),
+                // Still the lock `check` saw: out of the way, and the
+                // exclusive create once more. Out of the way is a rename to
+                // a name of this taker's own, which exactly one of two takers
+                // wins (the other finds nothing there, and refuses: the
+                // winner is writing), where a remove would let both pass
+                // and both create after it.
+                what if saw(&what) => {
+                    let mine = root.join(aside_name());
+                    match std::fs::rename(&path, &mine) {
+                        Ok(()) => {}
+                        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                            return Err(NotTaken::Theirs(settled(root)));
+                        }
+                        Err(e) => return Err(NotTaken::Io(e)),
+                    }
+                    // what was moved aside is read once more: a lock another
+                    // taker wrote between the look and the rename is put
+                    // back, and this one refuses, since that taker is writing
+                    if !saw(&found_at(&mine)) {
+                        std::fs::rename(&mine, &path).ok();
+                        return Err(NotTaken::Theirs(settled(root)));
+                    }
+                    aside = Some(mine);
+                    exclusive()
+                }
+                // one that reads otherwise is someone else's, there first
+                _ => return Err(NotTaken::Theirs(read(root))),
             }
-            match std::fs::remove_file(&path) {
-                Ok(()) => {}
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                Err(e) => return Err(NotTaken::Io(e)),
-            }
-            exclusive()
         }
         other => other,
     };
     let mut file = match created {
         Ok(file) => file,
-        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-            return Err(NotTaken::Theirs(settled(root)));
+        Err(e) => {
+            if let Some(mine) = &aside {
+                std::fs::remove_file(mine).ok();
+            }
+            return Err(match e.kind() {
+                std::io::ErrorKind::AlreadyExists => NotTaken::Theirs(settled(root)),
+                _ => NotTaken::Io(e),
+            });
         }
-        Err(e) => return Err(NotTaken::Io(e)),
     };
-    file.write_all(text.as_bytes()).map_err(NotTaken::Io)?;
-    file.sync_all().ok();
+    let written = file
+        .write_all(text.as_bytes())
+        .and_then(|()| file.sync_all());
     drop(file);
-    // ours, and nobody else's, before a byte of the release is written
-    match read(root) {
-        Some(now) if now.same_release(lock) => Ok(()),
-        other => Err(NotTaken::Theirs(other)),
+    // the one `check` saw is of no further use once ours is in place
+    if let Some(mine) = &aside {
+        std::fs::remove_file(mine).ok();
     }
+    written.map_err(NotTaken::Io)?;
+    // Ours, and nobody else's, before a byte of the release is written. A
+    // file briefly not there is given the moment another taker needs to put
+    // back what it moved aside by mistake (see above), and is read again.
+    for _ in 0..10 {
+        match read(root) {
+            Some(now) if now.same_release(lock) => return Ok(()),
+            Some(theirs) => return Err(NotTaken::Theirs(Some(theirs))),
+            None => std::thread::sleep(std::time::Duration::from_millis(20)),
+        }
+    }
+    Err(NotTaken::Theirs(None))
+}
+
+/// A name of this taker's own for the lock it puts out of the way: in the
+/// root, so the rename is one step on one filesystem, and unlike any other
+/// taker's, in or out of this process.
+fn aside_name() -> String {
+    static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    format!(
+        "{FILE}.{}.{nanos}.{}.aside",
+        std::process::id(),
+        N.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    )
 }
 
 /// The other release's lock, given a moment to be written: the one that
@@ -508,6 +580,51 @@ mod tests {
         assert_eq!(held.job, if first.is_ok() { 1 } else { 2 });
         let loser = if first.is_ok() { second } else { first };
         assert!(matches!(loser, Err(NotTaken::Theirs(Some(_)))));
+    }
+
+    /// Two releases that both saw the same stale lock and both come to take
+    /// it over: exactly one holds the folder after, the other refuses as a
+    /// second writer, and nothing is left beside the lock.
+    #[test]
+    fn two_take_overs_of_one_stale_lock_have_exactly_one_winner() {
+        for _ in 0..20 {
+            let dir = nils_dicom::synth::TempDir::new("release-lock");
+            let root = dir.path().join("tree");
+            let stale = a_lock(1);
+            take(&root, &stale, None).unwrap();
+            let over = TakenOver {
+                job: Some((1, "h".into())),
+                was: "done".into(),
+                lock: Some(stale.clone()),
+            };
+            let go = std::sync::Barrier::new(2);
+            let (first, second) = std::thread::scope(|s| {
+                let a = s.spawn(|| {
+                    go.wait();
+                    take(&root, &a_lock(2), Some(&over))
+                });
+                let b = s.spawn(|| {
+                    go.wait();
+                    take(&root, &a_lock(3), Some(&over))
+                });
+                (a.join().unwrap(), b.join().unwrap())
+            });
+            let winners = [first.is_ok(), second.is_ok()]
+                .iter()
+                .filter(|w| **w)
+                .count();
+            assert_eq!(winners, 1, "{first:?} {second:?}");
+            let held = read(&root).unwrap();
+            assert_eq!(held.job, if first.is_ok() { 2 } else { 3 });
+            let loser = if first.is_ok() { second } else { first };
+            assert!(matches!(loser, Err(NotTaken::Theirs(_))), "{loser:?}");
+            // the one put aside is gone: the lock is the folder's only file
+            let left: Vec<String> = std::fs::read_dir(&root)
+                .unwrap()
+                .map(|e| e.unwrap().file_name().to_string_lossy().to_string())
+                .collect();
+            assert_eq!(left, vec![FILE.to_string()], "{left:?}");
+        }
     }
 
     /// A lock `check` said may be taken over goes out of the way, but only
