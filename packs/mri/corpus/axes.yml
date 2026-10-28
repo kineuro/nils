@@ -677,7 +677,7 @@ cases:
     axes:
       body_part: brain
 
-  - name: a sagittal spine series on a spine coil keeps its spine in an exam registered as a brain, narrower and thicker than a brain volume, the slice count and thickness keep it spine
+  - name: a 40-slice 2 mm sagittal 3D slab on a spine coil keeps its spine in an exam registered as a brain
     stack:
       image_type: 'ORIGINAL\PRIMARY\M\ND\NORM'
       scanning_sequence: 'SE'
@@ -705,6 +705,86 @@ cases:
       fov_x: 120
       fov_y: 300
       n_slices: 120
+      slice_thickness: 1.0
+    axes:
+      body_part: spine
+
+  - name: a stated spine beside the brain keeps its spine
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\ND\NORM'
+      scanning_sequence: 'GR\IR'
+      mr_acquisition_type: '3D'
+      text_body_part: 'SPINE,BRAIN'
+      text_sequence_name: '*tfl3d1_16ns'
+      text_series_description: 'Sag T1 3D GRE IR MPRAGE'
+      receive_coil_name: 'Spine_32_RS'
+      fov_x: 250
+      fov_y: 250
+      n_slices: 176
+      slice_thickness: 1.0
+    axes:
+      body_part: spine
+
+  - name: a volume exported without a slice thickness is read by its spacing and is the brain
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\ND\NORM'
+      scanning_sequence: 'GR\IR'
+      mr_acquisition_type: '3D'
+      text_body_part: 'BRAIN,HEAD'
+      text_sequence_name: '*tfl3d1_16ns'
+      text_series_description: 'Sag T1 3D GRE IR MPRAGE'
+      receive_coil_name: 'Spine_32_RS'
+      fov_x: 250
+      fov_y: 250
+      n_slices: 176
+      spacing_between_slices: 1.0
+    axes:
+      body_part: brain
+
+  - name: a field of view over 300 mm on a spine coil keeps its spine
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\ND\NORM'
+      scanning_sequence: 'GR\IR'
+      mr_acquisition_type: '3D'
+      text_body_part: 'BRAIN,HEAD'
+      text_sequence_name: '*tfl3d1_16ns'
+      text_series_description: 'Sag T1 3D GRE IR MPRAGE'
+      receive_coil_name: 'Spine_32_RS'
+      fov_x: 350
+      fov_y: 350
+      n_slices: 176
+      slice_thickness: 1.0
+    axes:
+      body_part: spine
+
+  - name: a volume of under 100 slices on a spine coil keeps its spine
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\ND\NORM'
+      scanning_sequence: 'GR\IR'
+      mr_acquisition_type: '3D'
+      text_body_part: 'BRAIN,HEAD'
+      text_sequence_name: '*tfl3d1_16ns'
+      text_series_description: 'Sag T1 3D GRE IR MPRAGE'
+      receive_coil_name: 'Spine_32_RS'
+      fov_x: 250
+      fov_y: 250
+      n_slices: 60
+      slice_thickness: 1.0
+    axes:
+      body_part: spine
+
+  - name: a stated neck beside the brain is not read as a brain volume, the spine coil decides
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\ND\NORM'
+      scanning_sequence: 'GR\IR'
+      mr_acquisition_type: '3D'
+      text_body_part: 'HEAD,NECK'
+      text_sequence_name: '*tfl3d1_16ns'
+      text_series_description: 'Sag T1 3D GRE IR MPRAGE'
+      receive_coil_name: 'Spine_32_RS'
+      fov_x: 250
+      fov_y: 250
+      n_slices: 176
       slice_thickness: 1.0
     axes:
       body_part: spine

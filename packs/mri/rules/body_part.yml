@@ -106,7 +106,8 @@ rules:
   # spacing where a volume is exported without one). A sagittal spine series on
   # the same coil is narrower or thicker and keeps its spine. A spine stated
   # beside the brain keeps the stated tier's precedence: a spine mentioned at
-  # all decides it.
+  # all decides it. A stated neck beside the brain word is not read as a brain
+  # volume either (the spine coil then decides).
   spine_coil_brain_volume:
     clauses:
       - when:
@@ -114,6 +115,7 @@ rules:
             - spine_coil_alone
             - {text: stated_anatomy_text, any_substring: *brain}
             - {not: {text: stated_anatomy_text, any_substring: *spine}}
+            - {not: {text: stated_anatomy_text, any_substring: *neck}}
             - is_3d
             - {field: fov_x, le: 300}
             - {field: fov_y, le: 300}
@@ -125,7 +127,9 @@ rules:
             - {field: n_slices, ge: 100}
             - any:
                 - {field: slice_thickness, le: 1.5}
-                - {field: spacing_between_slices, le: 1.5}
+                - all:
+                    - {field: slice_thickness, present: false}
+                    - {field: spacing_between_slices, le: 1.5}
         cite: 'a brain-sized 3D volume on a spine coil, with a brain stated'
         source: geometry
         tier: keywords
@@ -135,7 +139,7 @@ rules:
 
   spine_coil:
     clauses:
-      - {when: {all: [spine_coil_alone]}, cite: 'a spine coil', source: coil, tier: keywords}
+      - {when: spine_coil_alone, cite: 'a spine coil', source: coil, tier: keywords}
     set: {body_part: spine}
     confidence: 0.65
     why: 'the series was received on a spine coil'
