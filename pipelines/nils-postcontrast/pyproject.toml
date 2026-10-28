@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "nils-postcontrast"
-version = "0.2.2"
+version = "0.3.0"
 description = "The certified post-contrast model served through its three-slice student, as a NILS pipeline image"
 license = "AGPL-3.0-only"
 requires-python = ">=3.10"

@@ -155,3 +155,67 @@ def test_the_student_is_three_seeds(tmp_path):
     save_file({k: v for k, v in sd.items() if not k.startswith("s2.")}, str(tmp_path / "two.safetensors"))
     with pytest.raises(ValueError, match="seed 2"):
         Student(tmp_path / "two.safetensors")
+
+
+# ---------------------------------------------------------------- a site's calibration (0.3.0)
+
+FROZEN_COLUMNS = ["p_given", "value", "confidence", "answers", "stage", "stage1", "reason", "margin", "seeds_agree", "files_read",
+                  "cascade_digest", "student_digest", "fusion_digest", "stack_id"]
+
+
+def test_without_the_raw_scores_flag_the_output_is_the_earlier_versions(tmp_path):
+    rc, out = run(tmp_path, 9.0)
+    assert rc == 0
+    for doc in tables(out).values():
+        assert list(doc) == FROZEN_COLUMNS
+    res = json.loads((out / "results.json").read_text())
+    assert res["params"] == {"workers": 2, "batch": 64, "device": "cpu"} and "calibration" not in res
+    assert all(set(u["metrics"]) == {"value", "confidence", "stage", "stage1", "reason", "files_read"} for u in res["units"])
+
+
+def test_raw_scores_write_the_log_odds_of_a_stack_with_no_calibration_and_never_propose(tmp_path):
+    stacks, I = setup_run(tmp_path, 9.0)
+    out = tmp_path / "out"
+    rc = cli.main(["cascade", "--stacks", str(stacks), "--inputs", str(I), "--output", str(out), "--threads", "2", "--device", "cpu", "--raw-scores"])
+    assert rc == 0
+    T = tables(out)
+    t7 = T[7]  # a cohort the fusion has no pair for
+    assert t7["reason"] == "no-calibration" and t7["stage1"] == "raw" and t7["answers"] == 0
+    assert t7["p_given"] is None and t7["value"] is None and t7["confidence"] is None
+    assert abs(t7["score_raw"] - 9.0) < 1e-5  # every coefficient 0: the log-odds is the intercept
+    seeds = [float(x) for x in t7["score_raw_seeds"].split()]
+    assert len(seeds) == 3 and all(abs(z - 9.0) < 1e-5 for z in seeds)
+    assert t7["site"] is None and t7["make"] == "Siemens" and t7["files_read"] == 3
+    # every other stack as before, its new columns empty
+    assert T[1]["answers"] == 1 and T[1]["value"] == "given" and T[1]["score_raw"] is None and T[1]["site"] == "cohort-a Siemens"
+    assert T[3]["reason"] == "not-t1-brain" and T[3]["score_raw"] is None and T[6]["reason"] == "deferred"
+    assert list(T[1]) == FROZEN_COLUMNS[:10] + ["score_raw", "score_raw_seeds", "site", "make"] + FROZEN_COLUMNS[10:]
+    res = json.loads((out / "results.json").read_text())
+    assert {p["stack_id"] for p in res["proposals"]} == {1, 2} and res["params"]["raw_scores"] is True
+    units = {u["unit_id"]: u for u in res["units"]}
+    assert units["stack-7"]["status"] == "succeeded" and units["stack-7"]["metrics"]["score_raw"] == t7["score_raw"]
+    assert res["metrics"]["by_outcome"]["no-calibration"] == 1 and res["metrics"]["deferred"] == [6]
+
+
+def test_a_calibration_file_scores_a_site_the_fusion_has_no_pair_for(tmp_path, monkeypatch):
+    stacks, I = setup_run(tmp_path, 9.0)
+    cal = tmp_path / "pairs.json"
+    cal.write_text(json.dumps({"cohort-c Siemens": [1.0, 0.0]}))
+    out = tmp_path / "out"
+    rc = cli.main(["cascade", "--stacks", str(stacks), "--inputs", str(I), "--output", str(out), "--threads", "2", "--device", "cpu",
+                   "--calibration", str(cal)])
+    assert rc == 0
+    T = tables(out)
+    assert T[7]["answers"] == 1 and T[7]["value"] == "given" and T[7]["reason"] is None and list(T[7]) == FROZEN_COLUMNS
+    res = json.loads((out / "results.json").read_text())
+    assert {p["stack_id"] for p in res["proposals"]} == {1, 2, 7} and res["calibration"] == {"sites": ["cohort-c Siemens"]}
+    # the descriptor's site file reaches the run through the environment
+    monkeypatch.setenv("NILS_PC_CALIBRATION", str(cal))
+    out2 = tmp_path / "out2"
+    rc = cli.main(["cascade", "--stacks", str(stacks), "--inputs", str(I), "--output", str(out2), "--threads", "2", "--device", "cpu"])
+    assert rc == 0 and tables(out2)[7]["answers"] == 1
+    # a file that is not there refuses the run
+    out3 = tmp_path / "out3"
+    rc = cli.main(["cascade", "--stacks", str(stacks), "--inputs", str(I), "--output", str(out3), "--device", "cpu",
+                   "--calibration", str(tmp_path / "missing.json")])
+    assert rc == 1 and "calibration file" in json.loads((out3 / "results.json").read_text())["error"]

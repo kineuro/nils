@@ -26,6 +26,15 @@ evidence alone, which no test has compared with a reference, and the model
 answers only where it is certified (record 55 E3). The change is class III
 by construction.
 
+With ``--raw-scores`` (0.3.0) a T1-type brain stack at a site with no
+calibration is converted, segmented and scored too, and its table carries
+the fused log-odds before any calibration (``score_raw``) beside the
+``no-calibration`` reason where it has an image arm; its ``p_given`` and
+``value`` stay empty, so it is never a proposal. A run given a calibration
+file (``--calibration``, or the descriptor's site file through
+``NILS_PC_CALIBRATION``) merges the file's site pairs over the fusion's
+first (``calibration.py``).
+
 **Where it runs.** With a card, the tools run in waves on it (``tools.wave``)
 while worker processes convert the stacks before and compute the features
 after; without one, every tool runs on the CPU, at most as many SynthSeg
@@ -60,9 +69,9 @@ from pathlib import Path
 
 import numpy as np
 
-from . import AXIS, GIVEN, NOT_GIVEN, evidence, features, manifest, parts, tools
+from . import AXIS, GIVEN, NOT_GIVEN, calibration, evidence, features, manifest, parts, tools
 from .arms import Arms, ArmsError
-from .fusion import Fusion, FusionError, fuse
+from .fusion import Fusion, FusionError, calibrated, log_odds
 from .results import FAILED, SKIPPED, Run, Unit
 
 logger = logging.getLogger("nils_postcontrast.full")
@@ -302,11 +311,13 @@ class Lane:
 # ---------- the run ----------
 
 
-def candidates(stacks, context, F: Fusion, features_all: bool = False) -> tuple[dict, dict, list]:
+def candidates(stacks, context, F: Fusion, features_all: bool = False, raw: bool = False) -> tuple[dict, dict, list]:
     """(the header rows by stack, the reasons of the stacks that are not
     candidates, the entries whose features are computed: the candidates', or
     with ``features_all`` every unsealed MR stack's with files, a research
-    check's, whose answers still follow the rule)."""
+    check's, whose answers still follow the rule; with ``raw``, the
+    raw-score mode's, the T1-type brain stacks with files at a site with no
+    calibration too, for their log-odds alone)."""
     rows = evidence.rows_for(stacks, context, F)
     why: dict = {}
     todo = []
@@ -323,7 +334,8 @@ def candidates(stacks, context, F: Fusion, features_all: bool = False) -> tuple[
             why[e.stack_id] = "no-calibration"
         elif not e.files:
             why[e.stack_id] = "no-files"
-        if e.stack_id not in why or (features_all and why[e.stack_id] in ("not-t1-brain", "no-calibration") and e.files):
+        if e.stack_id not in why or (features_all and why[e.stack_id] in ("not-t1-brain", "no-calibration") and e.files) \
+                or (raw and why[e.stack_id] == "no-calibration" and e.files):
             todo.append(e)
     return rows, why, todo
 
@@ -549,21 +561,28 @@ def _cards(asked: str, budget_frac: float, budget_mib: int) -> list:
     return out
 
 
-def _table(sid, P: FullParts, **kw) -> dict:
+def _table(sid, P: FullParts, raw: bool = False, **kw) -> dict:
     doc = {"p_given": None, "value": None, "confidence": None, "answers": 0, "stage": None, "reason": None, "arms": None, "failed_steps": None,
            "seconds": None}
+    if raw:
+        # the raw-score mode's columns, on every row of such a run
+        doc.update(score_raw=None, site=None, make=None)
     doc.update(kw)
     doc.update(cascade_digest=P.cascade.digest, fusion_digest=P.fusion.digest, arms_digest=P.arms_part.digest, stack_id=sid)
     return doc
 
 
 def cmd_full(a) -> int:
-    run = Run("postcontrast-full", a.output, {"workers": a.threads, "convert_workers": a.convert_workers, "wave": a.wave,
-                                              "synthseg_procs": a.synthseg_procs, "cards": a.cards}, "cpu")
+    params = {"workers": a.threads, "convert_workers": a.convert_workers, "wave": a.wave, "synthseg_procs": a.synthseg_procs, "cards": a.cards}
+    raw = bool(a.raw_scores)
+    if raw:
+        params["raw_scores"] = True
+    run = Run("postcontrast-full", a.output, params, "cpu")
     keep_work = a.keep_work
     work = (Path(a.work) if a.work else Path(tempfile.mkdtemp(prefix="nils-postcontrast-full-"))).absolute()
     try:
         P = FullParts(a.inputs)
+        P.F = calibration.for_run(P.F, a.calibration, run.extra)
         stacks, context = manifest.read(a.stacks, a.source_root)
         env = tools.Env.from_environ()
         cards = _cards(a.cards, a.card_share, a.card_budget_mib) if a.device != "cpu" else []
@@ -582,13 +601,21 @@ def cmd_full(a) -> int:
                                       "synthseg_procs": tools.ss_procs_for(c.budget_mib, a.synthseg_procs, a.synthseg_mib, a.other_mib)}
                                      for c in cards]}
         run.device = "cuda" if cards else "cpu"
-    except (parts.PartsError, FusionError, ArmsError, manifest.ManifestError, RuntimeError) as e:
+    except (parts.PartsError, FusionError, ArmsError, calibration.CalibrationError, manifest.ManifestError, RuntimeError) as e:
         run.extra["error"] = str(e)
         run.write()
         print(f"nils-postcontrast: {e}", file=sys.stderr)
         return 1
     t0 = time.time()
-    rows, why, todo = candidates(stacks, context, P.F, a.features_for == "all")
+    rows, why, todo = candidates(stacks, context, P.F, a.features_for == "all", raw)
+    by_id = {e.stack_id: e for e in stacks}
+
+    def table(sid, **kw):
+        if raw:
+            kw.setdefault("site", rows[sid]["site"])
+            kw.setdefault("make", evidence.make_of(by_id[sid]))
+        return _table(sid, P, raw=raw, **kw)
+
     atlas, hpn, vxn = P.write_atlas(work / "atlas")
     opts = {"workers": a.threads, "convert_workers": a.convert_workers, "wave": a.wave, "card_waves": a.card_waves,
             "synthseg_procs": a.synthseg_procs, "synthseg_mib": a.synthseg_mib, "synthseg_retry_mib": a.synthseg_retry_mib,
@@ -602,11 +629,13 @@ def cmd_full(a) -> int:
         r.update(rec[sid].get("cols") or {})
         frows.append(r)
     probs = P.A.probabilities(frows) if frows else {k: np.zeros(0) for k in "TUV"}
-    p, ans = fuse(P.F, frows, probs) if frows else (np.zeros(0), np.zeros(0, dtype=object))
+    z = log_odds(P.F, frows, probs) if frows else np.zeros(0)
+    p, ans = calibrated(P.F, frows, z) if frows else (np.zeros(0), np.zeros(0, dtype=object))
     tables: dict = {}
     for i, sid in enumerate(ids):
         r = rec[sid]
-        if sid in why:
+        uncal = raw and why.get(sid) == "no-calibration"
+        if sid in why and not uncal:
             continue
         armset = "".join(k for k in "TUV" if probs[k][i] == probs[k][i])
         failed = [k for k, v in (("convert", r.get("fail")), ("tools", r.get("tools_died") or r.get("tools_killed") or r.get("tools_error")),
@@ -616,18 +645,25 @@ def cmd_full(a) -> int:
         segmented = os.path.exists(tools.paths(str(work / "stacks" / str(sid)))["ss"])
         died = bool(r.get("tools_died") or r.get("features_died") or r.get("tools_killed"))
         lost = no_arm_reason(armset, r.get("fail") or None, segmented, died, bool(r.get("tools_error")))
+        if uncal:
+            # the raw-score mode: the log-odds alone where the stack has an
+            # image arm, no probability, no answer, so never a proposal
+            tables[sid] = table(sid, stage="full", reason="no-calibration", arms=armset, failed_steps=failed or None, seconds=r["stage"],
+                                score_raw=None if lost else round(float(z[i]), 6))
+            continue
         if lost:
             # record 55 E3: no image arm, so not where model r1 is certified
-            tables[sid] = _table(sid, P, stage="full", reason=lost, arms=armset, failed_steps=failed or None, seconds=r["stage"])
+            tables[sid] = table(sid, stage="full", reason=lost, arms=armset, failed_steps=failed or None, seconds=r["stage"])
             continue
         if a_ in VALUE:
-            tables[sid] = _table(sid, P, p_given=round(pi, 6), value=VALUE[a_], confidence=round(max(pi, 1 - pi), 6), answers=1, stage="full",
-                                 arms=armset, failed_steps=failed or None, seconds=r["stage"])
+            tables[sid] = table(sid, p_given=round(pi, 6), value=VALUE[a_], confidence=round(max(pi, 1 - pi), 6), answers=1, stage="full",
+                                arms=armset, failed_steps=failed or None, seconds=r["stage"])
         else:
-            tables[sid] = _table(sid, P, p_given=None if pi != pi else round(pi, 6), stage="full", reason="not-sure", arms=armset,
-                                 failed_steps=failed or None, seconds=r["stage"])
+            tables[sid] = table(sid, p_given=None if pi != pi else round(pi, 6), stage="full", reason="not-sure", arms=armset,
+                                failed_steps=failed or None, seconds=r["stage"])
     for sid, w in why.items():
-        tables[sid] = _table(sid, P, reason=w)
+        if sid not in tables:
+            tables[sid] = table(sid, reason=w)
     counts: dict = {}
     for e in stacks:
         doc = tables[e.stack_id]
@@ -635,8 +671,10 @@ def cmd_full(a) -> int:
         counts[k] = counts.get(k, 0) + 1
         body = (json.dumps(doc, indent=2) + "\n").encode()
         status = SKIPPED if doc["reason"] in ("sealed", "not-mr") else "succeeded"
-        u = Unit(e.unit or f"stack-{e.stack_id}", status=status,
-                 metrics={k2: doc[k2] for k2 in ("value", "confidence", "stage", "reason", "arms")})
+        metrics = {k2: doc[k2] for k2 in ("value", "confidence", "stage", "reason", "arms")}
+        if raw:
+            metrics["score_raw"] = doc["score_raw"]
+        u = Unit(e.unit or f"stack-{e.stack_id}", status=status, metrics=metrics)
         u.outputs.append(run.output_file(f"postcontrast/{e.stack_id}.json", body, "table", "application/json"))
         run.units.append(u)
         if doc["answers"]:
@@ -699,4 +737,5 @@ def add_parser(sub) -> None:
     c.add_argument("--features-for", choices=["candidates", "all"], default="candidates",
                    help="all: every unsealed MR stack's features too (a research check's); the answers still follow the rule")
     c.add_argument("--records", default=None, help="a file for each candidate's record (a research run's)")
+    calibration.add_run_options(c)
     c.set_defaults(fn=cmd_full)

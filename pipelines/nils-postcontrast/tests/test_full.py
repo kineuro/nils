@@ -556,3 +556,32 @@ def test_a_lane_gives_a_dead_workers_task_again_and_then_gives_up(tmp_path):
             break
     lane.shutdown()
     assert dead == ["dies"] and got["lives"] == 4 and lane.rebuilt >= 2
+
+
+# ---------------------------------------------------------------- a site's calibration (0.3.0)
+
+def test_raw_scores_give_a_stack_with_no_calibration_its_log_odds_and_no_answer(standin_env):
+    rc, out = run(standin_env, "--raw-scores")
+    assert rc == 0
+    T = tables(out)
+    t5 = T[5]  # a cohort the fusion has no pair for
+    assert t5["reason"] == "no-calibration" and t5["stage"] == "full" and t5["answers"] == 0 and t5["p_given"] is None and t5["value"] is None
+    assert isinstance(t5["score_raw"], float) and "V" in t5["arms"] and t5["site"] is None and t5["make"] == "Siemens"
+    assert T[1]["answers"] == 1 and T[1]["score_raw"] is None and T[1]["site"] == "cohort-a Siemens"
+    assert T[3]["reason"] == "not-t1-brain" and T[3]["score_raw"] is None and T[4]["reason"] == "sealed"
+    res = json.loads((out / "results.json").read_text())
+    assert {p["stack_id"] for p in res["proposals"]} == {1, 2} and res["params"]["raw_scores"] is True
+    assert res["metrics"]["candidates"] == 3 and res["metrics"]["by_outcome"]["no-calibration"] == 1
+    units = {u["unit_id"]: u for u in res["units"]}
+    assert units["stack-5"]["metrics"]["score_raw"] == t5["score_raw"]
+
+
+def test_a_calibration_file_scores_a_site_the_fusion_has_no_pair_for(standin_env):
+    cal = standin_env / "pairs.json"
+    cal.write_text(json.dumps({"site": "cohort-c Siemens", "a": 1.0, "b": 0.0, "n": 40}))
+    rc, out = run(standin_env, "--calibration", str(cal))
+    assert rc == 0
+    T = tables(out)
+    assert T[5]["answers"] == 1 and T[5]["value"] == "given" and "score_raw" not in T[5]
+    res = json.loads((out / "results.json").read_text())
+    assert {p["stack_id"] for p in res["proposals"]} == {1, 2, 5} and res["calibration"] == {"sites": ["cohort-c Siemens"]}
