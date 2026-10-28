@@ -376,12 +376,18 @@ fn the_job_contract_is_the_runner_s() {
             "{key}"
         );
     }
-    for key in ["id", "mount", "env", "optional"] {
+    for key in ["id", "mount", "env", "optional", "sweep"] {
         assert!(
             job["$defs"]["secret"]["properties"].get(key).is_some(),
             "{key}"
         );
     }
+    // a site file the outputs may echo is declared `sweep: false`; the
+    // default is a secret that is swept, in the schema as in the runner
+    assert_eq!(
+        job["$defs"]["secret"]["properties"]["sweep"]["default"],
+        true
+    );
     assert_eq!(x["secrets"]["items"]["$ref"], "#/$defs/secret");
     assert_eq!(
         strings(&job["required"]),

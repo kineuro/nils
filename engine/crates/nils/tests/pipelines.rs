@@ -4668,6 +4668,162 @@ x-nils:
     }
 }
 
+/// Wave 7b (P3, after review): a secret the descriptor declares `sweep:
+/// false` is a site file, such as a calibration pair, whose contents the
+/// outputs may echo. It is mounted and named as any secret, and nothing a
+/// container leaves is swept for it, while a secret without the flag is
+/// swept as before.
+#[test]
+fn a_site_file_declared_sweep_false_is_kept_where_the_outputs_echo_it() {
+    if !have("python3") {
+        eprintln!(
+            "python3 is not installed; the stand-in podman needs it, so this test is skipped"
+        );
+        return;
+    }
+    let lab = Lab::new("pipelines-secret-site-file");
+    const TOKEN: &str = "NILS-PLANTED-SECRET-5w33p-f4ls3";
+    const DIGEST: &str = "\"fusion_digest\": \"sha256:7b3c9e1a5d2f\"";
+    let dir = TempDir::new("pipelines-secret-site-file-home");
+    let licence = dir.file("license.txt", format!("{TOKEN}\n").as_bytes());
+    let pair_file = dir.file(
+        "pair.json",
+        format!("{{\"site\": \"cohort-x Maker\", \"a\": 1.0, \"b\": 0.0,\n  {DIGEST}}}\n")
+            .as_bytes(),
+    );
+    let leak = format!(
+        r#"name: echo-site-file
+schema-version: "0.5"
+tool-version: "1"
+container-image:
+  type: docker
+  image: "example.org/echo-site-file@sha256:{hex}"
+command-line: |
+  python3 -c '
+  import json, os, sys
+  m = json.load(open(sys.argv[1])); out = sys.argv[2]
+  lic = open(os.environ["FS_LICENSE"]).read()
+  cal = open(os.environ["NILS_PC_CALIBRATION"]).read()
+  s = m["stacks"][0]; u = s["unit"]; d = os.path.join(out, u); os.makedirs(d, exist_ok=True)
+  open(os.path.join(d, "table.txt"), "w").write("stack %d\n" % s["stack_id"] + cal.splitlines()[1] + "\n")
+  open(os.path.join(d, "copy.txt"), "w").write(lic)
+  json.dump({{"schema_version": "1", "units": [{{"unit_id": u, "status": "succeeded", "derivatives": [u + "/table.txt", u + "/copy.txt"]}}]}}, open(os.path.join(out, "results.json"), "w"))
+  ' [Manifest] [OutputLocation]
+x-nils:
+  analysis-level: stack
+  input: {{layout: stacks}}
+  units: apart
+  secrets:
+    - id: freesurfer_license
+      env: FS_LICENSE
+    - id: post_contrast_calibration
+      env: NILS_PC_CALIBRATION
+      optional: true
+      sweep: false
+  outputs:
+    - id: out
+      kind: output
+      path-template: "stack-{{stack}}/*.txt"
+      media-type: text/plain
+"#,
+        hex = "f".repeat(64)
+    );
+    lab.add_descriptor("echo-site-file", &leak);
+    for (id, file) in [
+        ("freesurfer_license", &licence),
+        ("post_contrast_calibration", &pair_file),
+    ] {
+        lab.ok(
+            &[
+                "pipeline",
+                "secret",
+                "set",
+                id,
+                "--file",
+                file.to_str().unwrap(),
+            ],
+            None,
+        );
+    }
+    let (ok, out, err) = lab.run(
+        &[
+            "run",
+            "echo-site-file",
+            "--select",
+            "selection:every@1",
+            "--json",
+        ],
+        None,
+    );
+    assert!(ok, "{err}");
+    let run: Value = serde_json::from_str(&out).unwrap();
+    // both were mounted and named
+    let runs = lab.podman_runs();
+    assert_eq!(runs.len(), 4);
+    let mount = format!(
+        "{}:/secrets/post_contrast_calibration:ro",
+        pair_file.display()
+    );
+    assert!(runs.iter().all(|w| pair(w, "--volume", &mount)), "{runs:?}");
+    assert!(runs.iter().all(|w| pair(
+        w,
+        "--env",
+        "NILS_PC_CALIBRATION=/secrets/post_contrast_calibration"
+    )));
+    // the licence's copies were swept; the tables, which echo a line of the
+    // site file, stand
+    assert_eq!(run["status"], "partial", "{run}");
+    assert_eq!(
+        run["summary"]["secrets"],
+        json!(["freesurfer_license", "post_contrast_calibration"])
+    );
+    let refused = run["summary"]["refused_files"].as_array().unwrap();
+    assert_eq!(
+        refused
+            .iter()
+            .filter(|r| r["why"]
+                .as_str()
+                .unwrap_or("")
+                .contains("held a secret input"))
+            .count(),
+        4,
+        "{run}"
+    );
+    assert!(
+        refused
+            .iter()
+            .all(|r| r["file"].as_str().unwrap().ends_with("copy.txt")),
+        "{run}"
+    );
+    assert_eq!(run["derivatives"].as_array().unwrap().len(), 4, "{run}");
+    // on disk: four tables, each still holding the site file's line, and no
+    // copy of the licence anywhere under the working place
+    let mut tables = 0;
+    let mut stack = vec![lab.work.path().to_path_buf()];
+    while let Some(d) = stack.pop() {
+        for e in std::fs::read_dir(&d).unwrap().flatten() {
+            let kind = e.file_type().unwrap();
+            if kind.is_dir() {
+                stack.push(e.path());
+            } else if kind.is_file() {
+                let name = e.file_name();
+                assert_ne!(name, "copy.txt", "{}", e.path().display());
+                let bytes = std::fs::read(e.path()).unwrap();
+                assert!(
+                    !bytes.windows(TOKEN.len()).any(|w| w == TOKEN.as_bytes()),
+                    "{} holds the licence",
+                    e.path().display()
+                );
+                if name == "table.txt" {
+                    tables += 1;
+                    assert!(String::from_utf8_lossy(&bytes).contains(DIGEST));
+                }
+            }
+        }
+    }
+    assert_eq!(tables, 4);
+}
+
 /// Record 49 R3, after review: a run cancelled while its units hold the
 /// secret in their logs and outputs leaves none of it behind; the units in
 /// flight are swept as the ones that ended are.

@@ -5444,6 +5444,17 @@ pub(crate) struct Given {
     held: secrets::Held,
 }
 
+/// What the sweep looks for after a container: the secrets given, less
+/// those the descriptor declares `sweep: false` (a site file whose contents
+/// the outputs may echo, such as a calibration a run merges over a model's).
+fn held_to_sweep(given: &[Given]) -> Vec<secrets::Held> {
+    given
+        .iter()
+        .filter(|g| g.secret.sweep)
+        .map(|g| g.held.clone())
+        .collect()
+}
+
 /// The file the site set for a secret, where it set one.
 pub(crate) fn secret_path(registry: &mut Registry, id: &str) -> Option<String> {
     registry
@@ -10203,10 +10214,10 @@ fn sweep_batch(
 ) -> Result<(Vec<Value>, Vec<String>), String> {
     let mut swept: Vec<Value> = Vec::new();
     let mut shut: Vec<String> = Vec::new();
-    if x.secrets.is_empty() {
+    let held = held_to_sweep(x.secrets);
+    if held.is_empty() {
         return Ok((swept, shut));
     }
-    let held: Vec<secrets::Held> = x.secrets.iter().map(|g| g.held.clone()).collect();
     let scratch = scratch_of(x, b);
     let results_path = b.out.join(nils_pipeline::results::FILE);
     let done = secrets::sweep(
