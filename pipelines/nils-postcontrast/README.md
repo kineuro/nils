@@ -54,11 +54,16 @@ fits its own pair, with no new model bundle or image:
    no raw score and `stage1` saying why (`no-geometry`, `multi-frame`,
    `no-slice`), never `deferred`, so the run's deferral list, which the
    engine runs the full pipeline over, keeps its meaning. The run's
-   metrics count the stacks the rule accepted as `candidates`, as before,
-   and the raw-scored stacks as `raw_scored`. These columns, and the unit
-   metric `score_raw`, are on every row and unit of every run, so a
-   table's shape never changes: without the switch they are null and every
-   stack is as before.
+   metrics count the stacks the rule accepted as `candidates`, with
+   `candidates_per_s` over the run's seconds, as before, and the
+   raw-scored stacks as `raw_scored`, with `raw_scored_per_s`. These
+   columns, and the unit metric `score_raw`, are on every row and unit of
+   every run, so a table's shape never changes: without the switch they
+   are null and every stack is answered as before. One reason changes in
+   every run of the full pipeline, with or without the switch: a T1-type
+   brain stack with no files is `no-files`, where 0.2.x said
+   `no-calibration` of one at an uncalibrated site; nothing of it could be
+   scored, so that is the truer reason.
 2. Label those stacks in a tab-separated file with a header, `stack`,
    `label` (`given` or `not_given`) and `source` (`header`, `name` or
    `manual`), and fit the pair:
@@ -74,19 +79,26 @@ fits its own pair, with no new model bundle or image:
    as `n_other_make`, rows whose table names another site as
    `n_other_site`, and rows whose `cohort_candidates` do not name the
    key's cohort as `n_other_cohort` (a row whose table names the key
-   itself as its site needs no such check; a row from an older table with
-   no such column is taken and counted as `n_without_candidates`). A table
-   that is not what a run writes, or a pair file that cannot be written, is
-   refused by one line naming the path, never a value. It needs
-   at least 20 labelled stacks of each class with a score, refuses a bad
-   row by its line number and never by its content, and writes `{site, a,
-   b, n, n_given, n_not_given, n_without_score, n_other_site,
-   n_other_make, n_other_cohort, n_without_candidates, fit, per_source,
-   overall, model, fitted_at}` with the log loss and accuracy overall and
-   per source, printed as a short report. `fit` says how many
+   itself as its site needs no such check). A `--scores` path with no
+   post-contrast table under it, a table that is not what a run writes,
+   or a pair file that cannot be written, is refused by one line naming
+   the path, never a value. It needs at least 20 labelled stacks of each
+   class with a score, and the refusal says how many rows were left out
+   and why (so a mis-spelled key, or an alias the run does not write, is
+   explained: "0 given and 0 not_given here; 60 rows were left out: 60 of
+   another cohort"); it refuses a bad row by its line number and never by
+   its content, and writes `{site, a, b, n, n_given, n_not_given,
+   n_without_score, n_other_site, n_other_make, n_other_cohort, fit,
+   per_source, overall, model, fitted_at}` with the log loss and accuracy
+   overall and per source, printed as a short report. `fit` says how many
    Newton iterations the pair took and whether it converged (a step is
    adopted only when it lowers the loss; where none does, the fit stops and
    says so); `model.fusion_digest` names the fusion the scores came from.
+   A fit that stopped before it converged, or whose slope `a` is not above
+   0 (a degenerate or inverted pair, under which a higher score would not
+   mean a higher probability), is unusable: one line says so and why, and
+   nothing is written; there is no override, the labels or the scores are
+   what to look at.
    The file is written as one compact line, on purpose: an engine
    released before `sweep: false` (before 1.0.0-beta.3) ignores the flag
    and sweeps the site file as a secret, each of its lines a needle, and

@@ -577,8 +577,9 @@ def test_raw_scores_give_a_stack_with_no_calibration_its_log_odds_and_no_answer(
     assert {p["stack_id"] for p in res["proposals"]} == {1, 2} and res["params"]["raw_scores"] is True
     # the candidates are still the stacks the rule accepted; the raw-score mode's are counted apart
     assert res["metrics"]["candidates"] == 2 and res["metrics"]["raw_scored"] == 1 and res["metrics"]["by_outcome"]["no-calibration"] == 1
-    # candidates_per_s is the run's throughput: the candidates and the raw-scored stacks over the run's seconds
-    assert abs(res["metrics"]["candidates_per_s"] - 3 / res["metrics"]["seconds"]) < 0.01 * res["metrics"]["candidates_per_s"]
+    # candidates_per_s is the candidates over the run's seconds, as before; raw_scored_per_s the raw-scored stacks over them
+    assert abs(res["metrics"]["candidates_per_s"] - 2 / res["metrics"]["seconds"]) < 0.01 * res["metrics"]["candidates_per_s"]
+    assert abs(res["metrics"]["raw_scored_per_s"] - 1 / res["metrics"]["seconds"]) < 0.01 * res["metrics"]["raw_scored_per_s"]
     units = {u["unit_id"]: u for u in res["units"]}
     assert units["stack-5"]["metrics"]["score_raw"] == t5["score_raw"] and units["stack-1"]["metrics"]["score_raw"] is None
 
@@ -595,21 +596,26 @@ def test_raw_scores_keep_a_failed_stacks_own_reason_and_no_score(standin_env, mo
     assert res["metrics"]["candidates"] == 2 and res["metrics"]["raw_scored"] == 0
 
 
-def test_raw_scores_say_no_files_of_a_file_less_stack_at_an_uncalibrated_site(standin_env):
+@pytest.mark.parametrize("raw", [True, False])
+def test_a_file_less_stack_at_an_uncalibrated_site_is_no_files_in_every_run(standin_env, raw):
     stacks, I = setup_run(standin_env)
     m = json.loads(stacks.read_text())
-    # a stack at the uncalibrated site with no files: nothing could be scored, so its reason is no-files, not no-calibration
+    # a stack at the uncalibrated site with no files: nothing could be scored, so its reason is no-files, not no-calibration,
+    # with the raw-score mode and without it (0.2.x said no-calibration of it)
     m["stacks"].append(dict(m["stacks"][-1], unit="stack-6", stack_id=6, series_id=16, files=[]))
     stacks.write_text(json.dumps(m))
     out = standin_env / "out"
     rc = cli.main(["full", "--stacks", str(stacks), "--inputs", str(I), "--output", str(out), "--threads", "2", "--convert-workers", "2",
-                   "--device", "cpu", "--work", str(standin_env / "work"), "--raw-scores"])
+                   "--device", "cpu", "--work", str(standin_env / "work"), *(["--raw-scores"] if raw else [])])
     assert rc == 0
     T = tables(out)
-    assert T[6]["reason"] == "no-files" and T[6]["score_raw"] is None and T[6]["answers"] == 0 and T[6]["cohort_candidates"] == json.dumps(["cohort-c"])
-    assert T[5]["reason"] == "no-calibration" and isinstance(T[5]["score_raw"], float)
+    assert T[6]["reason"] == "no-files" and T[6]["score_raw"] is None and T[6]["answers"] == 0
+    assert T[6]["cohort_candidates"] == (json.dumps(["cohort-c"]) if raw else None)
+    assert T[5]["reason"] == "no-calibration" and (isinstance(T[5]["score_raw"], float) if raw else T[5]["score_raw"] is None)
     res = json.loads((out / "results.json").read_text())
-    assert res["metrics"]["by_outcome"]["no-files"] == 1 and res["metrics"]["by_outcome"]["no-calibration"] == 1 and res["metrics"]["raw_scored"] == 1
+    assert res["metrics"]["by_outcome"]["no-files"] == 1 and res["metrics"]["by_outcome"]["no-calibration"] == 1
+    assert res["metrics"].get("raw_scored") == (1 if raw else None) and ("raw_scored_per_s" in res["metrics"]) is raw
+    assert abs(res["metrics"]["candidates_per_s"] - 2 / res["metrics"]["seconds"]) < 0.01 * res["metrics"]["candidates_per_s"]
 
 
 def test_a_calibration_file_scores_a_site_the_fusion_has_no_pair_for(standin_env):

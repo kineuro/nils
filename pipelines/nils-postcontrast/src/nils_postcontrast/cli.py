@@ -115,10 +115,9 @@ def score(stacks, context, cas, F: Fusion, device: str = "cpu", workers: int = 8
     out: dict = {}
     tasks = []
     uncal: set = set()
-    by_id = {e.stack_id: e for e in stacks}
 
     def table(sid, **kw):
-        return evidence.table_row(rows, by_id, sid, raw, functools.partial(_table, cas=cas), **kw)
+        return evidence.table_row(rows, sid, raw, functools.partial(_table, cas=cas), **kw)
 
     for e in stacks:
         r = rows[e.stack_id]

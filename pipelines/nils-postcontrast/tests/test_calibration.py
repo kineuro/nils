@@ -26,24 +26,24 @@ def fusion() -> Fusion:
                   use_V=True, cohort_aliases={}, untrusted_time_cohorts=[])
 
 
-def write_run(tmp: Path, n: int, seed: int = 0, site=None, start: int = 1, make: str = "Siemens", candidates=("cohort-c",)) -> dict:
+def write_run(tmp: Path, n: int, seed: int = 0, site=None, start: int = 1, make: str = "Siemens", candidates=("cohort-c",),
+              flip: bool = False) -> dict:
     """A raw-score run's output folder: n tables with z drawn wide and the
     label each z would get under the known pair, by stack id; ``candidates``
-    is written as the run writes the column, a JSON list in the text column,
-    and None writes an older table with no cohort_candidates column."""
+    is written as the run writes the column, a JSON list in the text column;
+    ``flip`` labels against the scores, an inverted site."""
     rng = np.random.default_rng(seed)
     z = rng.normal(0.0, 3.0, n)
     y = (rng.random(n) < 1 / (1 + np.exp(-(A * z + B)))).astype(int)
+    if flip:
+        y = 1 - y
     folder = tmp / "postcontrast"
     folder.mkdir(parents=True, exist_ok=True)
     labels = {}
     for i in range(n):
         sid = start + i
         doc = {"stack_id": sid, "p_given": None, "value": None, "reason": "no-calibration", "score_raw": round(float(z[i]), 6), "site": site,
-               "make": make, "cohort_candidates": json.dumps(list(candidates)) if candidates is not None else None, "fusion_digest": FUSION,
-               "cascade_digest": "sha256:" + "c" * 64}
-        if candidates is None:
-            del doc["cohort_candidates"]
+               "make": make, "cohort_candidates": json.dumps(list(candidates)), "fusion_digest": FUSION, "cascade_digest": "sha256:" + "c" * 64}
         (folder / f"{sid}.json").write_text(json.dumps(doc))
         labels[sid] = int(y[i])
     # a table with no raw score, as a calibrated stack's, is passed over
@@ -150,7 +150,9 @@ def test_a_merged_file_never_reroutes_a_stack_the_frozen_fusion_calibrates(tmp_p
     e = entry(3, datasets=("old-name", "cohort-c"), batch="dcm-raw-2026")
     row = evidence.rows_for([e], [], A)[3]
     cands = ["cohort-a", "cohort-c", "dcm-raw-2026", "raw-2026", "2026"]
-    assert row["site"] == "cohort-a Siemens" and row["cohort_candidates"] == cands
+    # the row carries the make and the candidates as the table's columns take them, built once
+    assert row["site"] == "cohort-a Siemens" and row["make"] == "Siemens" and row["cohort_candidates"] == json.dumps(cands)
+    assert evidence.raw_columns({3: row}, 3) == {"site": "cohort-a Siemens", "make": "Siemens", "cohort_candidates": json.dumps(cands)}
     assert evidence.cohort_candidates(e) == ["old-name", "cohort-c", "dcm-raw-2026", "raw-2026", "2026"]
     assert evidence.cohort_candidates(e, A.cohort_aliases) == cands
     assert evidence.cohort_pools(A) == ({"cohort-a"}, set()) and evidence.cohort_of(e, A, evidence.cohort_pools(A)) == ("cohort-a", "dataset", cands)
@@ -304,17 +306,17 @@ def test_calibrate_fits_the_sites_pair_from_a_runs_raw_scores_and_reports_per_so
     d = json.loads(out.read_text())
     assert d["site"] == "cohort-c Siemens" and abs(d["a"] - A) < 0.15 and abs(d["b"] - B) < 0.2, (d["a"], d["b"])
     assert d["n"] == 2000 and d["n_given"] + d["n_not_given"] == 2000 and d["n_without_score"] == 3 and d["n_other_site"] == 0
-    assert d["n_other_make"] == 0 and d["n_other_cohort"] == 0 and d["n_without_candidates"] == 0
+    assert d["n_other_make"] == 0 and d["n_other_cohort"] == 0
     assert d["fit"]["converged"] is True and d["fit"]["iterations"] > 0
     assert set(d["per_source"]) == {"header", "name", "manual"} and sum(m["n"] for m in d["per_source"].values()) == 2000
     for m in list(d["per_source"].values()) + [d["overall"]]:
         assert 0 < m["log_loss"] < math.log(2) and 0.5 < m["accuracy"] <= 1
     assert d["model"]["fusion_digest"] == FUSION and d["model"]["version"] == cli.__version__ and d["fitted_at"].endswith("Z")
     assert set(d) == {"site", "a", "b", "n", "n_given", "n_not_given", "n_without_score", "n_other_site", "n_other_make", "n_other_cohort",
-                      "n_without_candidates", "fit", "per_source", "overall", "model", "fitted_at"}
+                      "fit", "per_source", "overall", "model", "fitted_at"}
     text = capsys.readouterr().out
     assert "site cohort-c Siemens" in text and "3 labelled with no score" in text and "header:" in text and "manual:" in text
-    assert "0 of another make, 0 of another cohort, 0 from a table naming no cohort candidates" in text and "converged" in text
+    assert "0 of another make, 0 of another cohort" in text and "converged" in text
     # the pair file is a calibration file a run takes as it is, written as one compact line: an engine released before
     # sweep: false sweeps it as a secret, line by line, and the whole document is a needle no table holds
     text = out.read_text()
@@ -339,7 +341,13 @@ def test_calibrate_refuses_under_twenty_of_a_class_and_a_bad_source_by_line(tmp_
     rc = cli.main(["calibrate", "--labels", str(tmp_path / "labels.tsv"), "--scores", str(tmp_path / "run"), "--site", "cohort-c Siemens",
                    "--out", str(tmp_path / "pair.json")])
     err = capsys.readouterr().err
-    assert rc == 1 and "at least 20" in err and "19 given" in err and not (tmp_path / "pair.json").exists()
+    assert rc == 1 and "at least 20" in err and "19 given and 41 not_given here; no row was left out" in err and not (tmp_path / "pair.json").exists()
+    # a key of another cohort (mis-spelled, or the alias the run does not write): the refusal says where the rows went
+    rc = cli.main(["calibrate", "--labels", str(tmp_path / "labels.tsv"), "--scores", str(tmp_path / "run"), "--site", "cohort-x Siemens",
+                   "--out", str(tmp_path / "pair.json")])
+    err = capsys.readouterr().err
+    assert rc == 1 and "0 given and 0 not_given here; 60 rows were left out: 60 of another cohort" in err and err.count("\n") == 1
+    assert not (tmp_path / "pair.json").exists()
     write_labels(tmp_path / "labels.tsv", labels, extra_rows=["77\tgiven\tsomeword"])
     rc = cli.main(["calibrate", "--labels", str(tmp_path / "labels.tsv"), "--scores", str(tmp_path / "run"), "--site", "cohort-c Siemens",
                    "--out", str(tmp_path / "pair.json")])
@@ -353,27 +361,24 @@ def test_calibrate_takes_several_runs_and_keeps_another_sites_makes_and_cohorts_
     lc = write_run(tmp_path / "run-c", 30, seed=7, site="cohort-a Siemens", start=5000)
     # the same cohort on another make: its rows are not this key's
     ld = write_run(tmp_path / "run-d", 10, seed=8, start=7000, make="GE")
-    # stacks of another cohort (their candidates never name the key's), and an older run's tables with no candidates column
+    # stacks of another cohort (their candidates never name the key's)
     le = write_run(tmp_path / "run-e", 12, seed=9, start=8000, candidates=("cohort-d", "batch-2026-cohort-d"))
-    lf = write_run(tmp_path / "run-f", 8, seed=10, start=9000, candidates=None)
     # stacks whose table names the key as its site (a cohort the fusion reached through an alias, say): the site proves the
     # cohort, whatever the candidates say
     lg = write_run(tmp_path / "run-g", 6, seed=11, start=9500, site="cohort-c Siemens", candidates=("other-name",))
-    labels = {**la, **lb, **lc, **ld, **le, **lf, **lg}
+    labels = {**la, **lb, **lc, **ld, **le, **lg}
     write_labels(tmp_path / "labels.tsv", labels)
     scores = calibration.read_scores([tmp_path / "run-a", tmp_path / "run-b", tmp_path / "run-c" / "postcontrast" / "5000.json", tmp_path / "run-d",
-                                      tmp_path / "run-e", tmp_path / "run-f", tmp_path / "run-g"])
-    assert len(scores) == 197 and scores[7000]["make"] == "GE" and scores[1]["make"] == "Siemens"
+                                      tmp_path / "run-e", tmp_path / "run-g"])
+    assert len(scores) == 189 and scores[7000]["make"] == "GE" and scores[1]["make"] == "Siemens"
     assert scores[1]["cohort_candidates"] == ["cohort-c"] and scores[8000]["cohort_candidates"] == ["cohort-d", "batch-2026-cohort-d"]
-    assert scores[9000]["cohort_candidates"] is None
     d = calibration.calibrate(read_labels(tmp_path / "labels.tsv"), scores, "cohort-c Siemens")
-    assert d["n"] == 174 and d["n_other_site"] == 1 and d["n_without_score"] == 29 and d["n_other_make"] == 10
-    assert d["n_other_cohort"] == 12 and d["n_without_candidates"] == 8
-    assert "12 of another cohort, 8 from a table naming no cohort candidates" in calibration.report(d)
+    assert d["n"] == 166 and d["n_other_site"] == 1 and d["n_without_score"] == 29 and d["n_other_make"] == 10 and d["n_other_cohort"] == 12
+    assert "1 at another site, 10 of another make, 12 of another cohort" in calibration.report(d)
     # the make is compared without case and written as the tables spell it; a key without a make, or with a make the fusion
     # does not know, is refused
     d2 = calibration.calibrate(read_labels(tmp_path / "labels.tsv"), scores, "cohort-c siemens")
-    assert d2["n"] == 174 and d2["site"] == "cohort-c Siemens"
+    assert d2["n"] == 166 and d2["site"] == "cohort-c Siemens"
     assert calibration.site_key(" cohort-d canon/toshiba ") == ("cohort-d", "Canon/Toshiba") and calibration.site_key("cohort-d OTHER") == ("cohort-d", "other")
     with pytest.raises(CalibrationError, match="<cohort> <make>"):
         calibration.calibrate(read_labels(tmp_path / "labels.tsv"), scores, "cohort-c")
@@ -394,6 +399,30 @@ def test_a_cohort_name_with_a_space_survives_the_candidates_column(tmp_path):
         calibration.calibrate(read_labels(tmp_path / "labels.tsv"), scores, "my cohort")  # the last word is the make
 
 
+def test_an_unusable_fit_is_refused_and_nothing_written(tmp_path, capsys, monkeypatch):
+    # labels against the scores: the fit is inverted (a below 0), which no pair file may carry
+    labels = write_run(tmp_path / "run", 400, seed=14, flip=True)
+    write_labels(tmp_path / "labels.tsv", labels)
+    d = calibration.calibrate(read_labels(tmp_path / "labels.tsv"), calibration.read_scores([tmp_path / "run"]), "cohort-c Siemens")
+    assert d["a"] < 0 and d["fit"]["converged"] and "not above 0" in calibration.unusable(d)
+    out = tmp_path / "pair.json"
+    rc = cli.main(["calibrate", "--labels", str(tmp_path / "labels.tsv"), "--scores", str(tmp_path / "run"), "--site", "cohort-c Siemens",
+                   "--out", str(out)])
+    err = capsys.readouterr().err
+    assert rc == 1 and err.count("\n") == 1 and "unusable" in err and "not above 0" in err and "nothing was written" in err and not out.exists()
+    # a fit that stopped before it converged is refused the same way; there is no override
+    labels = write_run(tmp_path / "run", 400, seed=14)
+    write_labels(tmp_path / "labels.tsv", labels)
+    monkeypatch.setattr(calibration, "fit_platt", lambda z, y, iters=200: (0.8, -0.5, {"iterations": 3, "converged": False}))
+    rc = cli.main(["calibrate", "--labels", str(tmp_path / "labels.tsv"), "--scores", str(tmp_path / "run"), "--site", "cohort-c Siemens",
+                   "--out", str(out)])
+    err = capsys.readouterr().err
+    assert rc == 1 and err.count("\n") == 1 and "unusable" in err and "stuck after 3 iterations" in err and not out.exists()
+    monkeypatch.undo()
+    assert calibration.unusable({"a": 0.0, "fit": {"converged": True, "iterations": 5}}) is not None
+    assert calibration.unusable({"a": 0.3, "fit": {"converged": True, "iterations": 5}}) is None
+
+
 def test_a_table_that_is_not_a_runs_is_refused_by_its_path_and_an_unwritable_pair_file_by_one_line(tmp_path, capsys):
     labels = write_run(tmp_path / "run", 60, seed=13)
     write_labels(tmp_path / "labels.tsv", labels)
@@ -407,8 +436,21 @@ def test_a_table_that_is_not_a_runs_is_refused_by_its_path_and_an_unwritable_pai
         msg = str(e.value)
         assert "\n" not in msg and str(folder / "9.json") in msg and "seven" not in msg and "high" not in msg, msg
     (folder / "9.json").write_text(json.dumps({"stack_id": 9, "score_raw": 1.0, "cohort_candidates": None}))
-    assert calibration.read_scores([tmp_path / "run"])[9]["cohort_candidates"] is None
+    assert calibration.read_scores([tmp_path / "run"])[9]["cohort_candidates"] == []
     (folder / "9.json").unlink()
+    # a path with no table under it is refused by its path, never read as an empty run; a missing path names itself
+    for empty in (tmp_path / "empty", tmp_path / "empty" / "postcontrast"):
+        empty.mkdir(exist_ok=True)
+        (empty / "results.json").write_text("{}")
+        (empty / "notes.json").write_text(json.dumps({"note": "no table"}))
+        with pytest.raises(CalibrationError) as e:
+            calibration.read_scores([tmp_path / "run", tmp_path / "empty"])
+        assert str(e.value) == "no post-contrast tables under " + str(tmp_path / "empty")
+    with pytest.raises(CalibrationError, match="no post-contrast tables under"):
+        calibration.read_scores([tmp_path / "empty" / "notes.json"])
+    with pytest.raises(CalibrationError) as e:
+        calibration.read_scores([tmp_path / "gone"])
+    assert str(e.value) == "the scores path " + str(tmp_path / "gone") + " does not exist"
     # the command: a refused table is one line on stderr, exit 1, no traceback
     (folder / "9.json").write_text(json.dumps({"stack_id": "seven", "score_raw": 1.0}))
     rc = cli.main(["calibrate", "--labels", str(tmp_path / "labels.tsv"), "--scores", str(tmp_path / "run"), "--site", "cohort-c Siemens",

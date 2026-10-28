@@ -33,9 +33,11 @@ the fused log-odds before any calibration (``score_raw``) beside the
 ``make`` and ``cohort_candidates`` (a JSON list of the names a site key
 may be built from); its ``p_given`` and ``value`` stay empty, so it is
 never a proposal. A stack whose conversion or tools failed keeps that
-reason, with no raw score, and one with no files is ``no-files``. Every
-table carries the four columns and every unit's metrics ``score_raw``,
-null without the flag. A run given a
+reason, with no raw score. A T1-type brain stack with no files is
+``no-files`` in every run, with or without the flag, where 0.2.x said
+``no-calibration`` of one at an uncalibrated site: nothing of it could be
+scored, so that is the truer reason. Every table carries the four columns
+and every unit's metrics ``score_raw``, null without the flag. A run given a
 calibration file (``--calibration``, or the descriptor's site file through
 ``NILS_PC_CALIBRATION``) adds the file's site pairs beside the fusion's
 first (``calibration.py``); a site the frozen fusion has a pair for is
@@ -338,8 +340,10 @@ def candidates(stacks, context, F: Fusion, features_all: bool = False, raw: bool
         elif not (r["acquired"] and r["family"] == "T1-type" and r["brain"]):
             why[e.stack_id] = "not-t1-brain"
         elif not e.files:
-            # before the calibration test: no-calibration is the reason of a
-            # stack the model could score, and a file-less one it cannot
+            # before the calibration test, in every run: no-calibration is
+            # the reason of a stack the model could score, and a file-less
+            # one it cannot (0.2.x said no-calibration of such a stack at an
+            # uncalibrated site)
             why[e.stack_id] = "no-files"
         elif r["site"] is None or r["site"] not in F.cal:
             why[e.stack_id] = "no-calibration"
@@ -616,10 +620,9 @@ def cmd_full(a) -> int:
         return 1
     t0 = time.time()
     rows, why, todo = candidates(stacks, context, P.F, a.features_for == "all", raw)
-    by_id = {e.stack_id: e for e in stacks}
 
     def table(sid, **kw):
-        return evidence.table_row(rows, by_id, sid, raw, functools.partial(_table, P=P), **kw)
+        return evidence.table_row(rows, sid, raw, functools.partial(_table, P=P), **kw)
 
     atlas, hpn, vxn = P.write_atlas(work / "atlas")
     opts = {"workers": a.threads, "convert_workers": a.convert_workers, "wave": a.wave, "card_waves": a.card_waves,
@@ -688,16 +691,16 @@ def cmd_full(a) -> int:
             run.proposals.append({"stack_id": e.stack_id, "axis": AXIS, "value": doc["value"],
                                   "probabilities": {GIVEN: round(pg, 6), NOT_GIVEN: round(1 - pg, 6)}, "model_digest": P.cascade.digest})
     sec = time.time() - t0
-    # the candidates are the stacks the rule accepted; the raw-score mode's
-    # stacks are counted apart, as raw_scored. candidates_per_s is the run's
-    # throughput: the stacks it scored (the candidates, and in the raw-score
-    # mode the raw-scored stacks too) per second of the whole run
+    # the candidates are the stacks the rule accepted, and candidates_per_s
+    # is their number over the whole run's seconds, as before; the raw-score
+    # mode's stacks are counted apart, raw_scored and raw_scored_per_s
     n_cand = sum(1 for e in todo if not (raw and why.get(e.stack_id) == "no-calibration"))
-    raw_scored = sum(1 for d in tables.values() if d["score_raw"] is not None) if raw else 0
     run.metrics = {"stacks": len(stacks), "candidates": n_cand, "by_outcome": counts, "seconds": round(sec, 3),
-                   "candidates_per_s": round((n_cand + raw_scored) / sec, 4) if sec > 0 else None, "stats": stats}
+                   "candidates_per_s": round(n_cand / sec, 4) if sec > 0 else None, "stats": stats}
     if raw:
+        raw_scored = sum(1 for d in tables.values() if d["score_raw"] is not None)
         run.metrics["raw_scored"] = raw_scored
+        run.metrics["raw_scored_per_s"] = round(raw_scored / sec, 4) if sec > 0 else None
     calibration.record(run.extra, {sid: r["site"] for sid, r in rows.items()}, tables)
     run.models = [P.cascade.ref(), P.fusion.ref(), P.arms_part.ref()]
     run.write()

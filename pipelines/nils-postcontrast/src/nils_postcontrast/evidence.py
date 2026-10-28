@@ -205,24 +205,26 @@ def cohort_of(e, fusion, pools=None) -> tuple:
     return None, None, names
 
 
-def raw_columns(rows: dict, by_id: dict, sid: int) -> dict:
+def raw_columns(rows: dict, sid: int) -> dict:
     """The raw-score mode's site columns of a stack's table (0.3.0), the
-    same in the cascade's and the full pipeline's: its site key as the
-    fusion sees it (null where its cohort is none the fusion knows), its
-    make as the key spells it, and the cohort candidates the key could be
-    built from, alias-resolved, as a JSON list in the text column, in the
-    order ``cohort_of`` tries them."""
-    return {"site": rows[sid]["site"], "make": make_of(by_id[sid]), "cohort_candidates": json.dumps(rows[sid]["cohort_candidates"])}
+    same in the cascade's and the full pipeline's, picked from its
+    ``rows_for`` row: its site key as the fusion sees it (null where its
+    cohort is none the fusion knows), its make as the key spells it, and
+    the cohort candidates the key could be built from, alias-resolved, as
+    a JSON list in the text column, in the order ``cohort_of`` tries
+    them."""
+    r = rows[sid]
+    return {"site": r["site"], "make": r["make"], "cohort_candidates": r["cohort_candidates"]}
 
 
-def table_row(rows: dict, by_id: dict, sid: int, raw: bool, base_table, **kw) -> dict:
+def table_row(rows: dict, sid: int, raw: bool, base_table, **kw) -> dict:
     """A stack's table through the pipeline's own ``base_table(sid,
     **columns)``, whose shape never changes with the mode: in the raw-score
     mode the site columns (``raw_columns``) are filled first where the
     caller gave none, and without it they stay null. The cascade and the
     full pipeline build every row through this."""
     if raw:
-        for k, v in raw_columns(rows, by_id, sid).items():
+        for k, v in raw_columns(rows, sid).items():
             kw.setdefault(k, v)
     return base_table(sid, **kw)
 
@@ -266,11 +268,13 @@ def time_trusted(series: list, cohort, untrusted: list) -> bool:
 
 
 def rows_for(stacks: list, context: list, fusion) -> dict:
-    """Each scored stack's fusion row: the header columns, the site and the
-    cohort candidates it could be built from, brain, the (absent) pair
-    tier, and the facts behind them, by stack id. The fusion's cohort pools
-    are computed once here (``cohort_pools``), and ``cohort_of`` runs once
-    per stack, giving the site's cohort and the candidates together."""
+    """Each scored stack's fusion row: the header columns, the site, its
+    make and the cohort candidates it could be built from (``make_of`` and
+    the candidates as the table's JSON text column, computed once here for
+    the row and the table), brain, the (absent) pair tier, and the facts
+    behind them, by stack id. The fusion's cohort pools are computed once
+    here (``cohort_pools``), and ``cohort_of`` runs once per stack, giving
+    the site's cohort and the candidates together."""
     pools = cohort_pools(fusion)
     by_study: dict = {}
     for e in list(stacks) + list(context):
@@ -307,6 +311,7 @@ def rows_for(stacks: list, context: list, fusion) -> dict:
         t = tsec(e)
         tr = bool(s["trusted"])
         coh, where, names = cohort_of(e, fusion, pools)
+        mk = make_of(e)
         pc = axis_max(e, "post_contrast")
         rules = set(contrast(e).get("post_contrast_rules") or [])
         out[e.stack_id] = {
@@ -319,9 +324,10 @@ def rows_for(stacks: list, context: list, fusion) -> dict:
             "h_before_first_tag": float(tr and s["first"] is not None and t is not None and t < s["first"]),
             "h_time_trusted": float(tr),
             "has_pair": 0.0,
-            "site": f"{coh} {make_of(e)}" if coh else None,
+            "site": f"{coh} {mk}" if coh else None,
+            "make": mk,
             "cohort_from": where,
-            "cohort_candidates": names,
+            "cohort_candidates": json.dumps(names),
             "brain": brain(e),
             "family": family(e),
             "acquired": acquired(e),

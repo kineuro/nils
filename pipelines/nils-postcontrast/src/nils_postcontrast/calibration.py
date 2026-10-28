@@ -35,6 +35,7 @@ names a row by its line number, never by its content.
 from __future__ import annotations
 
 import csv
+import dataclasses
 import json
 import math
 import os
@@ -173,8 +174,7 @@ def apply(F: Fusion, path, fusion_digest=None) -> tuple:
                                + ", ".join(frozen))
     cal = dict(F.cal)
     cal.update(pairs)
-    G = Fusion(cols=F.cols, mean=F.mean, scale=F.scale, coef=F.coef, intercept=F.intercept, cal=cal, t=F.t, use_V=F.use_V,
-               cohort_aliases=F.cohort_aliases, untrusted_time_cohorts=F.untrusted_time_cohorts, frozen_keys=frozenset(F.frozen_sites()))
+    G = dataclasses.replace(F, cal=cal, frozen_keys=frozenset(F.frozen_sites()))
     return G, sorted(pairs), checked
 
 
@@ -283,31 +283,37 @@ def read_labels(path) -> dict:
     return out
 
 
-def _tables(path: Path):
-    """(file, table) of each table under a path: a run's output folder (its
-    ``postcontrast/<stack>.json``) or one file."""
+def _tables(path: Path) -> list:
+    """[(file, table)] of each table under a path: a run's output folder
+    (its ``postcontrast/<stack>.json``) or one file. A path with no
+    post-contrast table under it is refused, never read as an empty run."""
     if path.is_dir():
         sub = path / "postcontrast"
         folder = sub if sub.is_dir() else path
         files = sorted(p for p in folder.glob("*.json") if p.name != "results.json")
     else:
         files = [path]
+    out = []
     for f in files:
         try:
             doc = json.loads(f.read_text(encoding="utf-8"))
         except (OSError, UnicodeDecodeError, json.JSONDecodeError) as e:
             raise CalibrationError(f"the scores file {f} is not readable JSON") from e
         if isinstance(doc, dict) and "stack_id" in doc:
-            yield f, doc
+            out.append((f, doc))
+    if not out:
+        raise CalibrationError(f"no post-contrast tables under {path}")
+    return out
 
 
-def _candidates_of(f: Path, doc: dict):
+def _candidates_of(f: Path, doc: dict) -> list:
     """The ``cohort_candidates`` column of a table as the names it lists (a
-    JSON list in the text column), None where an older table has no such
-    column or it is null; anything else is refused by the file's path."""
+    JSON list in the text column; a run writes it on every row it scores),
+    no names where it is null; anything else is refused by the file's
+    path."""
     v = doc.get("cohort_candidates")
     if v is None:
-        return None
+        return []
     try:
         names = json.loads(v) if isinstance(v, str) else v
     except json.JSONDecodeError:
@@ -322,15 +328,15 @@ def read_scores(paths) -> dict:
     path a run's output folder (its ``postcontrast/<stack>.json`` tables)
     or one table. ``{stack: {"z", "site", "make", "cohort_candidates",
     "fusion_digest", "cascade_digest"}}`` (``cohort_candidates`` the
-    column's names, or None where an older table has no such column); a
-    stack in several outputs keeps the last. A table that is not what a run
-    writes (a stack id that is not an integer, a score that is not a
-    number) is refused by its path, never by a value."""
+    column's names); a stack in several outputs keeps the last. A path with
+    no table under it, and a table that is not what a run writes (a stack
+    id that is not an integer, a score that is not a number), are refused
+    by the path, never by a value."""
     out: dict = {}
     for p in paths:
         p = Path(p)
         if not p.exists():
-            raise CalibrationError("a scores path does not exist")
+            raise CalibrationError(f"the scores path {p} does not exist")
         for f, doc in _tables(p):
             z = doc.get("score_raw")
             if z is None:
@@ -418,13 +424,14 @@ def calibrate(labels: dict, scores: dict, site: str) -> dict:
     key's (compared without case) and rows whose ``cohort_candidates`` do
     not name the key's cohort are counted and left out; a row whose table
     names the key itself as its site needs no candidates check (the site
-    proves the cohort), and a row from an older table with no candidates
-    column is taken and counted; fewer than 20 rows of a class refuse."""
+    proves the cohort). Fewer than 20 rows of a class refuse, and the
+    refusal says how many rows were left out and why, so a mis-spelled or
+    alias-spelled key is explained."""
     key_cohort, make = site_key(site)
     site = f"{key_cohort} {make}"
     key_make = make.lower()
     zs, ys, srcs = [], [], []
-    n_without_score = n_other_site = n_other_make = n_other_cohort = n_without_candidates = 0
+    n_without_score = n_other_site = n_other_make = n_other_cohort = 0
     digests = {"fusion": set(), "cascade": set()}
     for sid, (y, src) in labels.items():
         r = scores.get(sid)
@@ -437,15 +444,11 @@ def calibrate(labels: dict, scores: dict, site: str) -> dict:
         if str(r.get("make") or "").strip().lower() != key_make:
             n_other_make += 1
             continue
-        if r["site"] != site:
+        if r["site"] != site and key_cohort not in r["cohort_candidates"]:
             # the table names no site: the key's cohort must be among the
             # stack's candidates (the run writes them alias-resolved)
-            cands = r.get("cohort_candidates")
-            if cands is None:
-                n_without_candidates += 1
-            elif key_cohort not in cands:
-                n_other_cohort += 1
-                continue
+            n_other_cohort += 1
+            continue
         zs.append(r["z"])
         ys.append(y)
         srcs.append(src)
@@ -457,8 +460,13 @@ def calibrate(labels: dict, scores: dict, site: str) -> dict:
     z, y = np.array(zs, np.float64), np.array(ys, np.float64)
     n_given, n_not = int(y.sum()), int(len(y) - y.sum())
     if n_given < FLOOR or n_not < FLOOR:
+        left = [(n_without_score, "labelled with no score"), (n_other_site, "at another site"), (n_other_make, "of another make"),
+                (n_other_cohort, "of another cohort")]
+        total = sum(n for n, _ in left)
+        why = (f"{total} row{'s were' if total != 1 else ' was'} left out: " + ", ".join(f"{n} {w}" for n, w in left if n)) if total \
+            else "no row was left out"
         raise CalibrationError(f"a site's pair needs at least {FLOOR} labelled stacks of each class with a score: "
-                               f"{n_given} given and {n_not} not_given here")
+                               f"{n_given} given and {n_not} not_given here; {why}")
     a, b, fit = fit_platt(z, y)
     per: dict = {}
     for s in SOURCES:
@@ -467,7 +475,7 @@ def calibrate(labels: dict, scores: dict, site: str) -> dict:
             per[s] = {"n": int(m.sum()), "n_given": int(y[m].sum()), **_measures(z[m], y[m], a, b)}
     return {"site": site, "a": round(a, 8), "b": round(b, 8), "n": int(len(y)), "n_given": n_given, "n_not_given": n_not,
             "n_without_score": n_without_score, "n_other_site": n_other_site, "n_other_make": n_other_make, "n_other_cohort": n_other_cohort,
-            "n_without_candidates": n_without_candidates, "fit": fit,
+            "fit": fit,
             "per_source": per, "overall": _measures(z, y, a, b),
             "model": {"fusion_digest": next(iter(digests["fusion"]), None), "cascade_digests": sorted(digests["cascade"]),
                       "image": "nils-postcontrast", "version": __version__},
@@ -478,7 +486,7 @@ def report(doc: dict) -> str:
     lines = [f"site {doc['site']}: a = {doc['a']:.6f}, b = {doc['b']:.6f}",
              f"{doc['n']} stacks fitted ({doc['n_given']} given, {doc['n_not_given']} not_given); "
              f"{doc['n_without_score']} labelled with no score, {doc['n_other_site']} at another site, {doc['n_other_make']} of another make, "
-             f"{doc['n_other_cohort']} of another cohort, {doc['n_without_candidates']} from a table naming no cohort candidates",
+             f"{doc['n_other_cohort']} of another cohort",
              f"fit: {doc['fit']['iterations']} iterations, {'converged' if doc['fit']['converged'] else 'stuck before it converged'}",
              f"overall: log loss {doc['overall']['log_loss']:.4f}, accuracy {doc['overall']['accuracy']:.4f}"]
     for s, m in doc["per_source"].items():
@@ -486,11 +494,27 @@ def report(doc: dict) -> str:
     return "\n".join(lines)
 
 
+def unusable(doc: dict) -> str | None:
+    """Why a fitted pair must not be written, or None: the fit stopped
+    before it converged (stuck), or its slope ``a`` is not above 0, a
+    degenerate or inverted pair under which a higher score would not mean
+    a higher probability. There is no override: the labels or the scores
+    are what to look at."""
+    if not doc["fit"]["converged"]:
+        return f"it stopped before it converged, stuck after {doc['fit']['iterations']} iterations"
+    if not doc["a"] > 0:
+        return f"its slope a is not above 0 (a = {doc['a']:.6f}), a degenerate or inverted pair"
+    return None
+
+
 def cmd_calibrate(a) -> int:
     try:
         labels = read_labels(a.labels)
         scores = read_scores(a.scores)
         doc = calibrate(labels, scores, a.site)
+        why = unusable(doc)
+        if why:
+            raise CalibrationError(f"the fit of site {doc['site']} is unusable and nothing was written: {why}")
     except CalibrationError as e:
         print(f"nils-postcontrast calibrate: {e}", file=sys.stderr)
         return 1
