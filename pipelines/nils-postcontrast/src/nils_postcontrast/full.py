@@ -34,7 +34,8 @@ the fused log-odds before any calibration (``score_raw``) beside the
 may be built from); its ``p_given`` and ``value`` stay empty, so it is
 never a proposal. A stack whose conversion or tools failed keeps that
 reason, with no raw score, and one with no files is ``no-files``. Every
-table carries the four columns, null without the flag. A run given a
+table carries the four columns and every unit's metrics ``score_raw``,
+null without the flag. A run given a
 calibration file (``--calibration``, or the descriptor's site file through
 ``NILS_PC_CALIBRATION``) adds the file's site pairs beside the fusion's
 first (``calibration.py``); a site the frozen fusion has a pair for is
@@ -677,9 +678,8 @@ def cmd_full(a) -> int:
         counts[k] = counts.get(k, 0) + 1
         body = (json.dumps(doc, indent=2) + "\n").encode()
         status = SKIPPED if doc["reason"] in ("sealed", "not-mr") else "succeeded"
-        metrics = {k2: doc[k2] for k2 in ("value", "confidence", "stage", "reason", "arms")}
-        if raw:
-            metrics["score_raw"] = doc["score_raw"]
+        # score_raw on every unit, null without the raw-score mode, as the table's column is
+        metrics = {k2: doc[k2] for k2 in ("value", "confidence", "stage", "reason", "arms", "score_raw")}
         u = Unit(e.unit or f"stack-{e.stack_id}", status=status, metrics=metrics)
         u.outputs.append(run.output_file(f"postcontrast/{e.stack_id}.json", body, "table", "application/json"))
         run.units.append(u)

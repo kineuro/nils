@@ -177,7 +177,9 @@ def test_without_the_raw_scores_flag_the_output_is_the_earlier_versions_with_the
     assert T[1]["answers"] == 1 and T[1]["value"] == "given" and T[7]["reason"] == "no-calibration" and T[6]["reason"] == "deferred"
     res = json.loads((out / "results.json").read_text())
     assert res["params"] == {"workers": 2, "batch": 64, "device": "cpu"} and "calibration" not in res
-    assert all(set(u["metrics"]) == {"value", "confidence", "stage", "stage1", "reason", "files_read"} for u in res["units"])
+    # every unit's metrics carry score_raw, null without the mode, as the table's column does
+    assert all(set(u["metrics"]) == {"value", "confidence", "stage", "stage1", "reason", "files_read", "score_raw"} for u in res["units"])
+    assert all(u["metrics"]["score_raw"] is None for u in res["units"])
 
 
 def test_raw_scores_write_the_log_odds_of_a_stack_with_no_calibration_and_never_propose(tmp_path):
@@ -202,13 +204,16 @@ def test_raw_scores_write_the_log_odds_of_a_stack_with_no_calibration_and_never_
     assert {p["stack_id"] for p in res["proposals"]} == {1, 2} and res["params"]["raw_scores"] is True
     units = {u["unit_id"]: u for u in res["units"]}
     assert units["stack-7"]["status"] == "succeeded" and units["stack-7"]["metrics"]["score_raw"] == t7["score_raw"]
+    assert units["stack-1"]["metrics"]["score_raw"] is None and "score_raw" in units["stack-6"]["metrics"]
     assert res["metrics"]["by_outcome"]["no-calibration"] == 1 and res["metrics"]["deferred"] == [6] and res["metrics"]["raw_scored"] == 1
 
 
-def test_raw_scores_defer_a_stack_the_student_could_not_read_at_a_site_with_no_pair(tmp_path):
+def test_raw_scores_keep_no_calibration_for_a_stack_the_student_could_not_read_at_a_site_with_no_pair(tmp_path):
     stacks, I = setup_run(tmp_path, 9.0)
-    # a stack at the uncalibrated site with no files: nothing was scored,
-    # so its reason is the read's, never no-calibration
+    # a stack at the uncalibrated site with no files: nothing was scored, so
+    # score_raw stays null and stage1 says why, but the reason stays
+    # no-calibration, never deferred, so the run's deferral list (what the
+    # engine runs the full pipeline over) keeps its meaning
     m = json.loads(stacks.read_text())
     eight = dict(m["stacks"][-1], unit="stack-8", stack_id=8, series_id=18, files=[])
     m["stacks"].append(eight)
@@ -217,10 +222,14 @@ def test_raw_scores_defer_a_stack_the_student_could_not_read_at_a_site_with_no_p
     rc = cli.main(["cascade", "--stacks", str(stacks), "--inputs", str(I), "--output", str(out), "--threads", "2", "--device", "cpu", "--raw-scores"])
     assert rc == 0
     T = tables(out)
-    assert T[8]["reason"] == "deferred" and T[8]["stage1"] == "no-geometry" and T[8]["score_raw"] is None and T[8]["cohort_candidates"] == json.dumps(["cohort-c"])
+    assert T[8]["reason"] == "no-calibration" and T[8]["stage1"] == "no-geometry" and T[8]["score_raw"] is None and T[8]["answers"] == 0
+    assert T[8]["cohort_candidates"] == json.dumps(["cohort-c"]) and T[8]["p_given"] is None
     assert T[7]["reason"] == "no-calibration" and T[7]["score_raw"] is not None
+    assert T[6]["reason"] == "deferred" and T[6]["stage1"] == "no-geometry"  # a calibrated stack not read is deferred as before
     res = json.loads((out / "results.json").read_text())
-    assert res["metrics"]["deferred"] == [6, 8] and res["metrics"]["raw_scored"] == 1 and res["metrics"]["by_outcome"]["no-calibration"] == 1
+    assert res["metrics"]["deferred"] == [6] and res["metrics"]["raw_scored"] == 1 and res["metrics"]["by_outcome"]["no-calibration"] == 2
+    units = {u["unit_id"]: u for u in res["units"]}
+    assert units["stack-8"]["status"] == "succeeded" and units["stack-8"]["metrics"]["score_raw"] is None
 
 
 def test_a_calibration_file_scores_a_site_the_fusion_has_no_pair_for(tmp_path, monkeypatch):

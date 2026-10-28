@@ -55,21 +55,22 @@ def contrast(e) -> dict:
     return e.contrast if isinstance(e.contrast, dict) else {}
 
 
-# the make words a site key ends in, as make_of spells them
-MAKES = ("Siemens", "GE", "Philips", "Canon/Toshiba", "other")
+# the make words a site key ends in, each with how the manufacturer header
+# spells it (lowercased), tried in this order; a header none of them matches
+# is OTHER. make_of returns one of MAKES, and MAKES is this table's words
+_MAKE_RULES = (("Siemens", re.compile("siemens")), ("GE", re.compile("^ge|ge |general electric")), ("Philips", re.compile("philips")),
+               ("Canon/Toshiba", re.compile("toshiba|canon")))
+OTHER = "other"
+MAKES = tuple(m for m, _ in _MAKE_RULES) + (OTHER,)
 
 
 def make_of(e) -> str:
+    """The stack's make as a site key spells it, one of ``MAKES``."""
     mk = str((e.header.get("fingerprint") or {}).get("manufacturer") or "").lower()
-    if "siemens" in mk:
-        return "Siemens"
-    if "ge " in mk or mk.startswith("ge") or "general electric" in mk:
-        return "GE"
-    if "philips" in mk:
-        return "Philips"
-    if re.search("toshiba|canon", mk):
-        return "Canon/Toshiba"
-    return "other"
+    for make, pat in _MAKE_RULES:
+        if pat.search(mk):
+            return make
+    return OTHER
 
 
 def agent(e) -> bool:
@@ -151,19 +152,25 @@ def _cohort_candidates(e) -> list:
     return cands
 
 
+def _resolved(e, aliases: dict) -> tuple:
+    """(``_cohort_candidates`` through the fusion's cohort aliases, with
+    where each comes from; the names, each once, in the same order)."""
+    cands = [(aliases.get(c, c), where) for c, where in _cohort_candidates(e)]
+    names: list = []
+    for c, _ in cands:
+        if c not in names:
+            names.append(c)
+    return cands, names
+
+
 def cohort_candidates(e, aliases=None) -> list:
     """The names of ``_cohort_candidates`` through the fusion's cohort
     aliases, each once, in the order ``cohort_of`` tries them: what a site
     builds its key from (``<name> <make>``) when the fusion knows none of
     them. Written as the stack's ``cohort_candidates`` column (a JSON
-    list), so the names are the ones a site key is looked up by."""
-    al = aliases or {}
-    out: list = []
-    for c, _ in _cohort_candidates(e):
-        c = al.get(c, c)
-        if c not in out:
-            out.append(c)
-    return out
+    list), so the names are the ones a site key is looked up by.
+    ``cohort_of`` returns the same list beside the cohort it found."""
+    return _resolved(e, aliases or {})[1]
 
 
 def cohort_pools(fusion) -> tuple:
@@ -178,22 +185,24 @@ def cohort_pools(fusion) -> tuple:
 
 
 def cohort_of(e, fusion, pools=None) -> tuple:
-    """The stack's calibration cohort and where it was found: a dataset
+    """(the stack's calibration cohort, where it was found, the
+    alias-resolved candidate names it was looked for under): a dataset
     holding its files (through the fusion's aliases), its first ingest
     batch, the batch's dash-suffixes, its subject's open cohorts. The
     frozen fusion's cohorts are tried first over every candidate; only a
     stack none of them names is resolved against the cohorts a site file
     added (``calibration.apply``), so a merged file never re-routes a stack
     the frozen fusion calibrates. ``pools`` is ``cohort_pools(fusion)``,
-    computed by the caller once for many stacks."""
-    al = fusion.cohort_aliases
+    computed by the caller once for many stacks. The names are
+    ``cohort_candidates``'s, built once here and written as the stack's
+    column by ``rows_for``."""
     known, added = pools if pools is not None else cohort_pools(fusion)
-    cands = [(al.get(c, c), where) for c, where in _cohort_candidates(e)]
+    cands, names = _resolved(e, fusion.cohort_aliases)
     for pool in (known, added):
         for c2, where in cands:
             if c2 in pool:
-                return c2, where
-    return None, None
+                return c2, where, names
+    return None, None, names
 
 
 def raw_columns(rows: dict, by_id: dict, sid: int) -> dict:
@@ -260,7 +269,8 @@ def rows_for(stacks: list, context: list, fusion) -> dict:
     """Each scored stack's fusion row: the header columns, the site and the
     cohort candidates it could be built from, brain, the (absent) pair
     tier, and the facts behind them, by stack id. The fusion's cohort pools
-    are computed once here (``cohort_pools``)."""
+    are computed once here (``cohort_pools``), and ``cohort_of`` runs once
+    per stack, giving the site's cohort and the candidates together."""
     pools = cohort_pools(fusion)
     by_study: dict = {}
     for e in list(stacks) + list(context):
@@ -287,7 +297,7 @@ def rows_for(stacks: list, context: list, fusion) -> dict:
                     ser[key][1] = n
         coh = None
         for e in B:
-            coh, _ = cohort_of(e, fusion, pools)
+            coh, _, _ = cohort_of(e, fusion, pools)
             break
         trusted = time_trusted([tuple(v) for v in ser.values()], coh, fusion.untrusted_time_cohorts) if B else False
         sess[study] = {"any": any(ag) if B else False, "all": all(ag) if B else False, "first": first, "trusted": trusted, "n": len(B)}
@@ -296,7 +306,7 @@ def rows_for(stacks: list, context: list, fusion) -> dict:
         s = sess.get(e.study, {"any": False, "all": False, "first": None, "trusted": False, "n": 0})
         t = tsec(e)
         tr = bool(s["trusted"])
-        coh, where = cohort_of(e, fusion, pools)
+        coh, where, names = cohort_of(e, fusion, pools)
         pc = axis_max(e, "post_contrast")
         rules = set(contrast(e).get("post_contrast_rules") or [])
         out[e.stack_id] = {
@@ -311,7 +321,7 @@ def rows_for(stacks: list, context: list, fusion) -> dict:
             "has_pair": 0.0,
             "site": f"{coh} {make_of(e)}" if coh else None,
             "cohort_from": where,
-            "cohort_candidates": cohort_candidates(e, fusion.cohort_aliases),
+            "cohort_candidates": names,
             "brain": brain(e),
             "family": family(e),
             "acquired": acquired(e),

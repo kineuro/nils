@@ -130,7 +130,8 @@ x-nils:
       mount: /secrets/post_contrast_calibration.json
       env: NILS_PC_CALIBRATION
       optional: true
-      # a site file (the site's calibration pair), not a secret: the tables echo its digest and site lines, so it is not swept
+      # a site file (the site's calibration pair), not a secret: the tables echo its digest and site lines, so it is not swept.
+      # An engine before 1.0.0-beta.3 ignores sweep and sweeps it line by line, which the one-line file calibrate writes survives
       sweep: false
   outputs:
     - id: scores

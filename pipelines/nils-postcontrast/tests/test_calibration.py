@@ -133,22 +133,86 @@ def test_a_merged_file_never_reroutes_a_stack_the_frozen_fusion_calibrates(tmp_p
     assert G.frozen_sites() == {"cohort-a Siemens"} and G.sites() == {"cohort-a Siemens", "cohort-c Siemens"} and F.frozen_sites() == F.sites()
     # a stack held by a dataset named as the file's cohort, ingested in a batch of a fusion cohort: the fusion's key, as before the file
     e = entry(1, datasets=("cohort-c",), batch="reread-cohort-a")
-    assert evidence.cohort_of(e, F) == ("cohort-a", "batch_part") and evidence.cohort_of(e, G) == ("cohort-a", "batch_part")
+    cands = ["cohort-c", "reread-cohort-a", "cohort-a", "a"]
+    assert evidence.cohort_of(e, F) == ("cohort-a", "batch_part", cands) and evidence.cohort_of(e, G) == ("cohort-a", "batch_part", cands)
     assert evidence.rows_for([e], [], G)[1]["site"] == "cohort-a Siemens"
     # a stack the frozen fusion names nothing of is the file's
     e = entry(2, datasets=("cohort-c",), batch="dcm-raw-2026")
-    assert evidence.cohort_of(e, F) == (None, None) and evidence.cohort_of(e, G) == ("cohort-c", "dataset")
+    cands = ["cohort-c", "dcm-raw-2026", "raw-2026", "2026"]
+    assert evidence.cohort_of(e, F) == (None, None, cands) and evidence.cohort_of(e, G) == ("cohort-c", "dataset", cands)
     # merging a second file keeps the frozen sites the frozen fusion's
     H, _, _ = calibration.apply(G, many)
     assert H.frozen_sites() == {"cohort-a Siemens"}
-    # the candidates a run writes are alias-resolved, as the site key is, and the pools are computed once per run
+    # the candidates a run writes are alias-resolved, as the site key is, built once per stack by cohort_of, and the pools are
+    # computed once per run
     A = Fusion(cols=["x"], mean=np.zeros(1), scale=np.ones(1), coef=np.ones(1), intercept=0.0, cal={"cohort-a Siemens": (1.0, 0.0)}, t=0.9,
                use_V=True, cohort_aliases={"old-name": "cohort-a"}, untrusted_time_cohorts=[])
     e = entry(3, datasets=("old-name", "cohort-c"), batch="dcm-raw-2026")
     row = evidence.rows_for([e], [], A)[3]
-    assert row["site"] == "cohort-a Siemens" and row["cohort_candidates"] == ["cohort-a", "cohort-c", "dcm-raw-2026", "raw-2026", "2026"]
+    cands = ["cohort-a", "cohort-c", "dcm-raw-2026", "raw-2026", "2026"]
+    assert row["site"] == "cohort-a Siemens" and row["cohort_candidates"] == cands
     assert evidence.cohort_candidates(e) == ["old-name", "cohort-c", "dcm-raw-2026", "raw-2026", "2026"]
-    assert evidence.cohort_pools(A) == ({"cohort-a"}, set()) and evidence.cohort_of(e, A, evidence.cohort_pools(A)) == ("cohort-a", "dataset")
+    assert evidence.cohort_candidates(e, A.cohort_aliases) == cands
+    assert evidence.cohort_pools(A) == ({"cohort-a"}, set()) and evidence.cohort_of(e, A, evidence.cohort_pools(A)) == ("cohort-a", "dataset", cands)
+
+
+def test_a_files_keys_are_canonical_and_go_through_the_fusions_cohort_aliases(tmp_path):
+    A = Fusion(cols=["x"], mean=np.zeros(1), scale=np.ones(1), coef=np.ones(1), intercept=0.0, cal={"cohort-a Siemens": (1.0, 0.0)}, t=0.9,
+               use_V=True, cohort_aliases={"old-name": "cohort-a", "other-name": "cohort-c"}, untrusted_time_cohorts=[])
+    many = tmp_path / "many.json"
+    # a map key is trimmed and its make word spelled as the tables spell it; the cohort goes through the aliases when merged
+    many.write_text(json.dumps({" cohort-c siemens ": [0.7, -0.2], "other-name ge": {"a": 2.0, "b": 0.5, "site": " other-name GE"}}))
+    assert load_pairs(many)[0] == {"cohort-c Siemens": (0.7, -0.2), "other-name GE": (2.0, 0.5)}
+    G, sites, _ = calibration.apply(A, many)
+    assert sites == ["cohort-c GE", "cohort-c Siemens"] and G.cal["cohort-c GE"] == (2.0, 0.5) and G.cal["cohort-c Siemens"] == (0.7, -0.2)
+    # a stack of the aliased cohort finds the file's pair under the key the run looks up
+    e = entry(4, datasets=("other-name",), batch="dcm-raw-2026")
+    assert evidence.rows_for([e], [], G)[4]["site"] == "cohort-c Siemens"
+    # the certified-pair guard compares canonical keys: the frozen site through an alias, or spelled without case, is refused
+    for key in ("old-name Siemens", "cohort-a siemens", " cohort-a SIEMENS "):
+        many.write_text(json.dumps({key: [0.7, -0.2]}))
+        with pytest.raises(CalibrationError, match="no site file replaces: cohort-a Siemens") as e:
+            calibration.apply(A, many)
+        assert "\n" not in str(e.value)
+    one = tmp_path / "one.json"
+    one.write_text(json.dumps({"site": "old-name siemens", "a": 0.7, "b": -0.2}))
+    with pytest.raises(CalibrationError, match="cohort-a Siemens"):
+        calibration.for_run(A, str(one), {})
+    # a key whose make the fusion does not know, or without a make, is refused by one line naming the key
+    for key in ("cohort-c Bruker", "cohort-c", " "):
+        many.write_text(json.dumps({key: [0.7, -0.2]}))
+        with pytest.raises(CalibrationError) as e:
+            load_pairs(many)
+        assert "\n" not in str(e.value) and repr(key) in str(e.value), str(e.value)
+    # two keys that are one site once canonical, or once aliased, are refused
+    many.write_text(json.dumps({"cohort-c Siemens": [0.7, -0.2], "cohort-c siemens": [0.7, -0.2]}))
+    with pytest.raises(CalibrationError, match="twice"):
+        load_pairs(many)
+    many.write_text(json.dumps({"cohort-c Siemens": [0.7, -0.2], "other-name Siemens": [0.7, -0.2]}))
+    assert len(load_pairs(many)[0]) == 2
+    with pytest.raises(CalibrationError, match="twice through the fusion's cohort aliases"):
+        calibration.apply(A, many)
+    # in the map form a pair file whose own site is a string naming another site is refused by one line naming the key
+    for own in ("cohort-d Siemens", "cohort-c GE", "Cohort-C Siemens", "cohort-c Bruker", ""):  # a cohort's case is significant
+        many.write_text(json.dumps({"cohort-c Siemens": {"a": 0.7, "b": -0.2, "site": own}}))
+        with pytest.raises(CalibrationError, match="under the key 'cohort-c Siemens' names another site itself") as e:
+            load_pairs(many)
+        assert "\n" not in str(e.value) and str(e.value).endswith("names another site itself")
+    many.write_text(json.dumps({"cohort-c Siemens": {"a": 0.7, "b": -0.2, "site": " cohort-c siemens"}}))
+    assert load_pairs(many)[0] == {"cohort-c Siemens": (0.7, -0.2)}
+    many.write_text(json.dumps({"cohort-c Siemens": {"a": 0.7, "b": -0.2, "site": 7}}))
+    assert load_pairs(many)[0] == {"cohort-c Siemens": (0.7, -0.2)}  # not a string: the key stands
+
+
+def test_make_of_speaks_the_make_words_a_site_key_ends_in():
+    def made(manufacturer):
+        return evidence.make_of(manifest.Entry(1, "stack-1", 11, "MR", {}, {"fingerprint": {"manufacturer": manufacturer}}, {}))
+
+    assert made("SIEMENS") == "Siemens" and made("Siemens Healthineers") == "Siemens" and made("GE MEDICAL SYSTEMS") == "GE"
+    assert made("General Electric") == "GE" and made("Philips Medical Systems") == "Philips" and made("TOSHIBA") == "Canon/Toshiba"
+    assert made("Canon Medical") == "Canon/Toshiba" and made("Bruker") == "other" and made(None) == "other" and made("") == "other"
+    assert evidence.MAKES == ("Siemens", "GE", "Philips", "Canon/Toshiba", "other") and evidence.OTHER in evidence.MAKES
+    assert all(made(m) in evidence.MAKES for m in ("SIEMENS", "GE", "Philips", "Canon", "nobody"))
 
 
 def test_the_results_count_the_stacks_each_pair_calibrated_and_name_keys_that_matched_no_stack():
@@ -199,6 +263,9 @@ def test_a_bad_row_is_refused_by_its_line_number_and_never_by_its_content(tmp_pa
         read_labels(p)
     p.write_text("source\tstack\tlabel\textra\nheader\t7\tnot_given\tx\n\n")
     assert read_labels(p) == {7: (0, "header")}
+    # a spreadsheet's export with a byte order mark reads the same
+    p.write_bytes(b"\xef\xbb\xbfstack\tlabel\tsource\n7\tnot_given\theader\n")
+    assert read_labels(p) == {7: (0, "header")}
 
 
 # ---------------------------------------------------------------- the fit
@@ -248,8 +315,14 @@ def test_calibrate_fits_the_sites_pair_from_a_runs_raw_scores_and_reports_per_so
     text = capsys.readouterr().out
     assert "site cohort-c Siemens" in text and "3 labelled with no score" in text and "header:" in text and "manual:" in text
     assert "0 of another make, 0 of another cohort, 0 from a table naming no cohort candidates" in text and "converged" in text
-    # the pair file is a calibration file a run takes as it is
+    # the pair file is a calibration file a run takes as it is, written as one compact line: an engine released before
+    # sweep: false sweeps it as a secret, line by line, and the whole document is a needle no table holds
+    text = out.read_text()
+    assert text.count("\n") == 1 and text.endswith("\n") and ": " not in text and ", " not in text and json.loads(text) == d
     assert load_pairs(out) == ({"cohort-c Siemens": (d["a"], d["b"])}, False)
+    # a reader takes either layout
+    (tmp_path / "pretty.json").write_text(json.dumps(d, indent=2) + "\n")
+    assert load_pairs(tmp_path / "pretty.json") == ({"cohort-c Siemens": (d["a"], d["b"])}, False)
     # a make word the fusion does not know is refused, and nothing is written
     rc = cli.main(["calibrate", "--labels", str(tmp_path / "labels.tsv"), "--scores", str(tmp_path / "run"), "--site", "cohort-c Bruker",
                    "--out", str(tmp_path / "none.json")])
@@ -301,7 +374,7 @@ def test_calibrate_takes_several_runs_and_keeps_another_sites_makes_and_cohorts_
     # does not know, is refused
     d2 = calibration.calibrate(read_labels(tmp_path / "labels.tsv"), scores, "cohort-c siemens")
     assert d2["n"] == 174 and d2["site"] == "cohort-c Siemens"
-    assert calibration.site_key(" cohort-d canon/toshiba ") == "cohort-d Canon/Toshiba" and calibration.site_key("cohort-d OTHER") == "cohort-d other"
+    assert calibration.site_key(" cohort-d canon/toshiba ") == ("cohort-d", "Canon/Toshiba") and calibration.site_key("cohort-d OTHER") == ("cohort-d", "other")
     with pytest.raises(CalibrationError, match="<cohort> <make>"):
         calibration.calibrate(read_labels(tmp_path / "labels.tsv"), scores, "cohort-c")
     with pytest.raises(CalibrationError, match="none the fusion knows"):

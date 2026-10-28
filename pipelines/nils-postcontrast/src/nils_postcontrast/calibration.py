@@ -14,7 +14,8 @@ site its own pair without a new model bundle or image:
    ``nils-postcontrast calibrate`` fits the pair on z by a plain logistic
    regression (Platt's, with his smoothed targets so a separable set still
    gives a finite pair), refusing under 20 rows of either class (model r2's
-   rule), and writes it as a pair file with its fit per label source;
+   rule), and writes it as a pair file, one line, with its fit per label
+   source;
 3. a run given that file (``--calibration``, or the descriptor's site file
    through ``NILS_PC_CALIBRATION``) adds its pairs beside the fusion's and
    scores the site as any calibrated one; a pair file fitted on another
@@ -24,7 +25,10 @@ site its own pair without a new model bundle or image:
 
 The site file is configuration, not a secret: the descriptor declares it
 ``sweep: false``, so the engine keeps it where secrets are kept but does
-not remove the tables, which echo its digest and site lines. A refusal
+not remove the tables, which echo its digest and site lines. An engine
+released before that flag (before 1.0.0-beta.3) sweeps it as a secret,
+line by line, which is why ``calibrate`` writes the file as one line: the
+whole document is then its only needle, and no table holds it. A refusal
 names a row by its line number, never by its content.
 """
 
@@ -56,12 +60,50 @@ class CalibrationError(ValueError):
 
 # ---------------------------------------------------------------- the pairs
 
-def _read_file(path) -> tuple:
-    """(the site pairs of a calibration file, the fusion digests it names):
-    one pair file (``site``, ``a``, ``b``, its ``model.fusion_digest``) or a
-    map of ``{site: [a, b]}`` (a value may also be a pair file's object)."""
+def site_key(site: str) -> tuple:
+    """A site key ``<cohort> <make>`` as a run spells it, as ``(cohort,
+    make)``: trimmed, the make word taken without case and written as
+    ``evidence.make_of`` spells it (``MAKES``); a make word the fusion does
+    not know is refused. Every key, a pair file's, a map's or
+    ``calibrate``'s, goes through here, so the run's lookup, which is exact,
+    finds it."""
+    cohort, _, make = site.strip().rpartition(" ")
+    if not cohort.strip() or not make:
+        raise CalibrationError("the site key is <cohort> <make>, the make as the tables spell it")
+    canon = {m.lower(): m for m in MAKES}.get(make.lower())
+    if canon is None:
+        raise CalibrationError("the site key's make is none the fusion knows: " + ", ".join(MAKES))
+    return cohort.strip(), canon
+
+
+def _key_of(site: str) -> str:
+    """A pair file's or a map's key through ``site_key``, refused by one
+    line naming it as the file spells it."""
     try:
-        d = json.loads(Path(path).read_text(encoding="utf-8"))
+        cohort, make = site_key(site)
+    except CalibrationError as e:
+        raise CalibrationError(f"the site {site!r}: {e}") from None
+    return f"{cohort} {make}"
+
+
+def _same_key(site: str, key: str) -> bool:
+    """Whether a site, as a file spells it, is the canonical key."""
+    try:
+        return _key_of(site) == key
+    except CalibrationError:
+        return False
+
+
+def _read_file(path) -> tuple:
+    """(the site pairs of a calibration file by their canonical key, the
+    fusion digests it names): one pair file (``site``, ``a``, ``b``, its
+    ``model.fusion_digest``) or a map of ``{site: [a, b]}`` (a value may
+    also be a pair file's object, whose own ``site``, where it is a string,
+    must be the key's). Every key goes through ``site_key``. The file is
+    read as JSON whatever its layout: ``calibrate`` writes it as one line,
+    and a pretty-printed one reads the same."""
+    try:
+        d = json.loads(Path(path).read_text(encoding="utf-8-sig"))
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as e:
         raise CalibrationError("the calibration file is not readable JSON") from e
     if not isinstance(d, dict) or not d:
@@ -80,16 +122,25 @@ def _read_file(path) -> tuple:
         d = {d["site"]: [d["a"], d["b"]]}
     out: dict = {}
     for site, v in d.items():
+        if not (isinstance(site, str) and site.strip()):
+            raise CalibrationError(f"the pair of site {site!r} is not under a site key, <cohort> <make>")
+        key = _key_of(site)
         if isinstance(v, dict):
+            own = v.get("site")
+            # a pair file under a map key is that key's: one naming another site itself is refused
+            if isinstance(own, str) and not (own.strip() and _same_key(own, key)):
+                raise CalibrationError(f"the pair under the key {site!r} names another site itself")
             digest_of(v)
             v = [v.get("a"), v.get("b")]
         # a value is [a, b], two numbers, or a pair file's object; nothing else
         if not isinstance(v, (list, tuple)) or len(v) != 2 or not all(isinstance(x, (int, float)) and not isinstance(x, bool) for x in v):
             raise CalibrationError(f"the pair of site {site!r} is not a list of two numbers, [a, b]")
         a, b = float(v[0]), float(v[1])
-        if not (isinstance(site, str) and site.strip()) or not (math.isfinite(a) and math.isfinite(b)):
-            raise CalibrationError(f"the pair of site {site!r} is not two finite numbers under a site key")
-        out[site] = (a, b)
+        if not (math.isfinite(a) and math.isfinite(b)):
+            raise CalibrationError(f"the pair of site {site!r} is not two finite numbers")
+        if key in out:
+            raise CalibrationError(f"the calibration file names the site {key!r} twice")
+        out[key] = (a, b)
     return out, digests
 
 
@@ -107,12 +158,15 @@ def load_pairs(path, fusion_digest=None) -> tuple:
 def apply(F: Fusion, path, fusion_digest=None) -> tuple:
     """The fusion with the file's pairs added beside its own: (fusion, the
     sites the file set, whether the file was held to the run's fusion,
-    ``load_pairs``). A file naming a site the frozen fusion has a pair for
-    is refused: a certified pair is never replaced. The fusion keeps its own
-    sites apart (``frozen_keys``), so ``evidence.cohort_of`` resolves a
-    stack against them first and against the file's cohorts only where they
-    name none."""
+    ``load_pairs``). The file's keys are canonical (``site_key``) and their
+    cohorts go through the fusion's cohort aliases, as a stack's do, so the
+    guard and the run's lookup compare like with like. A file naming a site
+    the frozen fusion has a pair for is refused: a certified pair is never
+    replaced. The fusion keeps its own sites apart (``frozen_keys``), so
+    ``evidence.cohort_of`` resolves a stack against them first and against
+    the file's cohorts only where they name none."""
     pairs, checked = load_pairs(path, fusion_digest)
+    pairs = _aliased(pairs, F.cohort_aliases)
     frozen = sorted(set(pairs) & F.frozen_sites())
     if frozen:
         raise CalibrationError("the calibration file names a site the frozen fusion is certified for, which no site file replaces: "
@@ -122,6 +176,20 @@ def apply(F: Fusion, path, fusion_digest=None) -> tuple:
     G = Fusion(cols=F.cols, mean=F.mean, scale=F.scale, coef=F.coef, intercept=F.intercept, cal=cal, t=F.t, use_V=F.use_V,
                cohort_aliases=F.cohort_aliases, untrusted_time_cohorts=F.untrusted_time_cohorts, frozen_keys=frozenset(F.frozen_sites()))
     return G, sorted(pairs), checked
+
+
+def _aliased(pairs: dict, aliases: dict) -> dict:
+    """The pairs under the keys a run looks a stack's site up by: each
+    key's cohort through the fusion's cohort aliases. Two keys that meet
+    under one alias are refused."""
+    out: dict = {}
+    for key, ab in pairs.items():
+        cohort, make = key.rsplit(" ", 1)
+        k2 = f"{aliases.get(cohort, cohort)} {make}"
+        if k2 in out:
+            raise CalibrationError(f"the calibration file names the site {k2!r} twice through the fusion's cohort aliases")
+        out[k2] = ab
+    return out
 
 
 def for_run(F: Fusion, path, extra: dict, fusion_digest=None) -> Fusion:
@@ -181,7 +249,8 @@ def read_labels(path) -> dict:
     file is tab-separated with a header naming ``stack``, ``label`` and
     ``source``; a bad row is refused by its line number."""
     try:
-        text = Path(path).read_text(encoding="utf-8")
+        # utf-8-sig: a spreadsheet's export may start with a byte order mark
+        text = Path(path).read_text(encoding="utf-8-sig")
     except (OSError, UnicodeDecodeError) as e:
         raise CalibrationError("the labels file is not readable text") from e
     rows = list(csv.reader(text.splitlines(), delimiter="\t"))
@@ -341,19 +410,6 @@ def _measures(z: np.ndarray, y: np.ndarray, a: float, b: float) -> dict:
     return {"log_loss": round(ll, 6), "accuracy": round(acc, 6)}
 
 
-def site_key(site: str) -> str:
-    """The site key ``<cohort> <make>`` as a run spells it: the make word
-    is taken without case and written as ``evidence.make_of`` spells it
-    (``MAKES``); a make word the fusion does not know is refused."""
-    cohort, _, make = site.strip().rpartition(" ")
-    if not cohort.strip() or not make:
-        raise CalibrationError("the site key is <cohort> <make>, the make as the tables spell it")
-    canon = {m.lower(): m for m in MAKES}.get(make.lower())
-    if canon is None:
-        raise CalibrationError("the site key's make is none the fusion knows: " + ", ".join(MAKES))
-    return f"{cohort.strip()} {canon}"
-
-
 def calibrate(labels: dict, scores: dict, site: str) -> dict:
     """The site's pair document from the labels and the raw scores: the
     fit, its counts and its measures overall and per label source. The key
@@ -364,9 +420,9 @@ def calibrate(labels: dict, scores: dict, site: str) -> dict:
     names the key itself as its site needs no candidates check (the site
     proves the cohort), and a row from an older table with no candidates
     column is taken and counted; fewer than 20 rows of a class refuse."""
-    site = site_key(site)
-    key_cohort, _, key_make = site.rpartition(" ")
-    key_make = key_make.lower()
+    key_cohort, make = site_key(site)
+    site = f"{key_cohort} {make}"
+    key_make = make.lower()
     zs, ys, srcs = [], [], []
     n_without_score = n_other_site = n_other_make = n_other_cohort = n_without_candidates = 0
     digests = {"fusion": set(), "cascade": set()}
@@ -441,7 +497,11 @@ def cmd_calibrate(a) -> int:
     out = Path(a.out)
     try:
         out.parent.mkdir(parents=True, exist_ok=True)
-        out.write_text(json.dumps(doc, indent=2) + "\n", encoding="utf-8")
+        # one line, compact: an engine released before sweep: false (1.0.0-beta.3)
+        # sweeps the site file as a secret, each of its lines a needle, and
+        # would remove every table echoing one; a whole document on one line
+        # is a needle no table holds. A reader takes either layout.
+        out.write_text(json.dumps(doc, separators=(",", ":")) + "\n", encoding="utf-8")
     except OSError as e:
         print(f"nils-postcontrast calibrate: the pair file {out} cannot be written ({e.strerror or e.__class__.__name__})", file=sys.stderr)
         return 1

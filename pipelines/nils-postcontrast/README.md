@@ -39,20 +39,26 @@ fits its own pair, with no new model bundle or image:
 1. Run with the `raw_scores` switch (`--raw-scores`, off by default; both
    pipelines). A T1-type brain stack at a site with no pair is scored too
    and its table carries `score_raw`, the fused log-odds before any
-   calibration (the cascade adds each seed's in `score_raw_seeds`), with its
+   calibration (the cascade adds each seed's in `score_raw_seeds`; a
+   unit's metrics carry `score_raw` too), with its
    `site` (empty where the fusion knows none of its cohorts), its `make` as
    the key spells it and `cohort_candidates`, a JSON list (in the text
    column, so a name with a space survives) of the dataset, batch and cohort
    names the stack belongs to, through the fusion's cohort aliases, in the
    order the site key is looked for, so the site builds its key as `<one of
    them> <make>`; `p_given` and `value` stay empty, so nothing becomes a
-   proposal. A stack whose conversion or tools failed keeps that reason
-   (`no-segmentation`, `worker-died`, ...) with no raw score, and one with
-   no files is `no-files`; `no-calibration` is a scored stack's. The run's
+   proposal. In the full pipeline a stack whose conversion or tools failed
+   keeps that reason (`no-segmentation`, `worker-died`, ...) with no raw
+   score, and one with no files is `no-files`; in the cascade a stack at
+   such a site that the student could not read keeps `no-calibration` with
+   no raw score and `stage1` saying why (`no-geometry`, `multi-frame`,
+   `no-slice`), never `deferred`, so the run's deferral list, which the
+   engine runs the full pipeline over, keeps its meaning. The run's
    metrics count the stacks the rule accepted as `candidates`, as before,
-   and the raw-scored stacks as `raw_scored`. These columns are on every
-   row of every run, so a table's shape never changes: without the switch
-   they are null and every stack is as before.
+   and the raw-scored stacks as `raw_scored`. These columns, and the unit
+   metric `score_raw`, are on every row and unit of every run, so a
+   table's shape never changes: without the switch they are null and every
+   stack is as before.
 2. Label those stacks in a tab-separated file with a header, `stack`,
    `label` (`given` or `not_given`) and `source` (`header`, `name` or
    `manual`), and fit the pair:
@@ -61,9 +67,10 @@ fits its own pair, with no new model bundle or image:
    nils-postcontrast calibrate --labels labels.tsv --scores <run output>... --site "<cohort> <make>" --out pair.json
    ```
 
-   It joins on the stack id and takes only the key's rows: the make is
-   compared without case and written as the tables spell it (a make word
-   the fusion does not know is refused); rows of another make are counted
+   It joins on the stack id and takes only the key's rows: the key is
+   trimmed, its make compared without case and written as the tables spell
+   it (a make word the fusion does not know is refused); rows of another
+   make are counted
    as `n_other_make`, rows whose table names another site as
    `n_other_site`, and rows whose `cohort_candidates` do not name the
    key's cohort as `n_other_cohort` (a row whose table names the key
@@ -80,17 +87,30 @@ fits its own pair, with no new model bundle or image:
    Newton iterations the pair took and whether it converged (a step is
    adopted only when it lowers the loss; where none does, the fit stops and
    says so); `model.fusion_digest` names the fusion the scores came from.
+   The file is written as one compact line, on purpose: an engine
+   released before `sweep: false` (before 1.0.0-beta.3) ignores the flag
+   and sweeps the site file as a secret, each of its lines a needle, and
+   would remove every table echoing one (they echo the fusion digest and
+   the site); a whole document on one line is a needle no table holds. A
+   run reads either layout, but a hand-edited or pretty-printed pair file
+   must not be given to such an engine.
 3. Give the pair to every run: the descriptor's optional site file
    `post_contrast_calibration` (`nils pipeline secret set
    post_contrast_calibration --file /absolute/path/pair.json`; the engine
    takes an absolute path, since it reads the file where it runs), which
    the engine mounts and names through `NILS_PC_CALIBRATION`; outside the
-   engine, `--calibration FILE`. The file is one pair file or a map `{site: [a, b]}`; its pairs are
+   engine, `--calibration FILE`. The file is one pair file or a map `{site:
+   [a, b]}` (a value may be a pair file's object, whose own `site`, where
+   it is a string, must be the key's); every key is read as `calibrate`
+   reads `--site` (trimmed, the make as the tables spell it) and its cohort
+   goes through the fusion's cohort aliases, so the key the run looks a
+   stack up by is the one the file set. Its pairs are
    added beside the fusion's before any stack is judged. A pair file whose
    `model.fusion_digest` names another fusion than the run's is refused, and
-   so is a file naming a site the frozen (certified) fusion has a pair for:
-   no site file replaces a certified pair (the run fails before any stack is
-   read, naming the key). The run's `results.json`
+   so is a file naming a site the frozen (certified) fusion has a pair for,
+   however it spells or aliases it: no site file replaces a certified pair
+   (the run fails before any stack is read, naming the key). The run's
+   `results.json`
    records under `calibration` the sites the file set, each with the number
    of stacks its pair calibrated (`sites: {key: n}`), `unchecked: true`
    where the file named no fusion to check against, and `matched_none:
@@ -99,7 +119,9 @@ fits its own pair, with no new model bundle or image:
    container as one, but it is a site file, not a secret: the descriptor
    declares it `sweep: false`, so the engine does not sweep the run's
    outputs for its lines (the tables echo the fusion digest and site it
-   names).
+   names). Engines released before that flag (before 1.0.0-beta.3) sweep
+   it as any secret, which the one-line pair file survives (step 2) and a
+   multi-line file does not.
 
 ## The full pipeline
 

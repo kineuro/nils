@@ -35,11 +35,13 @@ calibration is still read and scored, and its table carries the fused
 log-odds before any calibration (``score_raw``, with each seed's in
 ``score_raw_seeds``) beside the ``no-calibration`` reason, with its
 ``site``, ``make`` and ``cohort_candidates`` (a JSON list); its ``p_given``
-and ``value`` stay empty, so it is never a proposal, and a stack the student
-could not read is deferred as any other. The site fits its Platt pair on
-those scores with ``nils-postcontrast calibrate`` (``calibration.py``).
-Every table carries the five columns; without the flag they are null and
-the rest of the output is as before.
+and ``value`` stay empty, so it is never a proposal; such a stack the
+student could not read keeps ``no-calibration`` with no score (``stage1``
+says why), so the run's deferral list keeps its meaning. The site fits its
+Platt pair on those scores with ``nils-postcontrast calibrate``
+(``calibration.py``). Every table and every unit's metrics carry
+``score_raw`` (the table the five columns); without the flag they are null
+and the rest of the output is as before.
 """
 
 from __future__ import annotations
@@ -169,9 +171,13 @@ def score(stacks, context, cas, F: Fusion, device: str = "cpu", workers: int = 8
     with ProcessPoolExecutor(max(1, workers), mp_context=multiprocessing.get_context("spawn")) as ex:
         for sid, why, x, opened in ex.map(_read_one, tasks, chunksize=2):
             if x is None:
-                # not read, so not scored: deferred, in the raw-score mode too
-                # (no-calibration is a scored stack's reason there)
-                out[sid] = table(sid, stage1=why, reason="deferred", files_read=opened)
+                if sid in uncal:
+                    # the raw-score mode: an uncalibrated stack the student could
+                    # not read keeps no-calibration with no score (stage1 says
+                    # why), so the engine's deferral list keeps its meaning
+                    out[sid] = table(sid, stage1=why, reason="no-calibration", files_read=opened)
+                else:
+                    out[sid] = table(sid, stage1=why, reason="deferred", files_read=opened)
                 continue
             buf.append((sid, x, opened))
             if len(buf) >= batch:
@@ -207,9 +213,8 @@ def cmd_cascade(a: argparse.Namespace) -> int:
         counts[doc["reason"] or "answered"] = counts.get(doc["reason"] or "answered", 0) + 1
         body = (json.dumps(doc, indent=2) + "\n").encode()
         status = SKIPPED if doc["reason"] in ("sealed", "not-mr") else ("succeeded" if doc["answers"] or doc["reason"] else FAILED)
-        metrics = {k: doc[k] for k in ("value", "confidence", "stage", "stage1", "reason", "files_read")}
-        if a.raw_scores:
-            metrics["score_raw"] = doc["score_raw"]
+        # score_raw on every unit, null without the raw-score mode, as the table's column is
+        metrics = {k: doc[k] for k in ("value", "confidence", "stage", "stage1", "reason", "files_read", "score_raw")}
         u = Unit(e.unit or f"stack-{e.stack_id}", status=status, metrics=metrics)
         u.outputs.append(run.output_file(f"postcontrast/{e.stack_id}.json", body, "table", "application/json"))
         run.units.append(u)

@@ -342,6 +342,9 @@ def test_the_full_pipeline_answers_candidates_and_gives_every_other_stack_its_re
     props = {p["stack_id"]: p for p in res["proposals"]}
     assert set(props) == {1, 2} and props[1]["model_digest"] == T[1]["cascade_digest"]
     assert res["metrics"]["candidates"] == 2 and res["metrics"]["by_outcome"]["answered"] == 2
+    # every unit's metrics carry score_raw, null without the raw-score mode, as the table's column does
+    assert all(set(u["metrics"]) == {"value", "confidence", "stage", "reason", "arms", "score_raw"} for u in res["units"])
+    assert all(u["metrics"]["score_raw"] is None for u in res["units"])
     rec = {json.loads(line)["stack_id"]: json.loads(line) for line in (standin_env / "records.jsonl").read_text().splitlines()}
     assert rec[2]["convert"]["attempts"] == 2 and rec[1]["convert"]["attempts"] == 1
     assert all(k.startswith(("HP", "V", "T:")) for k in rec[1]["cols"])
@@ -577,7 +580,7 @@ def test_raw_scores_give_a_stack_with_no_calibration_its_log_odds_and_no_answer(
     # candidates_per_s is the run's throughput: the candidates and the raw-scored stacks over the run's seconds
     assert abs(res["metrics"]["candidates_per_s"] - 3 / res["metrics"]["seconds"]) < 0.01 * res["metrics"]["candidates_per_s"]
     units = {u["unit_id"]: u for u in res["units"]}
-    assert units["stack-5"]["metrics"]["score_raw"] == t5["score_raw"]
+    assert units["stack-5"]["metrics"]["score_raw"] == t5["score_raw"] and units["stack-1"]["metrics"]["score_raw"] is None
 
 
 def test_raw_scores_keep_a_failed_stacks_own_reason_and_no_score(standin_env, monkeypatch):
