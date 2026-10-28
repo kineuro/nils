@@ -28,6 +28,42 @@ the rest of T1-type brain is deferred to the full pipeline.
 
 The weights are a site's model inputs and are never part of the image.
 
+## Raw scores and a site's calibration
+
+The fusion's score is a log-odds per stack, calibrated per site (the key is
+`<cohort> <make>`: the dataset or cohort holding the stack and the scanner's
+make as `make` spells it) by a Platt pair the frozen fusion carries. A site it
+has no pair for gets `no-calibration` and no answer. Since 0.3.0 such a site
+fits its own pair, with no new model bundle or image:
+
+1. Run with the `raw_scores` switch (`--raw-scores`, off by default; both
+   pipelines). A T1-type brain stack at a site with no pair is scored too
+   and its table carries `score_raw`, the fused log-odds before any
+   calibration (the cascade adds each seed's in `score_raw_seeds`), with its
+   `site` and `make`; `p_given` and `value` stay empty, so nothing becomes a
+   proposal. Every other stack is as without the switch.
+2. Label those stacks in a tab-separated file with a header, `stack`,
+   `label` (`given` or `not_given`) and `source` (`header`, `name` or
+   `manual`), and fit the pair:
+
+   ```sh
+   nils-postcontrast calibrate --labels labels.tsv --scores <run output>... --site "<cohort> <make>" --out pair.json
+   ```
+
+   It joins on the stack id, needs at least 20 labelled stacks of each
+   class with a score, refuses a bad row by its line number and never by
+   its content, and writes `{site, a, b, n, n_given, n_not_given,
+   n_without_score, n_other_site, per_source, overall, model, fitted_at}`
+   with the log loss and accuracy overall and per source, printed as a short
+   report.
+3. Give the pair to every run: the descriptor's optional site file
+   `post_contrast_calibration` (`nils pipeline secret set
+   post_contrast_calibration --file pair.json`), which the engine mounts and
+   names through `NILS_PC_CALIBRATION`; outside the engine, `--calibration
+   FILE`. The file is one pair file or a map `{site: [a, b]}`; its pairs are
+   merged over the fusion's before any stack is judged, and the run records
+   the sites it set, never the pairs.
+
 ## The full pipeline
 
 `nils-postcontrast full` (descriptor `postcontrast-full/nils.job.yml`) is

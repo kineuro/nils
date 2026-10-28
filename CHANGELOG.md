@@ -4,6 +4,10 @@ All notable changes to NILS v1 are recorded here. The format follows [Keep a Cha
 
 ## [Unreleased]
 
+### Added
+
+- nils-postcontrast 0.3.0: a site the frozen fusion has no calibration pair for can fit its own (the partner-feedback study; Wave 7b). With the `raw_scores` switch of `postcontrast-cascade` and `postcontrast-full` (`--raw-scores`, off by default) a run still reads and scores a T1-type brain stack at such a site and writes its fused log-odds before any calibration as `score_raw` (the cascade adds each seed's as `score_raw_seeds`), with the stack's `site` and `make`, beside the `no-calibration` reason; its `p_given` and `value` stay empty, so it is never a proposal, and without the switch the output is as before. `nils-postcontrast calibrate --labels LABELS.tsv --scores RUN... --site "<cohort> <make>" --out PAIR.json` joins the site's labels (`stack`, `label` as `given` or `not_given`, `source` as `header`, `name` or `manual`) with those scores and fits the Platt pair by a plain logistic regression, refusing with fewer than 20 labelled stacks of either class and refusing a bad row by its line number, never by its content; the pair file carries the counts and the log loss and accuracy overall and per source. A run takes the pair through the optional site file `post_contrast_calibration` (`nils pipeline secret set post_contrast_calibration --file PAIR.json`; outside the engine `--calibration FILE`, one pair file or a map `{site: [a, b]}`), merged over the fusion's pairs before any stack is judged, so a site adds its pair with no new model bundle or image; the run records the sites the file set, never the pairs.
+
 ## [pack-mri-v1.4.0] - 2026-10-28
 
 The MRI pack 1.4.0, the coil rule after a partner site's first report (Wave 7b, the maintenance track). It declares pack contract 11 as 1.3.0 did and relies on no engine fix, so it installs on every engine 1.3.0 installs on.
