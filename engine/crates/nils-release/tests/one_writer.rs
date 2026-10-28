@@ -5,8 +5,14 @@
 //! second release started by mistake into the same folder found the first
 //! stale after a minute on another node, and a cancel was not seen until the
 //! release ended. Now the job's row moves with every stack, a cancel stops
-//! the release after the stack in hand, and the folder's own lock refuses a
-//! second writer on any host.
+//! the release after the stack in hand and leaves its row unfinished (a
+//! stopped release is not a version; the next run goes on with its number),
+//! and the folder's own lock, beating with the job, refuses a second writer
+//! on any host and of any registry while it is fresh.
+//!
+//! The lock tests stand both ways of the freshness window: a fresh stamp is
+//! now, a stale one an hour ago, so a test binary that shortens the window
+//! ([`job::FRESH_VAR`]) reads them the same.
 
 mod common;
 
@@ -20,7 +26,7 @@ use nils_registry::home::{Home, InitOptions};
 use nils_registry::job::{self, Claim, State};
 use nils_registry::session::Scheme as SessionScheme;
 use nils_registry::{Backend, Registry, Scheme};
-use nils_release::lock;
+use nils_release::lock::{self, Refusal};
 use nils_release::policy::Policy;
 use nils_release::run::{self, Selection};
 use nils_release::tags as categories;
@@ -125,6 +131,41 @@ fn files_under(root: &Path) -> Vec<std::path::PathBuf> {
     out
 }
 
+/// An ISO stamp an hour ago: stale under any freshness a test sets.
+fn an_hour_ago() -> String {
+    nils_registry::time::iso_of(nils_registry::time::now_secs() - 3600)
+}
+
+/// The `error` and `finished_at` of a release's row.
+fn row_of(reg: &mut Registry, release_id: i64) -> (Option<String>, Option<String>) {
+    let store = reg.store();
+    let sql = format!(
+        "SELECT error, finished_at FROM {} WHERE id = {}",
+        store.qualified("release"),
+        release_id
+    );
+    let r = store.query_opt(&sql, &[]).unwrap().unwrap();
+    (
+        r.opt_text(0).unwrap().map(str::to_string),
+        r.opt_text(1).unwrap().map(str::to_string),
+    )
+}
+
+/// The finished versions of the registry's releases, oldest first.
+fn finished_versions(reg: &mut Registry) -> Vec<String> {
+    let store = reg.store();
+    let sql = format!(
+        "SELECT version FROM {} WHERE finished_at IS NOT NULL ORDER BY id",
+        store.qualified("release")
+    );
+    store
+        .query(&sql, &[])
+        .unwrap()
+        .iter()
+        .map(|r| r.text(0).unwrap().to_string())
+        .collect()
+}
+
 /// The one release job of the registry.
 fn the_release_job(reg: &mut Registry) -> job::Job {
     let jobs = job::list(reg.store(), true, 100).unwrap();
@@ -168,6 +209,10 @@ fn the_release_beats_its_heart_once_per_stack_with_the_stacks_done() {
         assert_eq!(progress["stacks"], 3, "{progress}");
         assert_eq!(progress["version"], report.version, "{progress}");
         assert_eq!(progress["do"], "write", "{progress}");
+        assert!(
+            progress["beats"].as_i64().is_some_and(|b| b >= *done),
+            "{progress}"
+        );
     }
     assert!(seen[1].1 > seen[0].1, "the heartbeat moved: {seen:?}");
     let j = the_release_job(&mut reg);
@@ -181,7 +226,9 @@ fn the_release_beats_its_heart_once_per_stack_with_the_stacks_done() {
 /// (b) A cancel set on the row while the second stack is in hand stops the
 /// release after that stack: the job ends cancelled with the words, the two
 /// stacks written are whole, the rest were not written, the report says it
-/// stopped, the lock is gone; and the next run writes the rest.
+/// stopped, the lock is gone; the release's row is left unfinished with the
+/// stopped words, so it is not the newest finished version; and the next
+/// run writes the rest under the same version number and finishes it.
 #[test]
 fn a_cancel_stops_the_release_after_the_stack_in_hand_and_the_next_run_goes_on() {
     let source = tree(4);
@@ -233,31 +280,156 @@ fn a_cancel_stops_the_release_after_the_stack_in_hand_and_the_next_run_goes_on()
     assert_eq!(j.result.unwrap()["stopped_after"], 2);
     assert_eq!(lock::read(out.path()), None);
 
-    // the row of the stopped version says so too
-    let (error, finished): (Option<String>, Option<String>) = {
-        let store = reg.store();
-        let sql = format!(
-            "SELECT error, finished_at FROM {} WHERE id = {}",
-            store.qualified("release"),
-            report.release_id
-        );
-        let r = store.query_opt(&sql, &[]).unwrap().unwrap();
-        (
-            r.opt_text(0).unwrap().map(str::to_string),
-            r.opt_text(1).unwrap().map(str::to_string),
-        )
-    };
+    // the row of the stopped release says so and is not finished: a
+    // stopped release is not a version
+    let (error, finished) = row_of(&mut reg, report.release_id);
     assert_eq!(
         error.as_deref(),
         Some("stopped after 2 of 4 stacks; what was written stays written")
     );
-    assert!(finished.is_some());
+    assert_eq!(finished, None, "a stopped release is not finished");
+    assert!(finished_versions(&mut reg).is_empty());
 
-    // run again to go on: the two left are added, the two written are left alone
+    // run again to go on: the two left are added, the two written are left
+    // alone, under the same version number, and that run is the version
     let again = run::run(&mut reg, &settings(out.path(), &policy, &scheme)).unwrap();
     assert_eq!(again.stopped_after, None);
+    assert_eq!(
+        again.version, report.version,
+        "the version number did not move"
+    );
+    assert_ne!(again.release_id, report.release_id);
     assert_eq!((again.unchanged, again.added), (2, 2), "{again:?}");
     assert_eq!(files_under(out.path()).len(), 4);
+    assert_eq!(lock::read(out.path()), None);
+    assert_eq!(finished_versions(&mut reg), vec![report.version.clone()]);
+    let (error, finished) = row_of(&mut reg, again.release_id);
+    assert_eq!(error, None);
+    assert!(finished.is_some());
+    // and a third run numbers the next version after the finished one
+    let third = run::run(&mut reg, &settings(out.path(), &policy, &scheme)).unwrap();
+    assert_ne!(third.version, again.version);
+    assert_eq!(third.unchanged, 4);
+}
+
+/// A cancel read at the beat after the last stack still ends the release
+/// as stopped, with every stack counted as done: a stop the person asked
+/// for is never turned into a done release.
+#[test]
+fn a_cancel_read_after_the_last_stack_still_ends_the_release_stopped() {
+    let source = tree(2);
+    let home_dir = TempDir::new("one-writer-home");
+    let out = TempDir::new("one-writer-out");
+    let (_home, mut reg) = registry(&home_dir, &source);
+    let policy = Policy::default();
+    let scheme = SessionScheme::default();
+
+    let report = run::run_watched(
+        &mut reg,
+        &settings(out.path(), &policy, &scheme),
+        &mut |store, job_id, done| {
+            if done == 2 {
+                job::request_cancel(store, job_id).unwrap();
+            }
+        },
+    )
+    .unwrap();
+    // the cancel was set after the last stack's beat: the release reads it
+    // at its end and ends stopped all the same
+    assert_eq!(report.stacks, 2);
+    assert_eq!(report.added, 2);
+    assert_eq!(report.stopped_after, Some(2), "{report:?}");
+    assert_eq!(files_under(out.path()).len(), 2);
+    let j = the_release_job(&mut reg);
+    assert_eq!(j.state, State::Cancelled);
+    assert_eq!(j.error.as_deref(), Some(run::STOPPED));
+    let (error, finished) = row_of(&mut reg, report.release_id);
+    assert_eq!(
+        error.as_deref(),
+        Some("stopped after 2 of 2 stacks; what was written stays written")
+    );
+    assert_eq!(finished, None);
+    assert_eq!(lock::read(out.path()), None);
+    // the next run finishes the version with nothing left to write
+    let again = run::run(&mut reg, &settings(out.path(), &policy, &scheme)).unwrap();
+    assert_eq!(again.version, report.version);
+    assert_eq!(
+        (again.unchanged, again.added, again.stopped_after),
+        (2, 0, None)
+    );
+    assert_eq!(finished_versions(&mut reg), vec![report.version]);
+}
+
+/// A stop from outside the registry, as the command line's Ctrl-C, is read
+/// at the top of the next stack: the stack in hand is whole, no further one
+/// is begun, the row is stopped, the job cancelled and the lock gone.
+#[test]
+fn a_stop_from_the_keyboard_stops_the_release_at_the_next_stack() {
+    let source = tree(3);
+    let home_dir = TempDir::new("one-writer-home");
+    let out = TempDir::new("one-writer-out");
+    let (_home, mut reg) = registry(&home_dir, &source);
+    let policy = Policy::default();
+    let scheme = SessionScheme::default();
+
+    let asked = std::sync::atomic::AtomicBool::new(false);
+    let stop = || asked.load(std::sync::atomic::Ordering::SeqCst);
+    let report = run::run_with(
+        &mut reg,
+        &settings(out.path(), &policy, &scheme),
+        Some(&stop),
+        &mut |_, _, done| {
+            if done == 1 {
+                asked.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+        },
+    )
+    .unwrap();
+    assert_eq!(report.stopped_after, Some(1), "{report:?}");
+    assert_eq!(report.added, 1);
+    assert_eq!(files_under(out.path()).len(), 1);
+    let j = the_release_job(&mut reg);
+    assert_eq!(j.state, State::Cancelled);
+    assert_eq!(j.error.as_deref(), Some(run::STOPPED));
+    let (error, finished) = row_of(&mut reg, report.release_id);
+    assert_eq!(
+        error.as_deref(),
+        Some("stopped after 1 of 3 stacks; what was written stays written")
+    );
+    assert_eq!(finished, None);
+    assert_eq!(lock::read(out.path()), None);
+}
+
+/// A stop in before the compare stops there: nothing is compared, removed
+/// or written, and the row says it stopped after none of its stacks.
+#[test]
+fn a_stop_in_before_the_compare_stops_there() {
+    let source = tree(2);
+    let home_dir = TempDir::new("one-writer-home");
+    let out = TempDir::new("one-writer-out");
+    let (_home, mut reg) = registry(&home_dir, &source);
+    let policy = Policy::default();
+    let scheme = SessionScheme::default();
+
+    let stop = || true;
+    let report = run::run_with(
+        &mut reg,
+        &settings(out.path(), &policy, &scheme),
+        Some(&stop),
+        &mut |_, _, _| panic!("no stack is handled"),
+    )
+    .unwrap();
+    assert_eq!(report.stopped_after, Some(0), "{report:?}");
+    assert_eq!(report.stacks, 2);
+    assert_eq!((report.added, report.removed, report.written), (0, 0, 0));
+    assert!(files_under(out.path()).is_empty());
+    assert_eq!(the_release_job(&mut reg).state, State::Cancelled);
+    let (error, finished) = row_of(&mut reg, report.release_id);
+    assert_eq!(
+        error.as_deref(),
+        Some("stopped after 0 of 2 stacks; what was written stays written")
+    );
+    assert_eq!(finished, None);
     assert_eq!(lock::read(out.path()), None);
 }
 
@@ -293,6 +465,7 @@ fn a_lock_of_a_running_release_refuses_a_second_writer_and_names_it() {
             host: "a-node".to_string(),
             pid: 1,
             started_at: nils_registry::time::now_iso(),
+            beat_at: None,
         },
     )
     .unwrap();
@@ -339,6 +512,7 @@ fn a_lock_of_a_finished_release_is_taken_over_and_the_report_says_so() {
     )
     .unwrap();
     job::finish(reg.store(), other, State::Done, None).unwrap();
+    // fresh by its stamp; the registry's word that the job is over wins
     lock::take(
         out.path(),
         &lock::Lock {
@@ -347,6 +521,7 @@ fn a_lock_of_a_finished_release_is_taken_over_and_the_report_says_so() {
             host: "a-node".to_string(),
             pid: 1,
             started_at: nils_registry::time::now_iso(),
+            beat_at: Some(nils_registry::time::now_iso()),
         },
     )
     .unwrap();
@@ -375,23 +550,153 @@ fn a_lock_naming_an_unknown_job_blocks_nothing() {
     let (_home, mut reg) = registry(&home_dir, &source);
     let policy = Policy::default();
     let scheme = SessionScheme::default();
+    let registry_id = reg.meta().registry_id.clone();
     lock::take(
         out.path(),
         &lock::Lock {
             job: 4242,
-            registry: Some("some-other-registry".to_string()),
+            registry: Some(registry_id),
             host: "a-node".to_string(),
             pid: 1,
             started_at: nils_registry::time::now_iso(),
+            beat_at: Some(nils_registry::time::now_iso()),
         },
     )
     .unwrap();
     let report = run::run(&mut reg, &settings(out.path(), &policy, &scheme)).unwrap();
     let line = report.lock_taken_over.unwrap();
     assert!(
-        line.contains("job 4242") && line.contains("another registry's"),
+        line.contains("job 4242") && line.contains("which was unknown"),
         "{line}"
     );
     assert_eq!(files_under(out.path()).len(), 1);
     assert_eq!(lock::read(out.path()), None);
+}
+
+/// A lock of another registry cannot be asked about: it refuses while its
+/// beat is fresh, in words that name the job, its host and its registry,
+/// and is taken over once its beat is older than the freshness window.
+#[test]
+fn another_registrys_lock_refuses_while_fresh_and_is_taken_over_once_stale() {
+    let source = tree(1);
+    let home_dir = TempDir::new("one-writer-home");
+    let out = TempDir::new("one-writer-out");
+    let (_home, mut reg) = registry(&home_dir, &source);
+    let policy = Policy::default();
+    let scheme = SessionScheme::default();
+    let theirs = lock::Lock {
+        job: 77,
+        registry: Some("some-other-registry".to_string()),
+        host: "their-node".to_string(),
+        pid: 1,
+        started_at: an_hour_ago(),
+        beat_at: Some(nils_registry::time::now_iso()),
+    };
+    lock::take(out.path(), &theirs).unwrap();
+
+    let refused = run::run(&mut reg, &settings(out.path(), &policy, &scheme)).unwrap_err();
+    let words = refused.to_string();
+    assert!(matches!(refused, run::Error::Refused(_)), "{words}");
+    assert!(
+        words.contains("another release (job 77 on their-node, of registry some-other-registry)"),
+        "{words}"
+    );
+    assert!(files_under(out.path()).is_empty(), "nothing written");
+    assert_eq!(lock::read(out.path()), Some(theirs.clone()));
+    assert!(
+        job::list(reg.store(), true, 100)
+            .unwrap()
+            .iter()
+            .all(|j| j.kind != "release")
+    );
+
+    // the same lock, its beat an hour old: taken over
+    lock::take(
+        out.path(),
+        &lock::Lock {
+            beat_at: Some(an_hour_ago()),
+            ..theirs
+        },
+    )
+    .unwrap();
+    let report = run::run(&mut reg, &settings(out.path(), &policy, &scheme)).unwrap();
+    let line = report.lock_taken_over.unwrap();
+    assert!(
+        line.contains("job 77 on their-node") && line.contains("another registry's, silent since"),
+        "{line}"
+    );
+    assert_eq!(files_under(out.path()).len(), 1);
+    assert_eq!(lock::read(out.path()), None);
+}
+
+/// A lock file that cannot be read refuses, naming the file, until it has
+/// gone untouched for longer than the freshness window; then it is taken
+/// over and the report says so.
+#[test]
+fn an_unreadable_lock_refuses_until_it_is_old() {
+    let source = tree(1);
+    let home_dir = TempDir::new("one-writer-home");
+    let out = TempDir::new("one-writer-out");
+    let (_home, mut reg) = registry(&home_dir, &source);
+    let policy = Policy::default();
+    let scheme = SessionScheme::default();
+    let file = lock::path(out.path());
+    std::fs::write(&file, "{ not json").unwrap();
+
+    let refused = run::run(&mut reg, &settings(out.path(), &policy, &scheme)).unwrap_err();
+    let words = refused.to_string();
+    assert!(matches!(refused, run::Error::Refused(_)), "{words}");
+    assert!(
+        words.contains("holds a release lock that cannot be read")
+            && words.contains(&file.display().to_string())
+            && words.contains("remove it if no release is writing here"),
+        "{words}"
+    );
+    assert!(files_under(out.path()).is_empty(), "nothing written");
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), "{ not json");
+
+    // untouched for an hour: taken over
+    let old = std::time::SystemTime::now() - std::time::Duration::from_secs(3600);
+    std::fs::File::options()
+        .write(true)
+        .open(&file)
+        .unwrap()
+        .set_modified(old)
+        .unwrap();
+    let report = run::run(&mut reg, &settings(out.path(), &policy, &scheme)).unwrap();
+    let line = report.lock_taken_over.unwrap();
+    assert!(
+        line.contains("cannot be read") && line.contains("untouched for"),
+        "{line}"
+    );
+    assert_eq!(files_under(out.path()).len(), 1);
+    assert_eq!(lock::read(out.path()), None);
+}
+
+/// A registry that cannot be asked about the lock's job is a store failure,
+/// not a refusal: the words of a refusal would send the person to wait for
+/// a release nobody can see.
+#[test]
+fn a_store_failure_while_asking_about_the_lock_stays_a_store_failure() {
+    let source = tree(1);
+    let home_dir = TempDir::new("one-writer-home");
+    let out = TempDir::new("one-writer-out");
+    let (_home, mut reg) = registry(&home_dir, &source);
+    let registry_id = reg.meta().registry_id.clone();
+    lock::take(
+        out.path(),
+        &lock::Lock {
+            job: 1,
+            registry: Some(registry_id.clone()),
+            host: "a-node".to_string(),
+            pid: 1,
+            started_at: an_hour_ago(),
+            beat_at: Some(an_hour_ago()),
+        },
+    )
+    .unwrap();
+    let sql = format!("DROP TABLE {}", reg.store().qualified("job"));
+    reg.store().execute(&sql, &[]).unwrap();
+    let found = lock::check(reg.store(), &registry_id, out.path());
+    assert!(matches!(found, Err(Refusal::Store(_))), "{found:?}");
 }

@@ -340,35 +340,26 @@ fn output_ticking(
     run: &mut Command,
     tick: &mut dyn FnMut(),
 ) -> std::io::Result<std::process::Output> {
-    use std::io::Read;
     use std::process::Stdio;
     let mut child = run
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()?;
-    let drain = |pipe: Option<std::process::ChildStdout>| {
-        std::thread::spawn(move || {
-            let mut out = Vec::new();
-            if let Some(mut pipe) = pipe {
-                pipe.read_to_end(&mut out).ok();
-            }
-            out
-        })
-    };
     let stdout = drain(child.stdout.take());
-    let stderr = child.stderr.take();
-    let stderr = std::thread::spawn(move || {
-        let mut out = Vec::new();
-        if let Some(mut pipe) = stderr {
-            pipe.read_to_end(&mut out).ok();
-        }
-        out
-    });
+    let stderr = drain(child.stderr.take());
     let mut ticked = std::time::Instant::now();
     let status = loop {
-        if let Some(status) = child.try_wait()? {
-            break status;
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) => {}
+            Err(e) => {
+                // the child is not left behind with its pipes' threads: it
+                // is ended and reaped before the error is given back
+                child.kill().ok();
+                child.wait().ok();
+                return Err(e);
+            }
         }
         if ticked.elapsed() >= TICK_EVERY {
             ticked = std::time::Instant::now();
@@ -380,6 +371,19 @@ fn output_ticking(
         status,
         stdout: stdout.join().unwrap_or_default(),
         stderr: stderr.join().unwrap_or_default(),
+    })
+}
+
+/// Read a child's pipe to its end on a thread of its own, as
+/// `Command::output` does, so the child is never stuck on a full pipe while
+/// the parent waits on it.
+fn drain<R: std::io::Read + Send + 'static>(pipe: Option<R>) -> std::thread::JoinHandle<Vec<u8>> {
+    std::thread::spawn(move || {
+        let mut out = Vec::new();
+        if let Some(mut pipe) = pipe {
+            pipe.read_to_end(&mut out).ok();
+        }
+        out
     })
 }
 

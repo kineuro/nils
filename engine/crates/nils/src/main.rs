@@ -12085,10 +12085,17 @@ fn release(home: &Home, args: ReleaseArgs) -> Result<(), Exit> {
         authors: &args.author,
         observations: &args.observation,
     };
-    let report = run::run(&mut registry, &settings).map_err(|e| match e {
-        run::Error::Refused(m) => usage(m),
-        other => fail(other.to_string()),
-    })?;
+    // Wave 7b (the maintenance track): Ctrl-C or a termination stops the
+    // release as a cancel on its job does, at the top of the next stack,
+    // with the stack in hand whole.
+    let cancel = stop_on_signal()?;
+    let stop = || cancel.stop();
+    let report = run::run_with(&mut registry, &settings, Some(&stop), &mut |_, _, _| {}).map_err(
+        |e| match e {
+            run::Error::Refused(m) => usage(m),
+            other => fail(other.to_string()),
+        },
+    )?;
 
     let converter_path = converter.as_ref().map(|c| c.path.display().to_string());
     // Wave 7b (the maintenance track): a release asked to stop printed its
@@ -12122,9 +12129,8 @@ fn release(home: &Home, args: ReleaseArgs) -> Result<(), Exit> {
     }
     if let Some(n) = report.stopped_after {
         println!(
-            "  stopped          after {n} of {} stacks; what was written stays written, run the \
-             release again to go on",
-            report.stacks
+            "  stopped          {}; run the release again to go on",
+            run::stopped_words(n, &report)
         );
     }
     // Record 37 S7: what the names carry, which the row records too.
@@ -12395,8 +12401,12 @@ fn release_withdraw(home: &Home, name: &str, version: &str, why: &str) -> Result
     let mut registry = open(home)?;
     let store = registry.store();
     let d = store.dialect();
+    // a release that stopped or died left its row unfinished under the
+    // version number its next run goes on with: the version is the finished
+    // row
     let sql = format!(
-        "SELECT id, withdrawn_at IS NOT NULL FROM {} WHERE name = {} AND version = {}",
+        "SELECT id, withdrawn_at IS NOT NULL FROM {} WHERE name = {} AND version = {} \
+         AND finished_at IS NOT NULL",
         store.qualified("release"),
         d.param(1, Type::Text),
         d.param(2, Type::Text)
@@ -12452,6 +12462,7 @@ fn releases_doc(
     let policies = text_of(store, "release", "policies");
     let scheme = text_of(store, "release", "session_scheme");
     let pick_rules = text_of(store, "release", "pick_rules");
+    let finished = text_of(store, "release", "finished_at");
     let mut wheres = String::new();
     let mut params: Vec<Param> = Vec::new();
     if let Some(name) = name {
@@ -12466,7 +12477,8 @@ fn releases_doc(
     let sql = format!(
         "SELECT id, name, version, root, {started}, files, subjects, unchanged, moved, rewritten, \
          added, removed, layout, actor, {withdrawn}, withdrawn_by, withdrawn_why, {policy}, \
-         {policies}, {scheme}, session_naming, categories, naming, purpose, {pick_rules} \
+         {policies}, {scheme}, session_naming, categories, naming, purpose, {pick_rules}, \
+         {finished}, error \
          FROM {}{wheres} ORDER BY id DESC LIMIT {}",
         store.qualified("release"),
         limit.max(1)
@@ -12536,6 +12548,14 @@ fn releases_doc(
                 // 6, carried to releases, `frozen`, what it kept of them,
                 // which every reader of its picks after it reads
                 "picks": json(r.opt_text(24)?),
+                // Wave 7b (the maintenance track): a row without a finish is
+                // no version. One with the stopped words in `error` was
+                // asked to stop and did, after some of its stacks; the next
+                // run of the release goes on with it under the same number.
+                // One without a word died.
+                "finished_at": r.opt_text(25)?,
+                "error": r.opt_text(26)?,
+                "stopped": r.opt_text(25)?.is_none() && r.opt_text(26)?.is_some(),
             }))
         })
         .collect::<Result<_, nils_registry::Error>>()?;
@@ -12600,6 +12620,10 @@ struct Version {
     counts: [i64; 5],
     /// Record 55, decision 6: the main scans it read, where it read any.
     picks: Option<serde_json::Value>,
+    /// Whether the row finished: an unfinished one is no version.
+    finished: bool,
+    /// What the row says went wrong, or that it stopped.
+    error: Option<String>,
 }
 
 /// What a release read of the main scans, in words, for its history: the
@@ -12686,9 +12710,10 @@ fn history(home: &Home, args: &ReleaseArgs) -> Result<(), Exit> {
             .expect("release.started_at is a column"),
     );
     let pick_rules = text_of(store, "release", "pick_rules");
+    let finished = text_of(store, "release", "finished_at");
     let sql = format!(
         "SELECT id, name, version, root, {started}, files, unchanged, moved, rewritten, added, \
-         removed, {pick_rules} FROM {}{wheres} ORDER BY id",
+         removed, {pick_rules}, {finished}, error FROM {}{wheres} ORDER BY id",
         store.qualified("release"),
     );
     let rows = store
@@ -12716,6 +12741,11 @@ fn history(home: &Home, args: &ReleaseArgs) -> Result<(), Exit> {
                 .opt_text(11)
                 .map_err(|e| fail(e.to_string()))?
                 .and_then(|t| serde_json::from_str(t).ok()),
+            finished: r.opt_text(12).map_err(|e| fail(e.to_string()))?.is_some(),
+            error: r
+                .opt_text(13)
+                .map_err(|e| fail(e.to_string()))?
+                .map(str::to_string),
         });
     }
     let mut last_name = String::new();
@@ -12727,7 +12757,13 @@ fn history(home: &Home, args: &ReleaseArgs) -> Result<(), Exit> {
         }
         let when = v.started.split('T').next().unwrap_or(&v.started);
         let (version, files) = (&v.version, v.files);
-        println!("  {version:<16} {when}   {files:>9} files in the tree");
+        // Wave 7b (the maintenance track): a row without a finish is no
+        // version, and says why it is not
+        match (v.finished, &v.error) {
+            (true, _) => println!("  {version:<16} {when}   {files:>9} files in the tree"),
+            (false, Some(why)) => println!("  {version:<16} {when}   not a version: {why}"),
+            (false, None) => println!("  {version:<16} {when}   not a version: did not finish"),
+        }
         if let Some(p) = &v.picks {
             println!("      main scans   {}", picks_line(p));
         }
