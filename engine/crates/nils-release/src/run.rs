@@ -596,15 +596,22 @@ fn stop_details(report: &Report) -> String {
     format!("{removed}{lost}")
 }
 
+/// Whether a release that stopped after `after` stacks changed nothing of
+/// the tree: no stack written, no files of the version before removed, and
+/// no stack moved. A move renames files, so a stop after the moves is a
+/// stop that changed the tree, however many stacks it wrote.
+fn wrote_nothing(after: i64, report: &Report) -> bool {
+    after == 0 && report.removed_before_stop.unwrap_or(report.removed) == 0 && report.moved == 0
+}
+
 /// What a stopped release's row says, and the command's stopped line: after
 /// how many of its stacks it stopped, and what else there is to say
-/// ([`stop_details`]). A stop that wrote and removed nothing says so
+/// ([`stop_details`]). A stop that wrote, removed and moved nothing says so
 /// ([`WROTE_NOTHING`]), so a handover of the folder, which is the version
 /// before, whole, goes on.
 pub fn stopped_words(after: i64, report: &Report) -> String {
-    let wrote_nothing = after == 0 && report.removed_before_stop.unwrap_or(report.removed) == 0;
     let details = stop_details(report);
-    match wrote_nothing {
+    match wrote_nothing(after, report) {
         true => format!(
             "{STOPPED_WORDS} 0 of {} stacks{details}; {WROTE_NOTHING}",
             report.stacks
@@ -997,6 +1004,10 @@ fn run_release(
             settings.root.display()
         )),
     })?;
+    // The staging a release killed mid-rewrite left behind is nobody's now
+    // that the lock is ours: it goes whole, before a stack of this run is
+    // staged there.
+    std::fs::remove_dir_all(settings.root.join(REWRITE_DIR)).ok();
     let days = study_days(registry.store())?;
     let pixels = pixel_verdicts(registry.store())?;
     // Wave 4b §7: sessions come from the cache, built over each subject's
@@ -1632,9 +1643,7 @@ fn run_release(
                 // tree, then the old files go and the new ones are moved
                 // into place, so an abort or a kill mid-write leaves the old
                 // files or the new, never neither.
-                let in_place = job.change == crate::version::Change::Rewritten
-                    && !leaving.contains(&job.stack)
-                    && job.was.is_some();
+                let in_place = job.was.as_ref().is_some_and(|w| w.place == job.place);
                 let scratch = settings.root.join(REWRITE_DIR).join(job.stack.to_string());
                 let write_root: &Path = match in_place {
                     true => {
@@ -1943,11 +1952,13 @@ fn run_release(
             .collect::<Vec<_>>(),
     )?;
     write_changes(registry.store(), &report)?;
-    // A release stopped before it wrote a stack (at the compare, or at the
-    // top of its first stack) raises nothing: the questions are the version's
-    // to ask, and the run that writes it asks them (Wave 7b, the maintenance
-    // track).
-    let wrote_nothing = report.stopped_after == Some(0);
+    // A release stopped before it changed the tree (at the compare, or at
+    // the top of its first stack, no stack moved) raises nothing: the
+    // questions are the version's to ask, and the run that writes it asks
+    // them (Wave 7b, the maintenance track).
+    let wrote_nothing = report
+        .stopped_after
+        .is_some_and(|after| wrote_nothing(after, &report));
     if !held.is_empty() && !wrote_nothing {
         raise_review(registry.store(), &report, &held, &pixels)?;
     }
@@ -6971,6 +6982,33 @@ fn raise_shared(store: &mut Store, report: &Report, groups: &[&SharedGroup]) -> 
 mod tests {
     use super::*;
     use nils_dicom::synth::TempDir;
+
+    /// Wave 7b (the maintenance track): a stop that wrote, removed and moved
+    /// nothing says so, and a stop after the moves renamed files does not,
+    /// however many stacks it wrote: the tree is not the version before's.
+    #[test]
+    fn a_stop_after_the_moves_did_not_leave_the_tree_whole() {
+        let untouched = Report {
+            stacks: 2,
+            ..Report::default()
+        };
+        assert_eq!(
+            stopped_words(0, &untouched),
+            format!("{STOPPED_WORDS} 0 of 2 stacks; {WROTE_NOTHING}")
+        );
+        let moved = Report {
+            stacks: 2,
+            moved: 1,
+            ..Report::default()
+        };
+        assert_eq!(
+            stopped_words(0, &moved),
+            format!("{STOPPED_WORDS} 0 of 2 stacks; what was written stays written")
+        );
+        assert!(!wrote_nothing(0, &moved));
+        assert!(wrote_nothing(0, &untouched));
+        assert!(!wrote_nothing(1, &untouched));
+    }
 
     /// Wave 7b (the maintenance track): a preflight that refuses takes away
     /// every directory it made for the probe, down to the first one that was

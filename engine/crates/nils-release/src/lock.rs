@@ -463,8 +463,13 @@ fn settled(root: &Path) -> Option<Lock> {
 fn rewrite(root: &Path, lock: &Lock) -> std::io::Result<()> {
     let text = serde_json::to_string_pretty(lock).map_err(std::io::Error::other)?;
     let tmp = root.join(format!("{FILE}.{}.tmp", std::process::id()));
-    std::fs::write(&tmp, text)?;
-    std::fs::rename(&tmp, path(root))
+    let written = std::fs::write(&tmp, text).and_then(|()| std::fs::rename(&tmp, path(root)));
+    if written.is_err() {
+        // a temporary that could not be written whole or moved into place
+        // is not left beside the lock
+        std::fs::remove_file(&tmp).ok();
+    }
+    written
 }
 
 /// How a release lost its folder's lock between two beats: the file names

@@ -1051,6 +1051,35 @@ fn an_abort_mid_rewrite_leaves_the_old_files_or_the_new_never_neither() {
     assert!(!out.path().join(".nils-rewrite").exists());
 }
 
+/// A release killed mid-rewrite leaves its staging under the root. The next
+/// run, once the folder's lock is its own, removes the whole of it before a
+/// stack of its own is staged there (Wave 7b, the maintenance track).
+#[test]
+fn the_staging_an_earlier_kill_left_is_removed_once_the_lock_is_held() {
+    let source = tree(2);
+    let home_dir = TempDir::new("one-writer-home");
+    let out = TempDir::new("one-writer-out");
+    let (_home, mut reg) = registry(&home_dir, &source);
+    let scheme = SessionScheme::default();
+    let first = run::run(&mut reg, &settings(out.path(), &Policy::default(), &scheme)).unwrap();
+    assert_eq!(first.added, 2, "{first:?}");
+    let tree_files = files_under(out.path());
+    assert_eq!(tree_files.len(), 2);
+
+    // what a kill mid-rewrite leaves: a stack's staging with a file in it
+    let left = out.path().join(".nils-rewrite").join("7");
+    std::fs::create_dir_all(&left).unwrap();
+    std::fs::write(left.join("half.dcm"), b"half a file").unwrap();
+
+    let again = run::run(&mut reg, &settings(out.path(), &Policy::default(), &scheme)).unwrap();
+    assert_eq!(again.unchanged, 2, "{again:?}");
+    assert!(
+        !out.path().join(".nils-rewrite").exists(),
+        "the staging of the earlier kill is gone whole"
+    );
+    assert_eq!(files_under(out.path()), tree_files);
+}
+
 /// A stop read at the compare leaves nothing counted as restored: the
 /// version wrote nothing, so nothing of it was restored either (Wave 7b,
 /// the maintenance track).

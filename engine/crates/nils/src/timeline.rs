@@ -545,13 +545,15 @@ fn subject(store: &mut Store, id: i64) -> Result<Option<Vec<Event>>, String> {
             "session_cache",
         ));
     }
-    // releases holding one of the subject's stacks
+    // finished versions holding one of the subject's stacks (a release that
+    // stopped or died is not a version, though a stack's row may name it)
     let started = text_of(store, "release", "started_at");
     let sql = format!(
         "SELECT rel.id, rel.name, rel.version, {started}, COUNT(*) FROM {} rs \
          JOIN {} st ON st.id = rs.stack_id JOIN {} se ON se.id = st.series_id \
          JOIN {} rel ON rel.id = rs.release_id \
-         WHERE se.subject_id = {} GROUP BY rel.id, rel.name, rel.version, {started} ORDER BY rel.id",
+         WHERE se.subject_id = {} AND rel.finished_at IS NOT NULL \
+         GROUP BY rel.id, rel.name, rel.version, {started} ORDER BY rel.id",
         store.qualified("release_stack"),
         store.qualified("stack"),
         store.qualified("series"),
@@ -840,11 +842,13 @@ fn stack(store: &mut Store, id: i64) -> Result<Option<Vec<Event>>, String> {
             "pick",
         ));
     }
-    // released
+    // released, in a finished version (a release that stopped or died is
+    // not one, though the stack's row may name it)
     let started = text_of(store, "release", "started_at");
     let sql = format!(
         "SELECT rel.id, rel.name, rel.version, {started}, rs.route FROM {} rs \
-         JOIN {} rel ON rel.id = rs.release_id WHERE rs.stack_id = {} ORDER BY rel.id",
+         JOIN {} rel ON rel.id = rs.release_id \
+         WHERE rs.stack_id = {} AND rel.finished_at IS NOT NULL ORDER BY rel.id",
         store.qualified("release_stack"),
         store.qualified("release"),
         d.param(1, Type::Int)

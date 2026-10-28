@@ -438,6 +438,10 @@ fn handles_reading(
     Ok(out)
 }
 
+/// The finished versions that hold any of the stacks. A stack's current
+/// row may name a release that stopped or died before it finished (Wave
+/// 7b, the maintenance track): that is not a version, and a change's closure
+/// does not list it.
 fn releases_over(store: &mut Store, stacks: &[i64]) -> Result<Vec<ReleaseRef>, Reply> {
     let mut seen = BTreeSet::new();
     let mut out = Vec::new();
@@ -445,7 +449,8 @@ fn releases_over(store: &mut Store, stacks: &[i64]) -> Result<Vec<ReleaseRef>, R
         let (list, params) = holes(store, chunk, 1);
         let sql = format!(
             "SELECT DISTINCT rel.id, rel.name, rel.version FROM {} rs JOIN {} rel ON rel.id = rs.release_id \
-             WHERE rel.withdrawn_at IS NULL AND rs.stack_id IN ({list}) ORDER BY rel.id",
+             WHERE rel.withdrawn_at IS NULL AND rel.finished_at IS NOT NULL \
+             AND rs.stack_id IN ({list}) ORDER BY rel.id",
             store.qualified("release_stack"),
             store.qualified("release")
         );
@@ -478,4 +483,146 @@ fn open_items_on(store: &mut Store, stacks: &[i64]) -> Result<i64, Reply> {
         }
     }
     Ok(items.len() as i64)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use nils_dicom::synth::TempDir;
+    use nils_registry::home::Home;
+    use nils_registry::schema::table;
+    use nils_registry::store::Insert;
+
+    fn registry(dir: &TempDir) -> (Home, Registry) {
+        let home = Home::new(dir.path().join("registry"));
+        home.keys(None).add("k", b"nils-fixture-key").unwrap();
+        let registry = home
+            .init(&nils_registry::InitOptions {
+                backend: nils_registry::Backend::Sqlite,
+                dsn: None,
+                schema: None,
+                scheme: nils_registry::pseudonym::Scheme::Blake2b32,
+                key: "k".to_string(),
+                display_length: nils_registry::pseudonym::DEFAULT_DISPLAY_LENGTH,
+                session_scheme: None,
+            })
+            .unwrap();
+        (home, registry)
+    }
+
+    /// One row of a table, the columns given set and every other required
+    /// column filled with a stand-in of its type.
+    fn stub(store: &mut Store, name: &str, set: &[(&str, Param)]) {
+        let t = table(name);
+        let mut columns: Vec<&str> = Vec::new();
+        let mut values: Vec<Param> = Vec::new();
+        for c in &t.columns {
+            if let Some((_, v)) = set.iter().find(|(n, _)| *n == c.name) {
+                columns.push(c.name);
+                values.push(v.clone());
+            } else if c.not_null && c.ty != Type::Id {
+                columns.push(c.name);
+                values.push(match c.ty {
+                    Type::Int => Param::Int(0),
+                    Type::Double => Param::Double(0.0),
+                    Type::Bool => Param::Bool(false),
+                    Type::Bytes => Param::Bytes(Vec::new()),
+                    Type::Json => Param::from("{}"),
+                    Type::Date => Param::from("2026-01-01"),
+                    Type::Time => Param::from("00:00:00.000000"),
+                    Type::Timestamp => Param::from("2026-01-01T00:00:00Z"),
+                    Type::Id | Type::Text => Param::from("x"),
+                });
+            }
+        }
+        store.insert(&Insert::new(t, &columns), &[values]).unwrap();
+    }
+
+    /// Wave 7b (the maintenance track): a stack whose current row names a
+    /// release that did not finish (stopped, or died) is held by no version:
+    /// the closure of a change over it lists no release, and its timeline,
+    /// and its subject's, say nothing of being released. A stack of the same
+    /// subject that a finished version holds is listed as before.
+    #[test]
+    fn a_release_that_did_not_finish_holds_no_stack() {
+        let dir = TempDir::new("depends-releases");
+        let (_home, mut registry) = registry(&dir);
+        let store = registry.store();
+        let release = |finished: Option<&str>| {
+            vec![
+                ("name", Param::from("test")),
+                ("version", Param::from("2026.01.01.1")),
+                ("dataset_id", Param::Int(1)),
+                ("started_at", Param::from("2026-01-01T10:00:00Z")),
+                ("finished_at", finished.map_or(Param::Null, Param::from)),
+                ("error", Param::from("stopped after 1 of 2 stacks")),
+            ]
+        };
+        // id 1 finished, id 2 stopped: stack 1 was last written by the
+        // stopped one, stack 2 by the finished one
+        stub(store, "release", &release(Some("2026-01-01T10:05:00Z")));
+        stub(store, "release", &release(None));
+        stub(store, "subject", &[("id", Param::Int(1))]);
+        stub(
+            store,
+            "series",
+            &[("id", Param::Int(1)), ("subject_id", Param::Int(1))],
+        );
+        for stack in [1, 2] {
+            stub(
+                store,
+                "stack",
+                &[
+                    ("id", Param::Int(stack)),
+                    ("series_id", Param::Int(1)),
+                    ("stack_index", Param::Int(stack)),
+                    ("stack_key", Param::Text(format!("k{stack}"))),
+                ],
+            );
+        }
+        stub(
+            store,
+            "release_stack",
+            &[
+                ("dataset_id", Param::Int(1)),
+                ("stack_id", Param::Int(1)),
+                ("release_id", Param::Int(2)),
+            ],
+        );
+        stub(
+            store,
+            "release_stack",
+            &[
+                ("dataset_id", Param::Int(1)),
+                ("stack_id", Param::Int(2)),
+                ("release_id", Param::Int(1)),
+            ],
+        );
+
+        let over = releases_over(store, &[1]).unwrap_or_else(|_| panic!("a store failure"));
+        assert!(over.is_empty(), "{over:?}");
+        let over = releases_over(store, &[1, 2]).unwrap_or_else(|_| panic!("a store failure"));
+        assert_eq!(over.len(), 1, "{over:?}");
+        assert_eq!(over[0].release, 1);
+
+        let released = |registry: &mut Registry, kind: &str, id: i64| -> Vec<String> {
+            match crate::timeline::of(registry, kind, id).unwrap() {
+                crate::timeline::Outcome::Events(events) => events
+                    .into_iter()
+                    .filter(|e| e.kind == "released")
+                    .map(|e| e.summary)
+                    .collect(),
+                _ => panic!("the timeline of {kind} {id} has no events"),
+            }
+        };
+        assert!(released(&mut registry, "stack", 1).is_empty());
+        assert_eq!(
+            released(&mut registry, "stack", 2),
+            vec!["released in test 2026.01.01.1 as x".to_string()]
+        );
+        assert_eq!(
+            released(&mut registry, "subject", 1),
+            vec!["1 stacks released in test 2026.01.01.1".to_string()]
+        );
+    }
 }

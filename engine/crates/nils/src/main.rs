@@ -2769,7 +2769,7 @@ fn classify(home: &Home, args: ClassifyArgs) -> Result<(), Exit> {
         settings.review_below = Some(r);
     }
 
-    let cancel = stop_on_signal()?;
+    let cancel = stop_on_signal(Stopping::Batch)?;
     let mut registry = open(home)?;
     // record 56 §6.5: a scoped re-sort judges the stacks its scope holds
     if !args.scope.is_empty() {
@@ -3870,7 +3870,7 @@ fn place_command(home: &Home, command: PlaceCommand) -> Result<(), Exit> {
             if !json {
                 print!("{}", originals::as_text(&dataset, &surveyed));
             }
-            let cancel = stop_on_signal()?;
+            let cancel = stop_on_signal(Stopping::Batch)?;
             let done = originals::run(
                 &mut registry,
                 &dataset,
@@ -5297,7 +5297,7 @@ fn fingerprint(home: &Home, args: FingerprintArgs) -> Result<(), Exit> {
         }
         settings.window = n;
     }
-    let cancel = stop_on_signal()?;
+    let cancel = stop_on_signal(Stopping::Batch)?;
     let mut registry = open(home)?;
     let report = nils_classify::run(&mut registry, &settings, &cancel).map_err(|e| match e {
         nils_classify::Error::Busy { .. } => Exit {
@@ -5486,7 +5486,7 @@ fn digest(home: &Home, args: DigestArgs) -> Result<(), Exit> {
         print!("{}", settings.describe());
         return Ok(());
     }
-    let cancel = stop_on_signal()?;
+    let cancel = stop_on_signal(Stopping::Batch)?;
     let result = if settings.dry_run {
         nils_digest::digest_with(&settings, None, &cancel)
     } else {
@@ -5593,7 +5593,7 @@ fn pseudonymize(home: &Home, args: PseudonymizeArgs) -> Result<(), Exit> {
         Err(e) if asked => return Err(e),
         Err(_) => {}
     }
-    let cancel = stop_on_signal()?;
+    let cancel = stop_on_signal(Stopping::Batch)?;
     match nils_pseudonymize::pseudonymize_with(&settings, &mut registry, &cancel) {
         Ok(report) => {
             // Wave 7a (2026-10-10): the run counts its dataset's trees again
@@ -5713,9 +5713,45 @@ fn bring_in(home: &Home, args: BringInArgs) -> Result<(), Exit> {
     Ok(())
 }
 
+/// What the signal handler says it does, in the verb's own words: a batch
+/// verb writes what it has read and abandons the batch in flight on a
+/// second signal; a release finishes the stack in hand and, on a second
+/// signal, ends the converter and gives the stack up (Wave 7b, the
+/// maintenance track).
+#[derive(Clone, Copy)]
+enum Stopping {
+    Batch,
+    Release,
+}
+
+impl Stopping {
+    fn first(self) -> &'static str {
+        match self {
+            Stopping::Batch => {
+                "nils: stopping: what is read is written, then the job ends \
+                 (a second signal abandons the batch in flight)"
+            }
+            Stopping::Release => {
+                "nils: stopping: the stack in hand is finished, then the release ends \
+                 (a second signal ends the converter and gives the stack up)"
+            }
+        }
+    }
+
+    fn second(self) -> &'static str {
+        match self {
+            Stopping::Batch => "nils: aborting: the batch in flight is abandoned",
+            Stopping::Release => {
+                "nils: aborting: the converter is ended and the stack in hand is given up"
+            }
+        }
+    }
+}
+
 /// The token a run is asked to stop through (§10): one signal asks for a
-/// stop, a second for an abort. SIGINT and SIGTERM both count.
-fn stop_on_signal() -> Result<Cancel, Exit> {
+/// stop, a second for an abort. SIGINT and SIGTERM both count. `saying`
+/// is what each signal is answered with on stderr.
+fn stop_on_signal(saying: Stopping) -> Result<Cancel, Exit> {
     let cancel = Cancel::new();
     let token = cancel.clone();
     let mut asked = 0u8;
@@ -5723,11 +5759,8 @@ fn stop_on_signal() -> Result<Cancel, Exit> {
         token.request();
         asked = asked.saturating_add(1);
         match asked {
-            1 => eprintln!(
-                "nils: stopping: what is read is written, then the job ends \
-                 (a second signal abandons the batch in flight)"
-            ),
-            2 => eprintln!("nils: aborting: the batch in flight is abandoned"),
+            1 => eprintln!("{}", saying.first()),
+            2 => eprintln!("{}", saying.second()),
             _ => {}
         }
     })
@@ -6121,7 +6154,7 @@ fn preview_command(home: &Home, command: PreviewCommand) -> Result<(), Exit> {
         },
     )
     .map_err(|e| fail(e.to_string()))?;
-    let cancel = stop_on_signal()?;
+    let cancel = stop_on_signal(Stopping::Batch)?;
     let total = stacks.len();
     let mut go_on = |store: &mut nils_registry::Store, so_far: &crate::preview::Many| {
         let done = so_far.built.len() + so_far.current.len() + so_far.failed.len();
@@ -10478,7 +10511,7 @@ fn jobs_command(home: &Home, command: JobsCommand) -> Result<(), Exit> {
                 },
                 other => fail(other.to_string()),
             })?;
-            let cancel = stop_on_signal()?;
+            let cancel = stop_on_signal(Stopping::Batch)?;
             crate::worker::run(
                 home,
                 store,
@@ -12089,7 +12122,7 @@ fn release(home: &Home, args: ReleaseArgs) -> Result<(), Exit> {
     // release as a cancel on its job does, at the top of the next stack,
     // with the stack in hand whole; a second signal aborts, and the stack
     // in hand is given up too.
-    let cancel = stop_on_signal()?;
+    let cancel = stop_on_signal(Stopping::Release)?;
     let stop = || {
         if cancel.abort() {
             run::Asked::Abort
