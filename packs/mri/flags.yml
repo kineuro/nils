@@ -359,6 +359,13 @@ flags:
     any:
       - {field: mr_acquisition_type, eq: '3D'}
       - all: [{field: mr_acquisition_type, present: false}, image_type.is_3d_view]
+  # A coil named for the spine and for neither the head nor the neck: the
+  # three-clause test the two spine-coil body-part rules share.
+  spine_coil_alone:
+    all:
+      - {text: receive_coil_name, substring: spine}
+      - {not: {text: receive_coil_name, substring: head}}
+      - {not: {text: receive_coil_name, substring: neck}}
   is_2d:
     any:
       - {field: mr_acquisition_type, eq: '2D'}

@@ -677,7 +677,7 @@ cases:
     axes:
       body_part: brain
 
-  - name: a sagittal spine series on a spine coil keeps its spine in an exam registered as a brain, narrower and thicker than a brain volume
+  - name: a sagittal spine series on a spine coil keeps its spine in an exam registered as a brain, narrower and thicker than a brain volume, the slice count and thickness keep it spine
     stack:
       image_type: 'ORIGINAL\PRIMARY\M\ND\NORM'
       scanning_sequence: 'SE'
@@ -690,6 +690,22 @@ cases:
       fov_y: 230
       n_slices: 40
       slice_thickness: 2.0
+    axes:
+      body_part: spine
+
+  - name: a tall sagittal 3D slab on a spine coil with a brain stated keeps its spine, the short side is under 150 mm
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\ND\NORM'
+      scanning_sequence: 'SE'
+      mr_acquisition_type: '3D'
+      text_body_part: 'BRAIN,HEAD'
+      text_sequence_name: '*spc3d1_16'
+      text_series_description: 'Sag T2 3D SPACE'
+      receive_coil_name: 'Spine_32_RS'
+      fov_x: 120
+      fov_y: 300
+      n_slices: 120
+      slice_thickness: 1.0
     axes:
       body_part: spine
 
