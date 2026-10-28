@@ -72,6 +72,36 @@
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::Duration;
+
+/// Called every so often while the converter runs, so a release can beat
+/// its job's heart through a long conversion (Wave 7b, the maintenance
+/// track); answers whether the release is asked to abort, in which case the
+/// converter is ended and the conversion comes back as one that could not
+/// run.
+pub type Tick<'a> = dyn FnMut() -> bool + 'a;
+
+/// Why a conversion gave no files.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Fail {
+    /// The converter did not run to an end of its own: it could not be
+    /// started, or a signal ended it (an abort, a kill from outside). Nothing
+    /// is known of the stack, so nothing is recorded of it: the next run
+    /// converts it again.
+    CouldNotRun(String),
+    /// The converter ran and refused the stack, or gave what was not asked
+    /// for; the words say why. The same stack refuses again, so the release
+    /// records the fallback.
+    Refused(String),
+}
+
+impl std::fmt::Display for Fail {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Fail::CouldNotRun(why) | Fail::Refused(why) => f.write_str(why),
+        }
+    }
+}
 
 /// What a release found when it looked for the converter.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -141,13 +171,25 @@ pub fn convert(
     stem: &str,
     compress: bool,
 ) -> Result<Made, String> {
-    convert_ticking(converter, files, work, into, stem, compress, &mut || {})
+    convert_ticking(
+        converter,
+        files,
+        work,
+        into,
+        stem,
+        compress,
+        Duration::from_secs(5),
+        &mut || false,
+    )
+    .map_err(|e| e.to_string())
 }
 
-/// [`convert`], calling `tick` every few seconds while the converter runs,
-/// so a release can beat its job's heart through a long conversion (Wave
-/// 7b, the maintenance track): a row that falls silent for a minute is
-/// taken for stale by another node's claim.
+/// [`convert`], calling `tick` every `every` while the converter runs, so a
+/// release can beat its job's heart through a long conversion (Wave 7b, the
+/// maintenance track): a row that falls silent for a minute is taken for
+/// stale by another node's claim. The interval is the heart's, not this
+/// module's.
+#[allow(clippy::too_many_arguments)]
 pub fn convert_ticking(
     converter: &Converter,
     files: &[PathBuf],
@@ -155,12 +197,14 @@ pub fn convert_ticking(
     into: &Path,
     stem: &str,
     compress: bool,
-    tick: &mut dyn FnMut(),
-) -> Result<Made, String> {
+    every: Duration,
+    tick: &mut Tick<'_>,
+) -> Result<Made, Fail> {
     if files.is_empty() {
-        return Err("no files to convert".to_string());
+        return Err(Fail::Refused("no files to convert".to_string()));
     }
-    std::fs::create_dir_all(into).map_err(|e| format!("no directory to write into ({e})"))?;
+    std::fs::create_dir_all(into)
+        .map_err(|e| Fail::Refused(format!("no directory to write into ({e})")))?;
 
     // The list goes in a file because a stack is not a directory: a multi-echo
     // series shares one, and converting the directory would make one output for
@@ -175,13 +219,15 @@ pub fn convert_ticking(
         text.push_str(&f.display().to_string());
         text.push('\n');
     }
-    std::fs::write(&list, text).map_err(|e| format!("could not write the file list ({e})"))?;
-    let made = converted(converter, &list, work, into, stem, compress, tick);
+    std::fs::write(&list, text)
+        .map_err(|e| Fail::Refused(format!("could not write the file list ({e})")))?;
+    let made = converted(converter, &list, work, into, stem, compress, every, tick);
     std::fs::remove_file(&list).ok();
     made
 }
 
 /// One run of the converter over `list`, and what appeared.
+#[allow(clippy::too_many_arguments)]
 fn converted(
     converter: &Converter,
     list: &Path,
@@ -189,8 +235,9 @@ fn converted(
     into: &Path,
     stem: &str,
     compress: bool,
-    tick: &mut dyn FnMut(),
-) -> Result<Made, String> {
+    every: Duration,
+    tick: &mut Tick<'_>,
+) -> Result<Made, Fail> {
     let before = listing(into);
     let run = run_converter(
         converter,
@@ -201,9 +248,10 @@ fn converted(
             compress,
             merge: false,
         },
+        every,
         tick,
     )
-    .map_err(|e| format!("dcm2niix could not be run ({e})"))?;
+    .map_err(|e| Fail::CouldNotRun(format!("dcm2niix could not be run ({e})")))?;
     if !run.status.success() {
         // What it wrote before it failed is no output either (Wave 7a §8.2:
         // a failure that converted 26 of 32 files left letter-suffixed images
@@ -211,22 +259,30 @@ fn converted(
         for f in listing(into).difference(&before) {
             std::fs::remove_file(into.join(f)).ok();
         }
+        // A run a signal ended did not run: an abort, or a kill from
+        // outside, says nothing about the stack (Wave 7b, the maintenance
+        // track), where a failure of its own is the converter's word on it.
+        if let Some(signal) = ended_by(&run.status) {
+            return Err(Fail::CouldNotRun(format!(
+                "dcm2niix was ended by signal {signal}"
+            )));
+        }
         let text = String::from_utf8_lossy(&run.stderr);
         let text = match text.trim().is_empty() {
             true => String::from_utf8_lossy(&run.stdout).trim().to_string(),
             false => text.trim().to_string(),
         };
-        return Err(format!(
+        return Err(Fail::Refused(format!(
             "dcm2niix failed ({})",
             reason(text.lines().last().unwrap_or("no output"))
-        ));
+        )));
     }
 
     // What actually appeared, which is not what the exit code claims.
     let mut made: Vec<String> = listing(into).difference(&before).cloned().collect();
     made.sort();
     if made.is_empty() {
-        return Err("dcm2niix wrote nothing".to_string());
+        return Err(Fail::Refused("dcm2niix wrote nothing".to_string()));
     }
     let unexpected: Vec<&String> = made
         .iter()
@@ -249,15 +305,17 @@ fn converted(
                 // from the first run's stdout only (see the module).
                 let mut tried = None;
                 if one_echo_split(&String::from_utf8_lossy(&run.stdout)) {
-                    match merged(converter, list, into, stem, compress, &before, tick) {
+                    match merged(converter, list, into, stem, compress, &before, every, tick) {
                         Ok(made) => return Ok(made),
                         Err(Merge::CouldNotRun(e)) => {
-                            return Err(format!("dcm2niix could not be run ({e})"));
+                            return Err(Fail::CouldNotRun(format!(
+                                "dcm2niix could not be run ({e})"
+                            )));
                         }
                         Err(Merge::Refused(why)) => tried = Some(why),
                     }
                 }
-                let postfixes = postfixes_without_terse(converter, list, work, stem, tick);
+                let postfixes = postfixes_without_terse(converter, list, work, stem, every, tick);
                 let wanted = match postfixes.is_empty() {
                     true => String::new(),
                     false => format!(" ({})", postfixes.join(", ")),
@@ -278,9 +336,23 @@ fn converted(
                  equally spaced and a name nobody chose is not a BIDS name"
                 .to_string(),
         };
-        return Err(why);
+        return Err(Fail::Refused(why));
     }
     Ok(Made { files: made })
+}
+
+/// The signal that ended a child, if one did.
+fn ended_by(status: &std::process::ExitStatus) -> Option<i32> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt;
+        status.signal()
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = status;
+        None
+    }
 }
 
 /// How the converter is run: for the tree, or once more to learn a name.
@@ -300,7 +372,8 @@ fn run_converter(
     into: &Path,
     stem: &str,
     flags: Flags,
-    tick: &mut dyn FnMut(),
+    every: Duration,
+    tick: &mut Tick<'_>,
 ) -> std::io::Result<std::process::Output> {
     let mut run = Command::new(&converter.path);
     run.args(["-s", "y"]);
@@ -326,26 +399,34 @@ fn run_converter(
         }
     }
     run.args(["-f", stem]).arg("-o").arg(into).arg(list);
-    output_ticking(&mut run, tick)
+    output_ticking(&mut run, every, tick)
 }
 
-/// How often `tick` is called while a child runs.
-const TICK_EVERY: std::time::Duration = std::time::Duration::from_secs(5);
-
-/// `Command::output`, calling `tick` every [`TICK_EVERY`] while the child
-/// runs. Its stdout and stderr are drained on threads of their own, as
-/// `output` drains them, so a child that writes more than a pipe holds is
-/// never stuck on a full pipe while this waits on it.
+/// `Command::output`, calling `tick` every `every` while the child runs,
+/// and ending the child when a tick asks for an abort. Its stdout and
+/// stderr are drained on threads of their own, as `output` drains them, so
+/// a child that writes more than a pipe holds is never stuck on a full pipe
+/// while this waits on it.
+///
+/// The child runs in a process group of its own (as the pipeline runtime
+/// starts its tools), so a Ctrl-C at the keyboard reaches the release and
+/// not the converter: the release finishes the stack in hand, and the
+/// converter is ended only when a second signal asks for an abort.
 fn output_ticking(
     run: &mut Command,
-    tick: &mut dyn FnMut(),
+    every: Duration,
+    tick: &mut Tick<'_>,
 ) -> std::io::Result<std::process::Output> {
     use std::process::Stdio;
-    let mut child = run
-        .stdin(Stdio::null())
+    run.stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()?;
+        .stderr(Stdio::piped());
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        run.process_group(0);
+    }
+    let mut child = spawn(run)?;
     let stdout = drain(child.stdout.take());
     let stderr = drain(child.stderr.take());
     let mut ticked = std::time::Instant::now();
@@ -361,17 +442,41 @@ fn output_ticking(
                 return Err(e);
             }
         }
-        if ticked.elapsed() >= TICK_EVERY {
+        if ticked.elapsed() >= every {
             ticked = std::time::Instant::now();
-            tick();
+            if tick() {
+                // an abort: the child, this process's own, is ended and
+                // reaped, and its status says a signal ended it
+                child.kill().ok();
+                break child.wait()?;
+            }
         }
-        std::thread::sleep(std::time::Duration::from_millis(50));
+        std::thread::sleep(Duration::from_millis(50));
     };
     Ok(std::process::Output {
         status,
         stdout: stdout.join().unwrap_or_default(),
         stderr: stderr.join().unwrap_or_default(),
     })
+}
+
+/// `Command::spawn`, tried again a few times on `ETXTBSY`: a file another
+/// thread of this process has open for writing while a child of this
+/// process is between its fork and its exec cannot be run that instant (a
+/// test's stand-in converter, written and run beside other tests); the
+/// window is short and the retry closes it.
+fn spawn(run: &mut Command) -> std::io::Result<std::process::Child> {
+    const TEXT_FILE_BUSY: i32 = 26;
+    let mut tries = 0;
+    loop {
+        match run.spawn() {
+            Err(e) if e.raw_os_error() == Some(TEXT_FILE_BUSY) && tries < 20 => {
+                tries += 1;
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            other => return other,
+        }
+    }
 }
 
 /// Read a child's pipe to its end on a thread of its own, as
@@ -434,14 +539,15 @@ fn postfixes_without_terse(
     list: &Path,
     work: &Path,
     stem: &str,
-    tick: &mut dyn FnMut(),
+    every: Duration,
+    tick: &mut Tick<'_>,
 ) -> Vec<String> {
     let scratch = work.join("names");
     if std::fs::create_dir_all(&scratch).is_err() {
         return Vec::new();
     }
     let mut found: Vec<String> =
-        match run_converter(converter, list, &scratch, stem, Flags::Names, tick) {
+        match run_converter(converter, list, &scratch, stem, Flags::Names, every, tick) {
             Ok(run) => written_names(&String::from_utf8_lossy(&run.stdout))
                 .iter()
                 .filter_map(|n| n.strip_prefix(stem))
@@ -504,6 +610,7 @@ enum Merge {
 /// `-m y`, after the first run's files are gone. What it made where that is
 /// exactly the files the name asked for; otherwise why not, and then nothing
 /// of it is left in the tree.
+#[allow(clippy::too_many_arguments)]
 fn merged(
     converter: &Converter,
     list: &Path,
@@ -511,7 +618,8 @@ fn merged(
     stem: &str,
     compress: bool,
     before: &BTreeSet<String>,
-    tick: &mut dyn FnMut(),
+    every: Duration,
+    tick: &mut Tick<'_>,
 ) -> Result<Made, Merge> {
     let run = run_converter(
         converter,
@@ -522,6 +630,7 @@ fn merged(
             compress,
             merge: true,
         },
+        every,
         tick,
     )
     .map_err(|e| Merge::CouldNotRun(e.to_string()))?;
@@ -1122,6 +1231,90 @@ mod tests {
         assert_eq!(
             e.lines().nth(1).unwrap(),
             "a merge of the slices was tried: dcm2niix failed (Error: merge failed)"
+        );
+        assert!(names_in(&into).is_empty(), "{:?}", names_in(&into));
+    }
+
+    /// Wave 7b (the maintenance track): the tick comes at the interval the
+    /// heart gave, not a fixed one, while the child runs.
+    #[cfg(unix)]
+    #[test]
+    fn the_child_is_ticked_at_the_interval_it_was_given() {
+        let mut ticks = 0;
+        let out = output_ticking(
+            Command::new("sleep").arg("1"),
+            Duration::from_millis(100),
+            &mut || {
+                ticks += 1;
+                false
+            },
+        )
+        .unwrap();
+        assert!(out.status.success());
+        assert!(
+            (5..=11).contains(&ticks),
+            "{ticks} ticks in a second at 100 ms"
+        );
+    }
+
+    /// Wave 7b (the maintenance track): a tick that asks for an abort ends
+    /// the child, this process's own, and the status says a signal did.
+    #[cfg(unix)]
+    #[test]
+    fn an_abort_at_a_tick_ends_the_child() {
+        let started = std::time::Instant::now();
+        let out = output_ticking(
+            Command::new("sleep").arg("30"),
+            Duration::from_millis(50),
+            &mut || true,
+        )
+        .unwrap();
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "ended at the tick"
+        );
+        assert!(!out.status.success());
+        assert_eq!(ended_by(&out.status), Some(9), "{:?}", out.status);
+    }
+
+    /// Wave 7b (the maintenance track): a converter a signal ended did not
+    /// run: the conversion comes back as one that could not run, never as
+    /// the converter's refusal of the stack, and what it wrote is gone.
+    #[cfg(unix)]
+    #[test]
+    fn a_converter_a_signal_ended_could_not_run() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = nils_dicom::synth::TempDir::new("convert-signal");
+        let fake = dir.path().join("dcm2niix");
+        // writes half an image and is ended by a signal, as a kill from
+        // outside ends it (its own process, by its own pid)
+        std::fs::write(
+            &fake,
+            "#!/bin/sh\nwhile [ \"$1\" != -o ]; do shift; done\ntouch \"$2/s_T1w.nii.gz\"\nkill -KILL $$\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let c = Converter {
+            path: fake,
+            version: "stand-in".into(),
+        };
+        let into = dir.path().join("out");
+        let work = dir.path().join("work");
+        std::fs::create_dir_all(&work).unwrap();
+        let e = convert_ticking(
+            &c,
+            &[dir.path().join("1.dcm")],
+            &work,
+            &into,
+            "s_T1w",
+            true,
+            Duration::from_millis(50),
+            &mut || false,
+        )
+        .unwrap_err();
+        assert_eq!(
+            e,
+            Fail::CouldNotRun("dcm2niix was ended by signal 9".to_string())
         );
         assert!(names_in(&into).is_empty(), "{:?}", names_in(&into));
     }

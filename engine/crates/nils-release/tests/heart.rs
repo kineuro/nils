@@ -60,6 +60,54 @@ fn tree(instances: &[u32]) -> TempDir {
     dir
 }
 
+/// One session of one person, two T1w stacks of two slices each, as the
+/// BIDS tests make one: described, fingerprinted and classified, so the
+/// pack gives each a suffix and the converter is asked.
+fn bids_tree() -> TempDir {
+    let dir = TempDir::new("heart-bids");
+    for n in 1..=2u32 {
+        for slice in 1..=2u32 {
+            let sop = format!("1.2.3.{n}.{slice}");
+            let mut e = synth::minimal_mr("1.2.3", &format!("1.2.3.{n}.0"), &sop);
+            e.extend([
+                synth::text(tags::PATIENT_ID, VR::LO, "P1"),
+                synth::text(tags::STUDY_DATE, VR::DA, "20220115"),
+                synth::text(tags::SERIES_TIME, VR::TM, &format!("03141{n}")),
+                synth::text(tags::SERIES_NUMBER, VR::IS, &n.to_string()),
+                synth::text(tags::SERIES_DESCRIPTION, VR::LO, "t1_mprage_sag"),
+                synth::text(tags::PROTOCOL_NAME, VR::LO, "MPRAGE"),
+                synth::text(tags::MR_ACQUISITION_TYPE, VR::CS, "3D"),
+                synth::text(tags::IMAGE_TYPE, VR::CS, "ORIGINAL\\PRIMARY\\M\\ND"),
+                synth::text(tags::MANUFACTURER, VR::LO, "SYNTHETIC"),
+                synth::text(tags::BURNED_IN_ANNOTATION, VR::CS, "NO"),
+                synth::us(tags::ROWS, 16),
+                synth::us(tags::COLUMNS, 16),
+                synth::us(tags::BITS_ALLOCATED, 16),
+                synth::us(tags::BITS_STORED, 12),
+                synth::us(tags::HIGH_BIT, 11),
+                synth::us(tags::PIXEL_REPRESENTATION, 0),
+                synth::us(tags::SAMPLES_PER_PIXEL, 1),
+                synth::text(tags::PHOTOMETRIC_INTERPRETATION, VR::CS, "MONOCHROME2"),
+                synth::text(tags::PIXEL_SPACING, VR::DS, "1.0\\1.0"),
+                synth::text(tags::SLICE_THICKNESS, VR::DS, "1.0"),
+                synth::text(tags::IMAGE_ORIENTATION_PATIENT, VR::DS, "1\\0\\0\\0\\1\\0"),
+                synth::text(
+                    tags::IMAGE_POSITION_PATIENT,
+                    VR::DS,
+                    &format!("0\\0\\{slice}"),
+                ),
+                synth::text(tags::INSTANCE_NUMBER, VR::IS, &slice.to_string()),
+                synth::bytes(tags::PIXEL_DATA, VR::OW, vec![0x40u8; 16 * 16 * 2]),
+            ]);
+            dir.file(
+                &format!("{n}/{slice}"),
+                &synth::part10(&MetaFields::mr(&sop), &e, true),
+            );
+        }
+    }
+    dir
+}
+
 fn registry(home_dir: &TempDir, source: &TempDir) -> (Home, Registry) {
     let home = Home::new(home_dir.path());
     home.keys(None).add("k", KEY).unwrap();
@@ -83,6 +131,27 @@ fn registry(home_dir: &TempDir, source: &TempDir) -> (Home, Registry) {
 fn pack() -> &'static nils_pack::pack::Pack {
     static PACK: std::sync::OnceLock<nils_pack::pack::Pack> = std::sync::OnceLock::new();
     PACK.get_or_init(|| nils_pack::load(&common::shipped_mri(), None).expect("the MRI pack loads"))
+}
+
+/// A stand-in converter that answers its version, sleeps two seconds and
+/// writes the image and sidecar it was asked for: a conversion long enough
+/// for the heart to tick inside it under a one-second window.
+fn slow_converter(dir: &Path) -> nils_release::bids::convert::Converter {
+    use std::os::unix::fs::PermissionsExt as _;
+    let fake = dir.join("dcm2niix");
+    std::fs::write(
+        &fake,
+        "#!/bin/sh\n\
+         if [ \"$1\" = --version ]; then echo \"Chris Rorden's dcm2niiX version v1.0.20260724 (stand-in)\"; exit 0; fi\n\
+         stem=; dest=\n\
+         while [ $# -gt 1 ]; do case \"$1\" in -f) stem=$2; shift;; -o) dest=$2; shift;; esac; shift; done\n\
+         sleep 2\n\
+         : > \"$dest/$stem.nii.gz\"; echo '{\"EchoTime\": 0.1, \"RepetitionTime\": 3}' > \"$dest/$stem.json\"\n\
+         echo \"Convert 1 DICOM as $dest/$stem (16x16x1x1)\"\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+    nils_release::bids::convert::Converter::find(&fake).unwrap()
 }
 
 fn settings<'a>(out: &'a Path, policy: &'a Policy, scheme: &'a SessionScheme) -> run::Settings<'a> {
@@ -170,6 +239,46 @@ fn the_heart_beats_inside_one_long_stack() {
     assert!(
         lock_beats[1] > lock_beats[0],
         "the lock's beat moved: {lock_beats:?}"
+    );
+    assert_eq!(nils_release::lock::read(out.path()), None);
+
+    // and a conversion ticks at the heart's interval too: a BIDS release of
+    // two stacks through a converter that takes two seconds each beats
+    // several times inside the second one
+    let source = bids_tree();
+    let home_dir = TempDir::new("heart-home-bids");
+    let out = TempDir::new("heart-out-bids");
+    let (_home, mut reg) = registry(&home_dir, &source);
+    nils_classify::job::fingerprint(
+        &mut reg,
+        &nils_classify::Settings::default(),
+        &nils_digest::Cancel::new(),
+    )
+    .unwrap();
+    nils_classify::classify::classify(
+        &mut reg,
+        pack(),
+        &nils_classify::Settings::default(),
+        &nils_digest::Cancel::new(),
+    )
+    .unwrap();
+    let converter = slow_converter(home_dir.path());
+    let mut settings = settings(out.path(), &policy, &scheme);
+    settings.layout = run::Layout::Bids;
+    settings.converter = Some(&converter);
+    let mut beats: Vec<(i64, i64)> = Vec::new();
+    let report = run::run_watched(&mut reg, &settings, &mut |store, job_id, done| {
+        let j = job::show(store, job_id).unwrap().unwrap();
+        beats.push((done, j.progress.unwrap()["beats"].as_i64().unwrap()));
+    })
+    .unwrap();
+    assert_eq!(report.stopped_after, None);
+    assert_eq!(report.stacks, 2, "{report:?}");
+    assert_eq!(beats.len(), 2, "{beats:?} {report:?}");
+    let inside = beats[1].1 - beats[0].1;
+    assert!(
+        inside >= 5,
+        "the heart beat {inside} time(s) through a two-second conversion: {beats:?} {report:?}"
     );
     assert_eq!(nils_release::lock::read(out.path()), None);
 }

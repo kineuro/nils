@@ -48,6 +48,13 @@ pub fn fresh_secs() -> u64 {
         .unwrap_or(FRESH_SECS)
 }
 
+/// Whether a heartbeat stamp is within the freshness a claim allows
+/// ([`fresh_secs`]): the one rule for a claim, [`is_live`] and the release
+/// lock alike. A stamp that does not read is not fresh.
+pub fn is_fresh(stamp: &str) -> bool {
+    secs_of(stamp).is_some_and(|s| now_secs().saturating_sub(s) < fresh_secs())
+}
+
 /// What a claim says about the job it makes.
 #[derive(Debug, Clone)]
 pub struct Claim<'a> {
@@ -246,8 +253,7 @@ pub fn is_live(j: &Job) -> bool {
     if gone {
         return false;
     }
-    let fresh = secs_of(&last).is_some_and(|s| now_secs().saturating_sub(s) < fresh_secs());
-    fresh || runs_here(j.host.as_deref(), j.pid, &last)
+    is_fresh(&last) || runs_here(j.host.as_deref(), j.pid, &last)
 }
 
 fn stamp(store: &Store, column: &str) -> String {
@@ -367,10 +373,9 @@ fn claim_with(
         // A job of this host whose process is gone left no one to beat its
         // heart: it is over, however fresh the last beat.
         let gone = its_host == host && its_pid.is_some_and(|p| process_alive(p) == Some(false));
-        let fresh = secs_of(&last).is_some_and(|s| now_secs().saturating_sub(s) < fresh_secs());
         // a job whose process runs on this host is not stale, however long
         // since its last beat
-        let live = fresh || runs_here(Some(its_host), its_pid, &last);
+        let live = is_fresh(&last) || runs_here(Some(its_host), its_pid, &last);
         if live && !gone {
             if its_kind == claim.kind {
                 let Some(holds) = holds.as_deref_mut() else {

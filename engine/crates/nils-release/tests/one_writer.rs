@@ -27,36 +27,46 @@ use nils_registry::job::{self, Claim, State};
 use nils_registry::session::Scheme as SessionScheme;
 use nils_registry::{Backend, Registry, Scheme};
 use nils_release::lock::{self, Refusal};
-use nils_release::policy::Policy;
-use nils_release::run::{self, Selection};
+use nils_release::policy::{Policy, Uids};
+use nils_release::run::{self, Asked, Selection};
 use nils_release::tags as categories;
 
 const KEY: &[u8] = b"a release test key of some length";
 
-/// One study of one person with this many series, each a stack of its own.
+/// One study of one person with this many series, each a stack of its own
+/// with one instance.
 fn tree(stacks: u32) -> TempDir {
+    tree_of(&vec![1; stacks as usize])
+}
+
+/// One study of one person, one series per entry with that many instances.
+fn tree_of(instances: &[u32]) -> TempDir {
     let dir = TempDir::new("one-writer");
-    for n in 1..=stacks {
+    for (n, count) in instances.iter().enumerate() {
+        let n = n as u32 + 1;
         let series = format!("A.1.{n}");
-        let sop = format!("A.1.{n}.1");
-        let mut e = synth::minimal_mr("A.1", &series, &sop);
-        e.extend([
-            synth::text(tags::PATIENT_ID, VR::LO, "P1"),
-            synth::text(tags::STUDY_DATE, VR::DA, "20220115"),
-            synth::text(tags::SERIES_NUMBER, VR::IS, &n.to_string()),
-            synth::text(
-                tags::SERIES_DESCRIPTION,
-                VR::LO,
-                &format!("ax t2 series {n}"),
-            ),
-            synth::text(tags::MR_ACQUISITION_TYPE, VR::CS, "2D"),
-            synth::text(tags::IMAGE_TYPE, VR::CS, "ORIGINAL\\PRIMARY\\M\\ND"),
-            synth::text(tags::MANUFACTURER, VR::LO, "SYNTHETIC"),
-        ]);
-        dir.file(
-            &format!("s{n}/1"),
-            &synth::part10(&MetaFields::mr(&sop), &e, true),
-        );
+        for i in 1..=*count {
+            let sop = format!("A.1.{n}.{i}");
+            let mut e = synth::minimal_mr("A.1", &series, &sop);
+            e.extend([
+                synth::text(tags::PATIENT_ID, VR::LO, "P1"),
+                synth::text(tags::STUDY_DATE, VR::DA, "20220115"),
+                synth::text(tags::SERIES_NUMBER, VR::IS, &n.to_string()),
+                synth::text(tags::INSTANCE_NUMBER, VR::IS, &i.to_string()),
+                synth::text(
+                    tags::SERIES_DESCRIPTION,
+                    VR::LO,
+                    &format!("ax t2 series {n}"),
+                ),
+                synth::text(tags::MR_ACQUISITION_TYPE, VR::CS, "2D"),
+                synth::text(tags::IMAGE_TYPE, VR::CS, "ORIGINAL\\PRIMARY\\M\\ND"),
+                synth::text(tags::MANUFACTURER, VR::LO, "SYNTHETIC"),
+            ]);
+            dir.file(
+                &format!("s{n}/{i}"),
+                &synth::part10(&MetaFields::mr(&sop), &e, true),
+            );
+        }
     }
     dir
 }
@@ -129,6 +139,15 @@ fn files_under(root: &Path) -> Vec<std::path::PathBuf> {
     }
     out.sort();
     out
+}
+
+/// Put a lock in the root as another release left it, whatever is there.
+fn plant(root: &Path, lock: &lock::Lock) -> std::io::Result<()> {
+    std::fs::create_dir_all(root)?;
+    std::fs::write(
+        lock::path(root),
+        serde_json::to_string_pretty(lock).unwrap(),
+    )
 }
 
 /// An ISO stamp an hour ago: stale under any freshness a test sets.
@@ -373,7 +392,10 @@ fn a_stop_from_the_keyboard_stops_the_release_at_the_next_stack() {
     let scheme = SessionScheme::default();
 
     let asked = std::sync::atomic::AtomicBool::new(false);
-    let stop = || asked.load(std::sync::atomic::Ordering::SeqCst);
+    let stop = || match asked.load(std::sync::atomic::Ordering::SeqCst) {
+        true => Asked::Stop,
+        false => Asked::Nothing,
+    };
     let report = run::run_with(
         &mut reg,
         &settings(out.path(), &policy, &scheme),
@@ -411,7 +433,7 @@ fn a_stop_in_before_the_compare_stops_there() {
     let policy = Policy::default();
     let scheme = SessionScheme::default();
 
-    let stop = || true;
+    let stop = || Asked::Stop;
     let report = run::run_with(
         &mut reg,
         &settings(out.path(), &policy, &scheme),
@@ -431,6 +453,161 @@ fn a_stop_in_before_the_compare_stops_there() {
     );
     assert_eq!(finished, None);
     assert_eq!(lock::read(out.path()), None);
+}
+
+/// A second signal asks for an abort: the stack in hand is given up as it
+/// is, what it had written stays, nothing is recorded of it, the row is
+/// stopped after the stacks done, the job cancelled and the lock gone; and
+/// the next run writes that stack again, whole, under the same version.
+#[test]
+fn an_abort_gives_up_the_stack_in_hand_and_the_next_run_writes_it_again() {
+    let source = tree_of(&[2, 2, 2]);
+    let home_dir = TempDir::new("one-writer-home");
+    let out = TempDir::new("one-writer-out");
+    let (_home, mut reg) = registry(&home_dir, &source);
+    let policy = Policy::default();
+    let scheme = SessionScheme::default();
+
+    // the abort comes in once three files are in the tree: the first
+    // stack's two, and the first of the second stack's two
+    let root = out.path().to_path_buf();
+    let stop = || match files_under(&root).len() >= 3 {
+        true => Asked::Abort,
+        false => Asked::Nothing,
+    };
+    let report = run::run_with(
+        &mut reg,
+        &settings(out.path(), &policy, &scheme),
+        Some(&stop),
+        &mut |_, _, _| {},
+    )
+    .unwrap();
+    assert_eq!(report.stacks, 3);
+    assert_eq!(report.stopped_after, Some(1), "{report:?}");
+    assert_eq!((report.added, report.written), (1, 2), "{report:?}");
+    // the second stack's one file written before the abort stays, whole
+    let written = files_under(out.path());
+    assert_eq!(written.len(), 3, "{written:?}");
+    for path in &written {
+        assert_eq!(&std::fs::read(path).unwrap()[128..132], b"DICM");
+        assert!(path.extension().is_some_and(|e| e != "part"), "{written:?}");
+    }
+    let j = the_release_job(&mut reg);
+    assert_eq!(j.state, State::Cancelled);
+    assert_eq!(j.error.as_deref(), Some(run::STOPPED));
+    let (error, finished) = row_of(&mut reg, report.release_id);
+    assert_eq!(
+        error.as_deref(),
+        Some("stopped after 1 of 3 stacks; what was written stays written")
+    );
+    assert_eq!(finished, None);
+    assert_eq!(lock::read(out.path()), None);
+
+    // the next run: the stack given up is not in the state, so it is added,
+    // whole, and the version is finished under the same number
+    let again = run::run(&mut reg, &settings(out.path(), &policy, &scheme)).unwrap();
+    assert_eq!(again.version, report.version);
+    assert_eq!(again.stopped_after, None);
+    assert_eq!(
+        (again.unchanged, again.added, again.written),
+        (1, 2, 4),
+        "{again:?}"
+    );
+    assert_eq!(files_under(out.path()).len(), 6);
+    assert_eq!(finished_versions(&mut reg), vec![report.version]);
+}
+
+/// A stack rewritten in its place keeps its old files until the moment it
+/// is written: a stop after the first rewritten stack leaves the tree whole
+/// for the two not yet written, their files the version before's.
+#[test]
+fn a_stop_leaves_the_tree_whole_for_every_stack_not_yet_rewritten() {
+    let source = tree(3);
+    let home_dir = TempDir::new("one-writer-home");
+    let out = TempDir::new("one-writer-out");
+    let (_home, mut reg) = registry(&home_dir, &source);
+    let scheme = SessionScheme::default();
+    let first = run::run(&mut reg, &settings(out.path(), &Policy::default(), &scheme)).unwrap();
+    assert_eq!(first.added, 3);
+    let before: Vec<(std::path::PathBuf, Vec<u8>)> = files_under(out.path())
+        .into_iter()
+        .map(|p| {
+            let bytes = std::fs::read(&p).unwrap();
+            (p, bytes)
+        })
+        .collect();
+    assert_eq!(before.len(), 3);
+
+    // another policy: every stack's content differs, so every stack is
+    // rewritten, in its place
+    let remapped = Policy {
+        uids: Uids::Preserve,
+        ..Policy::default()
+    };
+    let asked = std::sync::atomic::AtomicBool::new(false);
+    let stop = || match asked.load(std::sync::atomic::Ordering::SeqCst) {
+        true => Asked::Stop,
+        false => Asked::Nothing,
+    };
+    let report = run::run_with(
+        &mut reg,
+        &settings(out.path(), &remapped, &scheme),
+        Some(&stop),
+        &mut |_, _, done| {
+            if done == 1 {
+                asked.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+        },
+    )
+    .unwrap();
+    assert_eq!(report.stopped_after, Some(1), "{report:?}");
+    assert_eq!((report.rewritten, report.removed), (1, 0));
+    assert_eq!(report.removed_before_stop, Some(0));
+    // the tree is whole: three files, the two not yet rewritten the
+    // version before's bytes, the rewritten one new bytes
+    let after = files_under(out.path());
+    assert_eq!(after.len(), 3, "{after:?}");
+    let mut same = 0;
+    for (path, bytes) in &before {
+        assert!(path.is_file(), "{} is still there", path.display());
+        if std::fs::read(path).unwrap() == *bytes {
+            same += 1;
+        }
+    }
+    assert_eq!(same, 2, "two stacks keep the version before's files");
+    let (error, _) = row_of(&mut reg, report.release_id);
+    assert_eq!(
+        error.as_deref(),
+        Some("stopped after 1 of 3 stacks; what was written stays written")
+    );
+    // and the run that goes on rewrites the two
+    let again = run::run(&mut reg, &settings(out.path(), &remapped, &scheme)).unwrap();
+    assert_eq!(again.version, report.version);
+    assert_eq!((again.unchanged, again.rewritten), (1, 2), "{again:?}");
+}
+
+/// A release refused before anything is written leaves no folder: the lock
+/// is taken after the preflight, so a refusal in the preflight, as a BIDS
+/// release without a converter, makes no root and no lock.
+#[test]
+fn a_release_refused_in_the_preflight_leaves_no_folder() {
+    let source = tree(1);
+    let home_dir = TempDir::new("one-writer-home");
+    let out = TempDir::new("one-writer-out");
+    let (_home, mut reg) = registry(&home_dir, &source);
+    let policy = Policy::default();
+    let scheme = SessionScheme::default();
+    let root = out.path().join("tree");
+    let mut settings = settings(&root, &policy, &scheme);
+    settings.layout = run::Layout::Bids;
+    settings.converter = None;
+    let refused = run::run(&mut reg, &settings).unwrap_err();
+    assert!(
+        matches!(&refused, run::Error::Refused(words) if words.contains("no converter was found")),
+        "{refused}"
+    );
+    assert!(!root.exists(), "no folder was made");
+    assert_eq!(the_release_job(&mut reg).state, State::Failed);
 }
 
 /// (c) A lock in the root naming a job the registry calls running refuses
@@ -457,7 +634,7 @@ fn a_lock_of_a_running_release_refuses_a_second_writer_and_names_it() {
     )
     .unwrap();
     let registry_id = reg.meta().registry_id.clone();
-    lock::take(
+    plant(
         out.path(),
         &lock::Lock {
             job: other,
@@ -513,7 +690,7 @@ fn a_lock_of_a_finished_release_is_taken_over_and_the_report_says_so() {
     .unwrap();
     job::finish(reg.store(), other, State::Done, None).unwrap();
     // fresh by its stamp; the registry's word that the job is over wins
-    lock::take(
+    plant(
         out.path(),
         &lock::Lock {
             job: other,
@@ -551,7 +728,7 @@ fn a_lock_naming_an_unknown_job_blocks_nothing() {
     let policy = Policy::default();
     let scheme = SessionScheme::default();
     let registry_id = reg.meta().registry_id.clone();
-    lock::take(
+    plant(
         out.path(),
         &lock::Lock {
             job: 4242,
@@ -592,7 +769,7 @@ fn another_registrys_lock_refuses_while_fresh_and_is_taken_over_once_stale() {
         started_at: an_hour_ago(),
         beat_at: Some(nils_registry::time::now_iso()),
     };
-    lock::take(out.path(), &theirs).unwrap();
+    plant(out.path(), &theirs).unwrap();
 
     let refused = run::run(&mut reg, &settings(out.path(), &policy, &scheme)).unwrap_err();
     let words = refused.to_string();
@@ -611,7 +788,7 @@ fn another_registrys_lock_refuses_while_fresh_and_is_taken_over_once_stale() {
     );
 
     // the same lock, its beat an hour old: taken over
-    lock::take(
+    plant(
         out.path(),
         &lock::Lock {
             beat_at: Some(an_hour_ago()),
@@ -629,9 +806,11 @@ fn another_registrys_lock_refuses_while_fresh_and_is_taken_over_once_stale() {
     assert_eq!(lock::read(out.path()), None);
 }
 
-/// A lock file that cannot be read refuses, naming the file, until it has
+/// A lock file that cannot be read, because it does not parse or cannot
+/// be opened at all, refuses, naming the file and the reason, until it has
 /// gone untouched for longer than the freshness window; then it is taken
-/// over and the report says so.
+/// over and the report says so. One that cannot be dated, or is dated in
+/// the future, is taken over as well: nothing refuses for ever.
 #[test]
 fn an_unreadable_lock_refuses_until_it_is_old() {
     let source = tree(1);
@@ -641,14 +820,29 @@ fn an_unreadable_lock_refuses_until_it_is_old() {
     let policy = Policy::default();
     let scheme = SessionScheme::default();
     let file = lock::path(out.path());
-    std::fs::write(&file, "{ not json").unwrap();
 
+    // a directory where the file should be: an error other than not found
+    // is never "no lock"
+    std::fs::create_dir_all(&file).unwrap();
     let refused = run::run(&mut reg, &settings(out.path(), &policy, &scheme)).unwrap_err();
     let words = refused.to_string();
     assert!(matches!(refused, run::Error::Refused(_)), "{words}");
     assert!(
         words.contains("holds a release lock that cannot be read")
             && words.contains(&file.display().to_string())
+            && words.contains("is a directory"),
+        "{words}"
+    );
+    std::fs::remove_dir(&file).unwrap();
+
+    std::fs::write(&file, "{ not json").unwrap();
+    let refused = run::run(&mut reg, &settings(out.path(), &policy, &scheme)).unwrap_err();
+    let words = refused.to_string();
+    assert!(matches!(refused, run::Error::Refused(_)), "{words}");
+    assert!(
+        words.contains("holds a release lock that cannot be read")
+            && words.contains(&file.display().to_string())
+            && words.contains("does not parse")
             && words.contains("remove it if no release is writing here"),
         "{words}"
     );
@@ -666,10 +860,28 @@ fn an_unreadable_lock_refuses_until_it_is_old() {
     let report = run::run(&mut reg, &settings(out.path(), &policy, &scheme)).unwrap();
     let line = report.lock_taken_over.unwrap();
     assert!(
-        line.contains("cannot be read") && line.contains("untouched for"),
+        line.contains("could not be read") && line.contains("untouched for"),
         "{line}"
     );
     assert_eq!(files_under(out.path()).len(), 1);
+    assert_eq!(lock::read(out.path()), None);
+
+    // dated in the future: it cannot be aged, and is taken over as well
+    std::fs::write(&file, "{ not json").unwrap();
+    let ahead = std::time::SystemTime::now() + std::time::Duration::from_secs(3600);
+    std::fs::File::options()
+        .write(true)
+        .open(&file)
+        .unwrap()
+        .set_modified(ahead)
+        .unwrap();
+    let report = run::run(&mut reg, &settings(out.path(), &policy, &scheme)).unwrap();
+    let line = report.lock_taken_over.unwrap();
+    assert!(
+        line.contains("could not be read") && line.contains("could not be dated"),
+        "{line}"
+    );
+    assert_eq!(report.unchanged, 1);
     assert_eq!(lock::read(out.path()), None);
 }
 
@@ -683,7 +895,7 @@ fn a_store_failure_while_asking_about_the_lock_stays_a_store_failure() {
     let out = TempDir::new("one-writer-out");
     let (_home, mut reg) = registry(&home_dir, &source);
     let registry_id = reg.meta().registry_id.clone();
-    lock::take(
+    plant(
         out.path(),
         &lock::Lock {
             job: 1,

@@ -12087,9 +12087,18 @@ fn release(home: &Home, args: ReleaseArgs) -> Result<(), Exit> {
     };
     // Wave 7b (the maintenance track): Ctrl-C or a termination stops the
     // release as a cancel on its job does, at the top of the next stack,
-    // with the stack in hand whole.
+    // with the stack in hand whole; a second signal aborts, and the stack
+    // in hand is given up too.
     let cancel = stop_on_signal()?;
-    let stop = || cancel.stop();
+    let stop = || {
+        if cancel.abort() {
+            run::Asked::Abort
+        } else if cancel.stop() {
+            run::Asked::Stop
+        } else {
+            run::Asked::Nothing
+        }
+    };
     let report = run::run_with(&mut registry, &settings, Some(&stop), &mut |_, _, _| {}).map_err(
         |e| match e {
             run::Error::Refused(m) => usage(m),
