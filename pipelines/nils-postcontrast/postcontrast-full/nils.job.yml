@@ -69,7 +69,7 @@ description: >-
 
 container-image:
   type: docker
-  image: "ghcr.io/kineuro/nils-postcontrast-full@sha256:eff962fabf7a97b2a41cf727bc5dc564ea9db9a966033695c7df7835612255e9"
+  image: "ghcr.io/kineuro/nils-postcontrast-full@sha256:85fdf4f8a722e2af84745058eb4f84860349c8c574af430330fe02ae80f3d5ba"
 
 inputs:
   - id: threads
