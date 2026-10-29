@@ -2,7 +2,9 @@
 
 All notable changes to NILS v1 are recorded here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html). The first release will be 1.0.0; until then pre-releases are tagged `v1.0.0-alpha.N`, then `v1.0.0-beta.N` from the first beta. The history of v0, the 0.x line, is in [kineuro/nils-legacy](https://github.com/kineuro/nils-legacy).
 
-## [Unreleased]
+## [1.0.0-beta.3] - 2026-10-29
+
+The third beta, a maintenance release after a partner site's second report (Wave 7b, the maintenance track): a release beats its heartbeat, stops at a cancel and holds its output folder against a second writer on any host; nils-postcontrast 0.3.0 with the raw-score mode, the calibrate command and a site's own calibration pair as a site file; and the job contract's additive `sweep: false`. The post-contrast fallback image is published as 0.3.0 and pinned. The MRI pack 1.4.0 ships in the tree.
 
 ### Added
 
