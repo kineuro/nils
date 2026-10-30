@@ -1731,6 +1731,15 @@ fn run_release(
     for stack in &moved {
         cards.remove(stack);
     }
+    // A move whose source is not where the last version left it is not a
+    // move: somebody emptied the tree, or half the move failed and was put
+    // back, and the stack is written again. What is left of it goes now,
+    // before any stack is begun (Wave 7b, 3.x6), so a worker writing a stack
+    // into the place it held is never undone by it; a stop already in
+    // removes nothing.
+    if !heart.asked() {
+        drop_unmoved(settings.root, &mut jobs, &moved, &mut leaving);
+    }
     // And only now is anything written.
     //
     // Wave 7b (3.x6): the stacks that need writing are written by a pool of
@@ -1827,14 +1836,10 @@ fn run_release(
                     }
                     continue;
                 }
-                // A move whose source is not where the last version left it
-                // is not a move. Somebody emptied the tree, and the stack is
-                // written again.
+                // a move that did not arrive is written again (its old files
+                // went before the loop, [`drop_unmoved`])
                 if job.change == crate::version::Change::Moved && !moved.contains(&job.stack) {
                     job.change = crate::version::Change::Rewritten;
-                    if let Some(was) = &job.was {
-                        sink.prune.drop_files(&was.files());
-                    }
                 }
                 match job.change {
                     crate::version::Change::Unchanged | crate::version::Change::Moved => {
@@ -1936,6 +1941,9 @@ fn run_release(
             }
             Ok(())
         };
+        // a panic on this thread gives up the stacks in hand as an error
+        // does: the scope then waits only for converters already ended
+        let _guard = AbortOnUnwind(&abort);
         let done = each();
         if done.is_err() {
             // the stacks in hand are given up: the scope waits for them
@@ -2146,6 +2154,19 @@ struct Sink {
     prune: Pruner,
 }
 
+/// Sets the abort the workers read when the loop's thread unwinds from a
+/// panic (Wave 7b, 3.x6), so the scope that waits for the workers does not
+/// wait for whole conversions with nothing beating the heart or the lock.
+struct AbortOnUnwind<'a>(&'a std::sync::atomic::AtomicBool);
+
+impl Drop for AbortOnUnwind<'_> {
+    fn drop(&mut self) {
+        if std::thread::panicking() {
+            self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+}
+
 /// What the stack loop reads and never changes.
 struct Ctx<'c> {
     dataset: i64,
@@ -2193,14 +2214,24 @@ impl Pruner {
         }
     }
 
-    fn finish(self) {
-        let mut later = self.later.unwrap_or_default();
+    /// Take away what is still empty: at the end of the stacks, and on any
+    /// way out of the loop, an error or a panic included ([`Drop`]).
+    fn finish(self) {}
+
+    fn prune_later(&mut self) {
+        let mut later = self.later.take().unwrap_or_default();
         // the deepest first, so a parent is looked at once its children are
         later.sort_by_key(|p| std::cmp::Reverse(p.components().count()));
         later.dedup();
         for dir in later {
             prune(&self.root, Some(&dir));
         }
+    }
+}
+
+impl Drop for Pruner {
+    fn drop(&mut self) {
+        self.prune_later();
     }
 }
 
@@ -2367,6 +2398,20 @@ fn settle_stack(
         scratch,
     } = worked;
     let root = ctx.settings.root;
+    // A stack staged beside the tree is placed only while the folder is
+    // still this release's: the heart beats first where its interval has
+    // passed, and once the lock is lost or an abort is in, a staged stack
+    // is given up as one in hand is, its old files left in place.
+    let outcome = match outcome {
+        Outcome::Files(files) if in_place => {
+            pulse(heart, store, abort);
+            match heart.lost.is_some() || heart.aborted {
+                true => Outcome::NotDone("aborted".to_string()),
+                false => Outcome::Files(files),
+            }
+        }
+        other => other,
+    };
     if let Some((why, route)) = fell_back {
         *report.unconvertible.entry(why).or_insert(0) += 1;
         *report.routes.entry("sourcedata".to_string()).or_insert(0) += 1;
@@ -4009,6 +4054,40 @@ fn stopped_version(
 /// appears or leaves, and renaming one onto the other in place would lose a
 /// tree. A DICOM stack owns its directory and moves as one; a converted stack
 /// is its named files and moves file by file.
+/// The moves that did not arrive are stacks to write again (Wave 7b,
+/// 3.x6): each becomes a rewrite, and what is left of its old files is
+/// removed, before any stack is begun, and counted among the stacks whose
+/// old files left. A place another stack of this version holds already (one
+/// left alone, or one whose move arrived there: the swap of two names) is
+/// left as it is, since those files are that stack's now.
+fn drop_unmoved(
+    root: &Path,
+    jobs: &mut [Job],
+    moved: &std::collections::HashSet<i64>,
+    leaving: &mut std::collections::HashSet<i64>,
+) {
+    use crate::version::Change;
+    let held: std::collections::HashSet<String> = jobs
+        .iter()
+        .filter(|j| {
+            j.change == Change::Unchanged || (j.change == Change::Moved && moved.contains(&j.stack))
+        })
+        .map(|j| j.place.key())
+        .collect();
+    for job in jobs.iter_mut() {
+        if job.change != Change::Moved || moved.contains(&job.stack) {
+            continue;
+        }
+        job.change = Change::Rewritten;
+        if let Some(was) = &job.was
+            && !held.contains(&was.place.key())
+        {
+            drop_files(root, &was.files());
+            leaving.insert(job.stack);
+        }
+    }
+}
+
 fn move_them(root: &Path, jobs: &[Job], tick: &mut dyn FnMut()) -> std::collections::HashSet<i64> {
     let mut arrived = std::collections::HashSet::new();
     let moving: Vec<&Job> = jobs
@@ -7998,6 +8077,44 @@ mod tests {
 
     fn read(root: &Path, path: &str) -> Option<String> {
         std::fs::read_to_string(root.join(path)).ok()
+    }
+
+    /// Wave 7b (3.x6): a move that did not arrive is written again and its
+    /// leftovers go before any stack is begun, but never from a place a
+    /// stack of this version holds already. Two stacks swap names, the
+    /// first one's move fails: the second arrived where the first was, and
+    /// its files stay, whatever order the workers then take the stacks in.
+    #[test]
+    fn a_move_that_did_not_arrive_never_drops_the_files_of_the_stack_now_at_its_place() {
+        let dir = TempDir::new("unmoved");
+        let root = dir.path();
+        // the first stack's files are gone from the tree, so its move fails;
+        // the third's move did not arrive either, and its files are nobody's
+        write(root, "sub-x/ses-1/anat/T1w_2/00000002.dcm");
+        write(root, "sub-x/ses-1/anat/FLAIR_1/00000003.dcm");
+        let mut jobs = vec![
+            job(1, "sub-x/ses-1/anat/T1w_1", "sub-x/ses-1/anat/T1w_2"),
+            job(2, "sub-x/ses-1/anat/T1w_2", "sub-x/ses-1/anat/T1w_1"),
+            job(3, "sub-x/ses-1/anat/FLAIR_1", "sub-x/ses-1/anat/FLAIR_2"),
+        ];
+        // the third is left out of the moves, as one that did not arrive
+        let moved = move_them(root, &jobs[..2], &mut || {});
+        assert_eq!(moved, std::collections::HashSet::from([2]));
+        let mut leaving = std::collections::HashSet::new();
+        drop_unmoved(root, &mut jobs, &moved, &mut leaving);
+        use crate::version::Change;
+        assert_eq!(
+            jobs.iter().map(|j| j.change).collect::<Vec<_>>(),
+            vec![Change::Rewritten, Change::Moved, Change::Rewritten]
+        );
+        // the second stack's files, where the first one's were, stay
+        assert_eq!(
+            read(root, "sub-x/ses-1/anat/T1w_1/00000002.dcm").as_deref(),
+            Some("sub-x/ses-1/anat/T1w_2/00000002.dcm")
+        );
+        // the third's leftovers went, and it counts among those that left
+        assert!(!root.join("sub-x/ses-1/anat/FLAIR_1").exists());
+        assert_eq!(leaving, std::collections::HashSet::from([3]));
     }
 
     #[test]

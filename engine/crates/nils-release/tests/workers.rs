@@ -668,6 +668,145 @@ fn an_abort_with_four_workers_gives_up_every_stack_in_hand() {
     assert_eq!(images(out.path()), 0);
 }
 
+/// A panic on the release's own thread with four workers ends the
+/// converters in hand at once, as an abort does: the scope does not wait out
+/// their conversions, nothing is recorded of them, and the folder's lock is
+/// taken away as the panic unwinds.
+#[test]
+#[allow(unsafe_code)]
+fn a_panic_on_the_releases_thread_ends_the_conversions_in_hand() {
+    // SAFETY: see the first test
+    unsafe { std::env::set_var(job::FRESH_VAR, "1") };
+    let tools = TempDir::new("workers-tools");
+    let (converter, log) = stand_in(tools.path(), "30");
+    let source = tree(&[1, 1, 1, 1, 1, 1]);
+    let home_dir = TempDir::new("workers-home");
+    let (_home, mut reg) = registry(&home_dir, &source, Backend::Sqlite, None, "");
+    let policy = Policy::default();
+    let scheme = SessionScheme::default();
+    let out = TempDir::new("workers-out");
+    // the stop is asked on the release's thread: a panic there stands for
+    // any (a store helper, the bookkeeping of a stack)
+    let stop = || {
+        if begun(&log) >= 4 {
+            panic!("a panic on the release's thread");
+        }
+        Asked::Nothing
+    };
+    let started = std::time::Instant::now();
+    let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        run::run_with(
+            &mut reg,
+            &settings(
+                "panicked",
+                out.path(),
+                &policy,
+                &scheme,
+                Layout::Bids,
+                Some(&converter),
+                4,
+            ),
+            Some(&stop),
+            &mut |_, _, _| {},
+        )
+    }));
+    assert!(caught.is_err(), "the panic goes on");
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(20),
+        "the converters were ended, not waited for"
+    );
+    assert_eq!(begun(&log), 4);
+    assert_eq!(images(out.path()), 0);
+    let store = reg.store();
+    let rows = store
+        .query(
+            &format!("SELECT COUNT(*) FROM {}", store.qualified("release_stack")),
+            &[],
+        )
+        .unwrap();
+    assert_eq!(rows[0].int(0).unwrap(), 0, "nothing recorded of them");
+    assert_eq!(nils_release::lock::read(out.path()), None);
+}
+
+/// A release that finds its folder's lock gone while stacks rewritten in
+/// their place come back staged places none of them: the old files stay
+/// as the version before wrote them, and the report says the lock was lost.
+#[test]
+#[allow(unsafe_code)]
+fn a_lock_lost_with_staged_stacks_in_hand_places_none_of_them() {
+    // SAFETY: see the first test
+    unsafe { std::env::set_var(job::FRESH_VAR, "1") };
+    let tools = TempDir::new("workers-tools");
+    let (converter, log) = stand_in(tools.path(), "1");
+    let source = tree(&[1; 8]);
+    let home_dir = TempDir::new("workers-home");
+    let (_home, mut reg) = registry(&home_dir, &source, Backend::Sqlite, None, "");
+    let scheme = SessionScheme::default();
+    let out = TempDir::new("workers-out");
+    let first_policy = Policy::default();
+    let first = run::run(
+        &mut reg,
+        &settings(
+            "lost",
+            out.path(),
+            &first_policy,
+            &scheme,
+            Layout::Bids,
+            Some(&converter),
+            4,
+        ),
+    )
+    .unwrap();
+    assert_eq!(first.added, 8);
+    let before = tree_of(out.path());
+
+    // another policy, so every stack is rewritten in its place; once four
+    // are in hand the lock goes, and the release's thread is held until
+    // their conversions are done, so their results wait in the queue
+    let other = Policy {
+        uids: nils_release::policy::Uids::Preserve,
+        ..Policy::default()
+    };
+    let root = out.path().to_path_buf();
+    let gone = std::cell::Cell::new(false);
+    let stop = || {
+        if !gone.get() && begun(&log) >= 12 {
+            gone.set(true);
+            std::fs::remove_file(nils_release::lock::path(&root)).unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(1800));
+        }
+        Asked::Nothing
+    };
+    let second = run::run_with(
+        &mut reg,
+        &settings(
+            "lost",
+            out.path(),
+            &other,
+            &scheme,
+            Layout::Bids,
+            Some(&converter),
+            4,
+        ),
+        Some(&stop),
+        &mut |_, _, _| {},
+    )
+    .unwrap();
+    assert!(gone.get());
+    assert!(second.lock_lost.is_some(), "{second:?}");
+    assert_eq!(second.rewritten, 0, "{second:?}");
+    assert_eq!(begun(&log), 12, "no stack begun after the loss");
+    assert_eq!(tree_of(out.path()), before, "nothing placed after the loss");
+    assert!(
+        // no stack's staging beside the tree is left
+        !dirs_of(out.path())
+            .iter()
+            .any(|d| d.starts_with(".nils-rewrite")),
+        "{:?}",
+        dirs_of(out.path())
+    );
+}
+
 /// How long one worker and eight take over the same synthetic stacks with
 /// the dcm2niix found on the search path: a measurement, not a check, so it
 /// runs only when asked (`--ignored`) and prints the seconds and the phases.

@@ -265,7 +265,8 @@ fn take_in(out: &Path, into: &Path, made: Made) -> Result<Made, Fail> {
     }
     for (n, f) in made.files.iter().enumerate() {
         if nils_proc::rename_or_copy(&out.join(f), &into.join(f)).is_err() {
-            for done in &made.files[..n] {
+            // the one in hand too: a copy that failed may have left half of it
+            for done in &made.files[..=n] {
                 std::fs::remove_file(into.join(done)).ok();
             }
             return Err(Fail::Refused(
