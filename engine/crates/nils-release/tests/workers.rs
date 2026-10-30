@@ -667,3 +667,105 @@ fn an_abort_with_four_workers_gives_up_every_stack_in_hand() {
     assert_eq!(begun(&log), 4);
     assert_eq!(images(out.path()), 0);
 }
+
+/// How long one worker and eight take over the same synthetic stacks with
+/// the dcm2niix found on the search path: a measurement, not a check, so it
+/// runs only when asked (`--ignored`) and prints the seconds and the phases.
+#[test]
+#[ignore]
+#[allow(unsafe_code)]
+fn measure_one_worker_against_eight() {
+    // SAFETY: see the first test
+    unsafe { std::env::set_var(job::FRESH_VAR, "1") };
+    let Ok(real) = Converter::find(Path::new("dcm2niix")) else {
+        eprintln!("dcm2niix is not installed; nothing to measure");
+        return;
+    };
+    // 24 stacks of 30 to 145 slices of 256 x 256, one of them much longer
+    let slices: Vec<u32> = (0..24).map(|n| 30 + (n * 37) % 90).chain([300]).collect();
+    let source = TempDir::new("workers-measure");
+    let side = 256usize;
+    for (n, count) in slices.iter().enumerate() {
+        let n = n + 1;
+        for slice in 1..=*count {
+            let sop = format!("1.2.3.{n}.{slice}");
+            let mut e = synth::minimal_mr("1.2.3", &format!("1.2.3.{n}"), &sop);
+            let mut pixels = vec![0u8; side * side * 2];
+            let mut x = (n as u32).wrapping_mul(2654435761) ^ slice;
+            for p in pixels.chunks_mut(2) {
+                x ^= x << 13;
+                x ^= x >> 17;
+                x ^= x << 5;
+                p[0] = (x & 0xff) as u8;
+                p[1] = ((x >> 8) & 0x0f) as u8;
+            }
+            e.extend([
+                synth::text(tags::PATIENT_ID, VR::LO, "P1"),
+                synth::text(tags::STUDY_DATE, VR::DA, "20220115"),
+                synth::text(tags::SERIES_TIME, VR::TM, &format!("03{:02}15", 10 + n)),
+                synth::text(
+                    tags::ACQUISITION_TIME,
+                    VR::TM,
+                    &format!("03{:02}15", 10 + n),
+                ),
+                synth::text(tags::SERIES_NUMBER, VR::IS, &n.to_string()),
+                synth::text(tags::SERIES_DESCRIPTION, VR::LO, "t1_mprage_sag"),
+                synth::text(tags::PROTOCOL_NAME, VR::LO, "MPRAGE"),
+                synth::text(tags::MR_ACQUISITION_TYPE, VR::CS, "3D"),
+                synth::text(tags::IMAGE_TYPE, VR::CS, "ORIGINAL\\PRIMARY\\M\\ND"),
+                synth::text(tags::MANUFACTURER, VR::LO, "SYNTHETIC"),
+                synth::text(tags::BURNED_IN_ANNOTATION, VR::CS, "NO"),
+                synth::us(tags::ROWS, side as u16),
+                synth::us(tags::COLUMNS, side as u16),
+                synth::us(tags::BITS_ALLOCATED, 16),
+                synth::us(tags::BITS_STORED, 12),
+                synth::us(tags::HIGH_BIT, 11),
+                synth::us(tags::PIXEL_REPRESENTATION, 0),
+                synth::us(tags::SAMPLES_PER_PIXEL, 1),
+                synth::text(tags::PHOTOMETRIC_INTERPRETATION, VR::CS, "MONOCHROME2"),
+                synth::text(tags::PIXEL_SPACING, VR::DS, "1.0\\1.0"),
+                synth::text(tags::SLICE_THICKNESS, VR::DS, "1.0"),
+                synth::text(tags::IMAGE_ORIENTATION_PATIENT, VR::DS, "1\\0\\0\\0\\1\\0"),
+                synth::text(
+                    tags::IMAGE_POSITION_PATIENT,
+                    VR::DS,
+                    &format!("0\\0\\{slice}"),
+                ),
+                synth::text(tags::INSTANCE_NUMBER, VR::IS, &slice.to_string()),
+                synth::bytes(tags::PIXEL_DATA, VR::OW, pixels),
+            ]);
+            source.file(
+                &format!("{n}/{slice}"),
+                &synth::part10(&MetaFields::mr(&sop), &e, true),
+            );
+        }
+    }
+    let home_dir = TempDir::new("workers-home");
+    let (_home, mut reg) = registry(&home_dir, &source, Backend::Sqlite, None, "");
+    let policy = Policy::default();
+    let scheme = SessionScheme::default();
+    for workers in [1usize, 8] {
+        let out = TempDir::new("workers-measure-out");
+        let started = std::time::Instant::now();
+        let r = run::run(
+            &mut reg,
+            &settings(
+                &format!("measure {workers}"),
+                out.path(),
+                &policy,
+                &scheme,
+                Layout::Bids,
+                Some(&real),
+                workers,
+            ),
+        )
+        .unwrap();
+        eprintln!(
+            "workers {workers}: {} stacks, {} files written, {:.1} s wall; phases {:?}",
+            r.stacks,
+            r.written,
+            started.elapsed().as_secs_f64(),
+            r.phases
+        );
+    }
+}

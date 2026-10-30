@@ -571,6 +571,11 @@ struct ReleaseArgs {
     /// vocabulary's primary kinds
     #[arg(long, value_name = "KIND")]
     observation: Vec<String>,
+    /// How many stacks are written at once (1 to 64), the longest first.
+    /// Without it, the NILS_RELEASE_WORKERS setting, else the smaller of 8
+    /// and the cores. 1 writes one stack after another, in the plan's order
+    #[arg(long, value_name = "N", value_parser = clap::value_parser!(u16).range(1..=64))]
+    workers: Option<u16>,
     /// Machine-readable output
     #[arg(long)]
     json: bool,
@@ -12142,6 +12147,7 @@ fn release(home: &Home, args: ReleaseArgs) -> Result<(), Exit> {
         compress: !args.no_compress,
         authors: &args.author,
         observations: &args.observation,
+        workers: args.workers.map_or(0, usize::from),
     };
     // Wave 7b (the maintenance track): Ctrl-C or a termination stops the
     // release as a cancel on its job does, at the top of the next stack,
@@ -12243,6 +12249,13 @@ fn release(home: &Home, args: ReleaseArgs) -> Result<(), Exit> {
             "  not removed      {}; those elements leave the file unchanged",
             left.join(", ")
         );
+    }
+    // Wave 7b (3.x6): how many stacks were written at once, and where
+    // their seconds went, summed over them; the report's JSON has them
+    // stack by stack
+    println!("  workers          {}", report.workers);
+    if let Some(line) = phases_line(&report.phases) {
+        println!("  phases           {line}");
     }
     if let Some(c) = &report.converter {
         println!("  converted by     {c}");
@@ -12537,6 +12550,7 @@ fn releases_doc(
     let scheme = text_of(store, "release", "session_scheme");
     let pick_rules = text_of(store, "release", "pick_rules");
     let finished = text_of(store, "release", "finished_at");
+    let phases = text_of(store, "release", "phases");
     let mut wheres = String::new();
     let mut params: Vec<Param> = Vec::new();
     if let Some(name) = name {
@@ -12552,7 +12566,7 @@ fn releases_doc(
         "SELECT id, name, version, root, {started}, files, subjects, unchanged, moved, rewritten, \
          added, removed, layout, actor, {withdrawn}, withdrawn_by, withdrawn_why, {policy}, \
          {policies}, {scheme}, session_naming, categories, naming, purpose, {pick_rules}, \
-         {finished}, error, stopped \
+         {finished}, error, stopped, {phases} \
          FROM {}{wheres} ORDER BY id DESC LIMIT {}",
         store.qualified("release"),
         limit.max(1)
@@ -12642,10 +12656,25 @@ fn releases_doc(
                         nils_registry::store::Cell::Int(n) => *n != 0,
                         _ => false,
                     },
+                // Wave 7b (3.x6): the seconds its stacks spent in each
+                // phase, summed; null on a row from before
+                "phases": json(r.opt_text(28)?),
             }))
         })
         .collect::<Result<_, nils_registry::Error>>()?;
     Ok(serde_json::json!({ "count": rows.len(), "releases": rows }))
+}
+
+/// The seconds a release's stacks spent in each phase, summed over them,
+/// as `--history` and the report's head print them (Wave 7b, 3.x6); none
+/// where nothing was measured.
+fn phases_line(p: &nils_release::run::Phases) -> Option<String> {
+    (!p.is_empty()).then(|| {
+        format!(
+            "staging {:.1} s, conversion {:.1} s, digest {:.1} s, sidecar {:.1} s",
+            p.staging, p.conversion, p.digest, p.sidecar
+        )
+    })
 }
 
 /// Whether a converter's version line names a build dated before the pinned one.
@@ -12727,6 +12756,8 @@ struct Version {
     finished: bool,
     /// What the row says went wrong, or that it stopped.
     error: Option<String>,
+    /// Wave 7b (3.x6): the seconds its stacks spent in each phase, summed.
+    phases: Option<nils_release::run::Phases>,
 }
 
 /// What a release read of the main scans, in words, for its history: the
@@ -12814,9 +12845,10 @@ fn history(home: &Home, args: &ReleaseArgs) -> Result<(), Exit> {
     );
     let pick_rules = text_of(store, "release", "pick_rules");
     let finished = text_of(store, "release", "finished_at");
+    let phases = text_of(store, "release", "phases");
     let sql = format!(
         "SELECT id, name, version, root, {started}, files, unchanged, moved, rewritten, added, \
-         removed, {pick_rules}, {finished}, error FROM {}{wheres} ORDER BY id",
+         removed, {pick_rules}, {finished}, error, {phases} FROM {}{wheres} ORDER BY id",
         store.qualified("release"),
     );
     let rows = store
@@ -12849,6 +12881,10 @@ fn history(home: &Home, args: &ReleaseArgs) -> Result<(), Exit> {
                 .opt_text(13)
                 .map_err(|e| fail(e.to_string()))?
                 .map(str::to_string),
+            phases: r
+                .opt_text(14)
+                .map_err(|e| fail(e.to_string()))?
+                .and_then(|t| serde_json::from_str(t).ok()),
         });
     }
     let mut last_name = String::new();
@@ -12890,6 +12926,9 @@ fn history(home: &Home, args: &ReleaseArgs) -> Result<(), Exit> {
         }
         if !said {
             println!("      nothing changed");
+        }
+        if let Some(line) = v.phases.as_ref().and_then(phases_line) {
+            println!("      seconds      {line}");
         }
         let store = registry.store();
         let sql = format!(
