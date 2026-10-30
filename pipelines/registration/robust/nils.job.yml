@@ -52,7 +52,8 @@ command-line: |-
   qc() { mri_synthseg --i "$1" --o "$2" --qc "$3" --robust --cpu --threads [THREADS] >/dev/null 2>&1 || return 1;
   fspython -c "import sys, csv; r = list(csv.reader(open(sys.argv[1])))[-1]; v = [float(x) for x in r[1:] if x.strip()]; print(\"%.3f\" % min(v))" "$3"; };
   dice() { fspython -c "import sys, numpy as np, nibabel as n; a = np.asarray(n.load(sys.argv[1]).dataobj).astype(int); b = np.asarray(n.load(sys.argv[2]).dataobj).astype(int);
-  if a.shape != b.shape: print(\"\"); sys.exit(); L = [l for l in np.unique(a) if l > 0]; d = [2.0 * np.sum((a == l) & (b == l)) / max(np.sum(a == l) + np.sum(b == l), 1) for l in L]; print(\"%.3f\" % (np.mean(d) if d else 0))" "$1" "$2"; };
+  if a.shape != b.shape: print(\"\"); sys.exit()
+  L = [l for l in np.unique(a) if l > 0]; d = [2.0 * np.sum((a == l) & (b == l)) / max(np.sum(a == l) + np.sum(b == l), 1) for l in L]; print(\"%.3f\" % (np.mean(d) if d else 0))" "$1" "$2"; };
   sanity() { fspython -c "import sys, numpy as np;
   rows = [l.split() for l in open(sys.argv[1]) if len(l.split()) == 4 and all(x.replace(\".\", \"\").replace(\"-\", \"\").replace(\"e\", \"\").replace(\"+\", \"\").isdigit() for x in l.split())][:4];
   M = np.array(rows, float); R = M[:3, :3]; det = float(np.linalg.det(R)); a = max(-1.0, min(1.0, (np.trace(R) - 1) / 2)); rot = float(np.degrees(np.arccos(a))); tl = float(np.linalg.norm(M[:3, 3]));
@@ -67,12 +68,12 @@ command-line: |-
   if [ $refused = 1 ]; then echo "$s: SynthSeg scores a visit below 0.65 (${qcs[*]}): refused"; printf "{\"visits\": %d, \"method\": \"robust\", \"qc_min\": %s, \"refused\": 1}\n" $n "$qmin" > "$d/${s}_desc-registration_metrics.json"; rm -rf "$w"; continue; fi;
   if [ $n -eq 2 ]; then
   a=${vis[0]}; b=${vis[1]}; sa=$(basename "$(dirname "$(dirname "$a")")"); sb=$(basename "$(dirname "$(dirname "$b")")");
-  mri_robust_register --mov "$b" --dst "$a" --lta "$w/${sb}_to_${sa}.lta" --halfmov "$w/${sb}_to_mid.lta" --halfdst "$w/${sa}_to_mid.lta" --halfmovlta "$w/mid_${sb}.lta" --halfdstlta "$w/mid_${sa}.lta" --iscale --satit --mapmovhdr "$w/${sb}_in_${sa}.nii.gz" >/dev/null 2>&1 || { echo "$s: mri_robust_register of $sb onto $sa failed"; rm -rf "$w"; continue; };
+  mri_robust_register --mov "$b" --dst "$a" --lta "$w/${sb}_to_${sa}.lta" --halfmov "$w/${sb}_half.nii.gz" --halfdst "$w/${sa}_half.nii.gz" --halfmovlta "$w/${sb}_to_mid.lta" --halfdstlta "$w/${sa}_to_mid.lta" --iscale --satit --mapmovhdr "$w/${sb}_in_${sa}.nii.gz" >/dev/null 2>&1 || { echo "$s: mri_robust_register of $sb onto $sa failed"; rm -rf "$w"; continue; };
   method=robust-register; ltas=("$w/${sa}_to_mid.lta" "$w/${sb}_to_mid.lta");
   mri_vol2vol --mov "$a" --targ "$a" --lta "$w/${sa}_to_mid.lta" --o "$w/${sa}_mid.nii.gz" >/dev/null 2>&1; mri_vol2vol --mov "$b" --targ "$a" --lta "$w/${sb}_to_mid.lta" --o "$w/${sb}_mid.nii.gz" >/dev/null 2>&1;
   mri_concat "$w/${sa}_mid.nii.gz" "$w/${sb}_mid.nii.gz" --mean --o "$w/template.nii.gz" >/dev/null 2>&1;
-  ic=$(fspython -c "import sys, numpy as np; rd = lambda p: np.array([l.split() for l in open(p) if len(l.split()) == 4 and l.split()[0].lstrip(\"-\").replace(\".\", \"\").replace(\"e\", \"\").replace(\"+\", \"\").isdigit()][:4], float);
-  A = rd(sys.argv[1]); B = rd(sys.argv[2]); C = A @ B; pts = np.array([[x, y, z, 1] for x in (-70, 70) for y in (-100, 70) for z in (-60, 80)], float).T; dv = (C @ pts - pts)[:3]; print(\"%.3f\" % float(np.sqrt((dv ** 2).sum(0)).mean()))" "$w/${sb}_to_${sa}.lta" "$w/mid_${sb}.lta" 2>/dev/null || echo "");
+  ic=$(fspython -c "import sys, numpy as np; rd = lambda p: np.array([l.split() for l in open(p) if len(l.split()) == 4 and l.split()[0].replace(\"-\", \"\").replace(\".\", \"\").replace(\"e\", \"\").replace(\"+\", \"\").isdigit()][:4], float);
+  A = rd(sys.argv[1]); B = rd(sys.argv[2]); H = rd(sys.argv[3]); C = np.linalg.inv(B) @ H @ A; pts = np.array([[x, y, z, 1] for x in (-70, 70) for y in (-100, 70) for z in (-60, 80)], float).T; dv = (C @ pts - pts)[:3]; print(\"%.3f\" % float(np.sqrt((dv ** 2).sum(0)).mean()))" "$w/${sb}_to_${sa}.lta" "$w/${sb}_to_mid.lta" "$w/${sa}_to_mid.lta" 2>/dev/null || echo "");
   else
   movs=(); for f in "${vis[@]}"; do movs+=("$f"); done; ltas=(); for f in "${vis[@]}"; do ses=$(basename "$(dirname "$(dirname "$f")")"); ltas+=("$w/${ses}_to_mid.lta"); done;
   mri_robust_template --mov "${movs[@]}" --template "$w/template.nii.gz" --lta "${ltas[@]}" --iscale --satit --average 1 --inittp 1 --fixtp >/dev/null 2>&1 || { echo "$s: mri_robust_template over $n visits failed"; rm -rf "$w"; continue; };
