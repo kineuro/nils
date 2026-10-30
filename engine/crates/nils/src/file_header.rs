@@ -573,6 +573,139 @@ pub(crate) fn whole(
     })))
 }
 
+/// The stack's own fingerprint values certificate 2's packets read, under
+/// the packet's names (fingerprint column, packet name): the shape of the
+/// stack (slices, its place among the series' stacks, how far it reaches,
+/// its field of view) and the physics the fingerprint works out (the
+/// b-values of a diffusion stack, the field strength rounded to a scanner's
+/// class). What is true of the file; no system's answer.
+const PACKET: &[(&str, &str)] = &[
+    ("image_type", "image_type"),
+    ("scanning_sequence", "scanning_sequence"),
+    ("sequence_variant", "sequence_variant"),
+    ("scan_options", "scan_options"),
+    ("mr_acquisition_type", "mr_acquisition_type"),
+    ("repetition_time", "repetition_time"),
+    ("echo_time", "echo_time"),
+    ("inversion_time", "inversion_time"),
+    ("flip_angle", "flip_angle"),
+    ("echo_train_length", "echo_train_length"),
+    ("echo_numbers", "echo_numbers"),
+    ("number_of_averages", "number_of_averages"),
+    ("pixel_bandwidth", "pixel_bandwidth"),
+    ("acquisition_matrix", "acquisition_matrix"),
+    ("receive_coil_name", "receive_coil_name"),
+    ("temporal_positions", "temporal_positions_in_stack"),
+    ("diffusion_b_value", "diffusion_b_value"),
+    ("dwi_b_values", "dwi_b_values"),
+    ("dwi_directions", "dwi_directions"),
+    ("magnetic_field_strength", "magnetic_field_strength"),
+    ("field_strength_normalized", "field_strength_normalized"),
+    ("manufacturer", "manufacturer"),
+    ("manufacturer_model_name", "manufacturer_model_name"),
+    ("orientation", "orientation"),
+    ("n_slices", "n_slices"),
+    ("n_instances", "n_instances"),
+    ("slice_thickness", "slice_thickness"),
+    ("spacing_between_slices", "spacing_between_slices"),
+    ("slice_span_mm", "slice_span_mm"),
+    ("rows", "rows"),
+    ("columns", "columns"),
+    ("pixel_spacing", "pixel_spacing"),
+    ("fov_x", "fov_x_mm"),
+    ("fov_y", "fov_y_mm"),
+    ("stacks_in_series", "stacks_in_series"),
+    ("stack_index", "stack_index"),
+    ("split_reason", "split_reason"),
+    ("centre_z_mm", "slice_centre_z_mm"),
+];
+
+/// 7b, the audit's packet (the raters' check and the audit read one
+/// packet): the stack's fingerprint values certificate 2's packets held,
+/// by the packet's names, and the session's list of series in the order
+/// they were acquired (`order`, `series_number`, `description`,
+/// `protocol_name`, `contrast_bolus_agent` where the series names one,
+/// and `this_stack` on the stack's own series). Below detail quasi the
+/// session's descriptions and protocol names are left out, as the header's
+/// own are. `None` where the stack is not in the registry.
+pub(crate) fn packet(
+    store: &mut Store,
+    stack: i64,
+    quasi: bool,
+) -> Result<Option<(Map<String, Value>, Vec<Value>)>, StoreError> {
+    let Some(k) = keys(store, stack)? else {
+        return Ok(None);
+    };
+    let columns: Vec<&str> = PACKET.iter().map(|(c, _)| *c).collect();
+    let got = row(store, "stack_fingerprint", "stack_id", stack, &columns)?;
+    let mut fields = Map::new();
+    for (column, name) in PACKET {
+        if let Some(v) = got.get(*column) {
+            fields.insert(name.to_string(), typed(v.clone()));
+        }
+    }
+    let d = store.dialect();
+    let fp = table("stack_fingerprint");
+    let sql = format!(
+        "SELECT se.id, se.series_number, se.series_description, se.protocol_name, se.contrast_bolus_agent, \
+         (SELECT MIN({}) FROM {} f WHERE f.series_id = se.id) FROM {} se WHERE se.study_id = {}",
+        d.text_of_qualified(
+            Some("f"),
+            fp.column("earliest_acquisition_time")
+                .expect("earliest_acquisition_time")
+        ),
+        store.qualified("stack_fingerprint"),
+        store.qualified("series"),
+        d.param(1, Type::Int)
+    );
+    type Series = (i64, Option<i64>, Value, Value, Value, Option<String>);
+    let mut rows: Vec<Series> = Vec::new();
+    for r in store.query(&sql, &[Param::Int(k.study)])? {
+        let text = |i: usize| crate::reader::cell_json(r.get(i));
+        rows.push((
+            r.int(0)?,
+            typed(text(1)).as_i64(),
+            text(2),
+            text(3),
+            text(4),
+            r.opt_text(5)?.map(str::to_string),
+        ));
+    }
+    // acquired first first, a series with no time last, then by number
+    rows.sort_by(|a, b| {
+        (a.5.is_none(), &a.5, a.1.unwrap_or(0), a.0).cmp(&(
+            b.5.is_none(),
+            &b.5,
+            b.1.unwrap_or(0),
+            b.0,
+        ))
+    });
+    let mut session = Vec::new();
+    for (i, (id, number, description, protocol, agent, _)) in rows.into_iter().enumerate() {
+        let mut e = Map::new();
+        e.insert("order".into(), json!(i + 1));
+        if let Some(n) = number {
+            e.insert("series_number".into(), json!(n));
+        }
+        if quasi {
+            if !description.is_null() {
+                e.insert("description".into(), description);
+            }
+            if !protocol.is_null() {
+                e.insert("protocol_name".into(), protocol);
+            }
+        }
+        if !agent.is_null() {
+            e.insert("contrast_bolus_agent".into(), agent);
+        }
+        if id == k.series {
+            e.insert("this_stack".into(), json!(true));
+        }
+        session.push(Value::Object(e));
+    }
+    Ok(Some((fields, session)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

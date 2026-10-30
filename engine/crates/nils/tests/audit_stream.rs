@@ -378,6 +378,10 @@ fn stream(pg: Option<(String, String)>) {
     );
     assert_eq!(status, 409, "{doc}");
     assert!(doc.to_string().contains("accepted since"), "{doc}");
+    // 7b: the refusal names the stamp it used and the since to give
+    let said = doc.to_string();
+    assert!(said.contains(&format!("the time of draw {d2}")), "{doc}");
+    assert!(said.contains("give since"), "{doc}");
     // vendor and year are frozen on the drawn stacks
     let shown = server.ok("GET", &format!("/api/audit/draws/{d1}"), None, &cleo);
     let vendors: BTreeSet<String> = shown["stacks"]
@@ -468,14 +472,16 @@ fn stream(pg: Option<(String, String)>) {
     let differences: BTreeSet<i64> = a_wrong.union(&b_wrong).copied().collect();
     assert!(differences.is_subset(&held), "every difference is settled");
     assert_eq!(held.len(), 19);
-    // the same draw is settled once
-    let (status, _) = server.call(
+    // the same draw is settled once: asked again, its counts (7b)
+    let again = server.ok(
         "POST",
         &format!("/api/audit/draws/{d1}/settle"),
         Some(json!({})),
         &cleo,
     );
-    assert_eq!(status, 409);
+    assert_eq!(again["settle"]["again"], true, "{again}");
+    assert_eq!(again["settle"]["items"], 19, "{again}");
+    assert_eq!(again["settle"]["campaign"]["id"], settle, "{again}");
     // the person: the accepted answer is the proposal; where a rater
     // differs, A and B are it and the differing answer, unlabelled; the
     // first two stacks' raters were right, so the rules were wrong there
@@ -853,13 +859,15 @@ fn edges(pg: Option<(String, String)>) {
     assert_eq!(s4["settle"]["items"], 0, "{s4}");
     assert_eq!(s4["settle"]["campaign"], Value::Null, "{s4}");
     assert!(s4["settle"]["note"].as_str().is_some(), "{s4}");
-    let (status, doc) = server.call(
+    let doc = server.ok(
         "POST",
         &format!("/api/audit/draws/{d4}/settle"),
         Some(json!({"settlers": [nora_p]})),
         &cleo,
     );
-    assert_eq!(status, 409, "settled once: {doc}");
+    assert_eq!(doc["settle"]["again"], true, "settled once: {doc}");
+    assert_eq!(doc["settle"]["campaign"], Value::Null, "{doc}");
+    assert_eq!(doc["settle"]["agreements"], 3, "{doc}");
     let g4 = server.ok("POST", &format!("/api/audit/draws/{d4}/grade"), None, &cleo);
     assert_eq!(g4["grade"]["read"], 3, "every stack stands: {g4}");
     assert_eq!(g4["grade"]["wrong"], 0, "{g4}");
@@ -919,8 +927,11 @@ fn edges(pg: Option<(String, String)>) {
         Some(json!({"count": 10, "axes": ["base"], "seed": "edge-next", "raters": [a_p, b_p]})),
         &cleo,
     );
+    // 7b: the default since continues the chain, so the stacks the two
+    // earlier draws by count hold (4 and 3) are not framed again
     assert_eq!(
-        next["draw"]["frame"]["stacks"], made1_frame,
+        next["draw"]["frame"]["stacks"],
+        made1_frame - 7,
         "the share draw did not cut the frame: {next}"
     );
     // and two frames in a row are disjoint: nothing was sorted since
@@ -931,6 +942,304 @@ fn edges(pg: Option<(String, String)>) {
         &cleo,
     );
     assert_eq!(status, 409, "the frame after a draw is empty: {doc}");
+}
+
+/// 7b, what the rater runner's rehearsal found: the accepted answer is read
+/// in the pack's value names (a stored `HASTE` is `SS-TSE`, a stored
+/// `FatSat` and `MoCo` the list), so a settle's proposals are taken; a
+/// second settle answers its counts; an audit item's header carries the
+/// check's packet; the served question says every value's meaning; and a
+/// second draw the same day, given the last draw's time, takes the stacks
+/// accepted at that second and none drawn before.
+fn fixes(pg: Option<(String, String)>) {
+    let (home, _src) = registry(pg.as_ref());
+    let open = || match &pg {
+        Some((dsn, schema)) => Store::connect_postgres(dsn, schema).unwrap(),
+        None => Store::open_sqlite(&home.path().join("registry.db")).unwrap(),
+    };
+    {
+        // every stack's technique stored as v0 spells it, its modifiers two rows
+        let mut store = open();
+        let axes = store.qualified("classification_axis");
+        let stack = store.qualified("stack");
+        store
+            .execute(
+                &format!("DELETE FROM {axes} WHERE axis IN ('technique', 'modifier')"),
+                &[],
+            )
+            .unwrap();
+        for (axis, value) in [
+            ("technique", "HASTE"),
+            ("modifier", "FatSat"),
+            ("modifier", "MoCo"),
+        ] {
+            store
+                .execute(
+                    &format!(
+                        "INSERT INTO {axes} (stack_id, axis, value, confidence, tier) SELECT id, '{axis}', '{value}', 1.0, 'rule' FROM {stack}"
+                    ),
+                    &[],
+                )
+                .unwrap();
+        }
+    }
+    let mut server = Server::start(&home);
+    let cleo = token(
+        "cleo",
+        "Cleo Curator",
+        &[
+            "review:see",
+            "review:work",
+            "campaigns:see",
+            "campaigns:work",
+        ],
+        "quasi",
+    );
+    let rater = |sub: &str| token(sub, sub, &["campaigns:see", "campaigns:work"], "quasi");
+    let (rater_a, rater_b, nora) = (rater("rater-a"), rater("rater-b"), rater("nora"));
+    let principal = |server: &Server, t: &str| {
+        server.ok("GET", "/api/capabilities", None, t)["principal"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    };
+    let (a_p, b_p, nora_p) = (
+        principal(&server, &rater_a),
+        principal(&server, &rater_b),
+        principal(&server, &nora),
+    );
+    let axes = json!(["technique", "modifier"]);
+    let first = server.ok(
+        "POST",
+        "/api/audit/draws",
+        Some(
+            json!({"count": 3, "since": "2000-01-01T00:00:00Z", "seed": "fix-1",
+                    "axes": axes, "raters": [a_p, b_p]}),
+        ),
+        &cleo,
+    );
+    let d1 = first["draw"]["id"].as_i64().unwrap();
+    let rc = first["campaign"]["id"].as_i64().unwrap();
+    let frame1 = first["draw"]["frame"]["stacks"].as_i64().unwrap();
+
+    // ----------------- 1: the accepted answer in the pack's value names
+    let shown = server.ok("GET", &format!("/api/audit/draws/{d1}"), None, &cleo);
+    let firsts: BTreeSet<i64> = shown["stacks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|st| {
+            assert_eq!(
+                st["accepted"],
+                json!({"technique": "SS-TSE", "modifier": ["FatSat", "MoCo"]}),
+                "{shown}"
+            );
+            st["stack_id"].as_i64().unwrap()
+        })
+        .collect();
+    assert_eq!(firsts.len(), 3);
+
+    // ----------------- 4: the served question says each value's meaning
+    let c = server.ok("GET", &format!("/api/campaigns/{rc}"), None, &rater_a);
+    let vocabulary = &c["question"]["vocabulary"];
+    for axis in ["technique", "modifier"] {
+        let values = c["question"]["values"][axis].as_array().unwrap();
+        assert!(!values.is_empty(), "{c}");
+        for v in values {
+            let e = &vocabulary[axis][v.as_str().unwrap()];
+            assert!(
+                e["meaning"].as_str().is_some_and(|m| !m.is_empty()),
+                "{axis} {v}: {e}"
+            );
+            assert!(e["meaning_from"].is_string(), "{e}");
+        }
+    }
+    assert!(
+        c["question"]["values"]["technique"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("SS-TSE")),
+        "{c}"
+    );
+    // the earlier names read as the values: a label, a stored form, `none`
+    let earlier = &c["question"]["earlier_names"];
+    assert_eq!(earlier["technique"]["HASTE"], "SS-TSE", "{c}");
+    assert_eq!(earlier["technique"]["SPACE"], "3D-TSE", "{c}");
+    assert_eq!(earlier["modifier"]["none"], Value::Null, "{c}");
+    assert!(earlier["modifier"].get("none").is_some(), "{c}");
+
+    // ---------------------- 3: an audit item's header is the check's packet
+    let item = c["items"][0]["id"].as_i64().unwrap();
+    let header = server.ok(
+        "GET",
+        &format!("/api/campaigns/{rc}/items/{item}/header"),
+        None,
+        &rater_a,
+    );
+    assert_eq!(header["blind"], true, "{header}");
+    for name in [
+        "stacks_in_series",
+        "stack_index",
+        "n_instances",
+        "orientation",
+    ] {
+        assert!(!header["fingerprint"][name].is_null(), "{name}: {header}");
+    }
+    let session = header["session"].as_array().unwrap();
+    assert_eq!(session.len(), 1, "one series in the study: {header}");
+    assert_eq!(session[0]["order"], 1, "{header}");
+    assert_eq!(session[0]["this_stack"], true, "{header}");
+    assert_eq!(session[0]["description"], "t1 mprage", "{header}");
+    let text = header.to_string();
+    for word in ["SS-TSE", "HASTE", "suggest", "accepted"] {
+        assert!(
+            !text.contains(word),
+            "no system's answer: {word} in {header}"
+        );
+    }
+
+    // ------------- 1 and 5: the settle takes the proposals, and again
+    let ids: Vec<i64> = firsts.iter().copied().collect();
+    answer_all(
+        &server,
+        rc,
+        &rater_a,
+        |_, _| json!({"technique": "SS-TSE", "modifier": ["FatSat", "MoCo"]}),
+    );
+    answer_all(&server, rc, &rater_b, |stack, _| {
+        if stack == ids[0] {
+            json!({"technique": "SS-TSE", "modifier": ["FatSat"]})
+        } else {
+            json!({"technique": "SS-TSE", "modifier": ["MoCo", "FatSat"]})
+        }
+    });
+    let body = json!({"settlers": [nora_p], "share": 0.0, "planted": {"share": 0.0}});
+    let settled = server.ok(
+        "POST",
+        &format!("/api/audit/draws/{d1}/settle"),
+        Some(body.clone()),
+        &cleo,
+    );
+    let s1 = &settled["settle"];
+    assert_eq!(s1["differences"], 1, "a stored HASTE is SS-TSE: {settled}");
+    assert_eq!(s1["agreements"], 2, "{settled}");
+    assert_eq!(s1["items"], 1, "{settled}");
+    for p in s1["proposals"].as_array().unwrap() {
+        assert_eq!(p["refused_values"], 0, "{settled}");
+    }
+    let again = server.ok(
+        "POST",
+        &format!("/api/audit/draws/{d1}/settle"),
+        Some(body),
+        &cleo,
+    );
+    let s2 = &again["settle"];
+    assert_eq!(s2["again"], true, "{again}");
+    assert_eq!(s2["campaign"]["id"], s1["campaign"]["id"], "{again}");
+    for k in [
+        "items",
+        "differences",
+        "agreements",
+        "agreements_settled",
+        "seed",
+        "share",
+    ] {
+        assert_eq!(s2[k], s1[k], "{k}: {again}");
+    }
+    let sc = s1["campaign"]["id"].as_i64().unwrap();
+    // the settle's proposal is the accepted answer in the question's names
+    let n = answer_all(&server, sc, &nora, |_, why| {
+        assert_eq!(why["suggested"]["technique"], "SS-TSE", "{why}");
+        json!({"technique": "SS-TSE", "modifier": ["FatSat", "MoCo"]})
+    });
+    assert_eq!(n, 1);
+    let sitem = server.ok("GET", &format!("/api/campaigns/{sc}"), None, &cleo)["items"][0]["id"]
+        .as_i64()
+        .unwrap();
+    let sheader = server.ok(
+        "GET",
+        &format!("/api/campaigns/{sc}/items/{sitem}/header"),
+        None,
+        &cleo,
+    );
+    // a verify item is no audit's: no packet beside its header
+    assert!(sheader.get("session").is_none(), "{sheader}");
+
+    // ------- 2: the default since says its stamp; the same second, inclusive
+    drop(server);
+    {
+        // every stack was accepted at the very second of the first draw
+        let mut store = open();
+        let at = format!(
+            "(SELECT created_at FROM {} WHERE id = {d1})",
+            store.qualified("audit_draw")
+        );
+        store
+            .execute(
+                &format!("UPDATE {} SET finished_at = {at}", store.qualified("job")),
+                &[],
+            )
+            .unwrap();
+    }
+    server = Server::start(&home);
+    let (status, doc) = server.call(
+        "POST",
+        "/api/audit/draws",
+        Some(json!({"count": 3, "axes": axes, "seed": "fix-2", "raters": [a_p, b_p]})),
+        &cleo,
+    );
+    assert_eq!(status, 409, "the default since is strictly after: {doc}");
+    let at = first["draw"]["created_at"].as_str().unwrap();
+    assert!(
+        doc.to_string().contains(&format!("give since {at}")),
+        "{doc}"
+    );
+    let next = server.ok(
+        "POST",
+        "/api/audit/draws",
+        Some(
+            json!({"count": 3, "since": at, "axes": axes, "seed": "fix-2",
+                    "raters": [a_p, b_p]}),
+        ),
+        &cleo,
+    );
+    assert_eq!(
+        next["draw"]["frame"]["stacks"],
+        frame1 - 3,
+        "the stacks accepted at that second, less the three drawn: {next}"
+    );
+    let d2 = next["draw"]["id"].as_i64().unwrap();
+    let seconds: BTreeSet<i64> = drawn(&server, d2, &cleo).iter().map(|x| x.0).collect();
+    assert_eq!(seconds.len(), 3);
+    assert!(seconds.is_disjoint(&firsts), "nothing is drawn twice");
+}
+
+#[test]
+fn the_rehearsal_fixes_hold() {
+    fixes(None);
+}
+
+#[test]
+fn the_rehearsal_fixes_hold_on_postgres_too() {
+    let Some(dsn) = std::env::var("NILS_TEST_POSTGRES_DSN")
+        .ok()
+        .filter(|d| !d.is_empty())
+    else {
+        eprintln!("NILS_TEST_POSTGRES_DSN is not set; the Postgres half is skipped");
+        return;
+    };
+    let schema = "nils_audit_fixes";
+    let drop = || {
+        let mut store = Store::connect_postgres(&dsn, schema).expect("connect");
+        store
+            .batch(&format!(
+                "DROP SCHEMA IF EXISTS {schema} CASCADE; DROP SCHEMA IF EXISTS {schema}_linkage CASCADE"
+            ))
+            .expect("drop");
+    };
+    drop();
+    fixes(Some((dsn.clone(), schema.to_string())));
+    drop();
 }
 
 #[test]
