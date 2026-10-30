@@ -586,28 +586,51 @@ pub(crate) fn together_disagree(judged: &[Judgement]) -> Option<String> {
     ))
 }
 
-/// The identities of a unit's input files as the registry holds them (each
-/// file's path, size and time), which the result key hashes.
-pub(crate) fn input_identities(store: &mut Store, stacks: &[i64]) -> Vec<String> {
-    let mut out = Vec::new();
+/// The identities of the input files of `stacks`, by stack (each file's
+/// path, size and time hashed), in one pass over the registry.
+pub(crate) fn input_identities_by_stack(
+    store: &mut Store,
+    stacks: &[i64],
+) -> BTreeMap<i64, Vec<String>> {
+    let mut out: BTreeMap<i64, Vec<String>> = BTreeMap::new();
     for chunk in stacks.chunks(500) {
         let ids: Vec<String> = chunk.iter().map(i64::to_string).collect();
         let sql = format!(
-            "SELECT f.path, f.size, f.mtime_ns FROM {} i JOIN {} f ON f.id = i.source_file_id \
+            "SELECT i.stack_id, f.path, f.size, f.mtime_ns FROM {} i JOIN {} f ON f.id = i.source_file_id \
              WHERE i.stack_id IN ({})",
             store.qualified("instance"),
             store.qualified("source_file"),
             ids.join(", ")
         );
         for r in store.query(&sql, &[]).unwrap_or_default() {
-            if let (Ok(p), Ok(s), Ok(m)) = (r.text(0), r.int(1), r.int(2)) {
-                out.push(nils_pipeline::sha256(format!("{p}\n{s}\n{m}").as_bytes()));
+            if let (Ok(k), Ok(p), Ok(s), Ok(m)) = (r.int(0), r.text(1), r.int(2), r.int(3)) {
+                out.entry(k)
+                    .or_default()
+                    .push(nils_pipeline::sha256(format!("{p}\n{s}\n{m}").as_bytes()));
             }
         }
     }
+    out
+}
+
+/// A unit's input identities, sorted and without repeats, from the rows
+/// of `input_identities_by_stack`.
+pub(crate) fn inputs_of(by_stack: &BTreeMap<i64, Vec<String>>, stacks: &[i64]) -> Vec<String> {
+    let mut out: Vec<String> = stacks
+        .iter()
+        .filter_map(|s| by_stack.get(s))
+        .flatten()
+        .cloned()
+        .collect();
     out.sort();
     out.dedup();
     out
+}
+
+/// The identities of a unit's input files as the registry holds them (each
+/// file's path, size and time), which the result key hashes.
+pub(crate) fn input_identities(store: &mut Store, stacks: &[i64]) -> Vec<String> {
+    inputs_of(&input_identities_by_stack(store, stacks), stacks)
 }
 
 /// The two keys of one unit's results.

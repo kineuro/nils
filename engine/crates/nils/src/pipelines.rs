@@ -5474,11 +5474,13 @@ pub(crate) fn secret_path(registry: &mut Registry, id: &str) -> Option<String> {
 /// refused before anything runs.
 fn secrets_for(registry: &mut Registry, d: &Descriptor, p: &Pipeline) -> Result<Vec<Given>, Exit> {
     let mut out = Vec::new();
+    let used = crate::software::for_run(registry, p).ok().flatten();
     for s in &d.secrets {
         // record 57 P5: a licence file placed in the software place
         // (licences/<app>/) stands where the site set no file
         let path = secret_path(registry, &s.id).or_else(|| {
-            crate::software::licence_file_for(registry, p, d, s).map(|f| f.display().to_string())
+            crate::software::licence_file_for(registry, used.as_ref(), p, d, s)
+                .map(|f| f.display().to_string())
         });
         match path {
             None if s.optional => {}
@@ -7713,9 +7715,13 @@ impl Judge<'_> {
         u: &Unit,
         of: &crate::pipeline_pack::UnitOf,
         j: &nils_pipeline::pack::rules::Judgement,
+        identities: Option<&BTreeMap<i64, Vec<String>>>,
     ) -> (String, String, Value) {
         let roles: BTreeSet<String> = of.by_role.keys().cloned().collect();
-        let inputs = crate::pipeline_pack::input_identities(store, &u.stacks);
+        let inputs = match identities {
+            Some(by_stack) => crate::pipeline_pack::inputs_of(by_stack, &u.stacks),
+            None => crate::pipeline_pack::input_identities(store, &u.stacks),
+        };
         crate::pipeline_pack::keys(&crate::pipeline_pack::KeysOf {
             pipeline: self.pipeline,
             pack: Some(&self.pack),
@@ -8333,6 +8339,8 @@ fn execute_run(home: &Home, registry: &mut Registry, x: &Execution<'_>) -> Resul
             .collect::<BTreeSet<i64>>()
             .into_iter()
             .collect();
+        let identities =
+            crate::pipeline_pack::input_identities_by_stack(registry.store(), &every_stack);
         let curation = crate::provenance::Curation::read(
             registry,
             &every_stack,
@@ -8356,7 +8364,7 @@ fn execute_run(home: &Home, registry: &mut Registry, x: &Execution<'_>) -> Resul
             let Some(&row_id) = row_ids.get(&u.id) else {
                 continue;
             };
-            let (ck, rk, members) = jd.keys(registry.store(), u, of, j);
+            let (ck, rk, members) = jd.keys(registry.store(), u, of, j, Some(&identities));
             let mut doc = jd.record(u, of, j, members, "run");
             // after the third review (finding 9): the optional inputs the
             // chain feeds nothing for, and why
@@ -9233,7 +9241,7 @@ fn judge_again(
             keep.push(i);
             continue;
         };
-        let (ck, rk, members) = jd.keys(registry.store(), u, &of, &j);
+        let (ck, rk, members) = jd.keys(registry.store(), u, &of, &j, None);
         let mut doc = jd.record(u, &of, &j, members, "start");
         // after the third review (finding 9): what fed nothing for this
         // unit, the step's unfed links and the gate's notes

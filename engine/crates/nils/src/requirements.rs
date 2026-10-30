@@ -234,6 +234,31 @@ fn subids_here() -> Option<bool> {
     Some(has("/etc/subuid") && has("/etc/subgid"))
 }
 
+/// How long a "the image is here" answer stands. The listing of software
+/// asks once per package on every load, and an inspect can take seconds;
+/// only a yes is kept, so an image pulled just now shows at once.
+const IMAGE_HERE_FOR: Duration = Duration::from_secs(60);
+
+type ImageSeen = std::sync::Mutex<std::collections::HashMap<(String, String), std::time::Instant>>;
+static IMAGE_SEEN: std::sync::OnceLock<ImageSeen> = std::sync::OnceLock::new();
+
+fn image_here_cached(rt: &runtime::Cli, image: &str) -> Option<bool> {
+    let seen = IMAGE_SEEN.get_or_init(Default::default);
+    let key = (rt.kind.name().to_string(), image.to_string());
+    if let Ok(m) = seen.lock()
+        && m.get(&key).is_some_and(|at| at.elapsed() < IMAGE_HERE_FOR)
+    {
+        return Some(true);
+    }
+    let here = runtime::image_here(rt, image, IMAGE_CAP);
+    if here == Some(true)
+        && let Ok(mut m) = seen.lock()
+    {
+        m.insert(key, std::time::Instant::now());
+    }
+    here
+}
+
 /// The runtime, and whether it can take the image or holds it already.
 fn runtime_and_image(
     registry: &mut Registry,
@@ -270,14 +295,14 @@ fn runtime_and_image(
                     runtime::image_recorded(&runtime::local_image(&dir, &p.image_digest, form))
                 }),
         },
-        _ => runtime::image_here(&rt, &p.image, IMAGE_CAP),
+        _ => image_here_cached(&rt, &p.image),
     };
     let extra = json!({
         "image": p.image, "present": here,
         "software": software.as_ref().map(crate::software::Used::doc),
         // the tool's part of a result's comparability key (section 5.6,
         // 57-Q4), for the pack to read
-        "key": crate::software::key_part(registry, p),
+        "key": crate::software::key_part(registry, p, software.as_ref()),
     });
     // an install whose last verification failed is not run
     let failed = software
