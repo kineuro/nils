@@ -261,3 +261,23 @@ cases:
       has_out_phase: false
     axes:
       modifier: ''
+
+  - name: a Philips survey whose per-frame part token states the water part keeps the Dixon and the water that token gives
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\LOCALIZER'
+      private_frame_image_type: 'DERIVED\PRIMARY\W\W\DERIVED'
+      scanning_sequence: GR
+      sequence_variant: MP
+      mr_acquisition_type: 2D
+      manufacturer: Philips Medical Systems
+      text_series_description: 'survey cor'
+      n_slices: 1
+      repetition_time: 3.1
+      echo_time: 1.4
+      flip_angle: 8
+    flags:
+      gre_scout_readout: true
+      has_water: true
+    axes:
+      construct: Water
+      modifier: Dixon
