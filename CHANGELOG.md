@@ -2,6 +2,16 @@
 
 All notable changes to NILS v1 are recorded here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html). The first release will be 1.0.0; until then pre-releases are tagged `v1.0.0-alpha.N`, then `v1.0.0-beta.N` from the first beta. The history of v0, the 0.x line, is in [kineuro/nils-legacy](https://github.com/kineuro/nils-legacy).
 
+## [Unreleased]
+
+### Fixed
+
+- A release asks the registry for the stacks' sidecar cards before it removes or renames anything in the tree, so a registry error ends the run with the tree as the last version left it.
+- A release refuses a second stack planned under the same directory and name as another before any conversion runs, and says which stack it shares the name with; it counts in the report's refused list and the stack is left to the next run.
+- `nils release` prints a warning line under "converted by" when the converter found is dated before the build this version pins.
+- `nils release --history` words the third count "written again or restored", since the count holds both.
+- The release row has a column of its own for a stop that was asked for, so a listing no longer reads it from the start of the error text; rows from before are read as they were.
+
 ## [1.0.0-beta.3] - 2026-10-29
 
 The third beta, a maintenance release after a partner site's second report (Wave 7b, the maintenance track): a release beats its heartbeat, stops at a cancel and holds its output folder against a second writer on any host; nils-postcontrast 0.3.0 with the raw-score mode, the calibrate command and a site's own calibration pair as a site file; and the job contract's additive `sweep: false`. The post-contrast fallback image is published as 0.3.0 and pinned. The MRI pack 1.4.0 ships in the tree.

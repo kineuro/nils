@@ -1574,6 +1574,31 @@ fn run_release(
             });
         }
     }
+    // Two planned stacks that name one stem in one directory would write the
+    // same files, and the converter's own `a` suffix would be the only sign.
+    // The later stack is refused before any conversion runs, with the other
+    // one named, and is left to the next run.
+    {
+        let mut first: HashMap<(String, String), i64> = HashMap::new();
+        let mut kept: Vec<Job> = Vec::with_capacity(jobs.len());
+        for job in std::mem::take(&mut jobs) {
+            if let Some(stem) = &job.place.stem
+                && job.change.is_work()
+            {
+                let key = (job.place.dir.clone(), stem.clone());
+                if let Some(other) = first.get(&key) {
+                    *report
+                        .refused
+                        .entry(format!("same name as stack {other}"))
+                        .or_insert(0) += 1;
+                    continue;
+                }
+                first.insert(key, job.stack);
+            }
+            kept.push(job);
+        }
+        jobs = kept;
+    }
     if heart.asked() {
         // nothing of this version is written, so nothing was restored
         // either, and nothing is raised below for it
@@ -1587,6 +1612,23 @@ fn run_release(
     let gone = match report.stopped_after {
         Some(_) => Vec::new(),
         None => gone_stacks(registry.store(), dataset, report.release_id)?,
+    };
+
+    // Record 55 C4: the sidecar's `NILS` object of each stack this version
+    // writes, built for those alone (#450): the names are settled over the
+    // whole registry, and the cards are not, nor are the tiers they read.
+    // Asked before the tree changes, so a store error leaves it whole; the
+    // cards of moves that then succeed are dropped below.
+    let mut cards: HashMap<i64, serde_json::Value> = match settings.layout {
+        Layout::Bids => cards_of(
+            registry.store(),
+            &facts,
+            &named,
+            jobs.iter()
+                .filter(|j| j.change != crate::version::Change::Unchanged)
+                .map(|j| j.stack),
+        )?,
+        Layout::Descriptive => HashMap::new(),
     };
 
     // ---------------------------------------------------------------- apply
@@ -1617,26 +1659,10 @@ fn run_release(
         };
         move_them(settings.root, &jobs, &mut tick)
     };
-    // Record 55 C4: the sidecar's `NILS` object of each stack this version
-    // writes, built for those alone (#450): the names are settled over the
-    // whole registry, and the cards are not, nor are the tiers they read. A
-    // move whose source is gone is written again below, and has its card.
-    let cards: HashMap<i64, serde_json::Value> = match settings.layout {
-        Layout::Bids => cards_of(
-            registry.store(),
-            &facts,
-            &named,
-            jobs.iter()
-                .filter(|j| match j.change {
-                    crate::version::Change::Unchanged => false,
-                    crate::version::Change::Moved => !moved.contains(&j.stack),
-                    _ => true,
-                })
-                .map(|j| j.stack),
-        )?,
-        Layout::Descriptive => HashMap::new(),
-    };
-
+    // a move whose source was there is not written again, and needs no card
+    for stack in &moved {
+        cards.remove(stack);
+    }
     // And only now is anything written.
     let mut rows: Vec<Vec<Param>> = Vec::new();
     let mut moves: Vec<Vec<Param>> = Vec::new();
@@ -5080,7 +5106,7 @@ fn close_row(store: &mut Store, report: &Report, stopped: Option<&str>) -> Resul
     let sql = format!(
         "UPDATE {} SET finished_at = {}, files = {}, subjects = {}, unchanged = {}, moved = {}, \
          rewritten = {}, added = {}, removed = {}, burned_in = {}, unjudged = {}, models = {}, \
-         error = {} WHERE id = {}",
+         error = {}, stopped = {} WHERE id = {}",
         store.qualified("release"),
         d.param(1, Type::Timestamp),
         d.param(2, Type::Int),
@@ -5094,7 +5120,8 @@ fn close_row(store: &mut Store, report: &Report, stopped: Option<&str>) -> Resul
         d.param(10, Type::Int),
         d.param(11, Type::Json),
         d.param(12, Type::Text),
-        d.param(13, Type::Int),
+        d.param(13, Type::Bool),
+        d.param(14, Type::Int),
     );
     store.execute(
         &sql,
@@ -5121,6 +5148,9 @@ fn close_row(store: &mut Store, report: &Report, stopped: Option<&str>) -> Resul
                 Some(e) => Param::from(e),
                 None => Param::Null,
             },
+            // converter-gone words also leave the row unfinished, and are
+            // not a stop asked for
+            Param::Bool(stopped.is_some_and(is_stopped)),
             Param::Int(report.release_id),
         ],
     )?;
