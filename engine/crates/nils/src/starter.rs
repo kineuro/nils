@@ -171,6 +171,20 @@ pub(crate) fn at_start(registry: &mut Registry) -> String {
         ),
         Err(e) => format!("starter catalog: not seeded: {e}"),
     };
+    // the registration family: its members and the family, beside the
+    // starters, where the catalog holds no family of that name
+    let pipelines = match crate::pipeline_family::seed_shipped(registry) {
+        Ok(added) if added.is_empty() => pipelines,
+        Ok(added) => format!(
+            "{pipelines}; registration family seeded {}",
+            added
+                .iter()
+                .filter_map(|a| a["label"].as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        Err(e) => format!("{pipelines}; registration family not seeded: {e}"),
+    };
     // Wave 7b A7: the shipped workflows beside the starters
     match crate::workflows::seed(registry) {
         Ok(added) if added.is_empty() => pipelines,

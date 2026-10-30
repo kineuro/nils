@@ -312,6 +312,79 @@ fn add_members_and_family(
     Ok(v)
 }
 
+/// The registration family as the engine ships it (Wave 7b): the family
+/// document, then each member's descriptor and pack, in the folder's order.
+const SHIPPED_FAMILY: &str = include_str!("../../../../pipelines/registration/nils-family.yaml");
+const SHIPPED_MEMBERS: [(&str, &str, &str); 3] = [
+    (
+        "ants",
+        include_str!("../../../../pipelines/registration/ants/nils.job.yml"),
+        include_str!("../../../../pipelines/registration/ants/nils-pack.yaml"),
+    ),
+    (
+        "synthmorph",
+        include_str!("../../../../pipelines/registration/synthmorph/nils.job.yml"),
+        include_str!("../../../../pipelines/registration/synthmorph/nils-pack.yaml"),
+    ),
+    (
+        "robust",
+        include_str!("../../../../pipelines/registration/robust/nils.job.yml"),
+        include_str!("../../../../pipelines/registration/robust/nils-pack.yaml"),
+    ),
+];
+
+/// Seed the shipped registration family where the catalog holds no family
+/// of its name: the members, then the family, as `nils pipeline add
+/// <folder>` adds them, each new member marked a starter. A family the
+/// catalog holds already, a person's or the engine's, is left as it is.
+/// Answers the labels of the members added, none when nothing was.
+pub(crate) fn seed_shipped(registry: &mut Registry) -> Result<Vec<Value>, String> {
+    let f = family::parse(SHIPPED_FAMILY).map_err(|e| format!("the shipped family: {e}"))?;
+    if get(registry.store(), &f.name)?.is_some() {
+        return Ok(Vec::new());
+    }
+    let mut members = BTreeMap::new();
+    let mut texts: Vec<(&String, String, Option<String>)> = Vec::new();
+    for k in f.members.keys() {
+        let (_, d_text, p_text) = SHIPPED_MEMBERS
+            .iter()
+            .find(|(m, _, _)| m == k)
+            .ok_or_else(|| format!("the shipped family names a member {k} the engine lacks"))?;
+        let d = nils_pipeline::descriptor::parse(d_text)
+            .map_err(|e| format!("the shipped member {k}: {e}"))?;
+        let pack = pipeline_pack::load(registry.store(), &d, p_text)
+            .map_err(|e| format!("the shipped member {k}: {e}"))?;
+        members.insert(k.clone(), (d, Some(pack)));
+        texts.push((k, (*d_text).to_string(), Some((*p_text).to_string())));
+    }
+    f.check(&members)
+        .map_err(|e| format!("the shipped family: {e}"))?;
+    registry.store().begin().map_err(|e| e.to_string())?;
+    let done = add_members_and_family(registry, &f, &texts).and_then(|v| {
+        let mut labels = Vec::new();
+        for m in v["members_added"].as_array().into_iter().flatten() {
+            if m["added"] == true
+                && let Some(id) = m["id"].as_i64()
+            {
+                rows::set_origin(registry.store(), id, rows::STARTER)
+                    .map_err(|e| fail(e.to_string()))?;
+                labels.push(json!({"id": id, "label": m["label"]}));
+            }
+        }
+        Ok(labels)
+    });
+    match done {
+        Ok(labels) => {
+            registry.store().commit().map_err(|e| e.to_string())?;
+            Ok(labels)
+        }
+        Err(e) => {
+            let _ = registry.store().rollback();
+            Err(format!("the shipped family {}: {}", f.name, e.message))
+        }
+    }
+}
+
 /// One unit of a family run: its name as a run names it, what it holds,
 /// and where the family sent it.
 #[derive(Debug, Clone)]
@@ -1301,6 +1374,49 @@ mod tests {
         let e = gone.members_exist(registry.store()).unwrap_err();
         assert!(e.contains("ants is no longer in the catalog"), "{e}");
         assert!(e.contains("nils pipeline add"), "{e}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The engine seeds the registration family beside its starters: the
+    /// three members as starters, then the family, once; a second start
+    /// adds nothing, and a family already in the catalog is left alone.
+    #[test]
+    fn the_shipped_registration_family_is_seeded_once() {
+        use nils_registry::{Backend, Home, InitOptions, Scheme};
+        let dir = std::env::temp_dir().join(format!("nils-family-seed-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let home = Home::new(&dir);
+        home.keys(None).add("nils", b"a test passphrase").unwrap();
+        let mut registry = home
+            .init(&InitOptions {
+                backend: Backend::Sqlite,
+                dsn: None,
+                schema: None,
+                scheme: Scheme::DEFAULT,
+                key: "nils".into(),
+                display_length: 12,
+                session_scheme: None,
+            })
+            .unwrap();
+        let added = super::seed_shipped(&mut registry).unwrap();
+        assert_eq!(added.len(), 3, "{added:?}");
+        let s = super::get(registry.store(), "registration")
+            .unwrap()
+            .expect("the family is kept");
+        s.members_exist(registry.store()).unwrap();
+        for id in s.members.values() {
+            let p = nils_registry::pipeline::get(registry.store(), *id)
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                p.origin.as_deref(),
+                Some(nils_registry::pipeline::STARTER),
+                "{}",
+                p.name
+            );
+        }
+        assert!(super::seed_shipped(&mut registry).unwrap().is_empty());
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -4,6 +4,14 @@ All notable changes to NILS v1 are recorded here. The format follows [Keep a Cha
 
 ## [Unreleased]
 
+### Added
+
+- The registration family is in the starter catalog. When the engine starts and the catalog holds no family named `registration`, it adds the three members (as starters) and then the family, as `nils pipeline add` of the folder does; a family already in the catalog is left as it is.
+
+### Changed
+
+- The software page answers faster. A container image found present is remembered for a minute, so listing the packages no longer inspects every image on each load, and a run's install is read once for its secrets and its comparability key.
+
 ### Fixed
 
 - A release asks the registry for the stacks' sidecar cards before it removes or renames anything in the tree, so a registry error ends the run with the tree as the last version left it.
@@ -11,6 +19,7 @@ All notable changes to NILS v1 are recorded here. The format follows [Keep a Cha
 - `nils release` prints a warning line under "converted by" when the converter found is dated before the build this version pins.
 - `nils release --history` words the third count "written again or restored", since the count holds both.
 - The release row has a column of its own for a stop that was asked for, so a listing no longer reads it from the start of the error text; rows from before are read as they were.
+- A call an assistant's turn makes and the door refuses (a ceiling that is not a ladder name, an idempotency key that is too long) no longer counts against the turn's calls, and the table of turns is swept every 256 calls, not on each.
 
 ## [1.0.0-beta.3] - 2026-10-29
 
