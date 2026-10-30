@@ -6,10 +6,18 @@
 # needs tight edges, both in the comparability key since each changes the
 # mask and its volume (--no-csf loads another model). The checks are NILS
 # policy: SynthStrip publishes no threshold.
+#
+# The session's FLAIR and T2w are masked beside the T1w (Wave 7b), for the
+# registration family's brain-mask Dice, which reads the moving image's
+# mask. The rules skip a mask nothing reads: the T2w of a session with a
+# FLAIR, since the family registers the FLAIR in its place, and a FLAIR or
+# T2w of another body part, which has no brain. A moving mask changes
+# nothing of the T1w's mask, image or volume, so the two switches break no
+# comparability; the border and --no-csf hold for every mask of the run.
 nils_pack: 1
 pipeline:
   name: synthstrip
-  descriptor_sha256: "sha256:32b9c7f70e47c1609ee885aca806c503458c7179f409b528f52caa4e01936c93"
+  descriptor_sha256: "sha256:c537f29cd92e827b7599436d5b6d72b800991c9148f5bbcf12760b85b92910e2"
   version: "1.0"
 goals:
   goal: [fast, standard, research]
@@ -27,6 +35,16 @@ knobs:
     changes: [brain_mask, brain, brain_volume]
     comparability: breaks
     set_by: rule
+  mask_flair:
+    what: "mask the session's FLAIR too, for the registration family's brain-mask Dice"
+    changes: [flair_mask, flair_mask_suffix]
+    comparability: none
+    set_by: rule
+  mask_t2w:
+    what: "mask the session's T2w too, for the registration family's brain-mask Dice"
+    changes: [t2w_mask]
+    comparability: none
+    set_by: rule
   threads:
     what: "the threads one session uses"
     comparability: none
@@ -37,6 +55,21 @@ rules:
     set: {no_csf: true}
     why: "a registration mask that needs tight edges takes the no-CSF model; everything else keeps the CSF"
     source: "synthstrip.io; the qsiprep template-registration mask (record 57, research 02)"
+  - id: no-t2w-mask-beside-a-flair
+    when: "present(flair)"
+    set: {mask_t2w: false}
+    why: "the registration family registers a session's FLAIR onto its T1w, and its T2w only where it has no FLAIR, so the T2w of a session with a FLAIR needs no mask"
+    source: "the registration family's ANTs member (needs.t2w is hard only without a FLAIR)"
+  - id: flair-mask-of-a-brain
+    when: "present(flair) and not (flair.body_part in ['brain', 'brain-neck'])"
+    set: {mask_flair: false}
+    why: "SynthStrip extracts a brain, and a FLAIR of another body part has none"
+    source: "synthstrip.io"
+  - id: t2w-mask-of-a-brain
+    when: "present(t2w) and not (t2w.body_part in ['brain', 'brain-neck'])"
+    set: {mask_t2w: false}
+    why: "SynthStrip extracts a brain, and a T2w of another body part (a spine scan) has none"
+    source: "synthstrip.io"
 checks:
   - {metric: mask_components, op: "<=", value: 1, action: flag, source: policy, words: "the mask is in more than one piece: it broke, or took something beside the brain"}
   - {metric: mask_edge_voxels, op: "<=", value: 0, action: flag, source: policy, words: "the mask touches the image's edge: the field of view may cut the brain"}
@@ -48,7 +81,7 @@ licence:
   accept: false
 resources:
   memory_gb: 8
-  minutes: 1
+  minutes: 3
   gpu: none
 comparability: {}
 tests: []

@@ -28,6 +28,7 @@ All notable changes to NILS v1 are recorded here. The format follows [Keep a Cha
 - An audit draw by count reads each stack's accepted answer in the pack's value names (`SS-TSE` for a stored `HASTE`, a list for a stored `FatSat,MoCo`), so the settle's proposals, the raters' agreement with the accepted answer and the grade compare the same words the question takes. A draw made before keeps the stored form.
 - A draw by count given `since` takes the stacks accepted at that time or after it. One that continues the round's draws (the default, or a time at or after the last draw's) leaves out every stack an earlier draw by count holds, so nothing is drawn twice; a time before the last draw reads that window again as it was.
 - Asking to settle an audit draw a second time answers the settle it has and its counts, with `again`, instead of refusing.
+- The synthstrip starter masks the session's FLAIR and T2w as well as its T1w, each mask named by its image's stem (`<stem>_desc-brain_mask.nii.gz`), so the registration family's brain-mask Dice has a mask of the moving image. The T1w's mask, brain image and table keep their names and content. The pack's rules leave the T2w unmasked in a session that has a FLAIR (the family registers the FLAIR) and a FLAIR or T2w of another body part; the switches `mask_flair` and `mask_t2w` break no comparability.
 
 ### Fixed
 
