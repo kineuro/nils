@@ -14452,7 +14452,7 @@ fn g11_the_registration_family_routes_lists_replays_and_records_the_member() {
         std::fs::write(
             dir.join("nils-pack.yaml"),
             format!(
-                "nils_pack: 1\npipeline: {{name: echo-{member}, descriptor_sha256: \"{digest}\", version: \"0.1\"}}\ngoals: {{goal: [fast, standard, research], task: [within_session]}}\nknobs:\n  threads: {{comparability: none, set_by: person}}\n"
+                "nils_pack: 1\npipeline: {{name: echo-{member}, descriptor_sha256: \"{digest}\", version: \"0.1\"}}\ngoals: {{goal: [fast, standard, research], task: [within_session, to_template]}}\nknobs:\n  threads: {{comparability: none, set_by: person}}\n"
             ),
         )
         .unwrap();
@@ -14462,15 +14462,16 @@ fn g11_the_registration_family_routes_lists_replays_and_records_the_member() {
         r#"nils_family: 1
 family: {name: fam, version: "0.1", words: "two echoes"}
 roles: [t1w, flair]
-goals: {goal: [fast, standard, research], task: [within_session]}
+goals: {goal: [fast, standard, research], task: [within_session, to_template]}
 tasks:
   within_session: {level: session, members: [fine, coarse]}
+  to_template: {level: session, members: [fine, coarse]}
 members:
   fine: {pipeline: echo-fine}
   coarse: {pipeline: echo-coarse}
 rules:
   - {id: fine, when: "t1w.voxel_max_mm <= 1.5", route: fine, why: "a fine T1w", source: policy}
-  - {id: coarse, when: "task == 'within_session'", route: coarse, why: "a coarse T1w", source: policy}
+  - {id: coarse, when: "task == 'within_session' or task == 'to_template'", route: coarse, why: "a coarse T1w", source: policy}
 "#,
     )
     .unwrap();
@@ -14522,6 +14523,54 @@ rules:
         assert_eq!(u["family"]["name"], "fam", "{u}");
         assert_eq!(u["family"]["digest"], fam_digest, "{u}");
     }
+    assert_eq!(doc["params"]["task"], "within_session", "{doc}");
+    // the G11 proof: a run of the family under another task records the
+    // family's switch, not the member descriptor's default, and its units
+    // ran under it
+    let (good, _out, err) = lab.run(
+        &[
+            "run",
+            "fam",
+            "--select",
+            "selection:every@1",
+            "--switch",
+            "task=to_template",
+        ],
+        None,
+    );
+    assert!(good, "{err}");
+    let runs = lab.json(&["pipeline", "runs", "--limit", "100", "--json"]);
+    let newest = runs
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|r| {
+            r["pipeline"]
+                .as_str()
+                .is_some_and(|p| p.starts_with("echo-coarse"))
+        })
+        .max_by_key(|r| r["id"].as_i64().unwrap())
+        .unwrap_or_else(|| panic!("no member run: {runs}"));
+    assert_ne!(newest["id"], run["id"], "{runs}");
+    let id = newest["id"].as_i64().unwrap().to_string();
+    let doc = lab.json(&["pipeline", "runs", &id, "--json"]);
+    assert_eq!(doc["params"]["task"], "to_template", "{doc}");
+    let mut tags: Vec<String> = Vec::new();
+    let mut stack = vec![lab.work.path().to_path_buf()];
+    while let Some(d) = stack.pop() {
+        for e in std::fs::read_dir(&d).into_iter().flatten().flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                stack.push(p);
+            } else if p.to_string_lossy().ends_with("_desc-echo_tag.txt") {
+                tags.push(std::fs::read_to_string(&p).unwrap_or_default());
+            }
+        }
+    }
+    assert!(
+        tags.iter().any(|t| t.contains("to_template")),
+        "the units ran the switch's task: {tags:?}"
+    );
 }
 
 /// A bids echo pipeline at the session level: for each session it writes
@@ -14544,9 +14593,15 @@ inputs:
     integer: true
     minimum: 1
     maximum: 4
+  - id: task
+    name: Task
+    type: String
+    value-key: "[TASK]"
+    value-choices: ["within_session", "to_template"]
+    default-value: "within_session"
 command-line: >-
   bash -c 'cd [InputDataset]; for f in sub-*/ses-*/anat/*_T1w.nii.gz; do a=$(dirname "$f"); mkdir -p [OutputLocation]/$a;
-  b=$(basename "$f" .nii.gz); echo "{tag} [THREADS]" > [OutputLocation]/$a/${{b%_T1w}}_desc-echo_tag.txt; done'
+  b=$(basename "$f" .nii.gz); echo "{tag} [THREADS] [TASK]" > [OutputLocation]/$a/${{b%_T1w}}_desc-echo_tag.txt; done'
 x-nils:
   contract: 1
   analysis-level: session
