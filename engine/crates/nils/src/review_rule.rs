@@ -1091,11 +1091,64 @@ enum Cutoff<'a> {
     Draw(i64),
 }
 
+/// One stored answer of an axis as the pack names it (7b, the rehearsal of
+/// the audit): the registry's rows keep v0's stored form (`HASTE`, `TIRM`,
+/// `FatSat,MoCo`), while a campaign's question, its answers and its labels
+/// speak the pack's identities (`SS-TSE`, `IR-TSE`, `["FatSat", "MoCo"]`).
+/// Each word is read as the value that stores it first, then by its
+/// identity, a former identity or its label; a word the axis's fallback
+/// names (technique's `Unknown`, which is none of its values) or `None`
+/// on a multi-valued axis is no value. A single-valued axis gives one
+/// identity or null, a multi-valued one a list or null; a word the pack
+/// does not know is kept as it is, and the question refuses it.
+pub(crate) fn named_by_pack(pack: &nils_pack::Pack, axis: &str, stored: &Value) -> Value {
+    let Some(a) = pack.axes.iter().find(|a| a.name == axis) else {
+        return stored.clone();
+    };
+    let words: Vec<String> = match stored {
+        Value::Null => return Value::Null,
+        Value::String(s) if a.multi => s.split(',').map(|w| w.trim().to_string()).collect(),
+        Value::String(s) => vec![s.trim().to_string()],
+        Value::Array(list) => list
+            .iter()
+            .filter_map(Value::as_str)
+            .map(|w| w.trim().to_string())
+            .collect(),
+        other => return other.clone(),
+    };
+    let mut ids: Vec<String> = Vec::new();
+    for w in words {
+        if w.is_empty() {
+            continue;
+        }
+        let known = a
+            .id_of_stored(&w)
+            .map(str::to_string)
+            .or_else(|| a.value_named(&w).map(|i| a.values[i].id.clone()));
+        let id = match known {
+            Some(id) => id,
+            None if a.default.as_deref() == Some(w.as_str()) => continue,
+            None if a.multi && w.eq_ignore_ascii_case("none") => continue,
+            None => w,
+        };
+        if !ids.contains(&id) {
+            ids.push(id);
+        }
+    }
+    match (a.multi, ids.len()) {
+        (_, 0) => Value::Null,
+        (true, _) => json!(ids),
+        (false, _) => json!(ids[0]),
+    }
+}
+
 fn frame(
     store: &mut Store,
     r: &Round,
     axes: &[String],
     since: Cutoff<'_>,
+    pack: Option<&nils_pack::Pack>,
+    exclude_drawn: bool,
 ) -> Result<Vec<Framed>, StoreError> {
     let holds = of_round(store, r);
     let d = store.dialect();
@@ -1104,7 +1157,7 @@ fn frame(
     let (after, params) = match since {
         Cutoff::Time(t) => (
             format!(
-                " AND x.id IN (SELECT c.stack_id FROM {} c JOIN {} j ON j.id = c.job_id WHERE COALESCE(j.finished_at, j.started_at) > {})",
+                " AND x.id IN (SELECT c.stack_id FROM {} c JOIN {} j ON j.id = c.job_id WHERE COALESCE(j.finished_at, j.started_at) >= {})",
                 store.qualified("classification"),
                 store.qualified("job"),
                 d.param(1, nils_registry::schema::Type::Timestamp)
@@ -1124,6 +1177,25 @@ fn frame(
             vec![nils_registry::store::Param::Int(id)],
         ),
         Cutoff::None => (String::new(), Vec::new()),
+    };
+    // 7b: a draw that continues the round's chain of draws by count never
+    // frames a stack an earlier draw by count of the round holds, so an
+    // inclusive `since` at the last draw's time draws nothing twice
+    let (after, params) = if exclude_drawn {
+        let n = params.len() + 1;
+        let mut params = params;
+        params.push(nils_registry::store::Param::Int(r.id));
+        (
+            format!(
+                "{after} AND x.id NOT IN (SELECT s.stack_id FROM {} s JOIN {} a ON a.id = s.draw_id WHERE a.round_id = {} AND a.count IS NOT NULL)",
+                store.qualified("audit_draw_stack"),
+                store.qualified("audit_draw"),
+                d.param(n, nils_registry::schema::Type::Int)
+            ),
+            params,
+        )
+    } else {
+        (after, params)
     };
     let sql = format!(
         "SELECT x.id, st.study_instance_uid, se.series_instance_uid, x.stack_key, f.manufacturer, {}, {} FROM {} x \
@@ -1188,7 +1260,10 @@ fn frame(
             match a.and_then(|m| m.get(axis)) {
                 Some((_, true)) => {}
                 Some((v, false)) => {
-                    accepted.insert(axis.clone(), json!(v));
+                    let v = json!(v);
+                    // read once here, in the pack's names (7b)
+                    let named = pack.map_or_else(|| v.clone(), |p| named_by_pack(p, axis, &v));
+                    accepted.insert(axis.clone(), named);
                 }
                 None => {
                     accepted.insert(axis.clone(), Value::Null);
@@ -1315,9 +1390,10 @@ fn campaign_over(
 /// and the chosen model where none is named), `seed` (a word; one is drawn
 /// and kept where none is given), `share` (1 % by default) or, record 58
 /// P2 (spec §13.1), `count` (a fixed number of stacks, 150 for the monthly
-/// audit) with `since` (the stacks accepted after this time; after the
-/// last draw where none is given), `axes` (the header certificate's by
-/// default), `raters` and `adjudicators` (the agent principals; anyone
+/// audit) with `since` (the stacks accepted at this time or after it;
+/// after the round's last draw by count where none is given; a draw that
+/// continues the chain never frames a stack an earlier one holds), `axes`
+/// (the header certificate's by default), `raters` and `adjudicators` (the agent principals; anyone
 /// with `campaigns:work` where none are named), `raters_per_item` (two by
 /// default) and `name`. A draw by count is settled by a person
 /// (`/settle`), so its raters' campaign is never adjudicated: a
@@ -1413,7 +1489,49 @@ fn draw_door(
         Some((None, t)) => Cutoff::Time(t),
         None => Cutoff::None,
     };
-    let framed = frame(registry.store(), &r, &axes, cutoff).map_err(failed)?;
+    let pack = doors
+        .pack_dir
+        .as_ref()
+        .and_then(|dir| nils_pack::load(&dir.join(&doors.ask_pack), None).ok());
+    // 7b: a draw by count continues the round's chain (the default since,
+    // or one at or after the last draw's time) and then frames no stack an
+    // earlier draw by count holds; a since before the last draw reads an
+    // earlier window again, as it was, so a seed draws the same stacks
+    // (how a draw is checked)
+    let exclude_drawn = by_count
+        && match &since {
+            Some((Some(_), _)) => true,
+            Some((None, t)) => {
+                match audit_draw::last_count_draw(registry.store(), r.id).map_err(failed)? {
+                    Some((_, last)) => {
+                        nils_registry::time::secs_of(t) >= nils_registry::time::secs_of(&last)
+                    }
+                    None => false,
+                }
+            }
+            None => false,
+        };
+    let framed = frame(
+        registry.store(),
+        &r,
+        &axes,
+        cutoff,
+        pack.as_ref(),
+        exclude_drawn,
+    )
+    .map_err(failed)?;
+    // 7b: a default `since` that leaves nothing to draw says the stamp it
+    // used and how to draw from earlier
+    if framed.is_empty()
+        && let Some((Some(last), t)) = &since
+    {
+        return Err(Reply::error(
+            409,
+            format!(
+                "no stack was accepted since {t}, the time of draw {last}, the round's last draw by count, which is where a draw by count starts when no since is given; to draw the stacks accepted at that second, give since {t} (the stacks accepted at it or after, less any an earlier draw by count holds); to read an earlier window again, give an earlier since"
+            ),
+        ));
+    }
     let since: Option<String> = since.map(|(_, t)| t);
     let (d, chosen) = audit_draw::draw(
         registry.store(),
@@ -1428,10 +1546,6 @@ fn draw_door(
     // the campaign: the drawn stacks frozen, an axes question as the
     // reference reads were asked, nothing suggested, closing into nothing
     let mut question = json!({"kind": "axes", "axes": axes});
-    let pack = doors
-        .pack_dir
-        .as_ref()
-        .and_then(|dir| nils_pack::load(&dir.join(&doors.ask_pack), None).ok());
     crate::campaigns::complete_axes(&mut question, pack.as_ref())
         .map_err(|(s, m)| Reply::error(s, m))?;
     let name = doc["name"]
@@ -1503,6 +1617,67 @@ fn accepted_text(accepted: &Value) -> String {
     }
 }
 
+/// A settle asked for again (7b): the settle the draw has, with its counts
+/// as the first call gave them, and nothing made. `again` says so. The
+/// counts are worked out again from the raters' answers and the settle's
+/// own seed and share, so they are the first call's while those answers
+/// stand; `proposals` is null, as nothing was imported now.
+fn settled_again(registry: &mut Registry, d: &audit_draw::Draw) -> Result<Reply, Reply> {
+    let seed = d.settle_seed.clone().unwrap_or_else(|| d.seed.clone());
+    let share = d.settle_share.unwrap_or(audit_draw::SETTLE_SHARE);
+    let drawn = audit_draw::stacks(registry.store(), d.id).map_err(failed)?;
+    let (reads, raters) = match d.campaign_id {
+        Some(rc) => {
+            let answers = audit_draw::raters_answers(registry.store(), rc)
+                .map_err(crate::campaigns::campaign_err)?;
+            let reads: BTreeMap<i64, Vec<audit_draw::Answered>> = answers
+                .iter()
+                .map(|(s, l)| (*s, l.iter().map(|(_, _, a)| a.clone()).collect()))
+                .collect();
+            let raters = nils_registry::campaign::get(registry.store(), rc)
+                .map_err(crate::campaigns::campaign_err)?
+                .map_or(1, |c| c.raters_per_item.max(1) as usize);
+            (reads, raters)
+        }
+        None => (BTreeMap::new(), 1),
+    };
+    let ts = audit_draw::to_settle(&seed, share, &drawn, &reads, raters);
+    let campaign = match d.settle_campaign_id {
+        Some(c) => {
+            let made = nils_registry::campaign::get(registry.store(), c)
+                .map_err(crate::campaigns::campaign_err)?
+                .ok_or_else(|| Reply::error(404, format!("no campaign {c}")))?;
+            let items = nils_registry::campaign::items(registry.store(), c)
+                .map_err(crate::campaigns::campaign_err)?
+                .len();
+            Some((made, items))
+        }
+        None => None,
+    };
+    let settle = match campaign {
+        Some((made, items)) => json!({
+            "campaign": {"id": made.id, "name": made.name, "purpose": "verify",
+                         "suggest": "imported", "closes_into": "none",
+                         "raters_per_item": made.raters_per_item, "trains": false,
+                         "status": made.status},
+            "items": items, "differences": ts.differ.len(), "agreements": ts.agree,
+            "agreements_settled": ts.agreements_drawn.len(), "seed": seed, "share": share,
+            "planted": nils_registry::verify::summary(registry.store(), made.id).map_err(failed)?,
+            "proposals": Value::Null,
+            "again": true,
+        }),
+        None => json!({
+            "campaign": Value::Null,
+            "items": 0, "differences": 0, "agreements": ts.agree,
+            "agreements_settled": 0, "seed": seed, "share": share,
+            "planted": Value::Null, "proposals": Value::Null,
+            "again": true,
+            "note": "nothing to settle: no rater differs from the accepted answer and the share of the agreements is none; the draw is graded with every stack standing as the raters' agreement",
+        }),
+    };
+    Ok(Reply::ok(json!({"draw": d.as_json(), "settle": settle})))
+}
+
 /// `POST /api/audit/draws/{id}/settle` (record 58 P2, spec §13.3): once
 /// both raters have answered every drawn stack, the verify campaign a
 /// person settles the round in: every stack where a rater's answer differs
@@ -1525,15 +1700,7 @@ fn settle_door(
         .map_err(failed)?
         .ok_or_else(|| Reply::error(404, format!("no audit draw {id}")))?;
     if d.settled() {
-        return Err(Reply::error(
-            409,
-            match d.settle_campaign_id {
-                Some(c) => format!("audit draw {id} is settled in campaign {c} already"),
-                None => {
-                    format!("audit draw {id} is settled already, with nothing left to a person")
-                }
-            },
-        ));
+        return settled_again(registry, &d);
     }
     let raters_campaign = d
         .campaign_id
@@ -2269,4 +2436,43 @@ fn archive_run(doors: &Doors, registry: &mut Registry, caller: &Caller) -> Resul
         "job": id, "state": "queued", "step": crate::system1::STEP, "for": "archive",
         "scans": frozen, "handle": handle, "command": command,
     })))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn mri() -> nils_pack::Pack {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../packs/mri");
+        nils_pack::load(&dir, None).expect("the MRI pack loads")
+    }
+
+    /// 7b: the registry's stored form read in the pack's value names, once,
+    /// where a draw reads the accepted answer.
+    #[test]
+    fn a_stored_answer_reads_in_the_packs_names() {
+        let pack = mri();
+        let n = |axis: &str, v: Value| named_by_pack(&pack, axis, &v);
+        // v0's display names, stored, are the values that store them
+        assert_eq!(n("technique", json!("HASTE")), json!("SS-TSE"));
+        assert_eq!(n("technique", json!("TIRM")), json!("IR-TSE"));
+        assert_eq!(n("technique", json!("SPACE")), json!("3D-TSE"));
+        // an identity is kept, so reading twice changes nothing
+        assert_eq!(n("technique", json!("SS-TSE")), json!("SS-TSE"));
+        assert_eq!(n("base", json!("T2*w")), json!("T2starw"));
+        assert_eq!(n("base", json!("T2starw")), json!("T2starw"));
+        // a comma list on a multi-valued axis is a list, None is no value
+        assert_eq!(
+            n("modifier", json!("FatSat,MoCo")),
+            json!(["FatSat", "MoCo"])
+        );
+        assert_eq!(n("modifier", json!("None")), Value::Null);
+        assert_eq!(n("modifier", Value::Null), Value::Null);
+        // base's Unknown is one of its values; technique's fallback word is none
+        assert_eq!(n("base", json!("Unknown")), json!("Unknown"));
+        assert_eq!(n("technique", json!("Unknown")), Value::Null);
+        // a word the pack does not know is kept, for the question to refuse
+        assert_eq!(n("technique", json!("NoSuch")), json!("NoSuch"));
+        assert_eq!(n("colour", json!("red")), json!("red"));
+    }
 }

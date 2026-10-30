@@ -11,11 +11,16 @@ All notable changes to NILS v1 are recorded here. The format follows [Keep a Cha
 - `GET` and `POST /api/audit/draws/{id}/rule-review` answer a graded audit round's rule review (its campaign's id, name, state and counts, or none), and the `POST` opens it over the grade's wrong stacks where none is open yet, once, with the same campaign a round over the rule opens when it is graded. A round within the rule that found a wrong stack can be reviewed too; one not graded yet, or with nothing wrong, is refused with what to do. The openapi document gains the door additively.
 - The registration family is in the starter catalog. When the engine starts and the catalog holds no family named `registration`, it adds the three members (as starters) and then the family, as `nils pipeline add` of the folder does; a family already in the catalog is left as it is.
 - The seven starters carry their packs. A new catalog seeds each starter with the pack the engine ships beside it, so its pre-flight gives the pack's skip reasons and the funnel and plan analysis read it. On a catalog already in place, the engine adds the starter with its pack as the name's next version, once; the version without the pack is left as it was, and where the starter replaces its earlier versions the listing says the new one is the same descriptor with its pack.
+- An audit item's header (`GET /api/campaigns/{id}/items/{item}/header` on a campaign of purpose audit) carries the packet the raters' check read: `fingerprint`, the stack's own fingerprint values under the packet's names (the slice count, the stacks in the series and the stack's place among them, the slice span, the field of view, the b-values, the field strength's class and the rest), and `session`, the study's series in the order they were acquired, the stack's own marked. Header text only, as before; below detail quasi the session's descriptions and protocol names are left out.
+- The vocabulary a served question carries says every value's `meaning` in one line (its description, else the names it goes by, else its label, `meaning_from` saying which), so a reader's prompt can be built from the campaign door instead of a fixed list. An axes question also says `earlier_names`, every other name an answer may give a value by (a former identity, the label, the stored form, `none` for no value) with the value it means, so answers written in an earlier vocabulary are translated, not guessed.
 
 ### Changed
 
 - `nils model register` takes a card made at another site: a training label set this registry does not hold is kept as a foreign claim, and the model says it was trained on a label set held at the training site (digest ...) instead of the registration being refused. A set the registry holds is checked against the sealed samples as before.
 - The software page answers faster. A container image found present is remembered for a minute, so listing the packages no longer inspects every image on each load, and a run's install is read once for its secrets and its comparability key.
+- An audit draw by count reads each stack's accepted answer in the pack's value names (`SS-TSE` for a stored `HASTE`, a list for a stored `FatSat,MoCo`), so the settle's proposals, the raters' agreement with the accepted answer and the grade compare the same words the question takes. A draw made before keeps the stored form.
+- A draw by count given `since` takes the stacks accepted at that time or after it. One that continues the round's draws (the default, or a time at or after the last draw's) leaves out every stack an earlier draw by count holds, so nothing is drawn twice; a time before the last draw reads that window again as it was.
+- Asking to settle an audit draw a second time answers the settle it has and its counts, with `again`, instead of refusing.
 
 ### Fixed
 
@@ -25,6 +30,7 @@ All notable changes to NILS v1 are recorded here. The format follows [Keep a Cha
 - `nils release --history` words the third count "written again or restored", since the count holds both.
 - The release row has a column of its own for a stop that was asked for, so a listing no longer reads it from the start of the error text; rows from before are read as they were.
 - A call an assistant's turn makes and the door refuses (a ceiling that is not a ladder name, an idempotency key that is too long) no longer counts against the turn's calls, and the table of turns is swept every 256 calls, not on each.
+- A draw by count whose default `since` leaves nothing to draw says the time it used, the draw it came from, and the `since` to give to take the stacks accepted at that second.
 
 ## [1.0.0-beta.3] - 2026-10-29
 

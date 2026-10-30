@@ -314,13 +314,24 @@ raters alone decides nothing.
    POST /api/audit/draws  {"count": 150, "seed": "<registered seed>", "raters": ["<rater-a>", "<rater-b>"]}
    ```
 
-   Give `"since": "2026-11-01T00:00:00Z"` to start the frame at a time. The
-   same seed over the same frame draws the same stacks in any registry; the
-   draw keeps its frame's size and digest and each stack's accepted answer,
+   Give `"since": "2026-11-01T00:00:00Z"` to start the frame at a time; the
+   stacks accepted at that time or after it are framed. The same seed over the
+   same frame draws the same stacks in any registry; the draw keeps its frame's
+   size and digest and each stack's accepted answer (in the pack's value names),
    vendor and acquisition year.
 
+   A second draw the same day finds nothing by default, since the default
+   starts strictly after the last draw. The refusal names that draw's time:
+   give it as `since` to take the stacks accepted at that second. A draw that
+   continues the round's draws never frames a stack an earlier draw by count
+   holds, so nothing is drawn twice.
+
 2. The two raters read each item blind through the campaign doors, as in
-   section 6. Their campaign is never adjudicated.
+   section 6. Their campaign is never adjudicated. An item's header door gives
+   the packet the raters' check read: the header's `fields`, the stack's
+   `fingerprint` values and the study's `session` list. The campaign door's
+   `question.values` and `question.vocabulary` (with each value's `meaning`)
+   are the words a rater answers in.
 
 3. Once both raters have answered every stack, make the settle:
 
@@ -332,7 +343,8 @@ raters alone decides nothing.
    accepted answer and a seeded 10 % of the stacks where both agree with it. The
    person sees the accepted answer filled in, and where a rater differs, the
    accepted and the differing answer as A and B, unlabelled. Planted values
-   guard against accepting without looking.
+   guard against accepting without looking. Asked again, the door answers the
+   settle the draw has, with its counts and `"again": true`.
 
 4. The person reads the settle campaign, then close it and grade the draw:
 
