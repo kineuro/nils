@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Process and file helpers that more than one crate of the engine needs
 //! and that depend on nothing else of it: waiting on a child while ticking,
 //! ending a child with its process group, and moving a file where a rename
