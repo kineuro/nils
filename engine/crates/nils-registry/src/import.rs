@@ -627,10 +627,17 @@ struct Parsed {
     fields: BTreeMap<String, Value>,
 }
 
+/// How a job's map file and a reason spell the column at `i` (from 0): its
+/// place, counted from 1.
+pub fn column_place(i: usize) -> String {
+    format!("column {}", i + 1)
+}
+
 /// Where a refused name came from, for a reason that never carries it.
+/// `at` counts from 1.
 fn named_in(at: Option<usize>) -> String {
     match at {
-        Some(place) => format!("the name in column {place}"),
+        Some(place) => format!("the name in {}", column_place(place - 1)),
         None => "the mapping's name".to_string(),
     }
 }
@@ -765,7 +772,7 @@ fn read_rows(mapping: &Mapping, csv_text: &str) -> Result<(Vec<Parsed>, Vec<Outc
         let mut bad = None;
         for (field, src, at) in &sources {
             let mut raw = cell_at(&record, *at);
-            let mut from = at.map(|i| format!("column {}", i + 1));
+            let mut from = at.map(column_place);
             if raw.is_empty()
                 && let Some(v) = &src.value
             {
