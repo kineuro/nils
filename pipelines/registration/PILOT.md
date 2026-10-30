@@ -17,11 +17,11 @@ nils pipeline add pipelines/registration
 nils pipeline show registration
 ```
 
-The images are pulled by the first run, by digest. The two site files the members may read: the FreeSurfer licence (`freesurfer_license`, the one recon-all reads) and TemplateFlow's `tpl-MNI152NLin2009cAsym_res-01_T1w.nii.gz` as `mni_template` for the ANTs member's template task (the SynthMorph member falls back to FreeSurfer's own copy of the template):
+The images are pulled by the first run, by digest, or installed into the software place first. The FreeSurfer licence is the site file the FreeSurfer members read (`freesurfer_license`, the one recon-all reads). TemplateFlow's `tpl-MNI152NLin2009cAsym_res-01_T1w.nii.gz` for the ANTs member's template task is fetched by its sha256 when the ANTs member is installed (a secret is capped at 64 KiB, so it cannot be set as one); the SynthMorph member falls back to FreeSurfer's own copy of the template:
 
 ```sh
 nils pipeline secret set freesurfer_license --file /path/to/license.txt
-nils pipeline secret set mni_template --file /path/to/tpl-MNI152NLin2009cAsym_res-01_T1w.nii.gz
+nils software install registration-ants@ants-2.6.2
 ```
 
 ## 2. The first half of G11: the routing, read-only

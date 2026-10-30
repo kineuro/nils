@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 #
 # The ANTs member of the registration family (record 57 P6, Wave 7b P2):
-# within a session, the FLAIR and the T2w onto the T1w, rigid with Mattes
+# within a session, the FLAIR (or a T2w alone) onto the T1w, rigid with Mattes
 # mutual information (32 bins, a SynthStrip brain mask of the T1w as the
 # fixed mask where the synthstrip starter made one, no histogram matching:
 # research 07, Table 5 R3); to the template, `antsRegistrationSyN.sh -t s`
@@ -12,11 +12,14 @@
 #
 # The image is ANTs 2.6.2, the release fMRIPrep 25.2 runs, pinned by its
 # registry manifest digest (resolved 2026-10-25 by a manifest request, not
-# pulled). It ships no template: the site places TemplateFlow's
-# tpl-MNI152NLin2009cAsym_res-01_T1w.nii.gz as the site file mni_template
-# (`nils pipeline secret set mni_template --file <path>`), which the
-# container sees at /opt/templates/MNI152NLin2009cAsym_T1w.nii.gz; a
-# to-template unit without it says so and writes nothing.
+# pulled). It ships no template: the pack names TemplateFlow's
+# tpl-MNI152NLin2009cAsym_res-01_T1w.nii.gz by its sha256 (`source.files`),
+# `nils software install` fetches it into the install's files/, and a run
+# is given it as the site file mni_template, which the container sees at
+# /opt/templates/MNI152NLin2009cAsym_T1w.nii.gz (a site file the site sets
+# itself stands first; a secret is capped at 64 KiB, so the 13.7 MB
+# template is never one). A to-template unit without it says so and
+# writes nothing.
 #
 # The outputs are typed derivatives (Wave 7b section 8.2): each transform
 # in ITK's native form (`.mat` for the rigid, `.h5` for SyN and its
@@ -24,20 +27,28 @@
 # and the grid or space it lands on; the aligned image with its role,
 # contrast and grid; and a table of the checks: the rigid sanity (the
 # determinant, a flip, the translation and rotation, read from the ITK
-# transform), the foreground Dice after alignment (Otsu masks of both
-# images on the T1w's grid), and for SyN the folding (the share of brain
+# transform), the brain-mask Dice after alignment (the SynthStrip mask of
+# the moving image carried onto the T1w's grid against the T1w's, where
+# the brain_mask input holds both; else no Dice and the row says why), and
+# for SyN the folding (the share of brain
 # voxels whose Jacobian determinant is not positive) and the inverse
 # consistency (the mean displacement of the forward transform composed
 # with its inverse, in mm, inside the brain). SynthSeg's quality scores
 # are the FreeSurfer members' check: this image has no SynthSeg.
+#
+# The brain-mask Dice is a second reading, not the gate: record 57 P6
+# puts the 0.85 alignment check on the link, where SAMSEG and segcsvd
+# check the brain masks of the FLAIR and the T1w they read. The Otsu
+# foreground Dice this member wrote before spread from 0.54 to 0.88 on
+# good pairs in the pilot of 2026-10-30, so it is gone.
 #
 # Production plans on the CPU (`-n` threads); ANTs uses no card.
 name: registration-ants
 schema-version: "0.5"
 tool-version: "ants-2.6.2"
 description: >-
-  Register a session's images with ANTs: within a session, the FLAIR and
-  the T2w onto the T1w, rigid with mutual information; to the template,
+  Register a session's images with ANTs: within a session, the FLAIR (or
+  a T2w alone) onto the T1w, rigid with mutual information; to the template,
   SyN of the T1w onto MNI152NLin2009cAsym after N4 and skull stripping.
   One session is one unit; CPU, about 5 minutes a rigid pair and 40
   minutes a SyN.
@@ -50,7 +61,7 @@ inputs:
   - id: task
     name: Task
     type: String
-    description: "within_session aligns the session's FLAIR and T2w onto its T1w, rigid; to_template aligns the T1w onto MNI152NLin2009cAsym with SyN."
+    description: "within_session aligns the session's FLAIR onto its T1w (its T2w where it has no FLAIR), rigid; to_template aligns the T1w onto MNI152NLin2009cAsym with SyN."
     value-key: "[TASK]"
     value-choices: ["within_session", "to_template"]
     default-value: "within_session"
@@ -90,23 +101,25 @@ command-line: |-
   for f in sub-*/ses-*/anat/*_T1w.nii.gz; do
   [ -e "$f" ] || continue;
   a=$(dirname "$f"); d=[OutputLocation]/$a; mkdir -p "$d"; b=$(basename "$f" .nii.gz); b=${b%_T1w};
-  w=$(mktemp -d [OutputLocation]/.work-XXXXXX); mask=""; m=$(find "$inputs"/brain_mask -path "*/$a/*_desc-brain_mask.nii.gz" 2>/dev/null | sort | head -n 1);
-  [ -n "$m" ] && mask=$m; xm=(); [ -n "$mask" ] && xm=(-x "[$mask,NULL]"); xn=(); [ -n "$mask" ] && xn=(-x "$mask");
+  w=$(mktemp -d [OutputLocation]/.work-XXXXXX); mask=""; m=$(find "$inputs"/brain_mask -path "*/$a/${b}_desc-brain_mask.nii.gz" 2>/dev/null | sort | head -n 1);
+  [ -n "$m" ] && mask=$m; masked=0; [ -n "$mask" ] && masked=1; xm=(); [ -n "$mask" ] && xm=(-x "[$mask,NULL]"); xn=(); [ -n "$mask" ] && xn=(-x "$mask");
   if [ "[TASK]" = within_session ]; then
   for role in flair t2w; do
   if [ $role = flair ]; then mv=$(flair "$a"); con=FLAIR; else mv=$(t2w "$a"); con=T2w; fi;
   [ -z "$mv" ] && continue;
-  antsRegistration -d 3 --float 0 -u 0 -j 0 -w "[0.005,0.995]" -r "[$f,$mv,1]" -t "Rigid[0.1]" -m "Mattes[$f,$mv,1,32,Regular,0.25]" -c "[1000x500x250x100,1e-6,10]" -f 8x4x2x1 -s 3x2x1x0vox ${xm[@]+"${xm[@]}"} -o "[$w/${con}_,]" -v 0 || { echo "$a: the rigid registration of the $con failed"; continue; };
+  if [ $role = t2w ] && [ -n "$(flair "$a")" ]; then echo "$a: the session has a FLAIR, so the FLAIR is registered onto the T1w and its T2w is not (the rules judged the FLAIR)"; continue; fi;
+  antsRegistration -d 3 --float 0 -u 0 -w "[0.005,0.995]" -r "[$f,$mv,1]" -t "Rigid[0.1]" -m "Mattes[$f,$mv,1,32,Regular,0.25]" -c "[1000x500x250x100,1e-6,10]" -f 8x4x2x1 -s 3x2x1x0vox ${xm[@]+"${xm[@]}"} -o "[$w/${con}_,]" -v 0 || { echo "$a: the rigid registration of the $con failed"; continue; };
   antsApplyTransforms -d 3 -i "$mv" -r "$f" -t "$w/${con}_0GenericAffine.mat" -n Linear -o "$d/${b}_space-T1w_desc-aligned_${con}.nii.gz" || continue;
   cp "$w/${con}_0GenericAffine.mat" "$d/${b}_from-${con}_to-T1w_mode-image_xfm.mat";
   sanity "$w/${con}_0GenericAffine.mat" "$w" && read det flip tl rot < "$w/sanity.txt" || { det=""; flip=""; tl=""; rot=""; };
-  ThresholdImage 3 "$f" "$w/fg_fixed.nii.gz" Otsu 1 >/dev/null; ThresholdImage 3 "$d/${b}_space-T1w_desc-aligned_${con}.nii.gz" "$w/fg_moving.nii.gz" Otsu 1 >/dev/null;
-  dice=$(ImageMath 3 "$w/dice.csv" DiceAndMinDistSum "$w/fg_fixed.nii.gz" "$w/fg_moving.nii.gz" >/dev/null 2>&1 && awk -F, "NR == 2 {printf \"%.3f\", \$2}" "$w/dice.csv");
-  printf "{\"moving\": \"%s\", \"method\": \"ants-rigid-mattes\", \"brain_masked\": %d%s%s%s%s%s}\n" "$con" "${mask:+1}${mask:-0}" "${det:+, \"rigid_determinant\": $det}" "${flip:+, \"rigid_flip\": $flip}" "${tl:+, \"rigid_translation_mm\": $tl}" "${rot:+, \"rigid_rotation_deg\": $rot}" "${dice:+, \"alignment_dice\": $dice}" > "$d/${b}_from-${con}_to-T1w_desc-registration_metrics.json";
-  echo "$a: $con onto the T1w, rigid (determinant ${det:-?}, translation ${tl:-?} mm, rotation ${rot:-?} degrees, foreground Dice ${dice:-?})"; done;
+  dice=""; note=""; mm=$(find "$inputs"/brain_mask -path "*/$a/$(basename "$mv" .nii.gz)_desc-brain_mask.nii.gz" 2>/dev/null | sort | head -n 1);
+  if [ -z "$mask" ]; then note="no brain mask of the T1w"; elif [ -z "$mm" ]; then note="no brain mask of the moving image";
+  else antsApplyTransforms -d 3 -i "$mm" -r "$f" -t "$w/${con}_0GenericAffine.mat" -n NearestNeighbor -o "$w/mask_moving.nii.gz" >/dev/null 2>&1 && dice=$(ImageMath 3 "$w/dice" DiceAndMinDistSum "$mask" "$w/mask_moving.nii.gz" >/dev/null 2>&1 && awk -F, "NR == 2 {printf \"%.3f\", \$2}" "$w/dice.csv"); [ -n "$dice" ] || note="the brain-mask Dice could not be computed"; fi;
+  printf "{\"moving\": \"%s\", \"method\": \"ants-rigid-mattes\", \"brain_masked\": %d%s%s%s%s%s%s}\n" "$con" "$masked" "${det:+, \"rigid_determinant\": $det}" "${flip:+, \"rigid_flip\": $flip}" "${tl:+, \"rigid_translation_mm\": $tl}" "${rot:+, \"rigid_rotation_deg\": $rot}" "${dice:+, \"alignment_dice\": $dice}" "${note:+, \"alignment_dice_note\": \"$note\"}" > "$d/${b}_from-${con}_to-T1w_desc-registration_metrics.json";
+  echo "$a: $con onto the T1w, rigid (determinant ${det:-?}, translation ${tl:-?} mm, rotation ${rot:-?} degrees, brain-mask Dice ${dice:-?}${note:+: $note})"; done;
   else
   tpl=/opt/templates/MNI152NLin2009cAsym_T1w.nii.gz;
-  if [ ! -f "$tpl" ]; then echo "$a: no template at $tpl: the site file mni_template is not set (nils pipeline secret set mni_template --file <TemplateFlow tpl-MNI152NLin2009cAsym_res-01_T1w.nii.gz>)"; rm -rf "$w"; continue; fi;
+  if [ ! -f "$tpl" ]; then echo "$a: no template at $tpl: install this member into the software place (nils software install registration-ants@ants-2.6.2), which fetches TemplateFlow tpl-MNI152NLin2009cAsym_res-01_T1w.nii.gz by its sha256"; rm -rf "$w"; continue; fi;
   N4BiasFieldCorrection -d 3 -i "$f" -o "$w/n4.nii.gz" -s 4 -b "[180]" -c "[50x50x50x50,0.0]" ${xn[@]+"${xn[@]}"} >/dev/null || { rm -rf "$w"; continue; };
   if [ -n "$mask" ]; then ImageMath 3 "$w/brain.nii.gz" m "$w/n4.nii.gz" "$mask"; stripped=1; else cp "$w/n4.nii.gz" "$w/brain.nii.gz"; stripped=0; echo "$a: no brain mask registered for the T1w, so SyN ran on the whole head"; fi;
   lm=""; xl=(); if [ "[LESIONS]" = on ]; then l=$(find "$inputs"/lesion_mask -path "*/$a/*_mask.nii.gz" -o -path "*/$a/*_dseg.nii.gz" 2>/dev/null | sort | head -n 1);
@@ -116,14 +129,14 @@ command-line: |-
   antsApplyTransforms -d 3 -r "$w/brain.nii.gz" -t "[$w/tpl_0GenericAffine.mat,1]" -t "$w/tpl_1InverseWarp.nii.gz" -o "[$d/${b}_from-MNI152NLin2009cAsym_to-T1w_mode-image_xfm.h5,1]" || continue;
   cp "$w/tpl_Warped.nii.gz" "$d/${b}_space-MNI152NLin2009cAsym_desc-aligned_T1w.nii.gz";
   ThresholdImage 3 "$w/brain.nii.gz" "$w/bm.nii.gz" Otsu 1 >/dev/null;
-  CreateJacobianDeterminantImage 3 "$w/tpl_1InverseWarp.nii.gz" "$w/jac.nii.gz" 0 0 >/dev/null; ThresholdImage 3 "$w/jac.nii.gz" "$w/fold.nii.gz" -1e9 0 >/dev/null;
+  CreateJacobianDeterminantImage 3 "$w/tpl_1InverseWarp.nii.gz" "$w/jac.nii.gz" 0 0 >/dev/null; ThresholdImage 3 "$w/jac.nii.gz" "$w/fold.nii.gz" -1e9 0 >/dev/null; ThresholdImage 3 "$tpl" "$w/bmt.nii.gz" Otsu 1 >/dev/null;
   antsApplyTransforms -d 3 -r "$w/brain.nii.gz" -t "$w/tpl_1InverseWarp.nii.gz" -t "$w/tpl_1Warp.nii.gz" -o "[$w/round.nii.gz,1]" >/dev/null;
-  fold=$(ImageIntensityStatistics 3 "$w/fold.nii.gz" "$w/bm.nii.gz" 2>/dev/null | awk "NR == 2 {printf \"%.4f\", \$2 * 100}");
+  fold=$(ImageIntensityStatistics 3 "$w/fold.nii.gz" "$w/bmt.nii.gz" 2>/dev/null | awk "NR == 2 {printf \"%.4f\", \$2 * 100}");
   for k in 0 1 2; do ImageMath 3 "$w/c$k.nii.gz" ExtractVectorComponent "$w/round.nii.gz" $k; ImageMath 3 "$w/c$k.nii.gz" m "$w/c$k.nii.gz" "$w/c$k.nii.gz"; done;
   ImageMath 3 "$w/sum.nii.gz" + "$w/c0.nii.gz" "$w/c1.nii.gz"; ImageMath 3 "$w/sum.nii.gz" + "$w/sum.nii.gz" "$w/c2.nii.gz"; ImageMath 3 "$w/mag.nii.gz" ^ "$w/sum.nii.gz" 0.5;
   ic=$(ImageIntensityStatistics 3 "$w/mag.nii.gz" "$w/bm.nii.gz" 2>/dev/null | awk "NR == 2 {printf \"%.3f\", \$2}");
   sanity "$w/tpl_0GenericAffine.mat" "$w" && read det flip tl rot < "$w/sanity.txt" || { det=""; flip=""; tl=""; rot=""; };
-  printf "{\"moving\": \"T1w\", \"method\": \"ants-syn\", \"brain_masked\": %d, \"lesion_masked\": %d%s%s%s%s}\n" "$stripped" "${lm:+1}${lm:-0}" "${det:+, \"affine_determinant\": $det}" "${flip:+, \"rigid_flip\": $flip}" "${fold:+, \"folding_pct\": $fold}" "${ic:+, \"inverse_consistency_mm\": $ic}" > "$d/${b}_from-T1w_to-MNI152NLin2009cAsym_desc-registration_metrics.json";
+  printf "{\"moving\": \"T1w\", \"method\": \"ants-syn\", \"brain_masked\": %d, \"lesion_masked\": %d%s%s%s%s}\n" "$stripped" "$([ -n "$lm" ] && echo 1 || echo 0)" "${det:+, \"affine_determinant\": $det}" "${flip:+, \"rigid_flip\": $flip}" "${fold:+, \"folding_pct\": $fold}" "${ic:+, \"inverse_consistency_mm\": $ic}" > "$d/${b}_from-T1w_to-MNI152NLin2009cAsym_desc-registration_metrics.json";
   echo "$a: T1w onto MNI152NLin2009cAsym, SyN (folding ${fold:-?} % of brain voxels, inverse consistency ${ic:-?} mm)"; fi;
   rm -rf "$w"; done'
 
@@ -137,7 +150,7 @@ x-nils:
     - id: brain_mask
       type: "derivative:mask"
       optional: true
-      description: "The sessions' brain masks (*_desc-brain_mask.nii.gz) from a run of the synthstrip starter: the fixed mask of the rigid registration, and the skull strip before SyN; where a session has none the whole head is read and the table says so"
+      description: "The sessions' brain masks from a run of the synthstrip starter: the T1w's (<T1w stem less _T1w>_desc-brain_mask.nii.gz) is the fixed mask of the rigid registration and the skull strip before SyN, where a session has none the whole head is read and the table says so; a moving image's (<its stem>_desc-brain_mask.nii.gz) gives the brain-mask Dice"
     - id: lesion_mask
       type: "derivative:mask"
       optional: true
@@ -208,7 +221,8 @@ x-nils:
         - {name: rigid_flip, type: integer, description: "1 where the determinant is negative: a flip, never right"}
         - {name: rigid_translation_mm, unit: mm, description: "The translation of the rigid transform at the image centre"}
         - {name: rigid_rotation_deg, description: "The rotation of the rigid transform, in degrees"}
-        - {name: alignment_dice, description: "The Dice of the foreground masks (Otsu) of the fixed and the aligned image on the T1w's grid"}
+        - {name: alignment_dice, description: "The Dice of the T1w's SynthStrip brain mask and the moving image's carried onto the T1w's grid by the rigid transform"}
+        - {name: alignment_dice_note, type: text, description: "Why no brain-mask Dice was written: no brain mask of the T1w, or of the moving image"}
         - {name: folding_pct, description: "The share of brain voxels whose Jacobian determinant is not positive, in percent: folding"}
         - {name: inverse_consistency_mm, unit: mm, description: "The mean displacement, inside the brain, of the forward transform composed with its inverse"}
   needs:

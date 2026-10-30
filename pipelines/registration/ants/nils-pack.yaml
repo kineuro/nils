@@ -6,13 +6,19 @@
 # task and the lesion mask, set from the family's), the needs the method
 # has beyond the family's (3D images at 1.5 mm or finer within a session,
 # a 3D T1w at 1.2 mm or finer to the template), the checks of section 7
-# and the comparability key. The thresholds of the rigid sanity, the
-# folding and the inverse consistency are policy, to be calibrated on the
-# pilot (spec section 22, question 3).
+# and the comparability key. The thresholds are the pilot's of
+# 2026-10-30 (spec section 22, question 3): the rigid determinant 1 within
+# 0.001 (1.0000 in 64 of 64 rows); within a session 10 mm and 10 degrees
+# (brain pairs at most 1.93 mm and 2.40 degrees, spine scans taken as the
+# T2w 18 mm and more); folding 0.01 % (0.0000 % in 32 of 32 SyN rows);
+# inverse consistency 0.05 mm (0.007 to 0.012 mm); the brain-mask Dice
+# 0.85 (0.985 to 0.990 after registration, 0.810 to 0.834 for a FLAIR
+# whose header was moved 15 mm). A unit without a brain mask of the
+# moving image writes no Dice and says so (alignment_dice_note).
 nils_pack: 1
 pipeline:
   name: registration-ants
-  descriptor_sha256: "sha256:10f5262e63621c3853d449a9990a279dd625bfcaf27119d50665ba1de5114155"
+  descriptor_sha256: "sha256:36c220595bc8bde593d047d1c8965f8e14c6108ceb1d316a13ee0b265e588d9c"
   version: "1.0"
 goals:
   goal: [fast, standard, research]
@@ -47,7 +53,7 @@ needs:
         source: policy
 knobs:
   task:
-    what: "within a session, the FLAIR and the T2w onto the T1w, rigid; to the template, SyN of the T1w onto MNI152NLin2009cAsym"
+    what: "within a session, the FLAIR (or a T2w alone) onto the T1w, rigid; to the template, SyN of the T1w onto MNI152NLin2009cAsym"
     changes: [flair_xfm, flair_aligned, t2w_xfm, t2w_aligned, template_xfm, template_xfm_inverse, template_aligned, metrics]
     comparability: breaks
     set_by: rule
@@ -78,13 +84,13 @@ rules:
     source: "record 57 research 07, Table 5 R9 (lesion masking advised)"
 checks:
   - {metric: rigid_flip, op: "==", value: 0, action: fail, source: policy, words: "the transform flips the image: a registration that found a mirror image is wrong"}
-  - {metric: rigid_determinant, op: ">=", value: 0.98, action: flag, source: policy, words: "the rigid transform's determinant is not near 1"}
-  - {metric: rigid_determinant, op: "<=", value: 1.02, action: flag, source: policy, words: "the rigid transform's determinant is not near 1"}
-  - {metric: rigid_translation_mm, op: "<=", value: 50, action: flag, source: policy, words: "the images moved more than 50 mm within a session: a patient who moved, or another series"}
-  - {metric: rigid_rotation_deg, op: "<=", value: 30, action: flag, source: policy, words: "the images turned more than 30 degrees within a session"}
-  - {metric: folding_pct, op: "<=", value: 0.01, action: flag, source: policy, words: "the deformation folds in more than 0.01 % of brain voxels"}
-  - {metric: inverse_consistency_mm, op: "<=", value: 0.1, action: flag, source: policy, words: "the forward and inverse transforms disagree by more than 0.1 mm on average"}
-  - {metric: alignment_dice, op: ">=", action: flag, cohort: true, stratum: [site, vendor, field_strength, sequence, post_contrast], min_sessions: 30, source: "policy (the overlap after alignment far below the cohort's)", words: "the overlap of the two images after alignment is far below the cohort's"}
+  - {metric: rigid_determinant, op: ">=", value: 0.999, action: flag, source: "pilot 2026-10-30", words: "the rigid transform's determinant is not 1: a rigid transform has determinant 1"}
+  - {metric: rigid_determinant, op: "<=", value: 1.001, action: flag, source: "pilot 2026-10-30", words: "the rigid transform's determinant is not 1: a rigid transform has determinant 1"}
+  - {metric: rigid_translation_mm, op: "<=", value: 10, action: flag, source: "pilot 2026-10-30", words: "the images moved more than 10 mm within a session: a patient who moved, or another series or body part"}
+  - {metric: rigid_rotation_deg, op: "<=", value: 10, action: flag, source: "pilot 2026-10-30", words: "the images turned more than 10 degrees within a session"}
+  - {metric: folding_pct, op: "<=", value: 0.01, action: flag, source: "pilot 2026-10-30", words: "the deformation folds in more than 0.01 % of brain voxels"}
+  - {metric: inverse_consistency_mm, op: "<=", value: 0.05, action: flag, source: "pilot 2026-10-30", words: "the forward and inverse transforms disagree by more than 0.05 mm on average"}
+  - {metric: alignment_dice, op: ">=", value: 0.85, action: flag, source: "pilot 2026-10-30", words: "the brain masks of the two images overlap by a Dice under 0.85 after alignment"}
 licence:
   spdx: "Apache-2.0"
   redistributable: true
@@ -99,7 +105,19 @@ resources:
 comparability:
   facts: [t1w.base]
 tests: []
+# The pinned image says `ANTs Version: 2.6.2.dev1-g52bc0ab`: the probe
+# looks for the release number without the v.
 source:
   image: "docker.io/antsx/ants@sha256:d53ce1c7db686c5a3791fb42b917aaee819c1f34327dd5171ebc3d2a8520297e"
-  probe: {command: "antsRegistration --version", expect: "ANTs Version: v2.6.2"}
+  probe: {command: "antsRegistration --version", expect: "ANTs Version: 2.6.2"}
   key_files: ["bin/antsRegistration", "bin/antsRegistrationSyN.sh"]
+  # TemplateFlow's MNI152NLin2009cAsym at 1 mm, 13,685,075 bytes: the
+  # software place fetches it by its sha256 into the install's files/, and
+  # a run is given it where the descriptor mounts the site file
+  # mni_template. FreeSurfer's copy, which the SynthMorph member falls back
+  # to, has the same grid and affine (correlation 1.00000 in the pilot of
+  # 2026-10-30): one space in the key.
+  files:
+    - id: mni_template
+      url: "https://templateflow.s3.amazonaws.com/tpl-MNI152NLin2009cAsym/tpl-MNI152NLin2009cAsym_res-01_T1w.nii.gz"
+      sha256: "1f27aabea9f7183dc0c69dafa71e1787b921ca778d655d9c1bf302b273d5627a"
