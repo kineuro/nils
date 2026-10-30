@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: AGPL-3.0-only
-# The release's gate: the ci run that passed on a tagged commit's tree, and the one that
+# The release's proof run: the ci run that passed on a tagged commit's tree, and the one that
 # still keeps the binaries it built.
 #
 #   scripts/release-ci-run.sh <sha>    prints "passed=<run id>" and "run=<run id, or empty>"

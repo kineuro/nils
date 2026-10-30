@@ -45,7 +45,14 @@ pushed=$(docker push "$REPO:$version" | tee /dev/stderr | sed -n 's/.*digest: \(
 ref="$REPO@$pushed"
 echo "$ref"
 # anyone must be able to pull it: a site pulls without credentials
-token=$(curl -fsS "https://ghcr.io/token?scope=repository:${REPO#ghcr.io/}:pull&service=ghcr.io" | python3 -c 'import json, sys; print(json.load(sys.stdin).get("token", ""))' || true)
+# (a 401 or any other answer than 200 leaves the token empty; the line below then says so alone)
+tokenbody=$(mktemp)
+tokencode=$(curl -sS -o "$tokenbody" -w '%{http_code}' "https://ghcr.io/token?scope=repository:${REPO#ghcr.io/}:pull&service=ghcr.io" || true)
+token=""
+if [ "$tokencode" = 200 ]; then
+  token=$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1])).get("token", ""))' "$tokenbody" 2>/dev/null || true)
+fi
+rm -f "$tokenbody"
 code=$(curl -s -o /dev/null -w '%{http_code}' -I -H "Authorization: Bearer $token" \
   -H "Accept: application/vnd.oci.image.index.v1+json, application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json" \
   "https://ghcr.io/v2/${REPO#ghcr.io/}/manifests/$pushed")

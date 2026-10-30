@@ -24,12 +24,13 @@ def full_pin() -> str:
 
 
 def write(refs: dict[str, str], out: Path, refs_dir: Path, pullable: bool = True,
-          taken: dict[str, str] | None = None) -> subprocess.CompletedProcess:
+          taken: dict[str, str] | None = None, from_files: bool = True) -> subprocess.CompletedProcess:
     refs_dir.mkdir(parents=True, exist_ok=True)
     for image, digest in refs.items():
         (refs_dir / f"{image}.ref").write_text(f"ghcr.io/kineuro/{image}@sha256:{digest * 64}\n")
-    for image, came in (taken or {}).items():
-        (refs_dir / f"{image}.from").write_text(f"{came}\n")
+    # the image job writes <image>.from for every image it ships: "built" or the release it took
+    for image in (refs if from_files else {}):
+        (refs_dir / f"{image}.from").write_text(f"{(taken or {}).get(image, 'built')}\n")
     env = dict(os.environ, NILS_RELEASE_PULLABLE=full_pin() if pullable else "")
     return subprocess.run([sys.executable, str(SCRIPT), "write", "--refs", str(refs_dir), "--out", str(out), "--tag", "v1.0.0-test",
                            "--expect", EXPECT], capture_output=True, text=True, env=env)
@@ -102,13 +103,22 @@ class Write(unittest.TestCase):
                           "(bodypart-embed, bodypart-infer, bodypart-infer-fusion, bodypart-seed, bodypart-train)", lines["nils-bodypart"])
             self.assertIn(f"`ghcr.io/kineuro/nils-postcontrast@sha256:{'c' * 64}`, built by this release (postcontrast-cascade)",
                           lines["nils-postcontrast"])
-            # no .from file: built, as a release before the notes wrote one
+            # built, with no release named
             self.assertIn(f"`ghcr.io/kineuro/nils-system1@sha256:{'a' * 64}`, built by this release (system1-score)", lines["nils-system1"])
             self.assertIn(f"`{full_pin()}`, published apart from the release, as the tree pins it (postcontrast-full)",
                           lines["nils-postcontrast-full"])
             # every digest the notes name is one IMAGES names
             images = {line.split("\t")[1] for line in (d / "out" / "IMAGES").read_text().splitlines()}
             self.assertEqual({line.split("`")[3] for line in notes[2:]}, images)
+
+    def test_a_built_image_without_its_from_file_fails_clearly(self):
+        """The image job always writes <image>.from; a missing one is a broken
+        workflow, not a build to guess."""
+        with tempfile.TemporaryDirectory() as d:
+            d = Path(d)
+            r = write({"nils-system1": "a"}, d / "out", d / "refs", from_files=False)
+            self.assertNotEqual(r.returncode, 0)
+            self.assertIn("nils-system1.from is missing", r.stderr)
 
     def test_no_image_at_all_writes_no_notes(self):
         with tempfile.TemporaryDirectory() as d:

@@ -5,15 +5,17 @@
 #
 #   scripts/release-image-reuse.sh <image> <sha>    prints "build", or "reuse<TAB><ref><TAB><tag>"
 #
-# The image's inputs are its package's files, pipelines/<image> less its tests and its README,
-# which the image does not hold: its Dockerfile, its requirements, its code, and its
-# descriptors, whose pins are its build arguments. Nothing outside the package goes into the
-# image, so nothing outside it decides; a change to how the workflow builds (the platforms,
-# the build action) rebuilds nothing by itself, and a build that is wanted anyway changes the
-# package (its version). The release that last shipped the image is the newest release tag
-# among <sha>'s ancestors whose IMAGES names ghcr.io/kineuro/<image> by digest; a release
+# The image's inputs are the files its build reads, nothing more: pipelines/<image>'s
+# Dockerfile, .dockerignore, requirements.txt, pyproject.toml and src (what its Dockerfile
+# COPYs), and for nils-bodypart the descriptor bodypart-embed/nils.job.yml, whose encoder pins
+# are its ENCODER_DIGESTS build argument. A change to another descriptor, a README, a test or
+# the other Dockerfile (Dockerfile.full is built apart) does not rebuild it. Nothing outside the
+# package goes into the image, so nothing outside it decides; a change to how the workflow
+# builds (the platforms, the build action) rebuilds nothing by itself, and a build that is
+# wanted anyway changes one of these files (the package's version).
+# The release that last shipped the image is the newest release tag among <sha>'s ancestors whose IMAGES names ghcr.io/kineuro/<image> by digest; a release
 # whose image job failed names it nowhere, so the one before it is read (twelve tags back at
-# most). Where the package's files at <sha> are the same as at that tag, and the registry says
+# most). Where those files at <sha> are the same as at that tag, and the registry says
 # anyone may pull that digest, the release takes it. Where they differ, where no release before
 # shipped the image, or where the digest cannot be pulled without credentials, the release
 # builds. The reasons go to stderr. Needs GH_TOKEN and GITHUB_REPOSITORY, and a checkout that
@@ -26,7 +28,10 @@ cd "$(git rev-parse --show-toplevel)"
 
 say() { echo "release-image-reuse: $*" >&2; }
 
-inputs=("pipelines/$image" ":(exclude)pipelines/$image/tests" ":(exclude)pipelines/$image/README.md")
+inputs=("pipelines/$image/Dockerfile" "pipelines/$image/.dockerignore" "pipelines/$image/requirements.txt"
+        "pipelines/$image/pyproject.toml" "pipelines/$image/src")
+# bodypart's build checks the encoder pins its embed descriptor carries (ENCODER_DIGESTS)
+if [ "$image" = nils-bodypart ]; then inputs+=("pipelines/nils-bodypart/bodypart-embed/nils.job.yml"); fi
 
 # the release tags among the ancestors, newest first, as the history orders them
 tags() {

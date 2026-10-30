@@ -234,7 +234,9 @@ def cmd_write(a: argparse.Namespace) -> None:
         image = repository[len(REGISTRY):]
         if repository in built:
             came = Path(a.refs) / f"{image}.from"
-            came = came.read_text().strip() if came.is_file() else "built"
+            if not came.is_file():
+                fail(f"{came} is missing: the release built {image}, and its job writes the file saying whether it built or took it")
+            came = came.read_text().strip()
             how = "built by this release" if came == "built" else f"unchanged since {came}, whose image it is"
         else:
             how = "published apart from the release, as the tree pins it"
