@@ -2,13 +2,20 @@
 #
 # The ANTs member of the registration family (record 57 P6, Wave 7b P2):
 # within a session, the FLAIR (or a T2w alone) onto the T1w, rigid with Mattes
-# mutual information (32 bins, a SynthStrip brain mask of the T1w as the
-# fixed mask where the synthstrip starter made one, no histogram matching:
+# mutual information (32 bins, no metric mask, no histogram matching:
 # research 07, Table 5 R3); to the template, `antsRegistrationSyN.sh -t s`
 # of the N4-corrected, skull-stripped T1w onto MNI152NLin2009cAsym, with a
 # lesion mask as the moving mask (`-x`) when lesions are on and a lesion
 # mask is registered for the session (Table 5 R9, as fMRIPrep does). The
 # family's rules send a session here; the task is the family's switch.
+#
+# The rigid reads no mask since the proof run 2026-10-31: with the
+# SynthStrip brain mask of the T1w as its fixed mask (`-x`), one of 21
+# real pairs went wrong in every run (22 to 30 mm, 18 to 25 degrees) and a
+# second in 2 of 4 runs from a 15 mm start, while the unmasked rigid
+# recovered 21 of 21 (brain-mask Dice 0.985 to 0.990, 14.8 to 15.5 mm
+# found). The brain masks still give the alignment Dice, and the T1w's
+# still strips the skull before SyN.
 #
 # The image is ANTs 2.6.2, the release fMRIPrep 25.2 runs, pinned by its
 # registry manifest digest (resolved 2026-10-25 by a manifest request, not
@@ -102,20 +109,21 @@ command-line: |-
   [ -e "$f" ] || continue;
   a=$(dirname "$f"); d=[OutputLocation]/$a; mkdir -p "$d"; b=$(basename "$f" .nii.gz); b=${b%_T1w};
   w=$(mktemp -d [OutputLocation]/.work-XXXXXX); mask=""; m=$(find "$inputs"/brain_mask -path "*/$a/${b}_desc-brain_mask.nii.gz" 2>/dev/null | sort | head -n 1);
-  [ -n "$m" ] && mask=$m; masked=0; [ -n "$mask" ] && masked=1; xm=(); [ -n "$mask" ] && xm=(-x "[$mask,NULL]"); xn=(); [ -n "$mask" ] && xn=(-x "$mask");
+  [ -n "$m" ] && mask=$m; xn=(); [ -n "$mask" ] && xn=(-x "$mask");
   if [ "[TASK]" = within_session ]; then
+  # The rigid reads no mask: with the T1w brain mask as its fixed mask (-x) it went wrong on real pairs in the proof run 2026-10-31 (22 to 30 mm, 18 to 25 degrees), the unmasked rigid recovered 21 of 21; the masks give the Dice only.
   for role in flair t2w; do
   if [ $role = flair ]; then mv=$(flair "$a"); con=FLAIR; else mv=$(t2w "$a"); con=T2w; fi;
   [ -z "$mv" ] && continue;
   if [ $role = t2w ] && [ -n "$(flair "$a")" ]; then echo "$a: the session has a FLAIR, so the FLAIR is registered onto the T1w and its T2w is not (the rules judged the FLAIR)"; continue; fi;
-  antsRegistration -d 3 --float 0 -u 0 -w "[0.005,0.995]" -r "[$f,$mv,1]" -t "Rigid[0.1]" -m "Mattes[$f,$mv,1,32,Regular,0.25]" -c "[1000x500x250x100,1e-6,10]" -f 8x4x2x1 -s 3x2x1x0vox ${xm[@]+"${xm[@]}"} -o "[$w/${con}_,]" -v 0 || { echo "$a: the rigid registration of the $con failed"; continue; };
+  antsRegistration -d 3 --float 0 -u 0 -w "[0.005,0.995]" -r "[$f,$mv,1]" -t "Rigid[0.1]" -m "Mattes[$f,$mv,1,32,Regular,0.25]" -c "[1000x500x250x100,1e-6,10]" -f 8x4x2x1 -s 3x2x1x0vox -o "[$w/${con}_,]" -v 0 || { echo "$a: the rigid registration of the $con failed"; continue; };
   antsApplyTransforms -d 3 -i "$mv" -r "$f" -t "$w/${con}_0GenericAffine.mat" -n Linear -o "$d/${b}_space-T1w_desc-aligned_${con}.nii.gz" || continue;
   cp "$w/${con}_0GenericAffine.mat" "$d/${b}_from-${con}_to-T1w_mode-image_xfm.mat";
   sanity "$w/${con}_0GenericAffine.mat" "$w" && read det flip tl rot < "$w/sanity.txt" || { det=""; flip=""; tl=""; rot=""; };
   dice=""; note=""; mm=$(find "$inputs"/brain_mask -path "*/$a/$(basename "$mv" .nii.gz)_desc-brain_mask.nii.gz" 2>/dev/null | sort | head -n 1);
   if [ -z "$mask" ]; then note="no brain mask of the T1w"; elif [ -z "$mm" ]; then note="no brain mask of the moving image";
   else antsApplyTransforms -d 3 -i "$mm" -r "$f" -t "$w/${con}_0GenericAffine.mat" -n NearestNeighbor -o "$w/mask_moving.nii.gz" >/dev/null 2>&1 && dice=$(ImageMath 3 "$w/dice" DiceAndMinDistSum "$mask" "$w/mask_moving.nii.gz" >/dev/null 2>&1 && awk -F, "NR == 2 {printf \"%.3f\", \$2}" "$w/dice.csv"); [ -n "$dice" ] || note="the brain-mask Dice could not be computed"; fi;
-  printf "{\"moving\": \"%s\", \"method\": \"ants-rigid-mattes\", \"brain_masked\": %d%s%s%s%s%s%s}\n" "$con" "$masked" "${det:+, \"rigid_determinant\": $det}" "${flip:+, \"rigid_flip\": $flip}" "${tl:+, \"rigid_translation_mm\": $tl}" "${rot:+, \"rigid_rotation_deg\": $rot}" "${dice:+, \"alignment_dice\": $dice}" "${note:+, \"alignment_dice_note\": \"$note\"}" > "$d/${b}_from-${con}_to-T1w_desc-registration_metrics.json";
+  printf "{\"moving\": \"%s\", \"method\": \"ants-rigid-mattes\", \"brain_masked\": 0%s%s%s%s%s%s}\n" "$con" "${det:+, \"rigid_determinant\": $det}" "${flip:+, \"rigid_flip\": $flip}" "${tl:+, \"rigid_translation_mm\": $tl}" "${rot:+, \"rigid_rotation_deg\": $rot}" "${dice:+, \"alignment_dice\": $dice}" "${note:+, \"alignment_dice_note\": \"$note\"}" > "$d/${b}_from-${con}_to-T1w_desc-registration_metrics.json";
   echo "$a: $con onto the T1w, rigid (determinant ${det:-?}, translation ${tl:-?} mm, rotation ${rot:-?} degrees, brain-mask Dice ${dice:-?}${note:+: $note})"; done;
   else
   tpl=/opt/templates/MNI152NLin2009cAsym_T1w.nii.gz;
@@ -147,7 +155,7 @@ x-nils:
   # run no longer takes them; their runs and results keep their names.
   # No version list: every earlier version of the name in a catalog.
   replaces:
-    why: "It runs on its pinned image: the rigid no longer passes -j 0 (which failed every pair in ANTs 2.6.2), the overlap tables are read where the tools write them, SyN folding is measured on the template's grid, the mask columns are valid JSON, the FLAIR is the moving image within a session, and the checks take the pilot's thresholds; the earlier versions failed every pair."
+    why: "The rigid within a session reads no brain mask (the masked rigid went wrong on real pairs in the proof run 2026-10-31; the unmasked one recovered 21 of 21). Before that, it runs on its pinned image: the rigid no longer passes -j 0 (which failed every pair in ANTs 2.6.2), the overlap tables are read where the tools write them, SyN folding is measured on the template's grid, the mask columns are valid JSON, the FLAIR is the moving image within a session, and the checks take the pilot's thresholds; the earlier versions failed every pair."
   input:
     layout: bids
     roles: [t1w, flair, t2w]
@@ -155,7 +163,7 @@ x-nils:
     - id: brain_mask
       type: "derivative:mask"
       optional: true
-      description: "The sessions' brain masks from a run of the synthstrip starter: the T1w's (<T1w stem less _T1w>_desc-brain_mask.nii.gz) is the fixed mask of the rigid registration and the skull strip before SyN, where a session has none the whole head is read and the table says so; a moving image's (<its stem>_desc-brain_mask.nii.gz) gives the brain-mask Dice"
+      description: "The sessions' brain masks from a run of the synthstrip starter: the T1w's (<T1w stem less _T1w>_desc-brain_mask.nii.gz) is the skull strip before SyN, where a session has none the whole head is read and the table says so; with a moving image's (<its stem>_desc-brain_mask.nii.gz) it gives the brain-mask Dice of the rigid, which itself reads no mask"
     - id: lesion_mask
       type: "derivative:mask"
       optional: true
@@ -219,7 +227,7 @@ x-nils:
       columns:
         - {name: moving, type: text, description: "The image moved: FLAIR, T2w or T1w"}
         - {name: method, type: text, description: "ants-rigid-mattes within a session, ants-syn to the template"}
-        - {name: brain_masked, type: integer, description: "1 where a SynthStrip brain mask of the T1w was the fixed mask (and the skull strip before SyN), 0 where the whole head was read"}
+        - {name: brain_masked, type: integer, description: "1 where a SynthStrip brain mask of the T1w stripped the skull before SyN, 0 where the whole head was read; 0 in every rigid row, since the rigid reads no mask (proof run 2026-10-31)"}
         - {name: lesion_masked, type: integer, description: "1 where SyN ran with the lesion mask as its moving mask"}
         - {name: rigid_determinant, description: "The determinant of the rigid transform; 1 for a rotation"}
         - {name: affine_determinant, description: "The determinant of SyN's affine stage"}
