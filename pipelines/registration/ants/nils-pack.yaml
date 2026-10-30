@@ -6,13 +6,19 @@
 # task and the lesion mask, set from the family's), the needs the method
 # has beyond the family's (3D images at 1.5 mm or finer within a session,
 # a 3D T1w at 1.2 mm or finer to the template), the checks of section 7
-# and the comparability key. The thresholds of the rigid sanity, the
-# folding and the inverse consistency are policy, to be calibrated on the
-# pilot (spec section 22, question 3).
+# and the comparability key. The thresholds are the pilot's of
+# 2026-10-30 (spec section 22, question 3): the rigid determinant 1 within
+# 0.001 (1.0000 in 64 of 64 rows); within a session 10 mm and 10 degrees
+# (brain pairs at most 1.93 mm and 2.40 degrees, spine scans taken as the
+# T2w 18 mm and more); folding 0.01 % (0.0000 % in 32 of 32 SyN rows);
+# inverse consistency 0.05 mm (0.007 to 0.012 mm); the brain-mask Dice
+# 0.85 (0.985 to 0.990 after registration, 0.810 to 0.834 for a FLAIR
+# whose header was moved 15 mm). A unit without a brain mask of the
+# moving image writes no Dice and says so (alignment_dice_note).
 nils_pack: 1
 pipeline:
   name: registration-ants
-  descriptor_sha256: "sha256:ec1d53a33c5b2817ba6a415cebb60c61da033ea71ed5865972f54fd5f30f9413"
+  descriptor_sha256: "sha256:9a143d8e0d4bd00e2e213276353f7d2bfbd723af887854e0dd2fa655c8ef39cf"
   version: "1.0"
 goals:
   goal: [fast, standard, research]
@@ -78,13 +84,13 @@ rules:
     source: "record 57 research 07, Table 5 R9 (lesion masking advised)"
 checks:
   - {metric: rigid_flip, op: "==", value: 0, action: fail, source: policy, words: "the transform flips the image: a registration that found a mirror image is wrong"}
-  - {metric: rigid_determinant, op: ">=", value: 0.98, action: flag, source: policy, words: "the rigid transform's determinant is not near 1"}
-  - {metric: rigid_determinant, op: "<=", value: 1.02, action: flag, source: policy, words: "the rigid transform's determinant is not near 1"}
-  - {metric: rigid_translation_mm, op: "<=", value: 50, action: flag, source: policy, words: "the images moved more than 50 mm within a session: a patient who moved, or another series"}
-  - {metric: rigid_rotation_deg, op: "<=", value: 30, action: flag, source: policy, words: "the images turned more than 30 degrees within a session"}
-  - {metric: folding_pct, op: "<=", value: 0.01, action: flag, source: policy, words: "the deformation folds in more than 0.01 % of brain voxels"}
-  - {metric: inverse_consistency_mm, op: "<=", value: 0.1, action: flag, source: policy, words: "the forward and inverse transforms disagree by more than 0.1 mm on average"}
-  - {metric: alignment_dice, op: ">=", action: flag, cohort: true, stratum: [site, vendor, field_strength, sequence, post_contrast], min_sessions: 30, source: "policy (the overlap after alignment far below the cohort's)", words: "the overlap of the two images after alignment is far below the cohort's"}
+  - {metric: rigid_determinant, op: ">=", value: 0.999, action: flag, source: "pilot 2026-10-30", words: "the rigid transform's determinant is not 1: a rigid transform has determinant 1"}
+  - {metric: rigid_determinant, op: "<=", value: 1.001, action: flag, source: "pilot 2026-10-30", words: "the rigid transform's determinant is not 1: a rigid transform has determinant 1"}
+  - {metric: rigid_translation_mm, op: "<=", value: 10, action: flag, source: "pilot 2026-10-30", words: "the images moved more than 10 mm within a session: a patient who moved, or another series or body part"}
+  - {metric: rigid_rotation_deg, op: "<=", value: 10, action: flag, source: "pilot 2026-10-30", words: "the images turned more than 10 degrees within a session"}
+  - {metric: folding_pct, op: "<=", value: 0.01, action: flag, source: "pilot 2026-10-30", words: "the deformation folds in more than 0.01 % of brain voxels"}
+  - {metric: inverse_consistency_mm, op: "<=", value: 0.05, action: flag, source: "pilot 2026-10-30", words: "the forward and inverse transforms disagree by more than 0.05 mm on average"}
+  - {metric: alignment_dice, op: ">=", value: 0.85, action: flag, source: "pilot 2026-10-30", words: "the brain masks of the two images overlap by a Dice under 0.85 after alignment"}
 licence:
   spdx: "Apache-2.0"
   redistributable: true

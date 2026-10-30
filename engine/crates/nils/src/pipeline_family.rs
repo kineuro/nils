@@ -1241,55 +1241,90 @@ mod tests {
     }
 
     /// The arithmetic of every check of section 7, per member pack: a good
-    /// value holds, a bad one does not, and the action is the spec's.
+    /// value holds, a bad one does not, the action is the spec's, and each
+    /// number calibrated by the pilot of 2026-10-30 says so.
     #[test]
     fn the_registration_checks_hold_good_values_and_refuse_bad_ones() {
         let (_, members) = shipped();
-        // metric, a good value, a bad value, the action
-        let cases: &[(&str, f64, f64, &str)] = &[
-            ("rigid_flip", 0.0, 1.0, "fail"),
-            ("rigid_translation_mm", 12.0, 51.0, "flag"),
-            ("rigid_rotation_deg", 4.0, 31.0, "flag"),
-            ("folding_pct", 0.001, 0.02, "flag"),
-            ("inverse_consistency_mm", 0.05, 0.2, "flag"),
+        const PILOT: &str = "pilot 2026-10-30";
+        // member, metric, a good value, a bad value, the action, calibrated
+        let cases: &[(&str, &str, f64, f64, &str, bool)] = &[
+            ("ants", "rigid_flip", 0.0, 1.0, "fail", false),
+            ("ants", "rigid_translation_mm", 1.93, 18.0, "flag", true),
+            ("ants", "rigid_rotation_deg", 2.4, 10.5, "flag", true),
+            ("ants", "folding_pct", 0.0, 0.02, "flag", true),
+            ("ants", "inverse_consistency_mm", 0.012, 0.06, "flag", true),
+            ("ants", "alignment_dice", 0.985, 0.834, "flag", true),
+            ("synthmorph", "rigid_flip", 0.0, 1.0, "fail", false),
+            ("synthmorph", "rigid_translation_mm", 1.93, 18.0, "flag", true),
+            ("synthmorph", "rigid_rotation_deg", 2.4, 10.5, "flag", true),
+            ("synthmorph", "folding_pct", 0.0, 0.02, "flag", true),
+            ("synthmorph", "inverse_consistency_mm", 0.05, 0.2, "flag", false),
+            ("robust", "rigid_flip", 0.0, 1.0, "fail", false),
+            ("robust", "rigid_translation_mm", 17.5, 51.0, "flag", false),
+            ("robust", "rigid_rotation_deg", 6.5, 31.0, "flag", false),
         ];
-        for (k, (_, p)) in &members {
-            let p = p.as_ref().unwrap();
-            for (metric, good, bad, action) in cases {
-                if *metric == "folding_pct" && k == "robust" {
-                    continue;
-                }
-                let checks: Vec<_> = p.checks.iter().filter(|c| c.metric == *metric).collect();
-                assert!(!checks.is_empty(), "{k} has no check on {metric}");
-                for c in &checks {
-                    assert_eq!(c.action.name(), *action, "{k} {metric}");
-                    assert!(c.holds(*good), "{k} {metric}: {good} should hold");
-                    assert!(!c.holds(*bad), "{k} {metric}: {bad} should not hold");
-                    assert_eq!(
-                        c.source.as_deref(),
-                        Some("policy"),
-                        "{k} {metric}: policy, to be calibrated"
-                    );
+        for (k, metric, good, bad, action, calibrated) in cases {
+            let p = members[*k].1.as_ref().unwrap();
+            let checks: Vec<_> = p.checks.iter().filter(|c| c.metric == *metric).collect();
+            assert!(!checks.is_empty(), "{k} has no check on {metric}");
+            for c in &checks {
+                assert_eq!(c.action.name(), *action, "{k} {metric}");
+                assert!(c.holds(*good), "{k} {metric}: {good} should hold");
+                assert!(!c.holds(*bad), "{k} {metric}: {bad} should not hold");
+                if *calibrated {
+                    assert_eq!(c.source.as_deref(), Some(PILOT), "{k} {metric}");
                 }
             }
-            // the determinant near 1: both bounds
+        }
+        // the robust member's halfway transforms are consistent by
+        // construction: no check on it
+        let robust = members["robust"].1.as_ref().unwrap();
+        assert!(
+            !robust
+                .checks
+                .iter()
+                .any(|c| c.metric == "inverse_consistency_mm"),
+            "robust"
+        );
+        // the ANTs brain-mask Dice is a fixed check, not a cohort one
+        let ants = members["ants"].1.as_ref().unwrap();
+        let dice = ants
+            .checks
+            .iter()
+            .find(|c| c.metric == "alignment_dice")
+            .unwrap();
+        assert!(!dice.cohort);
+        for (k, (_, p)) in &members {
+            let p = p.as_ref().unwrap();
+            // the determinant: 1 within 0.001 for a rigid member, near 1
+            // for SynthMorph, which may fall back to an affine
             let det: Vec<_> = p
                 .checks
                 .iter()
                 .filter(|c| c.metric == "rigid_determinant")
                 .collect();
             assert_eq!(det.len(), 2, "{k}");
-            assert!(det.iter().all(|c| c.holds(1.0) && c.holds(0.99)), "{k}");
-            assert!(det.iter().any(|c| !c.holds(0.9)), "{k}");
-            assert!(det.iter().any(|c| !c.holds(1.1)), "{k}");
-            // the label Dice is a cohort check within the stratum
-            let dice = p
-                .checks
-                .iter()
-                .find(|c| c.metric == "alignment_dice")
-                .unwrap();
-            assert!(dice.cohort, "{k}");
-            assert_eq!(dice.min_sessions, 30, "{k}");
+            assert!(det.iter().all(|c| c.holds(1.0) && c.holds(0.9995)), "{k}");
+            if k == "synthmorph" {
+                assert!(det.iter().all(|c| c.holds(0.99) && c.holds(1.01)), "{k}");
+                assert!(det.iter().any(|c| !c.holds(0.97)), "{k}");
+            } else {
+                assert!(det.iter().any(|c| !c.holds(0.998)), "{k}");
+                assert!(det.iter().any(|c| !c.holds(1.002)), "{k}");
+                assert!(det.iter().all(|c| c.source.as_deref() == Some(PILOT)), "{k}");
+            }
+            // the FreeSurfer members' label Dice is a cohort check within
+            // the stratum
+            if k != "ants" {
+                let dice = p
+                    .checks
+                    .iter()
+                    .find(|c| c.metric == "alignment_dice")
+                    .unwrap();
+                assert!(dice.cohort, "{k}");
+                assert_eq!(dice.min_sessions, 30, "{k}");
+            }
             // SynthSeg's quality at 0.65 fails the FreeSurfer members
             if k != "ants" {
                 let qc = p

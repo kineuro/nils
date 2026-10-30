@@ -16,7 +16,7 @@ inputs=/inputs;
 for f in sub-*/ses-*/anat/*_T1w.nii.gz; do
 [ -e "$f" ] || continue;
 a=$(dirname "$f"); d=[OutputLocation]/$a; mkdir -p "$d"; b=$(basename "$f" .nii.gz); b=${b%_T1w};
-w=$(mktemp -d [OutputLocation]/.work-XXXXXX); mask=""; m=$(find "$inputs"/brain_mask -path "*/$a/*_desc-brain_mask.nii.gz" 2>/dev/null | sort | head -n 1);
+w=$(mktemp -d [OutputLocation]/.work-XXXXXX); mask=""; m=$(find "$inputs"/brain_mask -path "*/$a/${b}_desc-brain_mask.nii.gz" 2>/dev/null | sort | head -n 1);
 [ -n "$m" ] && mask=$m; masked=0; [ -n "$mask" ] && masked=1; xm=(); [ -n "$mask" ] && xm=(-x "[$mask,NULL]"); xn=(); [ -n "$mask" ] && xn=(-x "$mask");
 if [ "[TASK]" = within_session ]; then
 for role in flair t2w; do
@@ -26,10 +26,11 @@ antsRegistration -d 3 --float 0 -u 0 -w "[0.005,0.995]" -r "[$f,$mv,1]" -t "Rigi
 antsApplyTransforms -d 3 -i "$mv" -r "$f" -t "$w/${con}_0GenericAffine.mat" -n Linear -o "$d/${b}_space-T1w_desc-aligned_${con}.nii.gz" || continue;
 cp "$w/${con}_0GenericAffine.mat" "$d/${b}_from-${con}_to-T1w_mode-image_xfm.mat";
 sanity "$w/${con}_0GenericAffine.mat" "$w" && read det flip tl rot < "$w/sanity.txt" || { det=""; flip=""; tl=""; rot=""; };
-ThresholdImage 3 "$f" "$w/fg_fixed.nii.gz" Otsu 1 >/dev/null; ThresholdImage 3 "$d/${b}_space-T1w_desc-aligned_${con}.nii.gz" "$w/fg_moving.nii.gz" Otsu 1 >/dev/null;
-dice=$(ImageMath 3 "$w/dice" DiceAndMinDistSum "$w/fg_fixed.nii.gz" "$w/fg_moving.nii.gz" >/dev/null 2>&1 && awk -F, "NR == 2 {printf \"%.3f\", \$2}" "$w/dice.csv");
-printf "{\"moving\": \"%s\", \"method\": \"ants-rigid-mattes\", \"brain_masked\": %d%s%s%s%s%s}\n" "$con" "$masked" "${det:+, \"rigid_determinant\": $det}" "${flip:+, \"rigid_flip\": $flip}" "${tl:+, \"rigid_translation_mm\": $tl}" "${rot:+, \"rigid_rotation_deg\": $rot}" "${dice:+, \"alignment_dice\": $dice}" > "$d/${b}_from-${con}_to-T1w_desc-registration_metrics.json";
-echo "$a: $con onto the T1w, rigid (determinant ${det:-?}, translation ${tl:-?} mm, rotation ${rot:-?} degrees, foreground Dice ${dice:-?})"; done;
+dice=""; note=""; mm=$(find "$inputs"/brain_mask -path "*/$a/$(basename "$mv" .nii.gz)_desc-brain_mask.nii.gz" 2>/dev/null | sort | head -n 1);
+if [ -z "$mask" ]; then note="no brain mask of the T1w"; elif [ -z "$mm" ]; then note="no brain mask of the moving image";
+else antsApplyTransforms -d 3 -i "$mm" -r "$f" -t "$w/${con}_0GenericAffine.mat" -n NearestNeighbor -o "$w/mask_moving.nii.gz" >/dev/null 2>&1 && dice=$(ImageMath 3 "$w/dice" DiceAndMinDistSum "$mask" "$w/mask_moving.nii.gz" >/dev/null 2>&1 && awk -F, "NR == 2 {printf \"%.3f\", \$2}" "$w/dice.csv"); [ -n "$dice" ] || note="the brain-mask Dice could not be computed"; fi;
+printf "{\"moving\": \"%s\", \"method\": \"ants-rigid-mattes\", \"brain_masked\": %d%s%s%s%s%s%s}\n" "$con" "$masked" "${det:+, \"rigid_determinant\": $det}" "${flip:+, \"rigid_flip\": $flip}" "${tl:+, \"rigid_translation_mm\": $tl}" "${rot:+, \"rigid_rotation_deg\": $rot}" "${dice:+, \"alignment_dice\": $dice}" "${note:+, \"alignment_dice_note\": \"$note\"}" > "$d/${b}_from-${con}_to-T1w_desc-registration_metrics.json";
+echo "$a: $con onto the T1w, rigid (determinant ${det:-?}, translation ${tl:-?} mm, rotation ${rot:-?} degrees, brain-mask Dice ${dice:-?}${note:+: $note})"; done;
 else
 tpl=/opt/templates/MNI152NLin2009cAsym_T1w.nii.gz;
 if [ ! -f "$tpl" ]; then echo "$a: no template at $tpl: the site file mni_template is not set (nils pipeline secret set mni_template --file <TemplateFlow tpl-MNI152NLin2009cAsym_res-01_T1w.nii.gz>)"; rm -rf "$w"; continue; fi;

@@ -1322,6 +1322,13 @@ fn the_registration_scripts_hand_ants_its_bracket_arguments_whole() {
     ] {
         std::fs::write(data.join(format!("sub-01/ses-01/anat/{f}.nii.gz")), "").unwrap();
     }
+    // the synthstrip starter's mask of the T1w, and one of the FLAIR: the
+    // brain-mask Dice reads both; the T2w has none
+    let masks = root.join("inputs/brain_mask/sub-01/ses-01/anat");
+    std::fs::create_dir_all(&masks).unwrap();
+    for f in ["sub-01_ses-01", "sub-01_ses-01_FLAIR"] {
+        std::fs::write(masks.join(format!("{f}_desc-brain_mask.nii.gz")), "").unwrap();
+    }
     // every ANTs tool is a stand-in that writes its arguments one per line
     // and leaves the files the script copies next
     let stub = "#!/bin/bash\n{ echo \"== $(basename \"$0\")\"; for a; do echo \"$a\"; done; } >> \"$ARGV_LOG\"\n\
@@ -1355,6 +1362,7 @@ fn the_registration_scripts_hand_ants_its_bracket_arguments_whole() {
             .replace("[TASK]", task)
             .replace("[LESIONS]", "off")
             .replace("[THREADS]", "2")
+            .replace("inputs=/inputs", &format!("inputs={}", root.join("inputs").display()))
             .replace(
                 "/opt/templates/MNI152NLin2009cAsym_T1w.nii.gz",
                 tpl.to_str().unwrap(),
@@ -1392,6 +1400,35 @@ fn the_registration_scripts_hand_ants_its_bracket_arguments_whole() {
     has(&["-b", "[180]", "-c", "[50x50x50x50,0.0]"]);
     assert!(argv.contains("_xfm.h5,1]\n"), "{argv}");
     assert!(argv.contains("0GenericAffine.mat,1]\n"), "{argv}");
+    // the FLAIR's mask is carried onto the T1w's grid for the Dice, and the
+    // T1w's own mask (not the FLAIR's) is the fixed mask
+    assert!(argv.contains("_FLAIR_desc-brain_mask.nii.gz\n-r\n"), "{argv}");
+    // (the stand-in's echo eats a lone -n, so the word after it is read)
+    assert!(argv.contains("FLAIR_0GenericAffine.mat\nNearestNeighbor\n"), "{argv}");
+    assert!(
+        argv.contains("\n-x\n[") && argv.contains("sub-01_ses-01_desc-brain_mask.nii.gz,NULL]\n"),
+        "{argv}"
+    );
+    // every table is JSON, with 0 or 1 where a mask was read (the masks'
+    // paths once leaked into brain_masked), and a row without a Dice says
+    // why
+    let anat = out.join("sub-01/ses-01/anat");
+    let row = |name: &str| -> serde_json::Value {
+        let p = anat.join(format!("sub-01_ses-01_{name}_desc-registration_metrics.json"));
+        let text = std::fs::read_to_string(&p).unwrap_or_else(|e| panic!("{}: {e}", p.display()));
+        serde_json::from_str(&text).unwrap_or_else(|e| panic!("{name}: {e}: {text}"))
+    };
+    let flair = row("from-FLAIR_to-T1w");
+    assert_eq!(flair["brain_masked"], 1, "{flair}");
+    assert_eq!(
+        flair["alignment_dice_note"], "the brain-mask Dice could not be computed",
+        "the stand-in ImageMath writes no table: {flair}"
+    );
+    let t2w = row("from-T2w_to-T1w");
+    assert_eq!(t2w["alignment_dice_note"], "no brain mask of the moving image", "{t2w}");
+    let syn = row("from-T1w_to-MNI152NLin2009cAsym");
+    assert_eq!(syn["brain_masked"], 1, "{syn}");
+    assert_eq!(syn["lesion_masked"], 0, "{syn}");
     // a dataset with no match runs nothing and still succeeds
     std::fs::remove_dir_all(data.join("sub-01")).unwrap();
     std::fs::write(&log, "").unwrap();

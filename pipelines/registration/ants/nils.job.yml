@@ -24,12 +24,20 @@
 # and the grid or space it lands on; the aligned image with its role,
 # contrast and grid; and a table of the checks: the rigid sanity (the
 # determinant, a flip, the translation and rotation, read from the ITK
-# transform), the foreground Dice after alignment (Otsu masks of both
-# images on the T1w's grid), and for SyN the folding (the share of brain
+# transform), the brain-mask Dice after alignment (the SynthStrip mask of
+# the moving image carried onto the T1w's grid against the T1w's, where
+# the brain_mask input holds both; else no Dice and the row says why), and
+# for SyN the folding (the share of brain
 # voxels whose Jacobian determinant is not positive) and the inverse
 # consistency (the mean displacement of the forward transform composed
 # with its inverse, in mm, inside the brain). SynthSeg's quality scores
 # are the FreeSurfer members' check: this image has no SynthSeg.
+#
+# The brain-mask Dice is a second reading, not the gate: record 57 P6
+# puts the 0.85 alignment check on the link, where SAMSEG and segcsvd
+# check the brain masks of the FLAIR and the T1w they read. The Otsu
+# foreground Dice this member wrote before spread from 0.54 to 0.88 on
+# good pairs in the pilot of 2026-10-30, so it is gone.
 #
 # Production plans on the CPU (`-n` threads); ANTs uses no card.
 name: registration-ants
@@ -90,7 +98,7 @@ command-line: |-
   for f in sub-*/ses-*/anat/*_T1w.nii.gz; do
   [ -e "$f" ] || continue;
   a=$(dirname "$f"); d=[OutputLocation]/$a; mkdir -p "$d"; b=$(basename "$f" .nii.gz); b=${b%_T1w};
-  w=$(mktemp -d [OutputLocation]/.work-XXXXXX); mask=""; m=$(find "$inputs"/brain_mask -path "*/$a/*_desc-brain_mask.nii.gz" 2>/dev/null | sort | head -n 1);
+  w=$(mktemp -d [OutputLocation]/.work-XXXXXX); mask=""; m=$(find "$inputs"/brain_mask -path "*/$a/${b}_desc-brain_mask.nii.gz" 2>/dev/null | sort | head -n 1);
   [ -n "$m" ] && mask=$m; masked=0; [ -n "$mask" ] && masked=1; xm=(); [ -n "$mask" ] && xm=(-x "[$mask,NULL]"); xn=(); [ -n "$mask" ] && xn=(-x "$mask");
   if [ "[TASK]" = within_session ]; then
   for role in flair t2w; do
@@ -100,10 +108,11 @@ command-line: |-
   antsApplyTransforms -d 3 -i "$mv" -r "$f" -t "$w/${con}_0GenericAffine.mat" -n Linear -o "$d/${b}_space-T1w_desc-aligned_${con}.nii.gz" || continue;
   cp "$w/${con}_0GenericAffine.mat" "$d/${b}_from-${con}_to-T1w_mode-image_xfm.mat";
   sanity "$w/${con}_0GenericAffine.mat" "$w" && read det flip tl rot < "$w/sanity.txt" || { det=""; flip=""; tl=""; rot=""; };
-  ThresholdImage 3 "$f" "$w/fg_fixed.nii.gz" Otsu 1 >/dev/null; ThresholdImage 3 "$d/${b}_space-T1w_desc-aligned_${con}.nii.gz" "$w/fg_moving.nii.gz" Otsu 1 >/dev/null;
-  dice=$(ImageMath 3 "$w/dice" DiceAndMinDistSum "$w/fg_fixed.nii.gz" "$w/fg_moving.nii.gz" >/dev/null 2>&1 && awk -F, "NR == 2 {printf \"%.3f\", \$2}" "$w/dice.csv");
-  printf "{\"moving\": \"%s\", \"method\": \"ants-rigid-mattes\", \"brain_masked\": %d%s%s%s%s%s}\n" "$con" "$masked" "${det:+, \"rigid_determinant\": $det}" "${flip:+, \"rigid_flip\": $flip}" "${tl:+, \"rigid_translation_mm\": $tl}" "${rot:+, \"rigid_rotation_deg\": $rot}" "${dice:+, \"alignment_dice\": $dice}" > "$d/${b}_from-${con}_to-T1w_desc-registration_metrics.json";
-  echo "$a: $con onto the T1w, rigid (determinant ${det:-?}, translation ${tl:-?} mm, rotation ${rot:-?} degrees, foreground Dice ${dice:-?})"; done;
+  dice=""; note=""; mm=$(find "$inputs"/brain_mask -path "*/$a/$(basename "$mv" .nii.gz)_desc-brain_mask.nii.gz" 2>/dev/null | sort | head -n 1);
+  if [ -z "$mask" ]; then note="no brain mask of the T1w"; elif [ -z "$mm" ]; then note="no brain mask of the moving image";
+  else antsApplyTransforms -d 3 -i "$mm" -r "$f" -t "$w/${con}_0GenericAffine.mat" -n NearestNeighbor -o "$w/mask_moving.nii.gz" >/dev/null 2>&1 && dice=$(ImageMath 3 "$w/dice" DiceAndMinDistSum "$mask" "$w/mask_moving.nii.gz" >/dev/null 2>&1 && awk -F, "NR == 2 {printf \"%.3f\", \$2}" "$w/dice.csv"); [ -n "$dice" ] || note="the brain-mask Dice could not be computed"; fi;
+  printf "{\"moving\": \"%s\", \"method\": \"ants-rigid-mattes\", \"brain_masked\": %d%s%s%s%s%s%s}\n" "$con" "$masked" "${det:+, \"rigid_determinant\": $det}" "${flip:+, \"rigid_flip\": $flip}" "${tl:+, \"rigid_translation_mm\": $tl}" "${rot:+, \"rigid_rotation_deg\": $rot}" "${dice:+, \"alignment_dice\": $dice}" "${note:+, \"alignment_dice_note\": \"$note\"}" > "$d/${b}_from-${con}_to-T1w_desc-registration_metrics.json";
+  echo "$a: $con onto the T1w, rigid (determinant ${det:-?}, translation ${tl:-?} mm, rotation ${rot:-?} degrees, brain-mask Dice ${dice:-?}${note:+: $note})"; done;
   else
   tpl=/opt/templates/MNI152NLin2009cAsym_T1w.nii.gz;
   if [ ! -f "$tpl" ]; then echo "$a: no template at $tpl: the site file mni_template is not set (nils pipeline secret set mni_template --file <TemplateFlow tpl-MNI152NLin2009cAsym_res-01_T1w.nii.gz>)"; rm -rf "$w"; continue; fi;
@@ -137,7 +146,7 @@ x-nils:
     - id: brain_mask
       type: "derivative:mask"
       optional: true
-      description: "The sessions' brain masks (*_desc-brain_mask.nii.gz) from a run of the synthstrip starter: the fixed mask of the rigid registration, and the skull strip before SyN; where a session has none the whole head is read and the table says so"
+      description: "The sessions' brain masks from a run of the synthstrip starter: the T1w's (<T1w stem less _T1w>_desc-brain_mask.nii.gz) is the fixed mask of the rigid registration and the skull strip before SyN, where a session has none the whole head is read and the table says so; a moving image's (<its stem>_desc-brain_mask.nii.gz) gives the brain-mask Dice"
     - id: lesion_mask
       type: "derivative:mask"
       optional: true
@@ -208,7 +217,8 @@ x-nils:
         - {name: rigid_flip, type: integer, description: "1 where the determinant is negative: a flip, never right"}
         - {name: rigid_translation_mm, unit: mm, description: "The translation of the rigid transform at the image centre"}
         - {name: rigid_rotation_deg, description: "The rotation of the rigid transform, in degrees"}
-        - {name: alignment_dice, description: "The Dice of the foreground masks (Otsu) of the fixed and the aligned image on the T1w's grid"}
+        - {name: alignment_dice, description: "The Dice of the T1w's SynthStrip brain mask and the moving image's carried onto the T1w's grid by the rigid transform"}
+        - {name: alignment_dice_note, type: text, description: "Why no brain-mask Dice was written: no brain mask of the T1w, or of the moving image"}
         - {name: folding_pct, description: "The share of brain voxels whose Jacobian determinant is not positive, in percent: folding"}
         - {name: inverse_consistency_mm, unit: mm, description: "The mean displacement, inside the brain, of the forward transform composed with its inverse"}
   needs:
