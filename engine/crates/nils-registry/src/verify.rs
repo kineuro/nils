@@ -247,13 +247,8 @@ fn write_planting(store: &mut Store, campaign: i64, p: &Planting) -> Result<(), 
 }
 
 fn hash(seed: &str, what: &str) -> u64 {
-    let d = ring::digest::digest(
-        &ring::digest::SHA256,
-        format!("{seed}:planted:{what}").as_bytes(),
-    );
-    let mut b = [0u8; 8];
-    b.copy_from_slice(&d.as_ref()[..8]);
-    u64::from_be_bytes(b)
+    let d = sha256_hex(format!("{seed}:planted:{what}").as_bytes());
+    u64::from_str_radix(&d[..16], 16).expect("sixteen hex digits")
 }
 
 /// A coin the seed draws for one thing, such as the order two proposals
@@ -723,13 +718,12 @@ pub fn list_digest(rows: &[Planted]) -> String {
             json!({"item": r.item_id, "axis": r.axis, "true": r.true_value, "wrong": r.wrong_value})
         })
         .collect();
-    hex::encode(
-        ring::digest::digest(
-            &ring::digest::SHA256,
-            Value::Array(canon).to_string().as_bytes(),
-        )
-        .as_ref(),
-    )
+    sha256_hex(Value::Array(canon).to_string().as_bytes())
+}
+
+/// The lower-case hex sha256 of some bytes.
+pub fn sha256_hex(bytes: &[u8]) -> String {
+    hex::encode(ring::digest::digest(&ring::digest::SHA256, bytes).as_ref())
 }
 
 #[cfg(test)]

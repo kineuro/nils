@@ -440,21 +440,12 @@ pub(crate) fn drawing(
 
 impl Drawing {
     pub(crate) fn axes(&self) -> Vec<String> {
-        strings_of(&self.question["axes"])
+        crate::campaigns::strings_of(&self.question["axes"])
     }
 
     pub(crate) fn constraints(&self) -> Value {
         self.question["constraints"].clone()
     }
-}
-
-fn strings_of(v: &Value) -> Vec<String> {
-    v.as_array()
-        .into_iter()
-        .flatten()
-        .filter_map(Value::as_str)
-        .map(str::to_string)
-        .collect()
 }
 
 /// `nils campaign ab`: read the voters, draw the items and the audit, and

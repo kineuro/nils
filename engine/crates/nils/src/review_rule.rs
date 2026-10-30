@@ -1286,14 +1286,6 @@ fn campaign_over(
     .map_err(crate::campaigns::campaign_err)
 }
 
-fn strings_of(v: &Value) -> Vec<String> {
-    v.as_array()
-        .into_iter()
-        .flatten()
-        .filter_map(|x| x.as_str().map(str::to_string))
-        .collect()
-}
-
 /// `POST /api/audit/draws`: a round's audit draw and the campaign that
 /// reads it. Body: `round` (a round's id; the round of the served rules
 /// and the chosen model where none is named), `seed` (a word; one is drawn
@@ -1440,8 +1432,8 @@ fn draw_door(
             source: json!({"audit_draw": d.id}),
             pack_version: &r.pack_version,
             raters_per_item: doc["raters_per_item"].as_i64().unwrap_or(2),
-            raters: strings_of(&doc["raters"]),
-            adjudicators: strings_of(&doc["adjudicators"]),
+            raters: crate::campaigns::strings_of(&doc["raters"]),
+            adjudicators: crate::campaigns::strings_of(&doc["adjudicators"]),
             adjudication,
             lease_seconds: doc["lease_seconds"].as_i64().unwrap_or(3600),
             suggest: nils_registry::campaign::Suggest::None,
@@ -1473,11 +1465,8 @@ fn draw_door(
 /// accepted answer.
 fn source_names(seed: &str, item: i64) -> [&'static str; 3] {
     const NAMES: [&str; 3] = ["source-a", "source-b", "source-c"];
-    let h = ring::digest::digest(
-        &ring::digest::SHA256,
-        format!("{seed}:sources:{item}").as_bytes(),
-    );
-    let k = (h.as_ref()[0] % 3) as usize;
+    let h = nils_registry::verify::sha256_hex(format!("{seed}:sources:{item}").as_bytes());
+    let k = (u8::from_str_radix(&h[..2], 16).expect("two hex digits") % 3) as usize;
     [NAMES[k], NAMES[(k + 1) % 3], NAMES[(k + 2) % 3]]
 }
 
@@ -1598,8 +1587,8 @@ fn settle_door(
             source: json!({"audit_draw": id, "settles": raters_campaign}),
             pack_version: c.pack_version.as_deref().unwrap_or_default(),
             raters_per_item: doc["raters_per_item"].as_i64().unwrap_or(1),
-            raters: strings_of(&doc["settlers"]),
-            adjudicators: strings_of(&doc["adjudicators"]),
+            raters: crate::campaigns::strings_of(&doc["settlers"]),
+            adjudicators: crate::campaigns::strings_of(&doc["adjudicators"]),
             adjudication: json!({"when": "disagree", "metric": "exact"}),
             lease_seconds: doc["lease_seconds"].as_i64().unwrap_or(3600),
             suggest: nils_registry::campaign::Suggest::Imported,
@@ -1879,7 +1868,7 @@ fn grade_door(
                 source: json!({"audit_draw": id, "rule_review": true}),
                 pack_version: &r.pack_version,
                 raters_per_item: 1,
-                raters: strings_of(&doc["reviewers"]),
+                raters: crate::campaigns::strings_of(&doc["reviewers"]),
                 adjudicators: Vec::new(),
                 adjudication: json!({"when": "disagree", "metric": "exact"}),
                 lease_seconds: 3600,

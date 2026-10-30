@@ -39,6 +39,7 @@ use serde_json::{Value, json};
 use crate::schema::{Type, table};
 use crate::store::{Error as StoreError, Insert, Param, Row, Store};
 use crate::time::now_iso;
+use crate::verify::sha256_hex;
 
 /// The share of a round's accepted stacks an audit reads (spec §18).
 pub const DEFAULT_SHARE: f64 = 0.01;
@@ -143,16 +144,6 @@ pub enum Size {
     Count(usize),
 }
 
-fn sha256_hex(bytes: &[u8]) -> String {
-    hex::encode(ring::digest::digest(&ring::digest::SHA256, bytes).as_ref())
-}
-
-/// The order a seed draws a frame in: by the sha256 of the seed and each
-/// stack's DICOM identity, never by a registry id.
-fn rank(seed: &str, f: &Framed) -> String {
-    sha256_hex(format!("{seed}:audit:{}", f.identity()).as_bytes())
-}
-
 /// How many stacks a share of a frame is: at least one of a frame that
 /// holds any, rounded up.
 pub fn how_many(share: f64, frame: usize) -> usize {
@@ -162,18 +153,16 @@ pub fn how_many(share: f64, frame: usize) -> usize {
     ((share * frame as f64).ceil() as usize).clamp(1, frame)
 }
 
-/// A frame in the order a seed draws it, keyed by `what` and each stack's
-/// DICOM identity alone.
+/// A frame in the order a seed draws it: by the sha256 of the seed, `what`
+/// and each stack's DICOM identity, never by a registry id.
 fn ranked<'a>(seed: &str, what: &str, frame: &'a [Framed]) -> Vec<&'a Framed> {
     let mut ranked: Vec<(String, &Framed)> = frame
         .iter()
         .map(|f| {
-            let r = if what == "audit" {
-                rank(seed, f)
-            } else {
-                sha256_hex(format!("{seed}:{what}:{}", f.identity()).as_bytes())
-            };
-            (r, f)
+            (
+                sha256_hex(format!("{seed}:{what}:{}", f.identity()).as_bytes()),
+                f,
+            )
         })
         .collect();
     ranked.sort_by(|a, b| {
