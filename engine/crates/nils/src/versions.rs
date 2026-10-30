@@ -28,6 +28,10 @@ use nils_registry::pipeline::{self as rows, Pipeline};
 use nils_registry::store::Store;
 use serde_json::{Value, json};
 
+/// Why a version is replaced by the same descriptor with its pack beside it.
+pub(crate) const PACK_ADDED: &str =
+    "the same descriptor, now with its pack (its skip reasons and checks)";
+
 /// How one version stands for a new run.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Standing {
@@ -124,7 +128,17 @@ pub(crate) fn of_versions(versions: &[Pipeline]) -> BTreeMap<i64, Standing> {
                 Standing {
                     state,
                     replaced_by: replacer.map(|j| (sorted[j].id, sorted[j].label())),
-                    why: replacer.and_then(|j| replaces[j].as_ref().map(|r| r.why.clone())),
+                    why: replacer.and_then(|j| {
+                        // record 57 P11: the same descriptor, now with its
+                        // pack, fixes nothing the descriptor's words name
+                        if sorted[j].descriptor_digest == p.descriptor_digest
+                            && p.pack_digest.is_none()
+                            && sorted[j].pack_digest.is_some()
+                        {
+                            return Some(PACK_ADDED.to_string());
+                        }
+                        replaces[j].as_ref().map(|r| r.why.clone())
+                    }),
                     current: current.clone(),
                 },
             )
@@ -286,5 +300,23 @@ mod tests {
         assert_eq!(n[0]["current"], 1);
         assert_eq!(n[0]["offered"], json!([1]));
         assert_eq!(n[0]["versions"][0]["standing"], "retired");
+    }
+
+    /// Record 57 P11: a starter's packless version, replaced by the same
+    /// descriptor with its pack, says so rather than the descriptor's fix.
+    #[test]
+    fn the_same_descriptor_with_its_pack_says_it_adds_the_pack() {
+        let mut old = version(1, 1, "active", json!({"why": "memory"}));
+        let mut new = version(2, 2, "active", json!({"why": "memory"}));
+        old.descriptor_digest = "sha256:same".into();
+        new.descriptor_digest = "sha256:same".into();
+        new.pack_digest = Some("sha256:pack".into());
+        let s = of_versions(&[old.clone(), new.clone()]);
+        assert_eq!(s[&1].state, "replaced");
+        assert_eq!(s[&1].why.as_deref(), Some(PACK_ADDED));
+        // another descriptor keeps its own words
+        new.descriptor_digest = "sha256:other".into();
+        let s = of_versions(&[old, new]);
+        assert_eq!(s[&1].why.as_deref(), Some("memory"));
     }
 }
