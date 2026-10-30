@@ -3464,7 +3464,7 @@ pub(crate) fn pack_version_of(doors: &Doors) -> Option<String> {
     Some(format!("{}@{}", pack.name, pack.version))
 }
 
-fn strings(v: &Value) -> Vec<String> {
+pub(crate) fn strings_of(v: &Value) -> Vec<String> {
     v.as_array()
         .into_iter()
         .flatten()
@@ -3683,8 +3683,8 @@ fn create_at_door(
             content_hash: hash.as_deref(),
             pack_version: pack_version.as_deref(),
             raters_per_item: doc["raters_per_item"].as_i64().unwrap_or(1),
-            raters: strings(&doc["raters"]),
-            adjudicators: strings(&doc["adjudicators"]),
+            raters: strings_of(&doc["raters"]),
+            adjudicators: strings_of(&doc["adjudicators"]),
             adjudication: &adjudication,
             closes_into: doc["closes_into"].as_str().unwrap_or("none"),
             lease_seconds: doc["lease_seconds"].as_i64().unwrap_or(3600),
@@ -3767,11 +3767,11 @@ pub(crate) fn complete_axes(
         "an axes question is held to the pack's legal combinations, and no pack is served here"
             .to_string(),
     ))?;
-    let axes = strings(&question["axes"]);
+    let axes = strings_of(&question["axes"]);
     let mut values: BTreeMap<String, Vec<String>> = BTreeMap::new();
     if let Some(m) = question["values"].as_object() {
         for (axis, list) in m {
-            values.insert(axis.clone(), strings(list));
+            values.insert(axis.clone(), strings_of(list));
         }
     } else if !question["values"].is_null() {
         return Err((400, "values: {axis: [values]}".into()));
@@ -3784,7 +3784,7 @@ pub(crate) fn complete_axes(
     // when not named; `derive: []` derives nothing
     let derive = match &question["derive"] {
         Value::Null => nils_pack::derive::infer(pack, &axes).map_err(|e| (400, e))?,
-        Value::Array(_) => strings(&question["derive"]),
+        Value::Array(_) => strings_of(&question["derive"]),
         _ => return Err((400, "derive: a list of axis names".into())),
     };
     nils_pack::derive::check(pack, &axes, &derive).map_err(|e| (400, e))?;
@@ -3798,7 +3798,7 @@ pub(crate) fn complete_axes(
 /// Nothing without a served pack.
 fn vocabulary_of(question: &Value, pack: Option<&nils_pack::Pack>) -> Option<Value> {
     let pack = pack?;
-    let words = |v: &Value| strings(v);
+    let words = |v: &Value| strings_of(v);
     let mut values: BTreeMap<String, Vec<String>> = BTreeMap::new();
     let all = |axis: &str| -> Vec<String> {
         pack.axes
@@ -4120,7 +4120,7 @@ fn repack_question(
             };
             let mut now: Vec<String> = Vec::new();
             let mut lost: Vec<String> = Vec::new();
-            for v in strings(&constraints["values"][a.as_str()]) {
+            for v in strings_of(&constraints["values"][a.as_str()]) {
                 match axis.value_index(&v) {
                     Some(i) if !now.contains(&axis.values[i].id) => {
                         now.push(axis.values[i].id.clone())

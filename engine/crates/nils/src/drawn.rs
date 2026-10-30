@@ -297,15 +297,6 @@ fn text<'a>(v: &'a Value, key: &str) -> Result<&'a str, Reply> {
         .ok_or_else(|| Reply::error(400, format!("{key}: a saved selection, as name@version")))
 }
 
-fn strings(v: &Value) -> Vec<String> {
-    v.as_array()
-        .into_iter()
-        .flatten()
-        .filter_map(Value::as_str)
-        .map(str::to_string)
-        .collect()
-}
-
 /// The stacks a selection holds, frozen now under the caller's grants.
 fn frozen(
     doors: &Doors,
@@ -377,7 +368,7 @@ pub(crate) fn door(
                 owner: &caller.principal,
                 question: question.clone(),
                 seed,
-                raters: strings(&doc["raters"]),
+                raters: crate::campaigns::strings_of(&doc["raters"]),
                 raters_per_item: doc["raters_per_item"].as_i64().unwrap_or(1),
                 lease_seconds: doc["lease_seconds"].as_i64().unwrap_or(3600),
                 served: served.as_ref(),
@@ -530,10 +521,10 @@ fn ab_door(
     let d = crate::ab::drawing(
         doc["question"]["axes"]
             .as_array()
-            .map(|_| strings(&doc["question"]["axes"])),
+            .map(|_| crate::campaigns::strings_of(&doc["question"]["axes"])),
         doc["question"]["derive"]
             .as_array()
-            .map(|_| strings(&doc["question"]["derive"])),
+            .map(|_| crate::campaigns::strings_of(&doc["question"]["derive"])),
         source["seed"].as_str().unwrap_or_default(),
         num("audit_share").unwrap_or(0.1),
         num("audit_cells").map_or(150, |n| n.max(0.0) as usize),
@@ -542,7 +533,7 @@ fn ab_door(
             .as_str()
             .unwrap_or("provenance=Localizer"),
         if source["localizer_asks"].is_array() {
-            strings(&source["localizer_asks"])
+            crate::campaigns::strings_of(&source["localizer_asks"])
         } else {
             vec!["provenance".into(), "body_part".into()]
         },
@@ -625,7 +616,7 @@ fn ab_door(
             reads,
             drawing: &d,
             served,
-            raters: strings(&doc["raters"]),
+            raters: crate::campaigns::strings_of(&doc["raters"]),
             closes_into,
             lease_seconds: doc["lease_seconds"].as_i64().unwrap_or(3600),
             dry_run,
