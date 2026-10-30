@@ -620,6 +620,10 @@ const PACKET: &[(&str, &str)] = &[
     ("centre_z_mm", "slice_centre_z_mm"),
 ];
 
+/// The audit's packet beside the header: the fingerprint values by the
+/// packet's names, and the session's series.
+pub(crate) type Packet = (Map<String, Value>, Vec<Value>);
+
 /// 7b, the audit's packet (the raters' check and the audit read one
 /// packet): the stack's fingerprint values certificate 2's packets held,
 /// by the packet's names, and the session's list of series in the order
@@ -632,7 +636,7 @@ pub(crate) fn packet(
     store: &mut Store,
     stack: i64,
     quasi: bool,
-) -> Result<Option<(Map<String, Value>, Vec<Value>)>, StoreError> {
+) -> Result<Option<Packet>, StoreError> {
     let Some(k) = keys(store, stack)? else {
         return Ok(None);
     };
