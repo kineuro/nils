@@ -1067,6 +1067,182 @@ mod tests {
         (out, calls)
     }
 
+    /// Wave 7b: SynthStrip masks the session's FLAIR and T2w beside its
+    /// T1w, each mask named by its image's stem, which is the moving
+    /// image's mask the registration family's brain-mask Dice reads; the
+    /// T1w's mask, image and table keep their names; a switch turned off
+    /// leaves its image unmasked and says so; each mask is typed by the
+    /// output of its role; and the pack's rules turn the T2w's mask off
+    /// beside a FLAIR and a mask of another body part off.
+    #[cfg(unix)]
+    #[test]
+    fn synthstrip_masks_the_moving_images_by_their_stems() {
+        use nils_dicom::synth::TempDir;
+        use nils_pipeline::pack::facts::{Facts, Val};
+        use nils_pipeline::pack::rules::{Person, judge};
+        if std::process::Command::new("bash")
+            .args(["-c", "true"])
+            .status()
+            .is_err()
+        {
+            eprintln!(
+                "bash is not installed; the starters' command lines need it, so this test is skipped"
+            );
+            return;
+        }
+        let root = TempDir::new("starter-synthstrip-moving");
+        // a FLAIR as the release names it beside a T2w; a T2w alone; the
+        // _FLAIR of an older tree
+        for f in [
+            "ses-1/anat/sub-a_ses-1_acq-3D+MPRAGE_T1w",
+            "ses-1/anat/sub-a_ses-1_acq-Ax+2D+FLAIR+IRTSE_T2w",
+            "ses-1/anat/sub-a_ses-1_acq-Ax+2D+TSE_T2w",
+            "ses-2/anat/sub-a_ses-2_acq-3D+MPRAGE_T1w",
+            "ses-2/anat/sub-a_ses-2_acq-Ax+2D+TSE_T2w",
+            "ses-3/anat/sub-a_ses-3_T1w",
+            "ses-3/anat/sub-a_ses-3_FLAIR",
+        ] {
+            root.file(&format!("input/sub-a/{f}.nii.gz"), b"x");
+        }
+        let tools: Vec<(&str, String)> = vec![
+            (
+                "mri_synthstrip",
+                r#"while [ $# -gt 0 ]; do case "$1" in -m|-o) printf x > "$2";; esac; shift; done"#
+                    .into(),
+            ),
+            (
+                "fspython",
+                r#"printf 'brain_volume,mask_components,mask_edge_voxels\n1200000,1,0\n'"#.into(),
+            ),
+        ];
+        let (_, text) = CATALOG.iter().find(|(n, _)| *n == "synthstrip").unwrap();
+        let d = descriptor::parse(text).unwrap();
+        let t1w = [
+            ("1", "sub-a_ses-1_acq-3D+MPRAGE"),
+            ("2", "sub-a_ses-2_acq-3D+MPRAGE"),
+            ("3", "sub-a_ses-3"),
+        ];
+        let flair = [
+            ("1", "sub-a_ses-1_acq-Ax+2D+FLAIR+IRTSE_T2w", "flair_mask"),
+            ("3", "sub-a_ses-3_FLAIR", "flair_mask_suffix"),
+        ];
+        let t2w = [
+            ("1", "sub-a_ses-1_acq-Ax+2D+TSE_T2w", "t2w_mask"),
+            ("2", "sub-a_ses-2_acq-Ax+2D+TSE_T2w", "t2w_mask"),
+        ];
+        let rel =
+            |ses: &str, stem: &str, what: &str| format!("sub-a/ses-{ses}/anat/{stem}_desc-{what}");
+        // the settings, and whether the FLAIRs and the T2ws are masked
+        type Case<'a> = (&'a [(&'a str, &'a str)], bool, bool);
+        let cases: [Case<'_>; 3] = [
+            (&[], true, true),
+            (&[("mask_t2w", "false")], true, false),
+            (&[("mask_flair", "false")], false, true),
+        ];
+        for (given, flairs, t2ws) in cases {
+            let (out, calls) = stand_in_run("synthstrip", given, root.path(), &tools);
+            let said = String::from_utf8_lossy(&out.stdout).to_string();
+            assert!(
+                out.status.success(),
+                "{given:?}: {said}{}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            let output = root.path().join("output");
+            let there = |r: &str| output.join(r).is_file();
+            // the T1w's files as they were named before
+            for (ses, stem) in t1w {
+                for what in ["brain_mask.nii.gz", "brain_T1w.nii.gz", "brain_volume.csv"] {
+                    assert!(there(&rel(ses, stem, what)), "{given:?}: {ses} {what}");
+                }
+                let mask = rel(ses, stem, "brain_mask.nii.gz");
+                let typed = nils_pipeline::files::unit_output(
+                    &d.outputs,
+                    &mask,
+                    &[("subject", "a"), ("session", ses)],
+                )
+                .unwrap();
+                assert_eq!(typed.id, "brain_mask", "{mask}");
+                assert_eq!(typed.role.as_deref(), Some("t1w"), "{mask}");
+            }
+            for (list, on, con) in [(&flair[..], flairs, "FLAIR"), (&t2w[..], t2ws, "T2w")] {
+                for (ses, stem, id) in list {
+                    let mask = rel(ses, stem, "brain_mask.nii.gz");
+                    assert_eq!(there(&mask), on, "{given:?}: {mask}");
+                    // a moving image's mask only: no brain image of it
+                    assert!(!there(&rel(ses, stem, "brain_T1w.nii.gz")), "{mask}");
+                    let typed = nils_pipeline::files::unit_output(
+                        &d.outputs,
+                        &mask,
+                        &[("subject", "a"), ("session", ses)],
+                    )
+                    .unwrap();
+                    assert_eq!(typed.id, *id, "{mask}");
+                    assert_eq!(typed.contrast.as_deref(), Some(con), "{mask}");
+                }
+                if !on {
+                    assert!(
+                        said.contains(&format!("the {con} is not masked")),
+                        "{given:?}: {said}"
+                    );
+                }
+            }
+            let strips = calls.iter().filter(|c| c[0] == "mri_synthstrip").count();
+            assert_eq!(
+                strips,
+                3 + if flairs { 2 } else { 0 } + if t2ws { 2 } else { 0 },
+                "{given:?}: {calls:?}"
+            );
+        }
+
+        // the pack: the T2w's mask is off beside a FLAIR, and a mask of
+        // another body part is off; the rest masks
+        let (_, pack) = PACKS.iter().find(|(n, _)| *n == "synthstrip").unwrap();
+        let pack = nils_pipeline::pack::parse(pack).unwrap();
+        pack.check(&d, &pack.vocabulary(&d)).unwrap();
+        let resolved = d.resolve(&[]).unwrap();
+        let facts = |roles: &[(&str, &str)]| {
+            let mut f = Facts::default();
+            f.roles.insert("t1w".into());
+            f.set("t1w.body_part", Val::Text("brain".into()));
+            for (role, part) in roles {
+                f.roles.insert(role.to_string());
+                f.set(&format!("{role}.body_part"), Val::Text(part.to_string()));
+            }
+            f
+        };
+        let person = Person {
+            user: "anna".into(),
+            ..Person::default()
+        };
+        for (roles, mask_flair, mask_t2w, by) in [
+            (
+                &[("flair", "brain"), ("t2w", "brain")][..],
+                true,
+                false,
+                Some("no-t2w-mask-beside-a-flair"),
+            ),
+            (&[("t2w", "brain")][..], true, true, None),
+            (
+                &[("t2w", "spine")][..],
+                true,
+                false,
+                Some("t2w-mask-of-a-brain"),
+            ),
+            (
+                &[("flair", "spine")][..],
+                false,
+                false,
+                Some("no-t2w-mask-beside-a-flair"),
+            ),
+            (&[][..], true, true, None),
+        ] {
+            let j = judge(&pack, &d, &resolved, &facts(roles), &person);
+            assert_eq!(j.knobs["mask_flair"].value, json!(mask_flair), "{roles:?}");
+            assert_eq!(j.knobs["mask_t2w"].value, json!(mask_t2w), "{roles:?}");
+            assert_eq!(j.knobs["mask_t2w"].rule.as_deref(), by, "{roles:?}");
+        }
+    }
+
     /// Record 57 P11 (research 02, SAMSEG's wiki): SAMSEG separates the
     /// pallidum from the white matter only with the FLAIR among its
     /// inputs, never from the T1w alone, and the unit's table says which

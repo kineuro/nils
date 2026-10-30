@@ -7,6 +7,21 @@
 # image and a one-row table with the brain's volume out. Learning-based and
 # contrast-agnostic, CPU only, no licence, the model inside the image.
 #
+# The session's FLAIR and T2w are masked too (Wave 7b), each mask named by
+# its image's stem (<stem>_desc-brain_mask.nii.gz), so the registration
+# family's brain-mask Dice has a mask of the moving image. Each is the
+# image the registration family takes: the FLAIR is the T2w with FLAIR
+# among the `+` tokens of its `acq-` (record 55 C4) or the `_FLAIR` of an
+# older tree, the T2w the first T2w without that token; the first of each
+# is masked, 2D or 3D, since SynthStrip reads either. The pack's rules turn
+# a mask off: the T2w of a session that has a FLAIR (the family registers
+# the FLAIR in its place) and a FLAIR or T2w whose body part is not the
+# brain. The T1w's mask, image and table are as they were: its mask keeps
+# its name (the stem less _T1w), which N4, SAMSEG, segcsvd and the
+# registration family read. The moving masks are outputs of their own,
+# typed by role and listed ahead of brain_mask, since a file is the first
+# output whose template it matches.
+#
 # The image is FreeSurfer 8.2.0, which ships mri_synthstrip, pinned by its
 # registry manifest digest (resolved 2026-09-24 with a registry manifest
 # request, not pulled: a single-platform linux/amd64 image manifest). The
@@ -27,15 +42,17 @@
 # volume alone (x-nils.replaces).
 #
 # Memory: mri_synthstrip on the CPU peaked at 5.7 GB on a 1 mm MPRAGE, so a
-# unit declares 8 GB. At 4 GB, where the runtime holds a unit to what it
+# unit declares 8 GB; the moving images are masked one after another, so
+# the peak is the same and the minutes three times one. At 4 GB, where the runtime holds a unit to what it
 # declares, every unit was killed while it processed its frame.
 name: synthstrip
 schema-version: "0.5"
 tool-version: "freesurfer-8.2.0"
 description: >-
   Skull-strip each session's T1-weighted image with SynthStrip: a binary
-  brain mask, the brain-extracted image, and the brain's volume in mm3. One
-  session is one unit; CPU, no licence.
+  brain mask, the brain-extracted image, and the brain's volume in mm3; and
+  a brain mask of the session's FLAIR and T2w, for the registration
+  family's alignment check. One session is one unit; CPU, no licence.
 
 container-image:
   type: docker
@@ -58,6 +75,20 @@ inputs:
     minimum: -5
     maximum: 10
     unit: mm
+  - id: mask_flair
+    name: Mask the FLAIR
+    type: Flag
+    description: "Mask the session's FLAIR too (<its stem>_desc-brain_mask.nii.gz), for the registration family's brain-mask Dice."
+    value-key: "[MASKFLAIR]"
+    command-line-flag: "flair"
+    default-value: true
+  - id: mask_t2w
+    name: Mask the T2w
+    type: Flag
+    description: "Mask the session's T2w too (<its stem>_desc-brain_mask.nii.gz), for the registration family's brain-mask Dice."
+    value-key: "[MASKT2W]"
+    command-line-flag: "t2w"
+    default-value: true
   - id: threads
     name: Threads
     type: Number
@@ -70,26 +101,57 @@ inputs:
 
 command-line: >-
   bash -c 'set -u; shopt -s nullglob; cd [InputDataset];
+  flair() { local g s q; for g in "$1"/*_T2w.nii.gz "$1"/*_FLAIR.nii.gz; do s=$(basename "$g" .nii.gz);
+  case "$s" in *_FLAIR) echo "$g"; return;; *_acq-*) q=${s#*_acq-};; *) continue;; esac;
+  case "+${q%%_*}+" in *+FLAIR+*) echo "$g"; return;; esac; done; };
+  t2w() { local g s q; for g in "$1"/*_T2w.nii.gz; do s=$(basename "$g" .nii.gz);
+  case "$s" in *_acq-*) q=${s#*_acq-}; case "+${q%%_*}+" in *+FLAIR+*) continue;; esac;; esac; echo "$g"; return; done; };
   for f in sub-*/ses-*/anat/*_T1w.nii.gz; do
-  d=[OutputLocation]/$(dirname "$f"); mkdir -p "$d";
+  a=$(dirname "$f"); d=[OutputLocation]/$a; mkdir -p "$d";
   b=$(basename "$f" .nii.gz); b=${b%_T1w};
   mri_synthstrip -i "$f" -o "$d/${b}_desc-brain_T1w.nii.gz" -m "$d/${b}_desc-brain_mask.nii.gz" -b [BORDER] -t [THREADS] [NOCSF] || continue;
   fspython -c "import sys, numpy, nibabel, scipy.ndimage as d; i = nibabel.load(sys.argv[1]); m = numpy.asarray(i.dataobj) > 0;
   v = float(m.sum() * numpy.prod(i.header.get_zooms()[:3])); c = int(d.label(m, d.generate_binary_structure(3, 3))[1]);
   e = int(m[0].sum() + m[-1].sum() + m[:, 0].sum() + m[:, -1].sum() + m[:, :, 0].sum() + m[:, :, -1].sum());
-  print(\"brain_volume,mask_components,mask_edge_voxels\\n%s,%d,%d\" % (v, c, e))" "$d/${b}_desc-brain_mask.nii.gz" > "$d/${b}_desc-brain_volume.csv" || continue; done'
+  print(\"brain_volume,mask_components,mask_edge_voxels\\n%s,%d,%d\" % (v, c, e))" "$d/${b}_desc-brain_mask.nii.gz" > "$d/${b}_desc-brain_volume.csv" || continue;
+  for role in flair t2w; do
+  if [ $role = flair ]; then mv=$(flair "$a"); con=FLAIR; on="[MASKFLAIR]"; else mv=$(t2w "$a"); con=T2w; on="[MASKT2W]"; fi;
+  [ -n "$mv" ] || continue; k="$d/$(basename "$mv" .nii.gz)_desc-brain_mask.nii.gz"; [ -e "$k" ] && continue;
+  if [ -z "$on" ]; then echo "$a: the $con is not masked: the pack turned mask_$role off for this session (its rules say why)"; continue; fi;
+  mri_synthstrip -i "$mv" -m "$k" -b [BORDER] -t [THREADS] [NOCSF] || { echo "$a: SynthStrip could not mask the $con"; continue; };
+  echo "$a: the $con is masked too, as $(basename "$k")"; done; done'
 
 x-nils:
   contract: 1
   analysis-level: session
   # No version list: every earlier version of the name in a catalog.
   replaces:
-    why: "Its table carries the mask's connected components and its voxels on the image's edge, which the pack's checks read; the earlier versions wrote the volume alone."
+    why: "It masks the session's FLAIR and T2w beside the T1w, which the registration family's brain-mask Dice reads, and its table carries the mask's connected components and its voxels on the image's edge, which the pack's checks read; the earlier versions masked the T1w alone, and the first wrote the volume alone."
   input:
     layout: bids
     roles: [t1w]
   units: apart
   outputs:
+    # the moving images' masks first: a file is the first output whose
+    # template it matches, and brain_mask's template matches them too
+    - id: flair_mask
+      kind: mask
+      path-template: "sub-{subject}/ses-{session}/anat/*FLAIR*_T2w_desc-brain_mask.nii.gz"
+      media-type: application/x-nifti+gzip
+      role: flair
+      contrast: FLAIR
+    - id: flair_mask_suffix
+      kind: mask
+      path-template: "sub-{subject}/ses-{session}/anat/*_FLAIR_desc-brain_mask.nii.gz"
+      media-type: application/x-nifti+gzip
+      role: flair
+      contrast: FLAIR
+    - id: t2w_mask
+      kind: mask
+      path-template: "sub-{subject}/ses-{session}/anat/*_T2w_desc-brain_mask.nii.gz"
+      media-type: application/x-nifti+gzip
+      role: t2w
+      contrast: T2w
     - id: brain_mask
       kind: mask
       path-template: "sub-{subject}/ses-{session}/anat/*_desc-brain_mask.nii.gz"
@@ -120,4 +182,4 @@ x-nils:
     gpu: none
     cores: 2
     memory-gb: 8
-    unit-minutes: 1
+    unit-minutes: 3
