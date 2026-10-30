@@ -358,6 +358,52 @@ raters alone decides nothing.
 > grade, `campaigns.rule_review` on the draw). Fixes go through the proposals
 > of section 5. The audit's and the settle's reads never train a model.
 
+## 8. Run the sealed protocol on your own install
+
+A site checks its own labels and returns counts only: a seeded draw of
+accepted stacks, read by your people in verify mode against the accepted
+answer, exported with a minimum cell of 5 stacks.
+
+1. Register the seed, then draw at the keyboard of the engine's host:
+
+   ```
+   nils audit draw --seed <registered seed> --count 150 --packets <new empty dir> --readers <person>,<person>
+   ```
+
+   Give `--since 2026-11-01T00:00:00Z` to start the frame at a time, and
+   `--readers-per-item 2` for a disagreement count. The same seed over the
+   same frame draws the same stacks in the same order. The command makes a
+   verify campaign over every drawn stack, the accepted answer filled in and
+   planted values from the seed, and prints its id.
+
+2. Read the packets if you want the header as text: one file per stack,
+   `0001.txt` onward in the order drawn, and `MANIFEST.json` with the seed and
+   the frame's digest. A packet holds the stored header less what names a
+   person; never a subject code, a path or anything NILS said of the stack.
+
+3. Your people read the verify campaign on the desk's verify screen. Close it
+   when they are done:
+
+   ```
+   POST /api/campaigns/<campaign>/close
+   ```
+
+4. Export the counts:
+
+   ```
+   nils audit export --draw <draw> --out passport.json
+   ```
+
+   The file holds the frame, drawn, read and settled counts, the wrong count
+   and its exact one-sided 95 % bound, the readers' disagreements, by axis,
+   by vendor and by acquisition year.
+
+> **Warning: a cell under 5 stacks is held back.** A vendor or year with 1 to 4
+> drawn stacks shows no counts (`held_back: true`), and where it is the only
+> one held, the next smallest cell of its list is held with it so that no
+> total gives it away (record 14). The export names no stack, subject code,
+> path or header text.
+
 ## Reference
 
 | Door | Grant |
@@ -382,3 +428,8 @@ raters alone decides nothing.
 | `POST /api/audit/draws/{id}/grade` | review:work |
 | `POST /api/audit/draws/{id}/settle` | review:work and campaigns:work |
 | `GET /api/audit/draws/pooled` | review:see or campaigns:see |
+
+| Command | What it does |
+|---|---|
+| `nils audit draw --seed S --count N --packets DIR --readers W [--since T] [--axes A,B] [--readers-per-item N]`, or `--raters W` in place of `--readers` | the seeded draw, its verify campaign (or with `--raters`, the raters' campaign of section 7) and the header packets |
+| `nils audit export [--draw ID] --out FILE` | the draw's counts under the minimum cell of 5 (default: the newest draw by count) |

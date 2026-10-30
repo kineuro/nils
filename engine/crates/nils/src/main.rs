@@ -32,6 +32,7 @@ mod anchored;
 mod ask_cli;
 mod ask_doors;
 mod assist_cli;
+mod audit_cli;
 mod backup;
 mod batches;
 mod browse;
@@ -896,6 +897,23 @@ enum AuditCommand {
         limit: usize,
         #[arg(long)]
         json: bool,
+    },
+    /// The sealed protocol (record 58 P6): a seeded draw of accepted stacks,
+    /// the verify campaign that reads them against the accepted answer, and
+    /// each drawn stack's header as a text packet named by its place in the
+    /// draw, with MANIFEST.json (the seed and the frame's digest)
+    Draw(Box<audit_cli::DrawArgs>),
+    /// The draw's counts for the label-quality passport: frame, drawn, read,
+    /// settled, wrong with its exact one-sided 95 % bound, and the readers'
+    /// disagreements, by axis, vendor and acquisition year; a cell under 5
+    /// stacks is held back (record 14). No codes, paths or header text
+    Export {
+        /// The draw (default: the newest draw by count)
+        #[arg(long, value_name = "ID")]
+        draw: Option<i64>,
+        /// Where the JSON is written
+        #[arg(long, value_name = "FILE")]
+        out: PathBuf,
     },
 }
 
@@ -2449,6 +2467,8 @@ fn main() -> ExitCode {
             limit,
             json,
         }) => audit_list(&home, principal, action, since, limit, json),
+        Command::Audit(AuditCommand::Draw(args)) => audit_cli::draw(&home, *args),
+        Command::Audit(AuditCommand::Export { draw, out }) => audit_cli::export(&home, draw, &out),
         Command::Pick { command } => pick_command(&home, command),
         Command::Session { command } => session_command(&home, command),
         Command::Synth(args) => synth(&home, args),

@@ -6,6 +6,8 @@ All notable changes to NILS v1 are recorded here. The format follows [Keep a Cha
 
 ### Added
 
+- `nils audit draw --seed S --count N --packets DIR` and `nils audit export --out FILE`, the sealed protocol on a site's own install. The draw is the audit door's seeded draw of accepted stacks; it makes a verify campaign over every drawn stack with the accepted answer as the proposal and planted values from the seed (or, with `--raters`, the monthly audit's raters' campaign), and writes each stack's header as a text packet named by its place in the draw, with `MANIFEST.json` holding the seed and the frame's digest. The export writes the frame, drawn, read and settled counts, the wrong count with its exact one-sided 95 % bound and the readers' disagreements, by axis, vendor and acquisition year, holding back every cell under 5 stacks and its complement; it names no stack, subject code, path or header text. `nils audit list` is unchanged, and a draw made at the command line is graded by `POST /api/audit/draws/{id}/grade` too.
+
 - The registration family is in the starter catalog. When the engine starts and the catalog holds no family named `registration`, it adds the three members (as starters) and then the family, as `nils pipeline add` of the folder does; a family already in the catalog is left as it is.
 
 ### Changed
