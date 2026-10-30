@@ -2339,6 +2339,17 @@ fn routed(
     if let Some(r) = crate::provenance::route(registry, caller, quasi, get, &pipeline_segs) {
         return r;
     }
+    // record 58 P4: the yield funnel of a selection through a pipeline
+    if let Some(r) = crate::funnel::route(
+        &doors.home,
+        doors.pack_dir.as_deref(),
+        registry,
+        get,
+        &segs,
+        query,
+    ) {
+        return r;
+    }
     // record 56 §6.4, §6.5: the pack's quality, the proposed rule changes
     // and their adoption
     if let Some(r) =
@@ -5888,6 +5899,9 @@ pub(crate) fn door(method: &str, segs: &[&str]) -> (Need, Detail) {
         ("GET", ["api", "provenance", _, _]) => {
             (Need::AnyOf(&["pipelines:see", "data:see"]), Plain)
         }
+        // record 58 P4: the funnel counts a selection through a pipeline, as
+        // the pre-flight reads it, and writes nothing but the handles
+        ("GET", ["api", "funnel"]) => (Need::One("pipelines:see"), Plain),
         // 2026-10-12: what the engine runs beside itself is read on the
         // Pipelines page and the Parts page; installing it is an admin's
         ("GET", ["api", "tools"]) => (Need::AnyOf(&["install:see", "pipelines:see"]), Plain),
@@ -6680,6 +6694,7 @@ pub(crate) fn doors_list() -> Vec<String> {
     .chain(std::iter::once(&crate::preflight::DOOR))
     .chain(crate::workflows::DOORS.iter())
     .chain(std::iter::once(&crate::provenance::DOOR))
+    .chain(std::iter::once(&crate::funnel::DOOR))
     .chain(crate::tools::DOORS.iter())
     .chain(crate::software::DOORS.iter())
     .chain(crate::pipelines::SETUP_DOORS.iter())
@@ -8936,6 +8951,7 @@ pub(crate) fn policy() -> Vec<serde_json::Value> {
             .chain(crate::pipelines::RUNTIME_POLICY.iter())
             .chain(crate::workflows::POLICY.iter())
             .chain(std::iter::once(&crate::provenance::POLICY))
+            .chain(std::iter::once(&crate::funnel::POLICY))
             .chain(crate::clinical_doors::POLICY.iter())
             .chain(crate::rule_changes::POLICY.iter())
             .chain(crate::review_questions::POLICY.iter())

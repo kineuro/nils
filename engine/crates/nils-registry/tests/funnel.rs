@@ -179,7 +179,13 @@ fn seed(store: &mut Store) -> Vec<i64> {
         s(2, 4, None, Some("T2w"), Some("2D")),
     ];
     let subjects: Vec<i64> = (0..3)
-        .map(|n| row(store, "subject", &[("code", Param::from(format!("sub{n}")))]))
+        .map(|n| {
+            row(
+                store,
+                "subject",
+                &[("code", Param::from(format!("sub{n}")))],
+            )
+        })
         .collect();
     let mut studies: BTreeMap<usize, (i64, i64)> = BTreeMap::new();
     let mut out = Vec::new();
@@ -188,7 +194,10 @@ fn seed(store: &mut Store) -> Vec<i64> {
         let (study, series) = *studies.entry(sd.study).or_insert_with(|| {
             let mut given = vec![
                 ("subject_id", Param::Int(subject)),
-                ("study_instance_uid", Param::from(format!("1.2.9.{}", sd.study))),
+                (
+                    "study_instance_uid",
+                    Param::from(format!("1.2.9.{}", sd.study)),
+                ),
             ];
             if let Some(d) = sd.date {
                 given.push(("study_date", Param::from(d)));
@@ -207,7 +216,10 @@ fn seed(store: &mut Store) -> Vec<i64> {
                 &[
                     ("subject_id", Param::Int(subject)),
                     ("study_id", Param::Int(study)),
-                    ("series_instance_uid", Param::from(format!("1.2.9.{}.1", sd.study))),
+                    (
+                        "series_instance_uid",
+                        Param::from(format!("1.2.9.{}.1", sd.study)),
+                    ),
                 ],
             );
             (study, series)
@@ -288,7 +300,10 @@ fn adds_up(name: &str, row: &Value) {
         for c in ["subjects", "sessions"] {
             let most = groups.iter().map(|g| n(g, c)).max().unwrap_or(0);
             let sum: i64 = groups.iter().map(|g| n(g, c)).sum();
-            assert!(most <= n(row, c) && n(row, c) <= sum, "{name} {by} {c}: {row}");
+            assert!(
+                most <= n(row, c) && n(row, c) <= sum,
+                "{name} {by} {c}: {row}"
+            );
         }
     }
 }
@@ -330,19 +345,31 @@ fn rows_count_subjects_sessions_and_stacks_and_add_up() {
         // subject 0's four stacks are one session, subject 1's two studies
         // two, subject 2's one: four sessions
         assert_eq!(
-            (n(&rows[0], "subjects"), n(&rows[0], "sessions"), n(&rows[0], "stacks")),
+            (
+                n(&rows[0], "subjects"),
+                n(&rows[0], "sessions"),
+                n(&rows[0], "stacks")
+            ),
             (3, 4, 10),
             "{name}: {}",
             rows[0]
         );
         assert_eq!(
-            (n(&rows[1], "subjects"), n(&rows[1], "sessions"), n(&rows[1], "stacks")),
+            (
+                n(&rows[1], "subjects"),
+                n(&rows[1], "sessions"),
+                n(&rows[1], "stacks")
+            ),
             (3, 4, 5),
             "{name}: {}",
             rows[1]
         );
         assert_eq!(
-            (n(&rows[2], "subjects"), n(&rows[2], "sessions"), n(&rows[2], "stacks")),
+            (
+                n(&rows[2], "subjects"),
+                n(&rows[2], "sessions"),
+                n(&rows[2], "stacks")
+            ),
             (3, 3, 3),
             "{name}: {}",
             rows[2]
@@ -351,27 +378,64 @@ fn rows_count_subjects_sessions_and_stacks_and_add_up() {
             adds_up(name, r);
         }
         // a row is the row before less what its filter removed
-        assert_eq!(n(&rows[0], "stacks") - (all.len() - t1.len()) as i64, n(&rows[1], "stacks"));
-        assert_eq!(n(&rows[1], "stacks") - (t1.len() - t1_3d.len()) as i64, n(&rows[2], "stacks"));
+        assert_eq!(
+            n(&rows[0], "stacks") - (all.len() - t1.len()) as i64,
+            n(&rows[1], "stacks")
+        );
+        assert_eq!(
+            n(&rows[1], "stacks") - (t1.len() - t1_3d.len()) as i64,
+            n(&rows[2], "stacks")
+        );
         // the year is the study's date, else the filled day; the base and the
         // acquisition type the registry's, else unknown
         assert_eq!(n(group(&rows[0], "by_year", "2019"), "stacks"), 4, "{name}");
-        assert_eq!(n(group(&rows[0], "by_year", "2019"), "sessions"), 1, "{name}");
+        assert_eq!(
+            n(group(&rows[0], "by_year", "2019"), "sessions"),
+            1,
+            "{name}"
+        );
         assert_eq!(n(group(&rows[0], "by_year", "2021"), "stacks"), 4, "{name}");
-        assert_eq!(n(group(&rows[0], "by_year", "2021"), "subjects"), 2, "{name}");
+        assert_eq!(
+            n(group(&rows[0], "by_year", "2021"), "subjects"),
+            2,
+            "{name}"
+        );
         assert_eq!(n(group(&rows[0], "by_year", "2015"), "stacks"), 2, "{name}");
-        assert_eq!(n(group(&rows[0], "by_base", "unknown"), "stacks"), 1, "{name}");
+        assert_eq!(
+            n(group(&rows[0], "by_base", "unknown"), "stacks"),
+            1,
+            "{name}"
+        );
         assert_eq!(n(group(&rows[0], "by_base", "T1w"), "stacks"), 5, "{name}");
-        assert_eq!(n(group(&rows[0], "by_dimension", "unknown"), "stacks"), 1, "{name}");
-        assert_eq!(n(group(&rows[0], "by_dimension", "2D"), "stacks"), 5, "{name}");
-        assert_eq!(n(group(&rows[0], "by_dimension", "3D"), "stacks"), 4, "{name}");
+        assert_eq!(
+            n(group(&rows[0], "by_dimension", "unknown"), "stacks"),
+            1,
+            "{name}"
+        );
+        assert_eq!(
+            n(group(&rows[0], "by_dimension", "2D"), "stacks"),
+            5,
+            "{name}"
+        );
+        assert_eq!(
+            n(group(&rows[0], "by_dimension", "3D"), "stacks"),
+            4,
+            "{name}"
+        );
         // counts only: nothing of a subject's code
         let text = serde_json::to_string(&rows).unwrap();
-        assert!(!text.contains("sub0") && !text.contains("1.2.9"), "{name}: {text}");
+        assert!(
+            !text.contains("sub0") && !text.contains("1.2.9"),
+            "{name}: {text}"
+        );
         // a stack the registry does not hold is not counted
         let mut with_ghost = all.clone();
         with_ghost.insert(999_999);
-        assert_eq!(n(&funnel::row_counts(&of, &with_ghost), "stacks"), 10, "{name}");
+        assert_eq!(
+            n(&funnel::row_counts(&of, &with_ghost), "stacks"),
+            10,
+            "{name}"
+        );
     }
 }
 
@@ -389,7 +453,10 @@ fn the_last_line_multiplies_the_certified_bound_by_the_count_filtered() {
         }];
         let line = funnel::budget(&none, &reads);
         assert!(line["at_most"].is_null(), "{name}: {line}");
-        assert!(line["words"].as_str().unwrap().contains("no certificate"), "{name}: {line}");
+        assert!(
+            line["words"].as_str().unwrap().contains("no certificate"),
+            "{name}: {line}"
+        );
         // a certificate whose graded result measured base on its own
         let result = labels::graded(&json!({
             "bar": 0.02, "n": 5000, "errors": 6,
@@ -429,13 +496,19 @@ fn the_last_line_multiplies_the_certified_bound_by_the_count_filtered() {
         ];
         let line = funnel::budget(&b, &reads);
         let want = base_bound * 5000.0 + stack_bound * 800.0;
-        assert!((line["sum"].as_f64().unwrap() - want).abs() < 1e-9, "{name}: {line}");
+        assert!(
+            (line["sum"].as_f64().unwrap() - want).abs() < 1e-9,
+            "{name}: {line}"
+        );
         assert_eq!(line["at_most"], want.ceil() as u64, "{name}: {line}");
         assert_eq!(line["terms"][0]["bound_from"], "axis", "{name}: {line}");
         assert_eq!(line["terms"][1]["bound_from"], "stack", "{name}: {line}");
         assert_eq!(
             line["words"],
-            format!("at most {} stacks misplaced by label error", want.ceil() as u64),
+            format!(
+                "at most {} stacks misplaced by label error",
+                want.ceil() as u64
+            ),
             "{name}"
         );
         // a certificate asked for by id, and one that is not there
@@ -446,10 +519,19 @@ fn the_last_line_multiplies_the_certified_bound_by_the_count_filtered() {
 
 #[test]
 fn a_graded_result_checks_its_axes() {
-    let bad = labels::graded(&json!({"bar": 0.02, "n": 5000, "errors": 6, "axes": {"base": {"n": 10, "errors": 11}}}));
+    let bad = labels::graded(
+        &json!({"bar": 0.02, "n": 5000, "errors": 6, "axes": {"base": {"n": 10, "errors": 11}}}),
+    );
     assert!(bad.is_err());
-    let stated = labels::graded(&json!({"bar": 0.02, "n": 5000, "errors": 6, "axes": {"base": {"n": 10, "errors": 0, "bound": 0.5}}}));
-    assert!(stated.unwrap_err().to_string().contains("worked out from the counts"));
+    let stated = labels::graded(
+        &json!({"bar": 0.02, "n": 5000, "errors": 6, "axes": {"base": {"n": 10, "errors": 0, "bound": 0.5}}}),
+    );
+    assert!(
+        stated
+            .unwrap_err()
+            .to_string()
+            .contains("worked out from the counts")
+    );
     let none = labels::graded(&json!({"bar": 0.02, "n": 5000, "errors": 6})).unwrap();
     assert!(none.get("axes").is_none(), "{none}");
 }
