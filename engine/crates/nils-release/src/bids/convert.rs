@@ -186,6 +186,7 @@ pub fn convert(
         compress,
         Duration::from_secs(5),
         &mut || false,
+        &mut Duration::default(),
     )
     .map_err(|e| e.to_string())
 }
@@ -195,6 +196,19 @@ pub fn convert(
 /// maintenance track): a row that falls silent for a minute is taken for
 /// stale by another node's claim. The interval is the heart's, not this
 /// module's.
+///
+/// `spent` gains the time the converter itself ran, every run of it this
+/// stack took (the merge and the run that learns the names included), so a
+/// release can say per stack what the conversion cost apart from the scrub
+/// and the digests around it (Wave 7b, 3.x6: measured over 135 stacks, the
+/// converter was about 85 % of a release's wall).
+///
+/// The converter writes into a folder of its own under `work`, never into
+/// `into` directly, and what it made is moved into `into` once it is
+/// accepted: several stacks of one session convert at once into the same
+/// `into` (3.x6), and "what appeared" is read from a folder no other
+/// conversion writes into. A name already in `into` is refused as the
+/// converter's own `a` suffix said before.
 #[allow(clippy::too_many_arguments)]
 pub fn convert_ticking(
     converter: &Converter,
@@ -205,11 +219,16 @@ pub fn convert_ticking(
     compress: bool,
     every: Duration,
     tick: &mut Tick<'_>,
+    spent: &mut Duration,
 ) -> Result<Made, Fail> {
     if files.is_empty() {
         return Err(Fail::Refused("no files to convert".to_string()));
     }
     std::fs::create_dir_all(into)
+        .map_err(|e| Fail::Refused(format!("no directory to write into ({e})")))?;
+    let out = work.join("out");
+    std::fs::remove_dir_all(&out).ok();
+    std::fs::create_dir_all(&out)
         .map_err(|e| Fail::Refused(format!("no directory to write into ({e})")))?;
 
     // The list goes in a file because a stack is not a directory: a multi-echo
@@ -227,10 +246,39 @@ pub fn convert_ticking(
     }
     std::fs::write(&list, text)
         .map_err(|e| Fail::Refused(format!("could not write the file list ({e})")))?;
-    let made = converted(converter, &list, work, into, stem, compress, every, tick);
+    let started = std::time::Instant::now();
+    let made = converted(converter, &list, work, &out, stem, compress, every, tick);
+    *spent += started.elapsed();
     std::fs::remove_file(&list).ok();
+    let made = made.and_then(|made| take_in(&out, into, made));
+    std::fs::remove_dir_all(&out).ok();
     made
 }
+
+/// Move what one conversion made from its own folder into `into`, or none
+/// of it: a name `into` holds already is another stack's of this run or a
+/// file an earlier run left, and the stack is refused in the words the
+/// converter's `a` suffix gave when it wrote into `into` itself.
+fn take_in(out: &Path, into: &Path, made: Made) -> Result<Made, Fail> {
+    if made.files.iter().any(|f| into.join(f).exists()) {
+        return Err(Fail::Refused(NAME_TAKEN.to_string()));
+    }
+    for (n, f) in made.files.iter().enumerate() {
+        if nils_proc::rename_or_copy(&out.join(f), &into.join(f)).is_err() {
+            for done in &made.files[..n] {
+                std::fs::remove_file(into.join(done)).ok();
+            }
+            return Err(Fail::Refused(
+                "the converted files could not be moved into place".to_string(),
+            ));
+        }
+    }
+    Ok(made)
+}
+
+/// The refusal of a name the folder holds already.
+const NAME_TAKEN: &str = "dcm2niix found the name already in the folder: another stack of this \
+     run, or a file an earlier run left";
 
 /// One run of the converter over `list`, and what appeared.
 #[allow(clippy::too_many_arguments)]
@@ -347,9 +395,7 @@ fn converted(
                 }
                 line
             }
-            Some(Route::NameTaken) => "dcm2niix found the name already in the folder: another \
-                 stack of this run, or a file an earlier run left"
-                .to_string(),
+            Some(Route::NameTaken) => NAME_TAKEN.to_string(),
             None => "dcm2niix wrote a file it was not asked for: the volume is probably not \
                  equally spaced and a name nobody chose is not a BIDS name"
                 .to_string(),
@@ -1410,6 +1456,7 @@ mod tests {
             true,
             Duration::from_millis(50),
             &mut || false,
+            &mut Duration::default(),
         )
         .unwrap_err();
         assert!(
@@ -1498,6 +1545,7 @@ mod tests {
             true,
             Duration::from_millis(50),
             &mut || false,
+            &mut Duration::default(),
         )
         .unwrap_err();
         assert_eq!(

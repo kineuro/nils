@@ -266,6 +266,16 @@ pub struct Report {
     /// as a rule's or a person's.
     pub models: Vec<crate::bids::dataset::Model>,
     pub seconds: f64,
+    /// Wave 7b (3.x6): how many stacks were written at once
+    /// ([`Settings::workers`]).
+    pub workers: i64,
+    /// Wave 7b (3.x6): the seconds the stacks written spent in each phase of
+    /// their writing, summed over the stacks ([`Phases`]). With several
+    /// workers the sum is more than the wall: it is the work, not the wait.
+    pub phases: Phases,
+    /// The same, stack by stack, in stack order: every stack this run wrote
+    /// or tried to write, none it carried as it was.
+    pub stack_phases: Vec<StackPhases>,
     /// Wave 7b (the maintenance track): set when the release was asked to
     /// stop and did, after this many of its planned stacks were handled.
     /// What was written stays written; the stacks after it were not
@@ -296,6 +306,56 @@ pub struct Report {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub lock_lost: Option<String>,
 }
+
+/// Where the seconds of writing one stack went (Wave 7b, 3.x6), each
+/// measured on the thread that wrote it: `staging`, reading each file and
+/// scrubbing and writing it (into the staging folder, or into the tree as
+/// DICOM; the DICOM export's moves too); `conversion`, the converter's own
+/// runs ([`crate::bids::convert::convert_ticking`]); `digest`, the digests
+/// of what was written; `sidecar`, reading and completing the converter's
+/// sidecar (the gaps BIDS asks of it, `BodyPart`, the `NILS` card,
+/// `aslcontext.tsv`). Measured over 135 stacks before workers, the
+/// converter was about 85 % of the wall.
+#[derive(Debug, Clone, Copy, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct Phases {
+    pub staging: f64,
+    pub conversion: f64,
+    pub digest: f64,
+    pub sidecar: f64,
+}
+
+impl Phases {
+    fn add(&mut self, other: &Phases) {
+        self.staging += other.staging;
+        self.conversion += other.conversion;
+        self.digest += other.digest;
+        self.sidecar += other.sidecar;
+    }
+
+    /// Whether nothing was measured (a release that wrote no stack).
+    pub fn is_empty(&self) -> bool {
+        self == &Phases::default()
+    }
+}
+
+/// One stack's [`Phases`].
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct StackPhases {
+    pub stack: i64,
+    #[serde(flatten)]
+    pub seconds: Phases,
+}
+
+/// The most stacks a release writes at once.
+pub const MAX_WORKERS: usize = 64;
+
+/// The setting the number of workers is read from where no flag gives it
+/// (Wave 7b, 3.x6).
+pub const WORKERS_VAR: &str = "NILS_RELEASE_WORKERS";
+
+/// The workers where neither the flag nor the setting says: the smaller of
+/// this and the cores.
+pub const DEFAULT_WORKERS: usize = 8;
 
 /// Which of the two layouts of §9 a release writes.
 ///
@@ -403,6 +463,34 @@ pub struct Settings<'a> {
     /// Whose dataset it is (§9.5). Empty means the actor who ran the release,
     /// which is the honest default and not a claim about authorship.
     pub authors: &'a [String],
+    /// Wave 7b (3.x6): how many stacks are written at once; 0 for the
+    /// setting ([`WORKERS_VAR`]) or, without it, the default
+    /// ([`Settings::workers`]). 1 writes one stack after another, in the
+    /// plan's order, as releases did before.
+    pub workers: usize,
+}
+
+impl Settings<'_> {
+    /// How many stacks this release writes at once: the field where it is
+    /// set, else the setting [`WORKERS_VAR`], else the smaller of
+    /// [`DEFAULT_WORKERS`] and the cores; at most [`MAX_WORKERS`].
+    pub fn workers(&self) -> usize {
+        let from_setting = || {
+            std::env::var(WORKERS_VAR)
+                .ok()
+                .and_then(|v| v.trim().parse::<usize>().ok())
+                .filter(|n| *n > 0)
+        };
+        let n = match self.workers {
+            0 => from_setting().unwrap_or_else(|| {
+                std::thread::available_parallelism()
+                    .map_or(1, |n| n.get())
+                    .min(DEFAULT_WORKERS)
+            }),
+            n => n,
+        };
+        n.clamp(1, MAX_WORKERS)
+    }
 }
 
 /// What went wrong.
@@ -1575,30 +1663,10 @@ fn run_release(
         }
     }
     // Two planned stacks that name one stem in one directory would write the
-    // same files, and the converter's own `a` suffix would be the only sign.
-    // The later stack is refused before any conversion runs, with the other
-    // one named, and is left to the next run.
-    {
-        let mut first: HashMap<(String, String), i64> = HashMap::new();
-        let mut kept: Vec<Job> = Vec::with_capacity(jobs.len());
-        for job in std::mem::take(&mut jobs) {
-            if let Some(stem) = &job.place.stem
-                && job.change.is_work()
-            {
-                let key = (job.place.dir.clone(), stem.clone());
-                if let Some(other) = first.get(&key) {
-                    *report
-                        .refused
-                        .entry(format!("same name as stack {other}"))
-                        .or_insert(0) += 1;
-                    continue;
-                }
-                first.insert(key, job.stack);
-            }
-            kept.push(job);
-        }
-        jobs = kept;
-    }
+    // same files. Refused here, in the plan's order and before anything is
+    // written, whatever the number of workers (Wave 7b, 3.x6): the stacks
+    // written at once never share a name.
+    jobs = refuse_shared_stems(jobs, &mut report.refused);
     if heart.asked() {
         // nothing of this version is written, so nothing was restored
         // either, and nothing is raised below for it
@@ -1664,285 +1732,234 @@ fn run_release(
         cards.remove(stack);
     }
     // And only now is anything written.
-    let mut rows: Vec<Vec<Param>> = Vec::new();
-    let mut moves: Vec<Vec<Param>> = Vec::new();
-    // why the converter could not be run any more, where that stopped the
-    // release (Wave 7b, the maintenance track)
-    let mut converter_gone: Option<String> = None;
-    let mut scans: BTreeMap<(String, String), Vec<crate::bids::dataset::Scan>> = BTreeMap::new();
-    for job in &mut jobs {
-        // Wave 7b (the maintenance track): asked to stop, the release writes
-        // no further stack. A stack that needs no writing is still recorded,
-        // since the tree holds it as the state will say; one that needs
-        // writing is left to the next run, which finds its files gone or
-        // never there and writes it then.
-        if job.change.is_work()
-            && (job.change != crate::version::Change::Moved || !moved.contains(&job.stack))
-            && heart.asked()
-        {
-            report.stopped_after.get_or_insert(heart.done);
-            if leaving.contains(&job.stack) {
-                // its old files went before the moves and it is not written:
-                // the stopped words count it
-                *report.removed_before_stop.get_or_insert(0) += 1;
-            }
-            continue;
-        }
-        // A move whose source is not where the last version left it is not a
-        // move. Somebody emptied the tree, and the stack is written again.
-        if job.change == crate::version::Change::Moved && !moved.contains(&job.stack) {
-            job.change = crate::version::Change::Rewritten;
-            if let Some(was) = &job.was {
-                drop_files(settings.root, &was.files());
-            }
-        }
-        let state: State = match job.change {
-            crate::version::Change::Unchanged | crate::version::Change::Moved => {
-                // The bytes are the ones the last version wrote, and the
-                // digest with them: nothing was read, so nothing is recomputed.
-                let was = job.was.clone().unwrap_or_else(|| State {
-                    content: job.content.clone(),
-                    place: job.place.clone(),
-                    route: job.route.clone(),
-                    files: 0,
-                    bytes: 0,
-                    digest: String::new(),
-                    extensions: Vec::new(),
-                });
-                // the files are the last version's; the route is this
-                // version's word for where they are, which a stack whose
-                // place stayed can change (a folder's working scan, named
-                // `sourcedata` before 2026-10-14 and `folder` since)
-                State {
-                    place: job.place.clone(),
-                    route: job.route.clone(),
-                    ..was
-                }
-            }
-            _ => {
-                // A stack rewritten in its place keeps its old files until
-                // its new ones are staged whole (Wave 7b, the maintenance
-                // track): it is written under a scratch root beside the
-                // tree, then the old files go and the new ones are moved
-                // into place, so an abort or a kill mid-write leaves the old
-                // files or the new, never neither.
-                let in_place = job.was.as_ref().is_some_and(|w| w.place == job.place);
-                let scratch = settings.root.join(REWRITE_DIR).join(job.stack.to_string());
-                let write_root: &Path = match in_place {
-                    true => {
-                        std::fs::remove_dir_all(&scratch).ok();
-                        &scratch
-                    }
-                    false => settings.root,
+    //
+    // Wave 7b (3.x6): the stacks that need writing are written by a pool of
+    // workers, several at once ([`Settings::workers`]). Each stack has its own
+    // staging folder and its own output, so the writing is independent; what
+    // stays on this thread is everything that touches the registry (a
+    // stack's instances read before it starts, the heart, the state rows
+    // written as results arrive) and the pruning of folders several stacks
+    // share, which waits for the end. A stop starts no new stack and lets
+    // the ones in hand finish, which is the beta.3 stop with more than one
+    // stack in hand; an abort ends them all. With one worker every stack is
+    // written on this thread, in the plan's order, as before.
+    let workers = settings.workers();
+    report.workers = workers as i64;
+    let order = match workers > 1 {
+        true => longest_first(registry.store(), &jobs, &moved)?,
+        false => (0..jobs.len()).collect(),
+    };
+    let mut sink = Sink {
+        rows: Vec::new(),
+        moves: Vec::new(),
+        scans: BTreeMap::new(),
+        converter_gone: None,
+        stopping: false,
+        prune: Pruner::new(settings.root, workers > 1),
+    };
+    let ctx = Ctx {
+        dataset,
+        settings,
+        leaving: &leaving,
+        acq_times: &acq_times,
+        nils_names: &nils_names,
+        job_id,
+    };
+    let abort = std::sync::atomic::AtomicBool::new(false);
+    let every = heart.every;
+    let mut slots: Vec<Option<&mut Job>> = jobs.iter_mut().map(Some).collect();
+    std::thread::scope(|scope| -> Result<(), Error> {
+        let (sent, results) = std::sync::mpsc::channel::<Finished<'_>>();
+        let mut in_flight = 0usize;
+        let mut each = || -> Result<(), Error> {
+            for &index in &order {
+                let Some(job) = slots[index].take() else {
+                    continue;
                 };
-                job.instances = instances_of(registry.store(), job.stack)?;
-                let code = job.code.clone();
-                let policy = &policies.all[job.policy];
-                let plan = Plan {
-                    writer: scrub::Writer::Release,
-                    policy,
-                    categories: &settings.categories,
-                    private: settings.private,
-                    code: &code,
-                    remap: (policy.uids == Uids::Remap)
-                        .then_some(remap.as_ref())
-                        .flatten(),
-                    keep: &[],
-                    remove: &[],
-                };
-                let every = heart.every;
-                let outcome = match settings.layout {
-                    Layout::Descriptive => {
-                        // the heart beats through a long stack, per file
-                        let dir = job.place.dir.clone();
-                        let store = registry.store();
-                        let mut tick = || heart.tick(store, "write");
-                        write_dicom(job, &plan, write_root, &dir, &mut tick)
-                    }
-                    Layout::Bids => {
-                        // the heart beats through a long conversion, from
-                        // the converter's wait; the store is free meanwhile
-                        let store = registry.store();
-                        let mut tick = || heart.tick(store, "write");
-                        write_bids(
-                            job,
-                            &plan,
-                            settings,
-                            write_root,
+                let needs_work = job.change.is_work()
+                    && (job.change != crate::version::Change::Moved || !moved.contains(&job.stack));
+                // a free worker first, so a stop asked meanwhile is read
+                // before the stack is begun
+                if needs_work {
+                    while in_flight >= workers {
+                        settle_next(
+                            &results,
+                            &ctx,
+                            &mut sink,
                             &mut report,
-                            body_parts.get(&job.stack).map(String::as_str),
-                            asl_contexts.get(&job.stack).map(String::as_str),
-                            cards.get(&job.stack),
+                            heart,
+                            registry.store(),
+                            watch,
+                            &abort,
+                        )?;
+                        in_flight -= 1;
+                    }
+                }
+                if sink.stopping && in_flight == 0 {
+                    report.stopped_after.get_or_insert(heart.done);
+                }
+                // Wave 7b (the maintenance track): asked to stop, the
+                // release writes no further stack. A stack that needs no
+                // writing is still recorded, since the tree holds it as the
+                // state will say; one that needs writing is left to the next
+                // run, which finds its files gone or never there and writes
+                // it then. The stacks in hand are finished first, and the
+                // stop counts them.
+                if needs_work && heart.asked() {
+                    while in_flight > 0 {
+                        settle_next(
+                            &results,
+                            &ctx,
+                            &mut sink,
+                            &mut report,
+                            heart,
+                            registry.store(),
+                            watch,
+                            &abort,
+                        )?;
+                        in_flight -= 1;
+                    }
+                    report.stopped_after.get_or_insert(heart.done);
+                    if leaving.contains(&job.stack) {
+                        // its old files went before the moves and it is not
+                        // written: the stopped words count it
+                        *report.removed_before_stop.get_or_insert(0) += 1;
+                    }
+                    continue;
+                }
+                // A move whose source is not where the last version left it
+                // is not a move. Somebody emptied the tree, and the stack is
+                // written again.
+                if job.change == crate::version::Change::Moved && !moved.contains(&job.stack) {
+                    job.change = crate::version::Change::Rewritten;
+                    if let Some(was) = &job.was {
+                        sink.prune.drop_files(&was.files());
+                    }
+                }
+                match job.change {
+                    crate::version::Change::Unchanged | crate::version::Change::Moved => {
+                        let state = carried(job);
+                        record_stack(
+                            &ctx,
+                            &mut sink,
+                            &mut report,
+                            heart,
+                            registry.store(),
+                            watch,
+                            &abort,
+                            index,
+                            job,
+                            state,
+                        )?;
+                    }
+                    _ => {
+                        // A stack rewritten in its place keeps its old files
+                        // until its new ones are staged whole (Wave 7b, the
+                        // maintenance track): it is written under a scratch
+                        // root beside the tree, then the old files go and the
+                        // new ones are moved into place, so an abort or a
+                        // kill mid-write leaves the old files or the new,
+                        // never neither.
+                        let in_place = job.was.as_ref().is_some_and(|w| w.place == job.place);
+                        let scratch = settings.root.join(REWRITE_DIR).join(job.stack.to_string());
+                        let write_root = match in_place {
+                            true => {
+                                std::fs::remove_dir_all(&scratch).ok();
+                                scratch.clone()
+                            }
+                            false => settings.root.to_path_buf(),
+                        };
+                        job.instances = instances_of(registry.store(), job.stack)?;
+                        let task = Work {
+                            settings,
+                            policy: &policies.all[job.policy],
+                            remap: remap.as_ref(),
+                            body_part: body_parts.get(&job.stack).map(String::as_str),
+                            aslcontext: asl_contexts.get(&job.stack).map(String::as_str),
+                            card: cards.get(&job.stack),
                             every,
-                            &mut tick,
-                        )
-                    }
-                };
-                let mut written = match outcome {
-                    Outcome::Files(written) => written,
-                    Outcome::NotDone(why) => {
-                        // Nothing is recorded of the stack: no state, no
-                        // move, so the next run finds it absent and writes
-                        // it again. Asked to stop or abort, the release
-                        // stops here, the stack not done; otherwise the
-                        // stack is one the converter could not run on, which
-                        // the report says, and the release goes on. A stack
-                        // staged beside the tree is let go: its old files
-                        // are still in place.
-                        job.instances.clear();
-                        if in_place {
-                            std::fs::remove_dir_all(&scratch).ok();
-                            prune(settings.root, scratch.parent());
-                        }
-                        if heart.asked() {
-                            report.stopped_after.get_or_insert(heart.done);
-                            if leaving.contains(&job.stack) {
-                                *report.removed_before_stop.get_or_insert(0) += 1;
-                            }
-                            continue;
-                        }
-                        *report.refused.entry(why).or_insert(0) += 1;
-                        heart.done += 1;
-                        heart.tick(registry.store(), "write");
-                        watch(registry.store(), job_id, heart.done);
-                        continue;
-                    }
-                    Outcome::ConverterGone(why) => {
-                        // The converter cannot be run at all, so the release
-                        // stops here as a stop asked for would: nothing of
-                        // this stack or of those after it is written, the
-                        // bookkeeping after the loop records what the stacks
-                        // done wrote and what left the version, and the row
-                        // is left unfinished with the words, so the next run
-                        // goes on under the same version; the run ends as a
-                        // failure with the words ([`Error::Stopped`]).
-                        job.instances.clear();
-                        if in_place {
-                            std::fs::remove_dir_all(&scratch).ok();
-                            prune(settings.root, scratch.parent());
-                        }
-                        report.stopped_after.get_or_insert(heart.done);
-                        if leaving.contains(&job.stack) {
-                            *report.removed_before_stop.get_or_insert(0) += 1;
-                        }
-                        heart.cancelled = true;
-                        converter_gone.get_or_insert(why);
-                        continue;
-                    }
-                };
-                if in_place && let Some(was) = &job.was {
-                    // staged whole: now the old files go and the new ones
-                    // take their place
-                    drop_files(settings.root, &was.files());
-                    for entry in written.iter_mut() {
-                        if let Ok(w) = &*entry
-                            && let Err(why) = place_staged(&scratch, settings.root, &w.wrote.path)
-                        {
-                            *entry = Err(why);
-                        }
-                    }
-                    std::fs::remove_dir_all(&scratch).ok();
-                    prune(settings.root, scratch.parent());
-                }
-                let mut wrote: Vec<Wrote> = Vec::new();
-                for w in written {
-                    match w {
-                        Ok(w) => {
-                            report.written += 1;
-                            for ((tag, action), n) in &w.applied.changes {
-                                *report.changes.entry(format!("{tag} {action}")).or_insert(0) += n;
-                            }
-                            wrote.push(w.wrote);
-                        }
-                        Err(why) => {
-                            // By the reason and never by the path: a report
-                            // that names the files it could not read names the
-                            // source tree, which is the one thing a released
-                            // dataset must not carry.
-                            *report.refused.entry(why).or_insert(0) += 1;
+                            root: write_root,
+                            in_place,
+                            scratch,
+                        };
+                        if workers <= 1 {
+                            // the heart beats through a long stack, per file
+                            // and from the converter's wait, on this thread
+                            let worked = {
+                                let store = registry.store();
+                                let mut tick = || heart.tick(store, "write");
+                                work(job, &task, &mut tick)
+                            };
+                            settle_stack(
+                                &ctx,
+                                &mut sink,
+                                &mut report,
+                                heart,
+                                registry.store(),
+                                watch,
+                                &abort,
+                                index,
+                                job,
+                                worked,
+                            )?;
+                        } else {
+                            // the worker reads the abort alone; this thread
+                            // beats for every stack in hand while it waits
+                            let sent = sent.clone();
+                            let abort = &abort;
+                            scope.spawn(move || {
+                                let worked =
+                                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                                        let mut tick =
+                                            || abort.load(std::sync::atomic::Ordering::SeqCst);
+                                        work(&mut *job, &task, &mut tick)
+                                    }));
+                                sent.send((index, job, worked)).ok();
+                            });
+                            in_flight += 1;
                         }
                     }
                 }
-                job.instances.clear();
-                roll_up(job, &wrote)
             }
+            while in_flight > 0 {
+                settle_next(
+                    &results,
+                    &ctx,
+                    &mut sink,
+                    &mut report,
+                    heart,
+                    registry.store(),
+                    watch,
+                    &abort,
+                )?;
+                in_flight -= 1;
+            }
+            Ok(())
         };
-        report.files += state.files;
-        report.bytes += state.bytes;
-        rows.push(vec![
-            Param::Int(dataset),
-            Param::Int(job.stack),
-            Param::Int(report.release_id),
-            Param::from(state.content.as_str()),
-            Param::from(state.place.dir.as_str()),
-            match &state.place.stem {
-                Some(stem) => Param::from(stem.as_str()),
-                None => Param::Null,
-            },
-            Param::from(state.route.as_str()),
-            Param::Int(state.files),
-            Param::Int(state.bytes),
-            Param::from(state.digest.as_str()),
-            match state.extensions.is_empty() {
-                true => Param::Null,
-                false => Param::from(state.extensions.join(",")),
-            },
-        ]);
-        match job.change {
-            crate::version::Change::Unchanged => report.unchanged += 1,
-            crate::version::Change::Moved => report.moved += 1,
-            crate::version::Change::Rewritten => report.rewritten += 1,
-            crate::version::Change::Added => report.added += 1,
-            crate::version::Change::Removed => {}
+        let done = each();
+        if done.is_err() {
+            // the stacks in hand are given up: the scope waits for them
+            abort.store(true, std::sync::atomic::Ordering::SeqCst);
         }
-        if job.change.is_work() {
-            moves.push(vec![
-                Param::Int(report.release_id),
-                Param::Int(job.stack),
-                Param::from(job.change.name()),
-                match &job.was {
-                    Some(was) => Param::from(was.place.key()),
-                    None => Param::Null,
-                },
-                Param::from(state.place.key()),
-            ]);
-        }
-        // §9.4: the time in the standard's own slot, per image, so anything
-        // joining on a date reads a column instead of parsing a directory name.
-        if settings.layout == Layout::Bids
-            && let Some(stem) = &state.place.stem
-            && let Some(image) = state
-                .extensions
-                .iter()
-                .find(|e| *e == ".nii.gz" || *e == ".nii")
-        {
-            let prefix = format!("sub-{}/", job.code);
-            let path = format!("{}/{stem}{image}", state.place.dir);
-            if let Some(rest) = path.strip_prefix(&prefix)
-                && let Some((session, file)) = rest.split_once('/')
-                && let Some(label) = session.strip_prefix("ses-")
-            {
-                scans
-                    .entry((job.code.clone(), label.to_string()))
-                    .or_default()
-                    .push(crate::bids::dataset::Scan {
-                        filename: file.to_string(),
-                        acq_time: acq_times.get(&job.stack).map(acquisition_time),
-                        nils_name: nils_names.get(&job.stack).cloned(),
-                    });
-            }
-        }
-        if rows.len() >= PLAN_BATCH {
-            upsert_state(registry.store(), &rows)?;
-            rows.clear();
-        }
-        heart.done += 1;
-        // the heart ticks, and beats once its interval has passed: the
-        // row's `done` may lag a stack or two for at most that long, and
-        // the beat after the loop makes it exact
-        heart.tick(registry.store(), "write");
-        watch(registry.store(), job_id, heart.done);
+        done
+    })?;
+    if sink.stopping {
+        report.stopped_after.get_or_insert(heart.done);
     }
+    let Sink {
+        rows,
+        moves,
+        scans,
+        converter_gone,
+        prune,
+        ..
+    } = sink;
+    prune.finish();
+    // the history's order is the plan's, however the stacks finished
+    let mut moves = moves;
+    moves.sort_by_key(|(index, _)| *index);
+    let mut moves: Vec<Vec<Param>> = moves.into_iter().map(|(_, m)| m).collect();
+    report.stack_phases.sort_by_key(|p| p.stack);
     // One beat more, so the final progress is exact, a cancel set while the
     // last stacks were in hand, or while every stack left needed no work, is
     // read, and a cancel in by now still ends the release as stopped, after
@@ -2082,8 +2099,524 @@ fn run_release(
     }
 }
 
+/// Two planned stacks that name one stem in one directory would write the
+/// same files, and the converter's own `a` suffix would be the only sign.
+/// The later stack in the plan's order is refused, with the other one named
+/// in the reason, and is left to the next run; the rest are kept in order.
+fn refuse_shared_stems(jobs: Vec<Job>, refused: &mut BTreeMap<String, i64>) -> Vec<Job> {
+    let mut first: HashMap<(String, String), i64> = HashMap::new();
+    let mut kept: Vec<Job> = Vec::with_capacity(jobs.len());
+    for job in jobs {
+        if let Some(stem) = &job.place.stem
+            && job.change.is_work()
+        {
+            let key = (job.place.dir.clone(), stem.clone());
+            if let Some(other) = first.get(&key) {
+                *refused
+                    .entry(format!("same name as stack {other}"))
+                    .or_insert(0) += 1;
+                continue;
+            }
+            first.insert(key, job.stack);
+        }
+        kept.push(job);
+    }
+    kept
+}
+
 /// How many plan rows and state rows are written at once.
 const PLAN_BATCH: usize = 2_000;
+
+/// What the stack loop gathers as the stacks are handled (Wave 7b, 3.x6),
+/// on the loop's own thread whichever worker wrote the stack.
+struct Sink {
+    /// The state rows not yet written, flushed every [`PLAN_BATCH`].
+    rows: Vec<Vec<Param>>,
+    /// The history's rows, with each stack's place in the plan, so they are
+    /// written in the plan's order however the stacks finished.
+    moves: Vec<(usize, Vec<Param>)>,
+    scans: BTreeMap<(String, String), Vec<crate::bids::dataset::Scan>>,
+    /// Why the converter could not be run any more, where that stopped the
+    /// release (Wave 7b, the maintenance track).
+    converter_gone: Option<String>,
+    /// A stack came back not done because a stop or an abort was asked, or
+    /// the converter was gone: the release stops once the stacks in hand
+    /// are in, after the stacks done by then.
+    stopping: bool,
+    prune: Pruner,
+}
+
+/// What the stack loop reads and never changes.
+struct Ctx<'c> {
+    dataset: i64,
+    settings: &'c Settings<'c>,
+    /// The stacks whose old files went before the moves.
+    leaving: &'c std::collections::HashSet<i64>,
+    acq_times: &'c HashMap<i64, (Day, Option<String>)>,
+    nils_names: &'c HashMap<i64, String>,
+    job_id: i64,
+}
+
+/// Empty folders taken away as files leave them (Wave 7b, 3.x6): at once
+/// where one stack is written at a time, as before; at the end of the
+/// stacks where several are, since a folder one stack empties may be the
+/// folder another is about to write into (two stacks of a session, a
+/// rewrite's staging root), and a folder removed under a converter's feet
+/// would refuse a stack that is fine. Only what is still empty at the end
+/// is taken away, so the tree comes out the same either way.
+struct Pruner {
+    root: PathBuf,
+    later: Option<Vec<PathBuf>>,
+}
+
+impl Pruner {
+    fn new(root: &Path, later: bool) -> Pruner {
+        Pruner {
+            root: root.to_path_buf(),
+            later: later.then(Vec::new),
+        }
+    }
+
+    fn drop_files(&mut self, files: &Files) {
+        match &mut self.later {
+            None => drop_files(&self.root, files),
+            Some(later) => drop_files_then(&self.root, files, &mut |dir| {
+                later.extend(dir.map(Path::to_path_buf));
+            }),
+        }
+    }
+
+    fn prune(&mut self, from: Option<&Path>) {
+        match &mut self.later {
+            None => prune(&self.root, from),
+            Some(later) => later.extend(from.map(Path::to_path_buf)),
+        }
+    }
+
+    fn finish(self) {
+        let mut later = self.later.unwrap_or_default();
+        // the deepest first, so a parent is looked at once its children are
+        later.sort_by_key(|p| std::cmp::Reverse(p.components().count()));
+        later.dedup();
+        for dir in later {
+            prune(&self.root, Some(&dir));
+        }
+    }
+}
+
+/// One stack to write, with everything its writing reads: handed to a
+/// worker, or written on the loop's thread where there is one worker.
+struct Work<'w> {
+    settings: &'w Settings<'w>,
+    policy: &'w Policy,
+    remap: Option<&'w Remap>,
+    body_part: Option<&'w str>,
+    aslcontext: Option<&'w str>,
+    card: Option<&'w serde_json::Value>,
+    every: std::time::Duration,
+    /// Where its files go: the tree's root, or the scratch root a stack
+    /// rewritten in its place is staged under.
+    root: PathBuf,
+    in_place: bool,
+    scratch: PathBuf,
+}
+
+/// What writing one stack came to, with what the loop needs to record it.
+struct Worked {
+    outcome: Outcome,
+    /// The converter would not convert it and it went under `sourcedata/`:
+    /// why, and the route it had.
+    fell_back: Option<(String, String)>,
+    phases: Phases,
+    in_place: bool,
+    scratch: PathBuf,
+}
+
+/// A worker's answer: the stack's place in the plan, the stack, and what
+/// came of it, or the panic that ended the worker.
+type Finished<'j> = (usize, &'j mut Job, std::thread::Result<Worked>);
+
+/// Write one stack, on whichever thread: no registry here, only the tree.
+fn work(job: &mut Job, task: &Work<'_>, tick: &mut crate::bids::convert::Tick<'_>) -> Worked {
+    let code = job.code.clone();
+    let plan = Plan {
+        writer: scrub::Writer::Release,
+        policy: task.policy,
+        categories: &task.settings.categories,
+        private: task.settings.private,
+        code: &code,
+        remap: (task.policy.uids == Uids::Remap)
+            .then_some(task.remap)
+            .flatten(),
+        keep: &[],
+        remove: &[],
+    };
+    let mut phases = Phases::default();
+    let mut fell_back = None;
+    let outcome = match task.settings.layout {
+        Layout::Descriptive => {
+            let dir = job.place.dir.clone();
+            write_dicom(job, &plan, &task.root, &dir, tick, &mut phases)
+        }
+        Layout::Bids => write_bids(
+            job,
+            &plan,
+            task.settings,
+            &task.root,
+            &mut fell_back,
+            task.body_part,
+            task.aslcontext,
+            task.card,
+            task.every,
+            tick,
+            &mut phases,
+        ),
+    };
+    Worked {
+        outcome,
+        fell_back,
+        phases,
+        in_place: task.in_place,
+        scratch: task.scratch.clone(),
+    }
+}
+
+/// Tick the heart from the loop's thread, and hand an abort it reads to
+/// the workers.
+fn pulse(heart: &mut Heart<'_>, store: &mut Store, abort: &std::sync::atomic::AtomicBool) {
+    if heart.tick(store, "write") {
+        abort.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+/// Wait for the next stack a worker finishes, beating the heart while the
+/// stacks are in hand (a stop and an abort are read at each tick), and
+/// record it.
+#[allow(clippy::too_many_arguments)]
+fn settle_next(
+    results: &std::sync::mpsc::Receiver<Finished<'_>>,
+    ctx: &Ctx<'_>,
+    sink: &mut Sink,
+    report: &mut Report,
+    heart: &mut Heart<'_>,
+    store: &mut Store,
+    watch: &mut Watch<'_>,
+    abort: &std::sync::atomic::AtomicBool,
+) -> Result<(), Error> {
+    loop {
+        match results.recv_timeout(std::time::Duration::from_millis(50)) {
+            Ok((index, job, Ok(worked))) => {
+                return settle_stack(
+                    ctx, sink, report, heart, store, watch, abort, index, job, worked,
+                );
+            }
+            Ok((_, _, Err(panic))) => {
+                // the stacks in hand are given up, and the panic goes on
+                abort.store(true, std::sync::atomic::Ordering::SeqCst);
+                std::panic::resume_unwind(panic);
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => pulse(heart, store, abort),
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return Ok(()),
+        }
+    }
+}
+
+/// The state of a stack that needs no writing: the bytes are the ones the
+/// last version wrote, and the digest with them: nothing was read, so
+/// nothing is recomputed.
+fn carried(job: &Job) -> State {
+    let was = job.was.clone().unwrap_or_else(|| State {
+        content: job.content.clone(),
+        place: job.place.clone(),
+        route: job.route.clone(),
+        files: 0,
+        bytes: 0,
+        digest: String::new(),
+        extensions: Vec::new(),
+    });
+    // the files are the last version's; the route is this version's word
+    // for where they are, which a stack whose place stayed can change (a
+    // folder's working scan, named `sourcedata` before 2026-10-14 and
+    // `folder` since)
+    State {
+        place: job.place.clone(),
+        route: job.route.clone(),
+        ..was
+    }
+}
+
+/// Record what writing one stack came to.
+#[allow(clippy::too_many_arguments)]
+fn settle_stack(
+    ctx: &Ctx<'_>,
+    sink: &mut Sink,
+    report: &mut Report,
+    heart: &mut Heart<'_>,
+    store: &mut Store,
+    watch: &mut Watch<'_>,
+    abort: &std::sync::atomic::AtomicBool,
+    index: usize,
+    job: &mut Job,
+    worked: Worked,
+) -> Result<(), Error> {
+    let Worked {
+        outcome,
+        fell_back,
+        phases,
+        in_place,
+        scratch,
+    } = worked;
+    let root = ctx.settings.root;
+    if let Some((why, route)) = fell_back {
+        *report.unconvertible.entry(why).or_insert(0) += 1;
+        *report.routes.entry("sourcedata".to_string()).or_insert(0) += 1;
+        if let Some(n) = report.routes.get_mut(route.as_str()) {
+            *n -= 1;
+        }
+    }
+    report.phases.add(&phases);
+    report.stack_phases.push(StackPhases {
+        stack: job.stack,
+        seconds: phases,
+    });
+    let mut written = match outcome {
+        Outcome::Files(written) => written,
+        Outcome::NotDone(why) => {
+            // Nothing is recorded of the stack: no state, no move, so the
+            // next run finds it absent and writes it again. Asked to stop
+            // or abort, the release stops here, the stack not done;
+            // otherwise the stack is one the converter could not run on,
+            // which the report says, and the release goes on. A stack
+            // staged beside the tree is let go: its old files are still in
+            // place.
+            job.instances.clear();
+            if in_place {
+                std::fs::remove_dir_all(&scratch).ok();
+                sink.prune.prune(scratch.parent());
+            }
+            if heart.asked() {
+                sink.stopping = true;
+                if ctx.leaving.contains(&job.stack) {
+                    *report.removed_before_stop.get_or_insert(0) += 1;
+                }
+                return Ok(());
+            }
+            *report.refused.entry(why).or_insert(0) += 1;
+            heart.done += 1;
+            pulse(heart, store, abort);
+            watch(store, ctx.job_id, heart.done);
+            return Ok(());
+        }
+        Outcome::ConverterGone(why) => {
+            // The converter cannot be run at all, so the release stops here
+            // as a stop asked for would: nothing of this stack or of those
+            // after it is written, the bookkeeping after the loop records
+            // what the stacks done wrote and what left the version, and the
+            // row is left unfinished with the words, so the next run goes on
+            // under the same version; the run ends as a failure with the
+            // words ([`Error::Stopped`]).
+            job.instances.clear();
+            if in_place {
+                std::fs::remove_dir_all(&scratch).ok();
+                sink.prune.prune(scratch.parent());
+            }
+            sink.stopping = true;
+            if ctx.leaving.contains(&job.stack) {
+                *report.removed_before_stop.get_or_insert(0) += 1;
+            }
+            heart.cancelled = true;
+            sink.converter_gone.get_or_insert(why);
+            return Ok(());
+        }
+    };
+    if in_place && let Some(was) = &job.was {
+        // staged whole: now the old files go and the new ones take their
+        // place
+        sink.prune.drop_files(&was.files());
+        for entry in written.iter_mut() {
+            if let Ok(w) = &*entry
+                && let Err(why) = place_staged(&scratch, root, &w.wrote.path)
+            {
+                *entry = Err(why);
+            }
+        }
+        std::fs::remove_dir_all(&scratch).ok();
+        sink.prune.prune(scratch.parent());
+    }
+    let mut wrote: Vec<Wrote> = Vec::new();
+    for w in written {
+        match w {
+            Ok(w) => {
+                report.written += 1;
+                for ((tag, action), n) in &w.applied.changes {
+                    *report.changes.entry(format!("{tag} {action}")).or_insert(0) += n;
+                }
+                wrote.push(w.wrote);
+            }
+            Err(why) => {
+                // By the reason and never by the path: a report that names
+                // the files it could not read names the source tree, which
+                // is the one thing a released dataset must not carry.
+                *report.refused.entry(why).or_insert(0) += 1;
+            }
+        }
+    }
+    job.instances.clear();
+    let state = roll_up(job, &wrote);
+    record_stack(
+        ctx, sink, report, heart, store, watch, abort, index, job, state,
+    )
+}
+
+/// Record one stack's state: its row, its move, its line in `scans.tsv`,
+/// and the heart.
+#[allow(clippy::too_many_arguments)]
+fn record_stack(
+    ctx: &Ctx<'_>,
+    sink: &mut Sink,
+    report: &mut Report,
+    heart: &mut Heart<'_>,
+    store: &mut Store,
+    watch: &mut Watch<'_>,
+    abort: &std::sync::atomic::AtomicBool,
+    index: usize,
+    job: &Job,
+    state: State,
+) -> Result<(), Error> {
+    report.files += state.files;
+    report.bytes += state.bytes;
+    sink.rows.push(vec![
+        Param::Int(ctx.dataset),
+        Param::Int(job.stack),
+        Param::Int(report.release_id),
+        Param::from(state.content.as_str()),
+        Param::from(state.place.dir.as_str()),
+        match &state.place.stem {
+            Some(stem) => Param::from(stem.as_str()),
+            None => Param::Null,
+        },
+        Param::from(state.route.as_str()),
+        Param::Int(state.files),
+        Param::Int(state.bytes),
+        Param::from(state.digest.as_str()),
+        match state.extensions.is_empty() {
+            true => Param::Null,
+            false => Param::from(state.extensions.join(",")),
+        },
+    ]);
+    match job.change {
+        crate::version::Change::Unchanged => report.unchanged += 1,
+        crate::version::Change::Moved => report.moved += 1,
+        crate::version::Change::Rewritten => report.rewritten += 1,
+        crate::version::Change::Added => report.added += 1,
+        crate::version::Change::Removed => {}
+    }
+    if job.change.is_work() {
+        sink.moves.push((
+            index,
+            vec![
+                Param::Int(report.release_id),
+                Param::Int(job.stack),
+                Param::from(job.change.name()),
+                match &job.was {
+                    Some(was) => Param::from(was.place.key()),
+                    None => Param::Null,
+                },
+                Param::from(state.place.key()),
+            ],
+        ));
+    }
+    // §9.4: the time in the standard's own slot, per image, so anything
+    // joining on a date reads a column instead of parsing a directory name.
+    if ctx.settings.layout == Layout::Bids
+        && let Some(stem) = &state.place.stem
+        && let Some(image) = state
+            .extensions
+            .iter()
+            .find(|e| *e == ".nii.gz" || *e == ".nii")
+    {
+        let prefix = format!("sub-{}/", job.code);
+        let path = format!("{}/{stem}{image}", state.place.dir);
+        if let Some(rest) = path.strip_prefix(&prefix)
+            && let Some((session, file)) = rest.split_once('/')
+            && let Some(label) = session.strip_prefix("ses-")
+        {
+            sink.scans
+                .entry((job.code.clone(), label.to_string()))
+                .or_default()
+                .push(crate::bids::dataset::Scan {
+                    filename: file.to_string(),
+                    acq_time: ctx.acq_times.get(&job.stack).map(acquisition_time),
+                    nils_name: ctx.nils_names.get(&job.stack).cloned(),
+                });
+        }
+    }
+    if sink.rows.len() >= PLAN_BATCH {
+        upsert_state(store, &sink.rows)?;
+        sink.rows.clear();
+    }
+    heart.done += 1;
+    // the heart ticks, and beats once its interval has passed: the row's
+    // `done` may lag a stack or two for at most that long, and the beat
+    // after the loop makes it exact
+    pulse(heart, store, abort);
+    watch(store, ctx.job_id, heart.done);
+    Ok(())
+}
+
+/// The factor a JPEG 2000 file costs the converter over an uncompressed
+/// one (Wave 7b, 3.x6): measured on a release of 135 stacks (7,530 files),
+/// a file in transfer syntax 1.2.840.10008.1.2.4.90 or .91 took dcm2niix 6
+/// to 9 times as long.
+const JPEG_2000_FACTOR: i64 = 7;
+
+/// The plan's stacks in the order a pool of workers takes them (Wave 7b,
+/// 3.x6): the most expected cost first, a stack's files with each JPEG 2000
+/// file counted [`JPEG_2000_FACTOR`] times, and the plan's order between
+/// stacks of one cost. Measured on a release of 135 stacks: the largest
+/// stack (352 slices, JPEG 2000) alone took 80 to 110 s of the 175 and,
+/// begun where the plan put it, finished last, with every other worker
+/// idle; begun at second 0 it runs beside all the others. A stack that
+/// needs no writing costs nothing and comes last.
+fn longest_first(
+    store: &mut Store,
+    jobs: &[Job],
+    moved: &std::collections::HashSet<i64>,
+) -> Result<Vec<usize>, Error> {
+    let mut cost: HashMap<i64, i64> = HashMap::new();
+    let wanted: Vec<i64> = jobs
+        .iter()
+        .filter(|j| {
+            j.change.is_work()
+                && (j.change != crate::version::Change::Moved || !moved.contains(&j.stack))
+        })
+        .map(|j| j.stack)
+        .collect();
+    for chunk in wanted.chunks(500) {
+        let ids = chunk
+            .iter()
+            .map(i64::to_string)
+            .collect::<Vec<_>>()
+            .join(",");
+        let inner = both_ways(store, "UNION", |from| {
+            format!(
+                "SELECT DISTINCT k.id AS stack, i.id AS inst, CASE WHEN i.transfer_syntax_uid IN \
+                 ('1.2.840.10008.1.2.4.90', '1.2.840.10008.1.2.4.91') THEN 1 ELSE 0 END AS slow \
+                 {from} WHERE k.id IN ({ids})"
+            )
+        });
+        let sql = format!(
+            "SELECT c.stack, COUNT(*), CAST(SUM(c.slow) AS BIGINT) FROM ({inner}) c GROUP BY c.stack"
+        );
+        for r in store.query(&sql, &[])? {
+            let (files, slow) = (r.int(1)?, r.opt_int(2)?.unwrap_or(0));
+            cost.insert(r.int(0)?, files - slow + slow * JPEG_2000_FACTOR);
+        }
+    }
+    let mut order: Vec<usize> = (0..jobs.len()).collect();
+    order.sort_by_key(|&i| std::cmp::Reverse(cost.get(&jobs[i].stack).copied().unwrap_or(0)));
+    Ok(order)
+}
 
 /// One row of the plan, as read back joined to the state.
 struct Planned {
@@ -3591,22 +4124,28 @@ fn place_staged(scratch: &Path, root: &Path, path: &str) -> Result<(), String> {
 
 /// Remove a stack's files, and any directory they leave empty.
 fn drop_files(root: &Path, files: &Files) {
+    drop_files_then(root, files, &mut |dir| prune(root, dir));
+}
+
+/// Remove a stack's files, and hand `emptied` each directory they may have
+/// left empty ([`Pruner`]).
+fn drop_files_then(root: &Path, files: &Files, emptied: &mut dyn FnMut(Option<&Path>)) {
     match files {
         Files::Directory(dir) => {
             let full = root.join(dir);
             std::fs::remove_dir_all(&full).ok();
-            prune(root, full.parent());
+            emptied(full.parent());
         }
         Files::Named(paths, export) => {
             for p in paths {
                 let full = root.join(p);
                 std::fs::remove_file(&full).ok();
-                prune(root, full.parent());
+                emptied(full.parent());
             }
             if let Some(export) = export {
                 let full = root.join(export);
                 std::fs::remove_dir_all(&full).ok();
-                prune(root, full.parent());
+                emptied(full.parent());
             }
         }
     }
@@ -4421,7 +4960,13 @@ struct Written {
 ///
 /// Read whole, because a release writes the pixels. The digest reader stops
 /// before them, which is right for reading a header at speed and wrong here.
-fn write_one(instance: &Instance, plan: &Plan, root: &Path, dir: &str) -> Result<Written, String> {
+fn write_one(
+    instance: &Instance,
+    plan: &Plan,
+    root: &Path,
+    dir: &str,
+    phases: &mut Phases,
+) -> Result<Written, String> {
     let mut object = open(Path::new(&instance.path))?;
     let applied = scrub::apply(&mut object, plan);
     if let Some(frames) = &instance.frames {
@@ -4436,13 +4981,13 @@ fn write_one(instance: &Instance, plan: &Plan, root: &Path, dir: &str) -> Result
     // Written whole and then moved into place, so that a run interrupted
     // halfway leaves no half a file for a handover to checksum.
     let temporary = target.with_extension("dcm.part");
-    object
-        .write_to_file(&temporary)
-        .map_err(|e| format!("unwritable: {}", first_line(&e.to_string())))?;
-    let bytes = std::fs::read(&temporary).map_err(|_| "unreadable after writing".to_string())?;
     // BLAKE2b-256 of what was written, so a handover can verify a tree
-    // without reading the files back through a DICOM parser (§11).
-    let digest = hex::encode(digest_of(&bytes));
+    // without reading the files back through a DICOM parser (§11): of the
+    // bytes in hand, the very bytes the file holds, never read back
+    // (Wave 7b, 3.x6).
+    let (bytes, digest) = encoded(&object, phases)?;
+    std::fs::write(&temporary, &bytes)
+        .map_err(|e| format!("unwritable: {}", first_line(&e.to_string())))?;
     std::fs::rename(&temporary, &target)
         .map_err(|_| "could not be moved into place".to_string())?;
 
@@ -4552,13 +5097,16 @@ fn write_dicom(
     root: &Path,
     dir: &str,
     tick: &mut crate::bids::convert::Tick<'_>,
+    phases: &mut Phases,
 ) -> Outcome {
     let mut out = Vec::with_capacity(job.instances.len());
     for i in &job.instances {
         if tick() {
             return Outcome::NotDone("aborted".to_string());
         }
-        out.push(write_one(i, plan, root, dir));
+        let (started, digesting) = (std::time::Instant::now(), phases.digest);
+        out.push(write_one(i, plan, root, dir, phases));
+        phases.staging += started.elapsed().as_secs_f64() - (phases.digest - digesting);
     }
     Outcome::Files(out)
 }
@@ -4582,12 +5130,13 @@ fn write_bids(
     plan: &Plan,
     settings: &Settings,
     root: &Path,
-    report: &mut Report,
+    fell_back: &mut Option<(String, String)>,
     body_part: Option<&str>,
     aslcontext: Option<&str>,
     card: Option<&serde_json::Value>,
     every: std::time::Duration,
     tick: &mut crate::bids::convert::Tick<'_>,
+    phases: &mut Phases,
 ) -> Outcome {
     let staging = root.join(".nils-convert").join(job.stack.to_string());
     std::fs::remove_dir_all(&staging).ok();
@@ -4599,10 +5148,10 @@ fn write_bids(
     // every stack kept as DICOM does, where a converted one has a file stem.
     if job.route == "sourcedata" || job.place.stem.is_none() {
         std::fs::remove_dir_all(&staging).ok();
-        return write_dicom(job, plan, root, &job.place.dir, tick);
+        return write_dicom(job, plan, root, &job.place.dir, tick, phases);
     }
 
-    let mut staged: Vec<PathBuf> = Vec::new();
+    let mut staged: Vec<Staged> = Vec::new();
     let mut applied = scrub::Applied::default();
     let mut refused: Vec<Result<Written, String>> = Vec::new();
     for i in &job.instances {
@@ -4610,16 +5159,19 @@ fn write_bids(
             std::fs::remove_dir_all(&staging).ok();
             return Outcome::NotDone("aborted".to_string());
         }
-        match stage_one(i, plan, &staging) {
-            Ok((path, done)) => {
-                staged.push(path);
+        let (started, digesting) = (std::time::Instant::now(), phases.digest);
+        match stage_one(i, plan, &staging, phases) {
+            Ok((one, done)) => {
+                staged.push(one);
                 for (what, n) in done.changes {
                     *applied.changes.entry(what).or_insert(0) += n;
                 }
             }
             Err(why) => refused.push(Err(why)),
         }
+        phases.staging += started.elapsed().as_secs_f64() - (phases.digest - digesting);
     }
+    let paths: Vec<PathBuf> = staged.iter().map(|s| s.path.clone()).collect();
     let Some(converter) = settings.converter else {
         std::fs::remove_dir_all(&staging).ok();
         refused.push(Err("no converter, and a BIDS tree is NIfTI".to_string()));
@@ -4647,16 +5199,20 @@ fn write_bids(
             }
         }
     }
-    let made = match crate::bids::convert::convert_ticking(
+    let mut converting = std::time::Duration::ZERO;
+    let made = crate::bids::convert::convert_ticking(
         converter,
-        &staged,
+        &paths,
         &staging,
         &into,
         &stem,
         settings.compress,
         every,
         tick,
-    ) {
+        &mut converting,
+    );
+    phases.conversion += converting.as_secs_f64();
+    let made = match made {
         Ok(made) => Ok(made),
         Err(crate::bids::convert::Fail::Refused(why)) => Err(why),
         // The converter did not run to an end of its own (an abort, a kill
@@ -4676,6 +5232,7 @@ fn write_bids(
     };
     // Wave 7a §8.2: an image BIDS cannot admit from its headers alone is no
     // BIDS image; it goes under `sourcedata/` as one that did not convert
+    let sidecar_started = std::time::Instant::now();
     let made = made.and_then(|made| {
         let datatype = job.place.dir.rsplit('/').next().unwrap_or("");
         let raw = job.place.dir.starts_with("sub-") && job.place.dir.split('/').count() == 3;
@@ -4708,12 +5265,14 @@ fn write_bids(
             lacks.join(", ")
         ))
     });
+    phases.sidecar += sidecar_started.elapsed().as_secs_f64();
     match made {
         Ok(made) => {
             // Record 55 C4 (2026-10-09), after v0's `bids-dcm` tree: the
             // slices the converter read, already scrubbed, in a folder named
             // after the file they made. Moved out of the staging directory
             // rather than written again.
+            let exporting = std::time::Instant::now();
             let exported = match job.dicom {
                 true => export_dicom(
                     &staged,
@@ -4723,6 +5282,8 @@ fn write_bids(
                 false => Vec::new(),
             };
             std::fs::remove_dir_all(&staging).ok();
+            phases.staging += exporting.elapsed().as_secs_f64();
+            let sidecar_started = std::time::Instant::now();
             // §9.2 with record 37 S6: where in the body, in the slot the
             // standard keeps it in. `dcm2niix` writes the sidecar from the
             // headers and the headers say `BodyPartExamined` in whatever the
@@ -4740,6 +5301,7 @@ fn write_bids(
             if let Some(card) = card {
                 add_to_sidecar(&into.join(format!("{stem}.json")), "NILS", card.clone());
             }
+            phases.sidecar += sidecar_started.elapsed().as_secs_f64();
             let mut out = refused;
             out.extend(exported);
             let mut files = made.files;
@@ -4781,11 +5343,15 @@ fn write_bids(
             if let Some(volume_type) = aslcontext
                 && stem.ends_with("_asl")
             {
+                let started = std::time::Instant::now();
                 match crate::bids::aslcontext::write(&into, &stem, volume_type) {
                     Ok(name) => files.push(name),
                     Err(why) => out.push(Err(why)),
                 }
+                phases.sidecar += started.elapsed().as_secs_f64();
             }
+            // the converter's files are read once, for their digest
+            let digesting = std::time::Instant::now();
             let mut first = true;
             for file in files {
                 let path = format!("{}/{file}", job.place.dir);
@@ -4806,6 +5372,7 @@ fn write_bids(
                     Err(_) => out.push(Err("unreadable after converting".to_string())),
                 }
             }
+            phases.digest += digesting.elapsed().as_secs_f64();
             Outcome::Files(out)
         }
         Err(why) => {
@@ -4815,14 +5382,12 @@ fn write_bids(
             // stack it could have converted is skipped and one it cannot is a
             // failure.
             std::fs::remove_dir_all(&staging).ok();
-            *report.unconvertible.entry(first_line(&why)).or_insert(0) += 1;
-            *report.routes.entry("sourcedata".to_string()).or_insert(0) += 1;
-            if let Some(n) = report.routes.get_mut(job.route.as_str()) {
-                *n -= 1;
-            }
-            job.route = "sourcedata".to_string();
+            *fell_back = Some((
+                first_line(&why),
+                std::mem::replace(&mut job.route, "sourcedata".to_string()),
+            ));
             job.place = job.fallback.clone();
-            match write_dicom(job, plan, root, &job.place.dir, tick) {
+            match write_dicom(job, plan, root, &job.place.dir, tick, phases) {
                 Outcome::Files(written) => {
                     let mut out = refused;
                     out.extend(written);
@@ -4837,7 +5402,7 @@ fn write_bids(
 /// The DICOM export of one converted stack (record 55 C4, 2026-10-09): its
 /// staged, scrubbed slices moved into `dir`, one file per slice under the
 /// name it was staged with.
-fn export_dicom(staged: &[PathBuf], root: &Path, dir: &str) -> Vec<Result<Written, String>> {
+fn export_dicom(staged: &[Staged], root: &Path, dir: &str) -> Vec<Result<Written, String>> {
     let into = root.join(dir);
     std::fs::remove_dir_all(&into).ok();
     if std::fs::create_dir_all(&into).is_err() {
@@ -4847,19 +5412,20 @@ fn export_dicom(staged: &[PathBuf], root: &Path, dir: &str) -> Vec<Result<Writte
         .iter()
         .map(|from| {
             let name = from
+                .path
                 .file_name()
                 .ok_or_else(|| "a staged slice without a name".to_string())?;
             let relative = PathBuf::from(dir).join(name);
             let target = root.join(&relative);
-            nils_proc::rename_or_copy(from, &target)
+            nils_proc::rename_or_copy(&from.path, &target)
                 .map_err(|_| "could not be put in the DICOM export".to_string())?;
-            let bytes =
-                std::fs::read(&target).map_err(|_| "unreadable in the DICOM export".to_string())?;
+            // the digest the staging took of these very bytes: the move
+            // does not read them again (Wave 7b, 3.x6)
             Ok(Written {
                 wrote: Wrote {
                     path: relative.display().to_string(),
-                    digest: hex::encode(digest_of(&bytes)),
-                    bytes: bytes.len() as i64,
+                    digest: from.digest.clone(),
+                    bytes: from.bytes,
                 },
                 applied: scrub::Applied::default(),
             })
@@ -4867,12 +5433,37 @@ fn export_dicom(staged: &[PathBuf], root: &Path, dir: &str) -> Vec<Result<Writte
         .collect()
 }
 
+/// One instance scrubbed into the staging directory: where, and the digest
+/// and size of the bytes written there, taken from the bytes in hand.
+struct Staged {
+    path: PathBuf,
+    digest: String,
+    bytes: i64,
+}
+
+/// A written object's bytes and their digest, the time of the digest
+/// counted in `phases`.
+fn encoded(
+    object: &dicom_object::DefaultDicomObject,
+    phases: &mut Phases,
+) -> Result<(Vec<u8>, String), String> {
+    let mut bytes: Vec<u8> = Vec::new();
+    object
+        .write_all(&mut bytes)
+        .map_err(|e| format!("unwritable: {}", first_line(&e.to_string())))?;
+    let started = std::time::Instant::now();
+    let digest = hex::encode(digest_of(&bytes));
+    phases.digest += started.elapsed().as_secs_f64();
+    Ok((bytes, digest))
+}
+
 /// Scrub one instance into the staging directory, ready to convert.
 fn stage_one(
     instance: &Instance,
     plan: &Plan,
     staging: &Path,
-) -> Result<(PathBuf, scrub::Applied), String> {
+    phases: &mut Phases,
+) -> Result<(Staged, scrub::Applied), String> {
     let mut object = open(Path::new(&instance.path))?;
     let applied = scrub::apply(&mut object, plan);
     // a file the digest split between stacks is converted, and exported, as
@@ -4881,10 +5472,19 @@ fn stage_one(
         keep_frames(&mut object, frames, instance.stack, plan.remap)?;
     }
     let path = staging.join(format!("{:08}.dcm", instance.id));
-    object
-        .write_to_file(&path)
+    // digested here, from the bytes in hand, for the DICOM export the
+    // staged file becomes (Wave 7b, 3.x6)
+    let (bytes, digest) = encoded(&object, phases)?;
+    std::fs::write(&path, &bytes)
         .map_err(|e| format!("unwritable: {}", first_line(&e.to_string())))?;
-    Ok((path, applied))
+    Ok((
+        Staged {
+            path,
+            digest,
+            bytes: bytes.len() as i64,
+        },
+        applied,
+    ))
 }
 
 /// Open a file whole, part 10 or bare.
@@ -5099,7 +5699,7 @@ fn close_row(store: &mut Store, report: &Report, stopped: Option<&str>) -> Resul
     let sql = format!(
         "UPDATE {} SET finished_at = {}, files = {}, subjects = {}, unchanged = {}, moved = {}, \
          rewritten = {}, added = {}, removed = {}, burned_in = {}, unjudged = {}, models = {}, \
-         error = {}, stopped = {} WHERE id = {}",
+         error = {}, stopped = {}, phases = {} WHERE id = {}",
         store.qualified("release"),
         d.param(1, Type::Timestamp),
         d.param(2, Type::Int),
@@ -5114,7 +5714,8 @@ fn close_row(store: &mut Store, report: &Report, stopped: Option<&str>) -> Resul
         d.param(11, Type::Json),
         d.param(12, Type::Text),
         d.param(13, Type::Bool),
-        d.param(14, Type::Int),
+        d.param(14, Type::Json),
+        d.param(15, Type::Int),
     );
     store.execute(
         &sql,
@@ -5144,6 +5745,7 @@ fn close_row(store: &mut Store, report: &Report, stopped: Option<&str>) -> Resul
             // converter-gone words also leave the row unfinished, and are
             // not a stop asked for
             Param::Bool(stopped.is_some_and(is_stopped)),
+            Param::from(serde_json::to_string(&report.phases).unwrap_or_else(|_| "{}".into())),
             Param::Int(report.release_id),
         ],
     )?;
@@ -7354,6 +7956,38 @@ mod tests {
             policy: 0,
             instances: Vec::new(),
         }
+    }
+
+    /// The cross-stack name check is made on the plan, before any worker
+    /// is given a stack (Wave 7b, 3.x6): the later of two stacks planned
+    /// under one directory and stem is refused, naming the first, and a
+    /// stack that needs no writing is never refused for it.
+    #[test]
+    fn the_later_of_two_stacks_planned_under_one_name_is_refused_naming_the_first() {
+        let named = |stack: i64, dir: &str, stem: &str, change| {
+            let mut j = job(stack, dir, dir);
+            j.place = Place::file(dir.to_string(), stem.to_string());
+            j.change = change;
+            j
+        };
+        use crate::version::Change::{Added, Rewritten, Unchanged};
+        let jobs = vec![
+            named(5, "sub-x/ses-1/anat", "sub-x_ses-1_T1w", Added),
+            named(3, "sub-x/ses-1/anat", "sub-x_ses-1_T1w", Rewritten),
+            named(4, "sub-x/ses-1/anat", "sub-x_ses-1_FLAIR", Added),
+            named(7, "sub-x/ses-1/anat", "sub-x_ses-1_T1w", Unchanged),
+            named(9, "sub-x/ses-1/anat", "sub-x_ses-1_T1w", Added),
+        ];
+        let mut refused = BTreeMap::new();
+        let kept = refuse_shared_stems(jobs, &mut refused);
+        assert_eq!(
+            kept.iter().map(|j| j.stack).collect::<Vec<_>>(),
+            vec![5, 4, 7]
+        );
+        assert_eq!(
+            refused,
+            BTreeMap::from([("same name as stack 5".to_string(), 2)])
+        );
     }
 
     fn write(root: &Path, path: &str) {

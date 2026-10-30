@@ -169,6 +169,8 @@ fn settings<'a>(
         compress: true,
         observations: &[],
         authors: &[],
+        // one stack at a time: these tests time a stop against the stacks
+        workers: 1,
     }
 }
 

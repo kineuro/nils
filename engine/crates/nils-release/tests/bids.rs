@@ -158,6 +158,7 @@ fn settings<'a>(
         compress: true,
         observations: &[],
         authors: &[],
+        workers: 0,
     }
 }
 

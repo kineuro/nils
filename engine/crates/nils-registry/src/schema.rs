@@ -1993,6 +1993,11 @@ fn build_registry() -> Vec<Table> {
                 // closes the row unfinished. Null on a row from before, which
                 // is read by the stopped words in its `error`.
                 col("stopped", Type::Bool),
+                // Wave 7b (3.x6): the seconds the stacks it wrote spent in
+                // each phase, summed over them, `{staging, conversion,
+                // digest, sidecar}`. Null on a row from before, and on a
+                // row whose run has not closed it.
+                col("phases", Type::Json),
             ],
         )
         .index(&["name"]),
