@@ -5,7 +5,9 @@
 # contrast acquired alike, onto their common space. The family's needs
 # skip a changed protocol or 2D visits in words (the SynthMorph visits
 # member is not shipped); this pack adds the method's own needs and the
-# checks of section 7: SynthSeg's quality scores at 0.65 fail the unit,
+# checks of section 7: SynthSeg's quality scores flag a visit under 0.65
+# and leave a visit out under 0.50 (the unit fails only when fewer than
+# two visits are left),
 # the rigid sanity is the pilot's of 2026-10-30 (the determinant 1 within
 # 0.001; the translation and rotation kept at 50 mm and 30 degrees, three
 # rows being too few to calibrate), the label Dice is against the cohort.
@@ -15,7 +17,7 @@
 nils_pack: 1
 pipeline:
   name: registration-robust
-  descriptor_sha256: "sha256:ddd969da07922d28e0e0f914e0eb6034e447595e607b3b60ce8c97b12313331a"
+  descriptor_sha256: "sha256:e088e7ae8227dd3a79c0e3300eb29e9e425210de50fcb33c855b18a472ffd860"
   version: "1.0"
 goals:
   goal: [fast, standard, research]
@@ -39,8 +41,9 @@ knobs:
     comparability: none
     set_by: person
 checks:
-  - {metric: refused, op: "==", value: 0, action: fail, source: "Billot et al. 2023 (SynthSeg QC rejects at 0.65)", words: "a visit scored under 0.65 on SynthSeg's quality scores: nothing was registered"}
-  - {metric: qc_min, op: ">=", value: 0.65, action: fail, source: "Billot et al. 2023 (SynthSeg QC rejects at 0.65)", words: "a visit scores under 0.65 on SynthSeg's quality scores"}
+  - {metric: refused, op: "==", value: 0, action: fail, source: "Billot et al. 2023 (SynthSeg QC flags at 0.65, as the SynthSeg starter does); pilot 2026-10-30 (refuse under 0.50: 7 of 32 ordinary 3D T1w scored 0.528 to 0.608 and registered as well as the rest)", words: "visits scored under 0.50 on SynthSeg's quality scores and fewer than two were left: nothing was registered"}
+  - {metric: qc_min, op: ">=", value: 0.65, action: flag, source: "Billot et al. 2023 (SynthSeg QC flags at 0.65, as the SynthSeg starter does); pilot 2026-10-30 (refuse under 0.50: 7 of 32 ordinary 3D T1w scored 0.528 to 0.608 and registered as well as the rest)", words: "a visit scores under 0.65 on SynthSeg's quality scores: a likely failure, registered all the same"}
+  - {metric: visits_refused, op: "==", value: 0, action: flag, source: "Billot et al. 2023 (SynthSeg QC flags at 0.65, as the SynthSeg starter does); pilot 2026-10-30 (refuse under 0.50: 7 of 32 ordinary 3D T1w scored 0.528 to 0.608 and registered as well as the rest)", words: "a visit scored under 0.50 on SynthSeg's quality scores and was left out; the others were registered"}
   - {metric: rigid_flip, op: "==", value: 0, action: fail, source: policy, words: "a visit's transform flips the image: a registration that found a mirror image is wrong"}
   - {metric: rigid_determinant, op: ">=", value: 0.999, action: flag, source: "pilot 2026-10-30", words: "a visit's transform has a determinant not 1: a rigid transform has determinant 1"}
   - {metric: rigid_determinant, op: "<=", value: 1.001, action: flag, source: "pilot 2026-10-30", words: "a visit's transform has a determinant not 1: a rigid transform has determinant 1"}

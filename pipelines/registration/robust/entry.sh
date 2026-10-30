@@ -13,10 +13,12 @@ for s in sub-*/; do
 [ -d "$s" ] || continue; s=${s%/}; d=[OutputLocation]/$s/anat; mkdir -p "$d"; w=$(mktemp -d [OutputLocation]/.work-XXXXXX);
 vis=(); for f in "$s"/ses-*/anat/*_T1w.nii.gz; do [ -e "$f" ] && vis+=("$f"); done; n=${#vis[@]};
 if [ $n -lt 2 ]; then echo "$s: $n visit with a T1w, nothing to align across visits"; rm -rf "$w"; continue; fi;
-refused=0; qcs=(); for f in "${vis[@]}"; do ses=$(basename "$(dirname "$(dirname "$f")")"); q=$(qc "$f" "$w/seg_$ses.nii.gz" "$w/qc_$ses.csv") || q="";
-qcs+=("${q:-?}"); if [ -n "$q" ] && fspython -c "import sys; sys.exit(0 if float(sys.argv[1]) < 0.65 else 1)" "$q"; then refused=1; fi; done;
-qmin=$(printf "%s\n" "${qcs[@]}" | grep -v "?" | sort -g | head -n 1);
-if [ $refused = 1 ]; then echo "$s: SynthSeg scores a visit below 0.65 (${qcs[*]}): refused"; printf "{\"visits\": %d, \"method\": \"robust\", \"qc_min\": %s, \"refused\": 1}\n" $n "$qmin" > "$d/${s}_desc-registration_metrics.json"; rm -rf "$w"; continue; fi;
+qcs=(); kept=(); out=(); for f in "${vis[@]}"; do ses=$(basename "$(dirname "$(dirname "$f")")"); q=$(qc "$f" "$w/seg_$ses.nii.gz" "$w/qc_$ses.csv") || q="";
+if [ -n "$q" ] && fspython -c "import sys; sys.exit(0 if float(sys.argv[1]) < 0.50 else 1)" "$q"; then out+=("$ses $q"); echo "$s: SynthSeg scores the visit $ses at $q, under 0.50: the visit is left out"; continue; fi;
+kept+=("$f"); qcs+=("${q:-?}"); done;
+qmin=$(printf "%s\n" "${qcs[@]}" | grep -v "?" | sort -g | head -n 1); nout=${#out[@]};
+if [ ${#kept[@]} -lt 2 ]; then echo "$s: SynthSeg scores $nout of $n visits under 0.50, which leaves fewer than two to align: refused"; printf "{\"visits\": %d, \"visits_refused\": %d, \"method\": \"robust\"%s, \"refused\": 1}\n" ${#kept[@]} $nout "${qmin:+, \"qc_min\": $qmin}" > "$d/${s}_desc-registration_metrics.json"; rm -rf "$w"; continue; fi;
+vis=("${kept[@]}"); n=${#vis[@]}; left=""; [ $nout -gt 0 ] && left=", $nout left out";
 if [ $n -eq 2 ]; then
 a=${vis[0]}; b=${vis[1]}; sa=$(basename "$(dirname "$(dirname "$a")")"); sb=$(basename "$(dirname "$(dirname "$b")")");
 mri_robust_register --mov "$b" --dst "$a" --lta "$w/${sb}_to_${sa}.lta" --halfmov "$w/${sb}_half.nii.gz" --halfdst "$w/${sa}_half.nii.gz" --halfmovlta "$w/${sb}_to_mid.lta" --halfdstlta "$w/${sa}_to_mid.lta" --iscale --satit --mapmovhdr "$w/${sb}_in_${sa}.nii.gz" >/dev/null 2>&1 || { echo "$s: mri_robust_register of $sb onto $sa failed"; rm -rf "$w"; continue; };
@@ -38,6 +40,6 @@ mri_vol2vol --mov "$f" --targ "$w/template.nii.gz" --lta "$l" --o "$d/${s}_${ses
 read det fl tl rot < <(sanity "$l") || continue;
 maxtl=$(fspython -c "import sys; print(max(float(sys.argv[1]), float(sys.argv[2])))" "$maxtl" "$tl"); maxrot=$(fspython -c "import sys; print(max(float(sys.argv[1]), float(sys.argv[2])))" "$maxrot" "$rot"); mindet=$(fspython -c "import sys; print(min(float(sys.argv[1]), float(sys.argv[2])))" "$mindet" "$det"); [ "$fl" = 1 ] && flip=1;
 if [ -f "$w/seg_template.nii.gz" ] && mri_synthseg --i "$d/${s}_${ses}_space-midspace_desc-aligned_T1w.nii.gz" --o "$w/seg_al_$ses.nii.gz" --robust --cpu --threads [THREADS] >/dev/null 2>&1; then ld=$(dice "$w/seg_template.nii.gz" "$w/seg_al_$ses.nii.gz"); [ -n "$ld" ] && mind=$(fspython -c "import sys; print(\"%.3f\" % min(float(sys.argv[1]), float(sys.argv[2])))" "${mind:-1}" "$ld"); fi; done;
-printf "{\"visits\": %d, \"method\": \"%s\", \"qc_min\": %s, \"rigid_flip\": %d, \"rigid_determinant\": %s, \"rigid_translation_mm\": %s, \"rigid_rotation_deg\": %s%s%s}\n" $n "$method" "${qmin:-null}" $flip "$mindet" "$maxtl" "$maxrot" "${ic:+, \"inverse_consistency_mm\": $ic}" "${mind:+, \"alignment_dice\": $mind}" > "$d/${s}_desc-registration_metrics.json";
-echo "$s: $n visits onto their common space, $method (quality min ${qmin:-?}; largest translation $maxtl mm, rotation $maxrot degrees; label Dice min ${mind:-?})";
+printf "{\"visits\": %d, \"visits_refused\": %d, \"method\": \"%s\", \"qc_min\": %s, \"rigid_flip\": %d, \"rigid_determinant\": %s, \"rigid_translation_mm\": %s, \"rigid_rotation_deg\": %s%s%s}\n" $n $nout "$method" "${qmin:-null}" $flip "$mindet" "$maxtl" "$maxrot" "${ic:+, \"inverse_consistency_mm\": $ic}" "${mind:+, \"alignment_dice\": $mind}" > "$d/${s}_desc-registration_metrics.json";
+echo "$s: $n visits onto their common space$left, $method (quality min ${qmin:-?}; largest translation $maxtl mm, rotation $maxrot degrees; label Dice min ${mind:-?})";
 rm -rf "$w"; done

@@ -5,7 +5,8 @@
 # which session comes here: within a session the 2D and the thick pairs,
 # to the template the fast goal or a session without a fine 3D T1w. The
 # pack carries the member's switch (the task, set from the family's), the
-# checks of section 7 (SynthSeg's quality scores at 0.65 fail the unit;
+# checks of section 7 (SynthSeg's quality scores flag under 0.65 and
+# refuse the pair under 0.50;
 # the determinant kept at 0.98 to 1.02, since an affine may scale; the
 # translation and rotation within a session at 10 mm and 10 degrees and
 # the folding at 0.01 %, the pilot's of 2026-10-30; the inverse
@@ -16,7 +17,7 @@
 nils_pack: 1
 pipeline:
   name: registration-synthmorph
-  descriptor_sha256: "sha256:04dd3a746edb9b0cc2936cf09dccaf8e68d14f8f154fb2fd4830a61f06e5e682"
+  descriptor_sha256: "sha256:c440739ce04fb31d53e0c69c1f0ca99901c650a608df2b9f967a730a4e1d1e30"
   version: "1.0"
 goals:
   goal: [fast, standard, research]
@@ -54,9 +55,9 @@ rules:
     why: "the family's task is this run's"
     source: policy
 checks:
-  - {metric: refused, op: "==", value: 0, action: fail, source: "Billot et al. 2023 (SynthSeg QC rejects at 0.65)", words: "an input scored under 0.65 on SynthSeg's quality scores: the pair was not registered"}
-  - {metric: qc_fixed, op: ">=", value: 0.65, action: fail, source: "Billot et al. 2023 (SynthSeg QC rejects at 0.65)", words: "the T1w scores under 0.65 on SynthSeg's quality scores"}
-  - {metric: qc_moving, op: ">=", value: 0.65, action: fail, source: "Billot et al. 2023 (SynthSeg QC rejects at 0.65)", words: "the moving image scores under 0.65 on SynthSeg's quality scores"}
+  - {metric: refused, op: "==", value: 0, action: fail, source: "Billot et al. 2023 (SynthSeg QC flags at 0.65, as the SynthSeg starter does); pilot 2026-10-30 (refuse under 0.50: 7 of 32 ordinary 3D T1w scored 0.528 to 0.608 and registered as well as the rest)", words: "an input scored under 0.50 on SynthSeg's quality scores: the pair was not registered"}
+  - {metric: qc_fixed, op: ">=", value: 0.65, action: flag, source: "Billot et al. 2023 (SynthSeg QC flags at 0.65, as the SynthSeg starter does); pilot 2026-10-30 (refuse under 0.50: 7 of 32 ordinary 3D T1w scored 0.528 to 0.608 and registered as well as the rest)", words: "the T1w scores under 0.65 on SynthSeg's quality scores: a likely failure, registered all the same"}
+  - {metric: qc_moving, op: ">=", value: 0.65, action: flag, source: "Billot et al. 2023 (SynthSeg QC flags at 0.65, as the SynthSeg starter does); pilot 2026-10-30 (refuse under 0.50: 7 of 32 ordinary 3D T1w scored 0.528 to 0.608 and registered as well as the rest)", words: "the moving image scores under 0.65 on SynthSeg's quality scores: a likely failure, registered all the same"}
   - {metric: affine_used, op: "==", value: 0, action: flag, source: policy, words: "the pair was aligned affinely, scale and shear allowed, since the build has no rigid model"}
   - {metric: rigid_flip, op: "==", value: 0, action: fail, source: policy, words: "the transform flips the image: a registration that found a mirror image is wrong"}
   - {metric: rigid_determinant, op: ">=", value: 0.98, action: flag, source: policy, words: "the transform's determinant is not near 1"}

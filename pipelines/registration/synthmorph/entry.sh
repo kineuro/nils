@@ -33,8 +33,8 @@ for role in flair t2w; do
 if [ $role = flair ]; then mv=$(flair "$a"); con=FLAIR; else mv=$(t2w "$a"); con=T2w; fi;
 [ -z "$mv" ] && continue;
 qm=$(qc "$mv" "$w" moving_$con) || qm="";
-if [ -n "$qf" ] && [ -n "$qm" ] && fspython -c "import sys; sys.exit(0 if min(float(sys.argv[1]), float(sys.argv[2])) < 0.65 else 1)" "$qf" "$qm"; then
-echo "$a: SynthSeg scores an input below 0.65 (T1w $qf, $con $qm): the pair is refused"; printf "{\"moving\": \"%s\", \"method\": \"synthmorph\", \"qc_fixed\": %s, \"qc_moving\": %s, \"refused\": 1}\n" "$con" "$qf" "$qm" > "$d/${b}_from-${con}_to-T1w_desc-registration_metrics.json"; continue; fi;
+if [ -n "$qf" ] && [ -n "$qm" ] && fspython -c "import sys; sys.exit(0 if min(float(sys.argv[1]), float(sys.argv[2])) < 0.50 else 1)" "$qf" "$qm"; then
+echo "$a: SynthSeg scores an input under 0.50 (T1w $qf, $con $qm): the pair is refused"; printf "{\"moving\": \"%s\", \"method\": \"synthmorph\", \"qc_fixed\": %s, \"qc_moving\": %s, \"refused\": 1}\n" "$con" "$qf" "$qm" > "$d/${b}_from-${con}_to-T1w_desc-registration_metrics.json"; continue; fi;
 model=affine; affine=1; if [ $rigid = 1 ]; then model=rigid; affine=0; fi;
 mri_synthmorph register -m $model -t "$w/${con}.lta" -o "$w/${con}_aligned.nii.gz" -j [THREADS] "$mv" "$f" >/dev/null 2>&1 || { echo "$a: SynthMorph $model of the $con failed"; continue; };
 [ $affine = 1 ] && echo "$a: the pinned SynthMorph has no rigid model, so the $con was aligned affinely (scale and shear allowed), flagged";
@@ -44,7 +44,7 @@ mri_synthseg --i "$w/${con}_aligned.nii.gz" --o "$w/seg_aligned.nii.gz" --robust
 printf "{\"moving\": \"%s\", \"method\": \"synthmorph-%s\", \"affine_used\": %d%s%s%s%s%s%s%s}\n" "$con" "$model" "$affine" "${qf:+, \"qc_fixed\": $qf}" "${qm:+, \"qc_moving\": $qm}" "${det:+, \"rigid_determinant\": $det}" "${flip:+, \"rigid_flip\": $flip}" "${tl:+, \"rigid_translation_mm\": $tl}" "${rot:+, \"rigid_rotation_deg\": $rot}" "${ld:+, \"alignment_dice\": $ld}" > "$d/${b}_from-${con}_to-T1w_desc-registration_metrics.json";
 echo "$a: $con onto the T1w, SynthMorph $model (quality T1w ${qf:-?}, $con ${qm:-?}; determinant ${det:-?}, translation ${tl:-?} mm, rotation ${rot:-?} degrees; label Dice ${ld:-?})"; done;
 else
-if [ -n "$qf" ] && fspython -c "import sys; sys.exit(0 if float(sys.argv[1]) < 0.65 else 1)" "$qf"; then echo "$a: SynthSeg scores the T1w below 0.65 ($qf): refused"; printf "{\"moving\": \"T1w\", \"method\": \"synthmorph-joint\", \"qc_fixed\": %s, \"refused\": 1}\n" "$qf" > "$d/${b}_from-T1w_to-MNI152NLin2009cAsym_desc-registration_metrics.json"; rm -rf "$w"; continue; fi;
+if [ -n "$qf" ] && fspython -c "import sys; sys.exit(0 if float(sys.argv[1]) < 0.50 else 1)" "$qf"; then echo "$a: SynthSeg scores the T1w under 0.50 ($qf): refused"; printf "{\"moving\": \"T1w\", \"method\": \"synthmorph-joint\", \"qc_fixed\": %s, \"refused\": 1}\n" "$qf" > "$d/${b}_from-T1w_to-MNI152NLin2009cAsym_desc-registration_metrics.json"; rm -rf "$w"; continue; fi;
 [ -f "$tpl" ] || { echo "$a: no template: neither the site file mni_template nor the mni_icbm152_nlin_asym_09c of FreeSurfer is here"; rm -rf "$w"; continue; };
 mri_synthmorph register -m joint -r 0.5 -t "$w/fwd.nii.gz" -T "$w/inv.nii.gz" -o "$w/aligned.nii.gz" -j [THREADS] "$f" "$tpl" >/dev/null 2>&1 || { echo "$a: SynthMorph joint to the template failed"; rm -rf "$w"; continue; };
 cp "$w/fwd.nii.gz" "$d/${b}_from-T1w_to-MNI152NLin2009cAsym_mode-image_xfm.nii.gz"; cp "$w/inv.nii.gz" "$d/${b}_from-MNI152NLin2009cAsym_to-T1w_mode-image_xfm.nii.gz"; cp "$w/aligned.nii.gz" "$d/${b}_space-MNI152NLin2009cAsym_desc-aligned_T1w.nii.gz";

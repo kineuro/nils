@@ -1325,15 +1325,30 @@ mod tests {
                 assert!(dice.cohort, "{k}");
                 assert_eq!(dice.min_sessions, 30, "{k}");
             }
-            // SynthSeg's quality at 0.65 fails the FreeSurfer members
+            // SynthSeg's quality under 0.65 flags in the FreeSurfer members,
+            // as the SynthSeg starter does; under 0.50 the script refuses
+            // (a pair, or a visit) and the refused row fails the unit
             if k != "ants" {
                 let qc = p
                     .checks
                     .iter()
                     .find(|c| c.metric == "qc_fixed" || c.metric == "qc_min")
                     .unwrap();
-                assert_eq!(qc.action.name(), "fail");
+                assert_eq!(qc.action.name(), "flag", "{k}");
                 assert!(qc.holds(0.65) && qc.holds(0.9) && !qc.holds(0.64), "{k}");
+                let refused = p.checks.iter().find(|c| c.metric == "refused").unwrap();
+                assert_eq!(refused.action.name(), "fail", "{k}");
+                let words = refused.words.as_deref().unwrap_or_default();
+                assert!(words.contains("0.50"), "{k}: {words}");
+            }
+            if k == "robust" {
+                let out = p
+                    .checks
+                    .iter()
+                    .find(|c| c.metric == "visits_refused")
+                    .unwrap();
+                assert_eq!(out.action.name(), "flag");
+                assert!(out.holds(0.0) && !out.holds(1.0));
             }
         }
     }
