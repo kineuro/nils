@@ -33,6 +33,7 @@ All notable changes to NILS v1 are recorded here. The format follows [Keep a Cha
 - The release row has a column of its own for a stop that was asked for, so a listing no longer reads it from the start of the error text; rows from before are read as they were.
 - A call an assistant's turn makes and the door refuses (a ceiling that is not a ladder name, an idempotency key that is too long) no longer counts against the turn's calls, and the table of turns is swept every 256 calls, not on each.
 - A draw by count whose default `since` leaves nothing to draw says the time it used, the draw it came from, and the `since` to give to take the stacks accepted at that second.
+- A cancelled pipeline run keeps a unit whose container ended just before the cancel was heard. Until now such a unit went back to the queue and `nils run --resume` ran it a second time.
 
 ## [1.0.0-beta.3] - 2026-10-29
 

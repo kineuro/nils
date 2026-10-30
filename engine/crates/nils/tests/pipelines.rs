@@ -4928,7 +4928,10 @@ x-nils:
 
 /// Record 49 A1: a person's cancel stops the units in flight and closes the
 /// run as cancelled, with the units it finished kept; `nils run --resume`
-/// goes on from there.
+/// goes on from there. A unit whose container ended before the cancel was
+/// heard is one it finished, taken in and kept, never stopped and run
+/// again (E1, 2026-10-30: under load a unit that ended in the turn the
+/// cancel was heard went back to the queue, and the resume ran it twice).
 #[test]
 fn a_cancelled_run_keeps_its_units_and_goes_on() {
     if !have("python3") {
@@ -4941,6 +4944,24 @@ fn a_cancelled_run_keeps_its_units_and_goes_on() {
     lab.add_descriptor("slow", &stack_slow("slow", "{cores: 1, memory-gb: 1}", ""));
     lab.ok(&["pipeline", "lane", "--cores", "1"], None);
     let t = lab.work.path().join("trace");
+    // each unit waits at a gate of its own, and every gate is opened at the
+    // end, so nothing the run started outlives the test
+    let gate = lab.work.path().join("gate");
+    let gate_of = |unit: &str| PathBuf::from(format!("{}-{unit}", gate.display()));
+    let pid_of = |unit: &str| PathBuf::from(format!("{}.pid", gate_of(unit).display()));
+    struct Open(PathBuf);
+    impl Drop for Open {
+        fn drop(&mut self) {
+            let dir = self.0.parent().unwrap();
+            for e in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+                let name = e.file_name().to_string_lossy().to_string();
+                if let Some(g) = name.strip_suffix(".pid").filter(|n| n.starts_with("gate-")) {
+                    let _ = std::fs::write(dir.join(g), "");
+                }
+            }
+        }
+    }
+    let _open = Open(gate.clone());
     let child = lab
         .command(&lab.path)
         .args([
@@ -4949,21 +4970,59 @@ fn a_cancelled_run_keeps_its_units_and_goes_on() {
             "--select",
             "selection:every@1",
             "--param",
-            "sleep=1",
+            "sleep=1.5",
         ])
         .env("LANE_TRACE", &t)
+        .env("SLOW_GATE", &gate)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .spawn()
         .unwrap();
-    let started = std::time::Instant::now();
-    while lab.count("SELECT COUNT(*) FROM pipeline_unit WHERE state = 'over'") < 1 {
-        assert!(started.elapsed().as_secs() < 60);
-        std::thread::sleep(std::time::Duration::from_millis(50));
-    }
+    let begun = |n: usize| -> Vec<String> {
+        let started = std::time::Instant::now();
+        loop {
+            let b: Vec<String> = trace(&t)
+                .into_iter()
+                .filter(|e| e.0 == "start")
+                .map(|e| e.2)
+                .collect();
+            if b.len() >= n && b.iter().take(n).all(|u| pid_of(u).exists()) {
+                return b;
+            }
+            assert!(started.elapsed().as_secs() < 60, "{b:?}");
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+    };
+    // the first unit is let through and ends; the second waits at its gate
+    let first = begun(1)[0].clone();
+    std::fs::write(gate_of(&first), "").unwrap();
+    let second = begun(2)[1].clone();
+    assert_eq!(
+        lab.count("SELECT COUNT(*) FROM pipeline_unit WHERE state = 'over'"),
+        1
+    );
+    // the registry is held while the second unit ends (a SQLite writer's
+    // lock, which the run waits for up to five seconds), so the run's next
+    // beat hears the cancel before it takes in a container that ended
     let job = lab.count("SELECT job_id FROM pipeline_run WHERE id = 1");
-    lab.ok(&["jobs", "cancel", &job.to_string()], None);
+    let mut holder = lab.store();
+    holder.begin().unwrap();
+    // the run's child that holds the second unit: the stand-in podman
+    let container = child_of(child.id(), read_pid(&pid_of(&second)))
+        .expect("the second unit runs under the run");
+    std::fs::write(gate_of(&second), "").unwrap();
+    let started = std::time::Instant::now();
+    // ended: the unit wrote its results and its container is a zombie the
+    // run has not reaped yet (or gone)
+    while trace(&t).iter().filter(|e| e.0 == "end").count() < 2
+        || proc_stat(container).is_some_and(|(state, _)| state != 'Z')
+    {
+        assert!(started.elapsed().as_secs() < 4, "{:?}", trace(&t));
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    nils_registry::job::request_cancel(&mut holder, job).unwrap();
+    holder.commit().unwrap();
     let out = child.wait_with_output().unwrap();
     assert!(!out.status.success());
     let err = String::from_utf8_lossy(&out.stderr);
@@ -4971,8 +5030,9 @@ fn a_cancelled_run_keeps_its_units_and_goes_on() {
     let run: Value =
         serde_json::from_str(&lab.ok(&["pipeline", "runs", "1", "--json"], None)).unwrap();
     assert_eq!(run["status"], "cancelled", "{run}");
-    let over = run["unit_states"]["over"].as_u64().unwrap();
-    assert!((1..4).contains(&over), "{run}");
+    // both units that ended are kept: the one taken in before the cancel
+    // and the one whose container ended before the cancel was heard
+    assert_eq!(run["unit_states"]["over"], 2, "{run}");
     assert!(
         run["unit_states"].get("running").is_none(),
         "none left in flight: {run}"
@@ -4987,6 +5047,40 @@ fn a_cancelled_run_keeps_its_units_and_goes_on() {
     assert_eq!(lab.count("SELECT COUNT(*) FROM derivative"), 4);
     let ends = trace(&t).iter().filter(|e| e.0 == "end").count();
     assert_eq!(ends, 4, "{:?}", trace(&t));
+}
+
+/// The pid a gated unit wrote at its gate.
+fn read_pid(path: &Path) -> u32 {
+    std::fs::read_to_string(path)
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap()
+}
+
+/// A process's state letter and its parent, as `/proc` holds them; none
+/// once it is gone.
+fn proc_stat(pid: u32) -> Option<(char, u32)> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    let (_, rest) = stat.rsplit_once(") ")?;
+    let mut words = rest.split(' ');
+    let state = words.next()?.chars().next()?;
+    let parent = words.next()?.parse().ok()?;
+    Some((state, parent))
+}
+
+/// The child of `parent` that `pid` runs under (or is).
+fn child_of(parent: u32, mut pid: u32) -> Option<u32> {
+    loop {
+        let (_, up) = proc_stat(pid)?;
+        if up == parent {
+            return Some(pid);
+        }
+        if up <= 1 {
+            return None;
+        }
+        pid = up;
+    }
 }
 
 /// 2026-10-17: a handle runs in parts (`--handle H --chunk N`), as the

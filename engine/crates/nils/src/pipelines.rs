@@ -8569,6 +8569,27 @@ fn execute_run(home: &Home, registry: &mut Registry, x: &Execution<'_>) -> Resul
     if !running.is_empty() {
         let mut pulse = Pulse::new(x.job_id, json!({"run": x.run_id, "phase": "stop"}));
         for mut r in running.drain(..) {
+            // E1 (2026-10-30): a container that ended before the stop was
+            // heard finished its units; they are taken in as it ended and
+            // kept, never given back to be run again
+            if let Ok(Some(status)) = r.child.try_wait() {
+                if let Some(w) = &r.inv.workdir {
+                    let _ = std::fs::remove_dir_all(w);
+                }
+                let taken = take_in(
+                    registry,
+                    x,
+                    &m,
+                    &r.batch,
+                    status.code(),
+                    signal_of(&status),
+                    &row_of,
+                    &mut taken_files,
+                );
+                if taken.is_ok() {
+                    continue;
+                }
+            }
             x.runtime.stop(&r.inv);
             let _ = runtime::kill(&mut r.child);
             let _ = r.child.wait();
