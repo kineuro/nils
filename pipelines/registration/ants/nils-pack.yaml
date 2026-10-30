@@ -99,7 +99,9 @@ resources:
 comparability:
   facts: [t1w.base]
 tests: []
+# The pinned image says `ANTs Version: 2.6.2.dev1-g52bc0ab`: the probe
+# looks for the release number without the v.
 source:
   image: "docker.io/antsx/ants@sha256:d53ce1c7db686c5a3791fb42b917aaee819c1f34327dd5171ebc3d2a8520297e"
-  probe: {command: "antsRegistration --version", expect: "ANTs Version: v2.6.2"}
+  probe: {command: "antsRegistration --version", expect: "ANTs Version: 2.6.2"}
   key_files: ["bin/antsRegistration", "bin/antsRegistrationSyN.sh"]
