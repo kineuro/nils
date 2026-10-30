@@ -177,6 +177,15 @@ pub(crate) struct PlanArgs {
     /// A knob a step lets a person set, as step.knob=value (repeatable)
     #[arg(long = "knob", value_name = "STEP.KNOB=VALUE")]
     pub(crate) knobs: Vec<String>,
+    /// Record 57 P9 (a run): the assistant whose proposal the person
+    /// accepted, by its purpose or name (with --proposal); every step's
+    /// run and its units record it with the person
+    #[arg(long, value_name = "AGENT", requires = "proposal")]
+    pub(crate) proposed_by: Option<String>,
+    /// Record 57 P9 (a run): the id of the assistant's proposal the person
+    /// accepted (with --proposed-by)
+    #[arg(long, value_name = "ID", requires = "proposed_by")]
+    pub(crate) proposal: Option<String>,
     /// The pack the scope is frozen under
     #[arg(long, default_value = "mri")]
     pub(crate) pack: String,
@@ -498,6 +507,8 @@ pub(crate) struct Scope {
 pub(crate) struct Person {
     pub goal: Option<String>,
     pub knobs: BTreeMap<String, Vec<(String, String)>>,
+    /// Record 57 P9: the assistant's proposal the person accepted.
+    pub proposed_by: Option<crate::proposed_by::ProposedBy>,
 }
 
 impl Person {
@@ -505,6 +516,11 @@ impl Person {
         let mut p = Person {
             goal: args.goal.clone(),
             knobs: BTreeMap::new(),
+            proposed_by: crate::proposed_by::ProposedBy::of_args(
+                args.proposed_by.as_deref(),
+                args.proposal.as_deref(),
+            )
+            .map_err(usage)?,
         };
         for k in &args.knobs {
             let (name, value) = k
@@ -526,6 +542,7 @@ impl Person {
         let mut p = Person {
             goal: body["goal"].as_str().map(str::to_string),
             knobs: BTreeMap::new(),
+            proposed_by: crate::proposed_by::ProposedBy::of_body(body)?,
         };
         match &body["knobs"] {
             Value::Null => {}
@@ -553,6 +570,16 @@ impl Person {
             _ => return Err("knobs is {step: {knob: value}}".into()),
         }
         Ok(p)
+    }
+
+    /// As the workflow run records it: [`Person::doc`], and the proposal
+    /// the person (`who`) accepted where there was one (record 57 P9).
+    pub(crate) fn record(&self, who: &str) -> Value {
+        let mut v = self.doc();
+        if let Some(pb) = &self.proposed_by {
+            v["proposed_by"] = pb.record(who);
+        }
+        v
     }
 
     pub(crate) fn doc(&self) -> Value {

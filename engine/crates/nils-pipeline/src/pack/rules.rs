@@ -36,6 +36,10 @@ pub struct Person {
     pub given: BTreeSet<String>,
     /// Of those, the ones the assistant proposed and the person accepted.
     pub proposed: BTreeSet<String>,
+    /// Record 57 P9: the proposal the person accepted where the run's plan
+    /// came from the assistant, `{agent, proposal, accepted_by}`; every
+    /// unit records it, and each knob the person gave names the agent.
+    pub proposed_by: Option<Value>,
     /// Whether a hard need on a fact the registry cannot tell lets the
     /// unit run (the person's choice, recorded as such).
     pub let_run: bool,
@@ -131,6 +135,9 @@ pub struct Judgement {
     /// Every fact the needs and the rules read, with its value, kept with
     /// the unit for the replay and shown at the reader's detail level.
     pub facts: Facts,
+    /// Record 57 P9: the proposal the person accepted, as the run records
+    /// it; none where the person chose without one.
+    pub proposed_by: Option<Value>,
 }
 
 impl Judgement {
@@ -143,9 +150,10 @@ impl Judgement {
     }
 
     /// As a unit records it and the doors answer it: `{status, need,
-    /// words, cannot_tell, let_run_by, variant, caveats, knobs, facts}`.
+    /// words, cannot_tell, let_run_by, variant, caveats, knobs, facts}`,
+    /// and `proposed_by` where the person accepted the assistant's proposal.
     pub fn doc(&self) -> Value {
-        json!({
+        let mut v = json!({
             "status": self.status.name(),
             "need": self.need,
             "words": self.words,
@@ -157,7 +165,11 @@ impl Judgement {
             "caveats": self.caveats.iter().map(Caveat::doc).collect::<Vec<_>>(),
             "knobs": self.knobs.iter().map(|(k, c)| (k.clone(), c.doc())).collect::<Map<_, _>>(),
             "facts": self.facts.to_json(),
-        })
+        });
+        if let Some(p) = &self.proposed_by {
+            v["proposed_by"] = p.clone();
+        }
+        v
     }
 
     /// The knobs alone, `{id: {value, by, rule}}`, as the pre-flight lists
@@ -339,6 +351,7 @@ pub fn judge(
         caveats: Vec::new(),
         knobs: BTreeMap::new(),
         facts: Facts::default(),
+        proposed_by: person.proposed_by.clone(),
     };
     // the needs, hard first: the first hard need the unit fails names it
     let n = judge_needs(&pack.needs, &[LINK, HOST], &vocab, &f, person, &mut note);
@@ -358,10 +371,14 @@ pub fn judge(
                     by: format!("person:{}", person.user),
                     rule: None,
                     facts: BTreeMap::new(),
-                    proposed: person
-                        .proposed
-                        .contains(id)
-                        .then(|| "assistant".to_string()),
+                    proposed: person.proposed.contains(id).then(|| {
+                        person
+                            .proposed_by
+                            .as_ref()
+                            .and_then(|p| p["agent"].as_str())
+                            .unwrap_or("assistant")
+                            .to_string()
+                    }),
                 },
             );
         }
@@ -467,12 +484,18 @@ pub fn person_may_set(pack: &PipelinePack, given: &BTreeSet<String>) -> Result<(
 /// both read it; under an unchanged pack it is the recorded judgement.
 pub fn rejudge(pack: &PipelinePack, d: &Descriptor, recorded: &Value) -> Result<Judgement, String> {
     let facts = Facts::from_json(&recorded["facts"]);
-    let mut person = Person::default();
+    let mut person = Person {
+        proposed_by: Some(recorded["proposed_by"].clone()).filter(Value::is_object),
+        ..Person::default()
+    };
     let mut given: Vec<(String, String)> = Vec::new();
     for (k, c) in recorded["knobs"].as_object().into_iter().flatten() {
         if let Some(user) = c["by"].as_str().and_then(|b| b.strip_prefix("person:")) {
             person.user = user.to_string();
             person.given.insert(k.clone());
+            if c["proposed"].is_string() {
+                person.proposed.insert(k.clone());
+            }
             given.push((
                 k.clone(),
                 match &c["value"] {
@@ -649,6 +672,28 @@ mod tests {
         assert_eq!(doc["facts"]["values"]["goal"], "fast");
         let again = replay(&p, &d, &doc).unwrap();
         assert_eq!(again, j.params().into_iter().collect::<BTreeMap<_, _>>());
+        // no proposal noted: the unit's record has no proposed_by
+        assert!(doc.get("proposed_by").is_none(), "{doc}");
+        // record 57 P9: a plan accepted from a proposal names the agent on
+        // the person's knobs and the proposal on the unit, and the replay
+        // reads both back
+        let accepted = json!({"agent": "plan-analysis", "proposal": "c-7", "accepted_by": "anna"});
+        let mut anna_p = anna.clone();
+        anna_p.proposed_by = Some(accepted.clone());
+        let jp = judge(&p, &d, &resolved, &facts(true, "3D", 1.0), &anna_p);
+        assert_eq!(jp.knobs["threads"].by, "person:anna");
+        assert_eq!(
+            jp.knobs["threads"].proposed.as_deref(),
+            Some("plan-analysis")
+        );
+        let docp = jp.doc();
+        assert_eq!(docp["proposed_by"], accepted);
+        let back = rejudge(&p, &d, &docp).unwrap();
+        assert_eq!(back.doc()["proposed_by"], accepted);
+        assert_eq!(
+            back.knobs["threads"].proposed.as_deref(),
+            Some("plan-analysis")
+        );
         // without the person's value the fast goal's rule sets the threads
         let j = judge(
             &p,

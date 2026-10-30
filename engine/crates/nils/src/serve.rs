@@ -4096,7 +4096,7 @@ fn routed(
             // A command line for a worker: the one way anything heavy runs
             // through the door, answered 202 with the job's id.
             let doc = json_body(body)?;
-            let command: Vec<String> = doc["command"]
+            let mut command: Vec<String> = doc["command"]
                 .as_array()
                 .map(|a| {
                     a.iter()
@@ -4120,6 +4120,10 @@ fn routed(
                     ),
                 ));
             }
+            // record 57 P9: a run the person accepted from the assistant's
+            // proposal says which, beside the command
+            crate::proposed_by::onto_command(&doc, &mut command)
+                .map_err(|e| Reply::error(400, e))?;
             // Wave 4c §6.5 and record 26 §6: of the linkage verbs `import`
             // and `merge` are jobs the door queues; purge and the rest stay
             // on the command line.
@@ -4174,7 +4178,6 @@ fn routed(
             // `bring-in @dataset`, which stands for the thread of a
             // dataset with its own steps in front of whatever follows.
             let mut then = crate::chain::parse_then(&doc).map_err(|e| Reply::error(400, e))?;
-            let mut command = command;
             let mut digest_first: Option<u64> = None;
             if command[0] == "bring-in" {
                 let asked =

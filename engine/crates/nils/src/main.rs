@@ -86,6 +86,7 @@ mod places;
 mod preflight;
 mod preview;
 mod profile;
+mod proposed_by;
 mod provenance;
 mod pyramid;
 mod reader;

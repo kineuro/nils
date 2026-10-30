@@ -484,6 +484,7 @@ impl PersonAsk {
             choices,
             given,
             proposed: BTreeSet::new(),
+            proposed_by: None,
             let_run: self.let_run,
         })
     }
