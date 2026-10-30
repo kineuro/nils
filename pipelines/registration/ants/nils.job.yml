@@ -143,6 +143,11 @@ command-line: |-
 x-nils:
   contract: 1
   analysis-level: session
+  # It fixes the earlier versions (the pilot of 2026-10-30), so a new
+  # run no longer takes them; their runs and results keep their names.
+  # No version list: every earlier version of the name in a catalog.
+  replaces:
+    why: "It runs on its pinned image: the rigid no longer passes -j 0 (which failed every pair in ANTs 2.6.2), the overlap tables are read where the tools write them, SyN folding is measured on the template's grid, the mask columns are valid JSON, the FLAIR is the moving image within a session, and the checks take the pilot's thresholds; the earlier versions failed every pair."
   input:
     layout: bids
     roles: [t1w, flair, t2w]

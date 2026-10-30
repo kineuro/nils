@@ -102,6 +102,11 @@ command-line: |-
 x-nils:
   contract: 1
   analysis-level: participant
+  # It fixes the earlier versions (the pilot of 2026-10-30), so a new
+  # run no longer takes them; their runs and results keep their names.
+  # No version list: every earlier version of the name in a catalog.
+  replaces:
+    why: "It writes its halfway transforms where they are read, so the across-visits template and the aligned visits exist, reads the rigid sanity from real values, leaves a visit out by its SynthSeg quality and takes the pilot's thresholds; the earlier versions made no template."
   input:
     layout: bids
     roles: [t1w]
