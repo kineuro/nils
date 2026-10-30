@@ -2175,7 +2175,7 @@ pub const BOUND_TOLERANCE: f64 = 1e-6;
 pub const BOUND_CONFIDENCE: f64 = 0.95;
 
 /// The members a cited graded result may hold.
-const CITED_RESULT: [&str; 8] = [
+const CITED_RESULT: [&str; 9] = [
     "bar",
     "n",
     "errors",
@@ -2184,6 +2184,7 @@ const CITED_RESULT: [&str; 8] = [
     "coverage",
     "test",
     "claim",
+    "axes",
 ];
 
 /// The members a citation may hold.
@@ -2390,6 +2391,46 @@ pub fn graded(result: &Value) -> Result<Value, Error> {
                     )
                 })?;
             out["coverage"] = json!(c);
+        }
+    }
+    // record 58 P4 (Wave 7b A8): what the run measured axis by axis, each
+    // {n, errors} with its bound worked out at the same confidence, which
+    // the funnel's error-budget line reads; no bar is held per axis
+    match doc.get("axes") {
+        None | Some(Value::Null) => {}
+        Some(Value::Object(axes)) => {
+            let mut out_axes = serde_json::Map::new();
+            for (axis, a) in axes {
+                let count = |k: &str| a.get(k).and_then(Value::as_i64);
+                let (Some(an), Some(ae)) = (count("n"), count("errors")) else {
+                    return Err(Error::Invalid(format!(
+                        "result.axes.{axis}: what the run measured on the axis, {{n, errors}}"
+                    )));
+                };
+                if an <= 0 || !(0..=an).contains(&ae) {
+                    return Err(Error::Invalid(format!(
+                        "result.axes.{axis}: n is how many stacks the axis was graded on, and errors from 0 to n"
+                    )));
+                }
+                let b = crate::audit_draw::clopper_pearson_upper(ae as u64, an as u64, confidence);
+                if let Some(stated) = a.get("bound").filter(|b| !b.is_null()) {
+                    let stated = stated.as_f64().ok_or_else(|| {
+                        Error::Invalid(format!("result.axes.{axis}.bound: a share"))
+                    })?;
+                    if (stated - b).abs() > BOUND_TOLERANCE {
+                        return Err(Error::Invalid(format!(
+                            "result.axes.{axis}.bound is {stated}, and {ae} wrong of {an} gives {b:.10} by the {BOUND_METHOD} bound at {confidence}; the bound is worked out from the counts"
+                        )));
+                    }
+                }
+                out_axes.insert(axis.clone(), json!({"n": an, "errors": ae, "bound": b}));
+            }
+            out["axes"] = Value::Object(out_axes);
+        }
+        Some(_) => {
+            return Err(Error::Invalid(
+                "result.axes: per axis, {n, errors}, as the run measured it".into(),
+            ));
         }
     }
     for (k, most) in [("test", 64usize), ("claim", 500)] {
