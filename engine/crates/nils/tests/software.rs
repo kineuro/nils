@@ -2031,3 +2031,85 @@ fn a_plain_file_is_fetched_by_its_sha256_and_stands_for_the_secret() {
     let fixed = lab.json(&["software", "verify", "tpl-tool@1.0", "--json"], &[]);
     assert_eq!(fixed["verified"], true, "{fixed}");
 }
+
+/// The G11 proof: `nils software install <app>@<version>` without `--pack`
+/// recorded no pack, ran no probe and kept a fingerprint the pack's verify
+/// later refused. Now the install takes the pack the catalog's current
+/// pipeline of the tool carries, the one `--pack` would name, and is the
+/// install made with it: the probe and the test run pass, the commands,
+/// the fingerprint and the pack's licence are the same, the pack's digest
+/// (the catalog's) is recorded, and a verify with the pack passes.
+#[test]
+fn an_install_without_pack_takes_the_catalog_pipeline_s_pack() {
+    let text = descriptor("echo-tool", "2.0", IMAGE_ECHO, "gpu: none", "");
+    let digest = nils_pipeline::descriptor::parse(&text).unwrap().digest();
+    let pack = PACK_ECHO.replace("sha256:00", &digest);
+    let installed = |name: &str, with_pack: bool| -> (Lab, Value, Value) {
+        let lab = Lab::new(name);
+        let dir = lab.bin.path().join("pair");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("nils.job.yml"), &text).unwrap();
+        std::fs::write(dir.join("nils-pack.yaml"), &pack).unwrap();
+        let added = lab.json(&["pipeline", "add", dir.to_str().unwrap(), "--json"], &[]);
+        assert_eq!(added["name"], "echo-tool", "{added}");
+        let file = lab.pack_file("echo", &pack);
+        let mut args = vec!["software", "install", "echo-tool@2.0", "--json"];
+        if with_pack {
+            args.extend(["--pack", file.to_str().unwrap()]);
+        }
+        let done = lab.json(&args, &[]);
+        let manifest: Value = serde_json::from_str(
+            &std::fs::read_to_string(lab.place().join("echo-tool/2.0/manifest.json")).unwrap(),
+        )
+        .unwrap();
+        (lab, done, manifest)
+    };
+    let (_with, given, given_m) = installed("software-pack-given", true);
+    let (lab, taken, taken_m) = installed("software-pack-taken", false);
+    for (done, m) in [(&given, &given_m), (&taken, &taken_m)] {
+        assert_eq!(done["installed"], true, "{done}");
+        assert_eq!(done["verified"], true, "{done}");
+        let v = &done["package"]["verification"];
+        assert_eq!(v["probe"]["passed"], true, "the probe ran: {v}");
+        assert_eq!(v["test"]["passed"], true, "the test run ran: {v}");
+        assert!(m["pack_sha256"].is_string(), "{m}");
+    }
+    for key in [
+        "fingerprint",
+        "commands",
+        "licence",
+        "files",
+        "image",
+        "digest",
+    ] {
+        assert_eq!(given_m[key], taken_m[key], "{key}");
+    }
+    // the digest recorded is the catalog's pack digest
+    let listed = lab.json(&["pipeline", "list", "--json"], &[]);
+    let row = listed["pipelines"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["name"] == "echo-tool")
+        .unwrap_or_else(|| panic!("{listed}"));
+    let catalog_digest = if row["pack_digest"].is_string() {
+        row["pack_digest"].clone()
+    } else {
+        lab.json(&["pipeline", "show", "echo-tool", "--json"], &[])["pack_digest"].clone()
+    };
+    assert_eq!(taken_m["pack_sha256"], catalog_digest, "{taken_m}");
+    // the pack's own verify passes on the install made without it
+    let file = lab.pack_file("echo-again", &pack);
+    let verified = lab.json(
+        &[
+            "software",
+            "verify",
+            "echo-tool@2.0",
+            "--pack",
+            file.to_str().unwrap(),
+            "--json",
+        ],
+        &[],
+    );
+    assert_eq!(verified["verified"], true, "{verified}");
+}
