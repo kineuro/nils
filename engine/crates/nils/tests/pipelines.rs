@@ -7068,6 +7068,9 @@ fn the_starter_catalog_is_seeded_at_the_engine_s_start() {
             "freesurfer-recon-all",
             "mriqc",
             "n4-bias-correction",
+            "registration-ants",
+            "registration-robust",
+            "registration-synthmorph",
             "samseg-lesions",
             "segcsvd",
             "synthseg",
@@ -7083,7 +7086,7 @@ fn the_starter_catalog_is_seeded_at_the_engine_s_start() {
     // a second start adds nothing
     let server = Server::start(&lab);
     let (_, again) = server.call("GET", "/api/pipelines", None, OPERATOR);
-    assert_eq!(again["pipelines"].as_array().unwrap().len(), 7, "{again}");
+    assert_eq!(again["pipelines"].as_array().unwrap().len(), 10, "{again}");
     drop(server);
     let listed = lab.json(&["pipeline", "starter", "--json"]);
     for s in listed["starters"].as_array().unwrap() {

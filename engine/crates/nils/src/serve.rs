@@ -616,6 +616,11 @@ static TURN_CAP: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::ne
 type Turns = std::sync::Mutex<HashMap<String, (u32, Instant)>>;
 static TURNS: std::sync::OnceLock<Turns> = std::sync::OnceLock::new();
 
+/// Counted calls since the last sweep of `TURNS`; the sweep runs every
+/// `TURN_SWEEP_EVERY` calls, not on each.
+static TURN_INSERTS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+const TURN_SWEEP_EVERY: u32 = 256;
+
 /// Wave 7b §18: a call of an assistant's turn past the turn cap, refused
 /// with 429 and words a model reads as "answer now". A turn is what the
 /// actor names (`turn`, with its `conversation`); a call that names none
@@ -636,7 +641,12 @@ fn turn_refused(caller: &Caller) -> Option<Reply> {
     let turns = TURNS.get_or_init(|| std::sync::Mutex::new(HashMap::new()));
     let mut turns = turns.lock().ok()?;
     let now = Instant::now();
-    turns.retain(|_, (_, at)| now.duration_since(*at) < Duration::from_secs(3600));
+    if TURN_INSERTS
+        .fetch_add(1, Ordering::Relaxed)
+        .is_multiple_of(TURN_SWEEP_EVERY)
+    {
+        turns.retain(|_, (_, at)| now.duration_since(*at) < Duration::from_secs(3600));
+    }
     let entry = turns.entry(key).or_insert((0, now));
     entry.0 = entry.0.saturating_add(1);
     entry.1 = now;
@@ -737,9 +747,6 @@ fn narrow(mut caller: Caller, request: &Request) -> Result<Caller, Reply> {
         }
         caller.actor = value;
     }
-    if let Some(refused) = turn_refused(&caller) {
-        return Err(refused);
-    }
     if let Some(ceiling) = header("X-Nils-Ceiling") {
         let Some(step) = Step::parse(&ceiling) else {
             return Err(Reply::error(
@@ -761,6 +768,10 @@ fn narrow(mut caller: Caller, request: &Request) -> Result<Caller, Reply> {
             ));
         }
         caller.idempotency_key = Some(key);
+    }
+    // Counted last, so a call the checks above refuse is not a call of the turn.
+    if let Some(refused) = turn_refused(&caller) {
+        return Err(refused);
     }
     Ok(caller)
 }

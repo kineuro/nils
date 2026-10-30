@@ -326,8 +326,7 @@ pub(crate) fn for_run(registry: &mut Registry, p: &Pipeline) -> Result<Option<Us
 /// here) is the same tool, `same_as_pinned: true`, and the key keeps the
 /// pinned digest; one that differs, or that cannot be compared, has its
 /// own key, its fingerprint. An installed copy is the pinned image.
-pub(crate) fn key_part(registry: &mut Registry, p: &Pipeline) -> Value {
-    let used = for_run(registry, p).ok().flatten();
+pub(crate) fn key_part(registry: &mut Registry, p: &Pipeline, used: Option<&Used>) -> Value {
     let Some(u) = used else {
         return json!({
             "tool": p.name, "version": p.tool_version, "digest": p.image_digest,
@@ -527,17 +526,18 @@ fn licence_file(l: &Layout, app: &str, licence: Option<&Licence>) -> Option<Path
 /// `nils pipeline secret set` (record 49 R3): the licence file under
 /// `licences/<app>/` of the install the run uses, or of the pipeline's own
 /// name, when the secret's variable is the one the pack names or the
-/// pipeline reads one secret alone.
+/// pipeline reads one secret alone. `used` is the install the run uses, which
+/// the caller reads once.
 pub(crate) fn licence_file_for(
     registry: &mut Registry,
+    used: Option<&Used>,
     p: &Pipeline,
     d: &Descriptor,
     s: &descriptor::Secret,
 ) -> Option<PathBuf> {
     let place = place(registry).ok()?;
     let l = place.layout();
-    let used = for_run(registry, p).ok().flatten();
-    let (app, licence) = match &used {
+    let (app, licence) = match used {
         Some(u) => (
             u.manifest.app.clone(),
             u.pack.as_ref().and_then(|k| k.licence.clone()),
@@ -622,7 +622,7 @@ pub(crate) fn licence_check(
     let mut unset: Vec<&descriptor::Secret> = Vec::new();
     for s in d.secrets.iter().filter(|s| !s.optional) {
         if crate::pipelines::secret_path(registry, &s.id).is_none()
-            && licence_file_for(registry, p, d, s).is_none()
+            && licence_file_for(registry, used.as_ref(), p, d, s).is_none()
         {
             unset.push(s);
         }

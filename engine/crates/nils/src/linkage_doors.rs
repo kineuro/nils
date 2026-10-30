@@ -493,7 +493,7 @@ static WRITTEN: AtomicUsize = AtomicUsize::new(0);
 
 /// The header a job's map file gives the column at `i` (from 0): its place.
 fn place_header(i: usize) -> String {
-    format!("column {}", i + 1)
+    nils_registry::import::column_place(i)
 }
 
 /// The map as a CSV the job reads and removes: under the registry home,
