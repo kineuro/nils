@@ -1166,3 +1166,109 @@ fn a_registered_card_gains_its_missing_claims_at_the_door_and_the_keyboard() {
         .collect();
     assert_eq!(who, ["ada@lab", "cleo@lab"]);
 }
+
+/// A model from elsewhere (2026-10-30) at the keyboard: a card whose label
+/// set this registry never wrote registers as a foreign claim, the
+/// registration and `nils model show` say the set is held at the training
+/// site and was not checked here, and `nils model keep` keeps its file.
+#[test]
+fn a_model_from_elsewhere_registers_shows_and_is_kept_at_the_keyboard() {
+    let home = TempDir::new("foreign-home");
+    let mut key = nils()
+        .arg("--registry")
+        .arg(home.path())
+        .args(["key", "add", "k"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    key.stdin
+        .take()
+        .unwrap()
+        .write_all(b"a foreign claim test key\n")
+        .unwrap();
+    assert!(key.wait().unwrap().success());
+    ok(&home, &["init", "--key", "k"]);
+    let work = TempDir::new("foreign-work");
+    ok(
+        &home,
+        &[
+            "place",
+            "add",
+            "work",
+            work.path().to_str().unwrap(),
+            "--role",
+            "working",
+        ],
+    );
+    let files = TempDir::new("foreign-files");
+    let bytes = b"weights fitted at another site";
+    let artifact = files.file("enc.bin", bytes);
+    let foreign = digest('f');
+    let card = files.file(
+        "enc.card.json",
+        json!({"name": "enc", "version": "r1", "kind": "encoder", "task": "features:image",
+               "trained_on": {"label_set": foreign, "name": "theirs", "rows": 12}})
+        .to_string()
+        .as_bytes(),
+    );
+    let out = ok(
+        &home,
+        &[
+            "model",
+            "register",
+            "--card",
+            card.to_str().unwrap(),
+            "--artifact",
+            artifact.to_str().unwrap(),
+        ],
+    );
+    assert!(out.starts_with("registered model "), "{out}");
+    assert!(
+        out.contains(&format!(
+            "trained on  a label set held at the training site (digest {foreign})"
+        )),
+        "{out}"
+    );
+    assert!(
+        out.contains("not checked against the samples sealed here"),
+        "{out}"
+    );
+
+    let shown = ok(&home, &["model", "show", "enc@r1"]);
+    assert!(
+        shown.contains(&format!(
+            "  trained on  a label set held at the training site (digest {foreign})"
+        )),
+        "{shown}"
+    );
+    let doc: Value =
+        serde_json::from_str(&ok(&home, &["model", "show", "enc@r1", "--json"])).unwrap();
+    assert_eq!(doc["trained_on"], foreign.as_str(), "{doc}");
+    assert_eq!(doc["trained_on_held"], "training_site", "{doc}");
+    assert_eq!(
+        doc["card"]["trained_on"]["label_set"],
+        foreign.as_str(),
+        "{doc}"
+    );
+
+    let kept = ok(
+        &home,
+        &[
+            "model",
+            "keep",
+            "enc@r1",
+            "--artifact",
+            artifact.to_str().unwrap(),
+        ],
+    );
+    assert!(!kept.trim().is_empty(), "{kept}");
+    let copy = work.path().join("derivatives/models/enc-r1/enc.bin");
+    assert_eq!(std::fs::read(&copy).unwrap(), bytes, "{kept}");
+    assert_eq!(
+        format!("sha256:{}", sha256(bytes)),
+        doc["digest"].as_str().unwrap(),
+        "{doc}"
+    );
+}

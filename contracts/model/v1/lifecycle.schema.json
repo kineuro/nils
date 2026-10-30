@@ -151,6 +151,11 @@
     "encoder_model_ids": { "type": "array", "items": { "type": "integer" }, "description": "Record 43: every encoder a head reads, in order" },
     "threshold": { "type": ["number", "null"], "description": "Record 43: the card's threshold, at or above which the model's proposals are staged" },
     "trained_on": { "type": ["string", "null"] },
+    "trained_on_held": {
+      "type": ["string", "null"],
+      "enum": ["here", "training_site", null],
+      "description": "Added 2026-10-30: where the label set trained_on names is held. here: in this registry, checked against the samples sealed here; training_site: a foreign claim, a set this registry does not hold, kept as the card wrote it and never checked against its rows; null where the card names none"
+    },
     "check": {
       "oneOf": [{ "$ref": "#/$defs/check" }, { "type": "null" }],
       "description": "The check that admitted it, or the last one that failed while it was registered"

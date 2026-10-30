@@ -102,6 +102,10 @@ pub struct Model {
     pub encoder_model_ids: Vec<i64>,
     /// The digest of the label set it was fitted on.
     pub trained_on: Option<String>,
+    /// Whether that label set is held at the training site, not in this
+    /// registry (a foreign claim, 2026-10-30): the digest is as the card
+    /// wrote it, and nothing here was checked against the set itself.
+    pub trained_on_foreign: bool,
     pub pack_version: Option<String>,
     /// The check that admitted it, or the last that failed while it was
     /// registered.
@@ -132,6 +136,31 @@ impl Model {
     /// Whether its answers may be written: admitted or promoted.
     pub fn answers(&self) -> bool {
         matches!(self.state.as_str(), "admitted" | "promoted")
+    }
+
+    /// Where the label set it was trained on is held: `here`, in this
+    /// registry, or `training_site`, a foreign claim; none when its card
+    /// names no set.
+    pub fn trained_on_held(&self) -> Option<&'static str> {
+        self.trained_on.as_ref().map(|_| {
+            if self.trained_on_foreign {
+                "training_site"
+            } else {
+                "here"
+            }
+        })
+    }
+
+    /// The label set it was trained on, in a line: the digest of a set
+    /// this registry holds, or the foreign claim's words.
+    pub fn trained_on_words(&self) -> Option<String> {
+        self.trained_on.as_ref().map(|t| {
+            if self.trained_on_foreign {
+                format!("a label set held at the training site (digest {t})")
+            } else {
+                t.clone()
+            }
+        })
     }
 
     /// The probability at or above which its proposals are staged (record
@@ -166,6 +195,7 @@ impl Model {
             "encoder_model_ids": self.encoder_model_ids,
             "threshold": self.threshold(),
             "trained_on": self.trained_on,
+            "trained_on_held": self.trained_on_held(),
             "pack_version": self.pack_version,
             "check": self.check,
             "registered_by": self.registered_by,
@@ -304,7 +334,7 @@ fn select_sql(store: &Store, filter: &str) -> String {
     format!(
         "SELECT id, name, version, kind, digest, task, slot, state, {}, encoder_model_id, \
          trained_on, pack_version, {}, registered_by, {}, admitted_by, {}, promoted_by, {}, \
-         retired_by, {}, review_item FROM {}{filter} ORDER BY id",
+         retired_by, {}, review_item, trained_on_foreign FROM {}{filter} ORDER BY id",
         text("card"),
         text("gate"),
         text("registered_at"),
@@ -343,6 +373,7 @@ fn of(r: &Row) -> Result<Model, StoreError> {
         retired_by: text(19)?,
         retired_at: text(20)?,
         review_item: r.opt_int(21)?,
+        trained_on_foreign: r.opt_int(22)?.is_some_and(|v| v != 0),
     })
 }
 
@@ -650,16 +681,24 @@ fn checked_trained_on(card: &Value) -> Result<(), Error> {
 /// certification sample, since a model fitted on the sample that certifies
 /// it certifies nothing.
 fn trained_on_usable(store: &mut Store, digest: &str) -> Result<(), Error> {
-    let sets = crate::labels::by_digest(store, digest).map_err(labels_err)?;
-    if sets.is_empty() {
-        return Err(Error::Unknown(format!(
-            "no label set has the digest {digest}; a model is trained on a set this registry wrote (nils labels export)"
-        )));
+    if trained_on_held_here(store, digest)? {
+        return Ok(());
     }
+    Err(Error::Unknown(format!(
+        "no label set has the digest {digest}; a model is trained on a set this registry wrote (nils labels export)"
+    )))
+}
+
+/// Whether this registry holds a label set of the digest, each one usable
+/// for training under the seals in force (records 40 R3 and 42 S7); false
+/// where it holds none, which registration takes as a foreign claim
+/// (2026-10-30): the set is held at the training site.
+fn trained_on_held_here(store: &mut Store, digest: &str) -> Result<bool, Error> {
+    let sets = crate::labels::by_digest(store, digest).map_err(labels_err)?;
     for set in &sets {
         crate::labels::usable_for_training(store, set.id).map_err(labels_err)?;
     }
-    Ok(())
+    Ok(!sets.is_empty())
 }
 
 /// Record 55 D4 and A5: the card's tested claims, speed, GPU need and
@@ -791,7 +830,11 @@ fn labels_err(e: crate::labels::Error) -> Error {
 
 /// Register a model from its card. Refused when the digest is registered
 /// already, or the name and version are taken, or a head names no
-/// registered encoder.
+/// registered encoder, or the label set it names is one this registry
+/// holds and a row of it is of a sample sealed now. A label set this
+/// registry does not hold is a foreign claim (2026-10-30): the model is
+/// registered with the digest as written and the set marked as held at the
+/// training site.
 pub fn register(registry: &mut Registry, card: &Value, who: &str) -> Result<Model, Error> {
     let slot = checked_slot(registry.store(), card)?;
     let (name, version, kind, digest, task) = (
@@ -824,9 +867,14 @@ pub fn register(registry: &mut Registry, card: &Value, who: &str) -> Result<Mode
     // record 55 E2: a cascade's parts are registered models, none retired
     parts_of(store, card)?;
     let trained_on = card["trained_on"]["label_set"].as_str().map(str::to_string);
-    if let Some(digest) = &trained_on {
-        trained_on_usable(store, digest)?;
-    }
+    // A set this registry holds is checked against the seals in force as
+    // before; one it does not hold is a foreign claim (2026-10-30), kept as
+    // the card wrote it and marked as held at the training site, since a
+    // model from elsewhere is trained on a set this registry never wrote.
+    let foreign = match &trained_on {
+        Some(digest) => !trained_on_held_here(store, digest)?,
+        None => false,
+    };
     let pack_version = card["pack_version"].as_str().map(str::to_string);
     let now = now_iso();
     let mut stored = card.clone();
@@ -850,6 +898,7 @@ pub fn register(registry: &mut Registry, card: &Value, who: &str) -> Result<Mode
                         "pack_version",
                         "registered_by",
                         "registered_at",
+                        "trained_on_foreign",
                     ],
                 )
                 .returning(&["id"]),
@@ -867,6 +916,11 @@ pub fn register(registry: &mut Registry, card: &Value, who: &str) -> Result<Mode
                     pack_version.as_deref().map_or(Param::Null, Param::from),
                     Param::from(who),
                     Param::from(now.as_str()),
+                    if foreign {
+                        Param::Bool(true)
+                    } else {
+                        Param::Null
+                    },
                 ]],
             )?
             .first()
@@ -897,6 +951,7 @@ pub fn register(registry: &mut Registry, card: &Value, who: &str) -> Result<Mode
         json!({
             "kind": m.kind, "encoder_model_id": m.encoder_model_id,
             "encoder_model_ids": m.encoder_model_ids, "trained_on": m.trained_on,
+            "trained_on_held": m.trained_on_held(),
         }),
     )?;
     Ok(m)

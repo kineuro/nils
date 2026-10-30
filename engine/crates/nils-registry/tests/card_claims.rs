@@ -478,3 +478,134 @@ fn a_registered_card_gains_its_missing_claims_and_nothing_else_on_both_backends(
         assert_eq!(audited(&mut reg).len(), 4, "{name}");
     }
 }
+
+/// A model from elsewhere (2026-10-30): a card whose label set this
+/// registry does not hold registers as a foreign claim, the digest kept as
+/// the card wrote it and the set marked as held at the training site; it
+/// is admitted as a model on a set held here is; a card on a set held here
+/// is checked against the seals as before; a part named by another card is
+/// still registered first.
+#[test]
+fn a_card_trained_on_a_set_held_elsewhere_registers_as_a_foreign_claim_on_both_backends() {
+    for (name, _guard, dir, mut reg) in registries() {
+        let held_stack = stack(&mut reg, 1, "1.2.840.8.1");
+        let local = outside_set(&mut reg, &dir, "local", "1.2.840.8.1");
+        let foreign = digest('f');
+
+        // a head naming an encoder not registered yet is refused, saying which
+        let early = model::register(
+            &mut reg,
+            &json!({"name": "head", "version": "1", "kind": "head", "digest": digest('1'),
+                    "task": "axis:body_part", "encoder": {"digest": digest('e')},
+                    "trained_on": {"label_set": foreign}}),
+            WHO,
+        )
+        .unwrap_err();
+        assert!(early.to_string().contains(&digest('e')), "{name}: {early}");
+
+        let enc = model::register(
+            &mut reg,
+            &json!({"name": "enc", "version": "1", "kind": "encoder", "digest": digest('e'),
+                    "task": "features:image",
+                    "trained_on": {"label_set": foreign, "name": "theirs", "rows": 9}}),
+            WHO,
+        )
+        .unwrap();
+        assert_eq!(enc.trained_on.as_deref(), Some(foreign.as_str()), "{name}");
+        assert!(enc.trained_on_foreign, "{name}");
+        assert_eq!(enc.trained_on_held(), Some("training_site"), "{name}");
+        assert_eq!(
+            enc.trained_on_words().unwrap(),
+            format!("a label set held at the training site (digest {foreign})"),
+            "{name}"
+        );
+        assert_eq!(enc.to_json()["trained_on_held"], "training_site", "{name}");
+        assert_eq!(
+            enc.card["trained_on"]["label_set"], foreign,
+            "{name}: the card is kept as written"
+        );
+        let read = model::get(reg.store(), enc.id).unwrap().unwrap();
+        assert!(read.trained_on_foreign, "{name}");
+        assert!(!read.missing().contains(&"trained_on"), "{name}");
+
+        // the head on the same foreign set, once its encoder is registered
+        let head = model::register(
+            &mut reg,
+            &json!({"name": "head", "version": "1", "kind": "head", "digest": digest('1'),
+                    "task": "axis:body_part", "encoder": {"digest": digest('e')},
+                    "trained_on": {"label_set": foreign}}),
+            WHO,
+        )
+        .unwrap();
+        assert!(head.trained_on_foreign, "{name}");
+        let check = json!({"suite": "heldout", "passed": true,
+                           "checks": [{"name": "ece", "passed": true, "value": 0.02, "threshold": 0.05}]});
+        let admitted = model::admit(&mut reg, head.id, &check, WHO).unwrap();
+        assert_eq!(admitted.state, "admitted", "{name}");
+        assert!(admitted.trained_on_foreign, "{name}");
+
+        // a set held here keeps today's path: held, and checked against the seals
+        let here = model::register(
+            &mut reg,
+            &json!({"name": "enc", "version": "2", "kind": "encoder", "digest": digest('2'),
+                    "task": "features:image", "trained_on": {"label_set": local}}),
+            WHO,
+        )
+        .unwrap();
+        assert!(!here.trained_on_foreign, "{name}");
+        assert_eq!(here.trained_on_held(), Some("here"), "{name}");
+        assert_eq!(here.trained_on_words().unwrap(), local, "{name}");
+        assert_eq!(here.to_json()["trained_on_held"], "here", "{name}");
+        labels::seal(&mut reg, "cert-f", None, &[held_stack], WHO).unwrap();
+        let sealed = model::register(
+            &mut reg,
+            &json!({"name": "enc", "version": "3", "kind": "encoder", "digest": digest('3'),
+                    "task": "features:image", "trained_on": {"label_set": local}}),
+            WHO,
+        );
+        assert!(
+            matches!(&sealed, Err(Error::Refused(m)) if m.contains("sealed")),
+            "{name}: {sealed:?}"
+        );
+
+        // no set named: held is none
+        let none = model::register(
+            &mut reg,
+            &json!({"name": "enc", "version": "4", "kind": "encoder", "digest": digest('4'),
+                    "task": "features:image"}),
+            WHO,
+        )
+        .unwrap();
+        assert_eq!(none.trained_on_held(), None, "{name}");
+        assert!(none.to_json()["trained_on_held"].is_null(), "{name}");
+
+        // the audit row of the registration says where the set is held
+        let sql = format!(
+            "SELECT {} FROM {} WHERE action = 'model.register' ORDER BY id",
+            reg.store()
+                .dialect()
+                .text_of(table("audit").column("details").unwrap()),
+            reg.store().qualified("audit")
+        );
+        let held: Vec<Value> = reg
+            .store()
+            .query(&sql, &[])
+            .unwrap()
+            .iter()
+            .map(|r| {
+                serde_json::from_str::<Value>(r.text(0).unwrap()).unwrap()["trained_on_held"]
+                    .clone()
+            })
+            .collect();
+        assert_eq!(
+            held,
+            [
+                json!("training_site"),
+                json!("training_site"),
+                json!("here"),
+                Value::Null
+            ],
+            "{name}"
+        );
+    }
+}
