@@ -5507,6 +5507,19 @@ fn secrets_for(registry: &mut Registry, d: &Descriptor, p: &Pipeline) -> Result<
             crate::software::licence_file_for(registry, used.as_ref(), p, d, s)
                 .map(|f| f.display().to_string())
         });
+        // a plain file the install holds by its sha256 (a template the
+        // pack names) stands where neither is set: checked by its digest
+        // at install and verify, mounted as the secret is, never swept
+        if path.is_none()
+            && let Some(file) = crate::software::install_file_for(registry, used.as_ref(), &s.id)
+        {
+            out.push(Given {
+                secret: s.clone(),
+                path: file,
+                held: None,
+            });
+            continue;
+        }
         match path {
             None if s.optional => {}
             None => {

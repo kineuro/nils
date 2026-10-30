@@ -1911,3 +1911,123 @@ fn a_second_process_waits_for_the_install_s_lock() {
     assert!(status.success());
     assert!(!lab.place().join("echo-tool/2.0").exists());
 }
+
+/// A plain file beside an image (record 57 P5; the registration pilot of
+/// 2026-10-30): a pack's `source.files` names a template by its sha256,
+/// the install fetches it into `files/<id>` and keeps it only when the
+/// digest is the pack's, verify finds it changed, an install that lacks it
+/// fetches it again, and a pipeline reading the secret of that id needs
+/// no site file: the install's file stands for it.
+#[test]
+fn a_plain_file_is_fetched_by_its_sha256_and_stands_for_the_secret() {
+    const IMAGE_TPL: &str = "example.org/tpl-tool@sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
+    let lab = Lab::new("software-files");
+    lab.add_pipeline(&descriptor(
+        "tpl-tool",
+        "1.0",
+        IMAGE_TPL,
+        "gpu: none",
+        "  secrets:\n    - {id: tpl, mount: /opt/templates/t.nii.gz}\n",
+    ));
+    // before: the secret is not set, and nothing stands for it
+    let before = lab.json(&["software", "list", "--json"], &[]);
+    let licence = Lab::need(Lab::package(&before, "tpl-tool@1.0"), "licence");
+    assert_eq!(licence["state"], "missing", "{licence}");
+    assert!(
+        licence["said"]
+            .as_str()
+            .unwrap()
+            .contains("reads the secret tpl"),
+        "{licence}"
+    );
+    let bytes = b"a template of more than a secret's 64 KiB, in a test a few bytes".repeat(2000);
+    assert!(bytes.len() > 64 * 1024);
+    let file = lab.bin.file("site/tpl.nii.gz", &bytes);
+    let pack = |sha: &str| {
+        format!(
+            "nils_pack: 1\npipeline: {{name: tpl-tool, descriptor_sha256: \"sha256:00\"}}\nsource:\n  image: \"{IMAGE_TPL}\"\n  files:\n    - {{id: tpl, url: \"file://{}\", sha256: \"{sha}\"}}\n",
+            file.display()
+        )
+    };
+    let right = sha256(&bytes);
+    // a file whose digest is not the pack's is not kept, nor the install
+    let wrong = lab.pack_file("wrong", &pack(&format!("sha256:{}", "0".repeat(64))));
+    let (good, _, err) = lab.run(
+        &[
+            "software",
+            "install",
+            "tpl-tool@1.0",
+            "--pack",
+            wrong.to_str().unwrap(),
+        ],
+        &[],
+        None,
+    );
+    assert!(!good);
+    assert!(
+        err.contains("the file tpl") && err.contains("not kept"),
+        "{err}"
+    );
+    assert!(!lab.place().join("tpl-tool/1.0/manifest.json").exists());
+    // the right one is fetched, recorded and verified
+    let pack_file = lab.pack_file("right", &pack(&right));
+    let done = lab.json(
+        &[
+            "software",
+            "install",
+            "tpl-tool@1.0",
+            "--pack",
+            pack_file.to_str().unwrap(),
+            "--json",
+        ],
+        &[],
+    );
+    assert_eq!(done["installed"], true, "{done}");
+    assert_eq!(done["verified"], true, "{done}");
+    let kept = lab.place().join("tpl-tool/1.0/files/tpl");
+    assert_eq!(std::fs::read(&kept).unwrap(), bytes);
+    let manifest: Value = serde_json::from_str(
+        &std::fs::read_to_string(lab.place().join("tpl-tool/1.0/manifest.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(manifest["files"][0]["id"], "tpl", "{manifest}");
+    assert_eq!(manifest["files"][0]["sha256"], right, "{manifest}");
+    assert_eq!(
+        manifest["files"][0]["size_bytes"],
+        bytes.len(),
+        "{manifest}"
+    );
+    // the install's file stands for the secret
+    let after = lab.json(&["software", "list", "--json"], &[]);
+    let licence = Lab::need(Lab::package(&after, "tpl-tool@1.0"), "licence");
+    assert_eq!(licence["state"], "ok", "{licence}");
+    // changed on disk, verify says so
+    std::fs::write(&kept, b"another template").unwrap();
+    let changed = lab.json(&["software", "verify", "tpl-tool@1.0", "--json"], &[]);
+    assert_eq!(changed["verified"], false, "{changed}");
+    assert!(
+        changed["verification"]["fingerprint"]["said"]
+            .as_str()
+            .unwrap()
+            .contains("tpl under files/"),
+        "{changed}"
+    );
+    // installed again, the file is fetched again and the install left
+    std::fs::remove_file(&kept).unwrap();
+    let again = lab.json(
+        &[
+            "software",
+            "install",
+            "tpl-tool@1.0",
+            "--pack",
+            pack_file.to_str().unwrap(),
+            "--json",
+        ],
+        &[],
+    );
+    assert_eq!(again["installed"], false, "{again}");
+    assert_eq!(again["fetched"], json!(["tpl"]), "{again}");
+    assert_eq!(std::fs::read(&kept).unwrap(), bytes);
+    let fixed = lab.json(&["software", "verify", "tpl-tool@1.0", "--json"], &[]);
+    assert_eq!(fixed["verified"], true, "{fixed}");
+}

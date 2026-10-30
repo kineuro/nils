@@ -35,8 +35,8 @@ use std::time::Duration;
 use nils_pipeline::descriptor::{self, Descriptor};
 use nils_pipeline::runtime;
 use nils_pipeline::software::{
-    self as layout, Checked, External, How, Kind, Layout, Licence, Manifest, PackSoftware,
-    Verification,
+    self as layout, Checked, External, FileEntry, How, Kind, Layout, Licence, Manifest,
+    PackSoftware, SourceFile, Verification,
 };
 use nils_registry::Registry;
 use nils_registry::pipeline::{self as rows, Pipeline};
@@ -623,6 +623,7 @@ pub(crate) fn licence_check(
     for s in d.secrets.iter().filter(|s| !s.optional) {
         if crate::pipelines::secret_path(registry, &s.id).is_none()
             && licence_file_for(registry, used.as_ref(), p, d, s).is_none()
+            && install_file_for(registry, used.as_ref(), &s.id).is_none()
         {
             unset.push(s);
         }
@@ -873,6 +874,27 @@ fn verify_install(
                 )
             }
         });
+    }
+    // the plain files beside the image, by the sha256 they were kept by
+    let changed: Vec<String> = m
+        .files
+        .iter()
+        .filter(|f| {
+            nils_pipeline::files::sha256_file(&l.file(&m.app, &m.version, &f.id))
+                .map(|(_, hex)| format!("sha256:{hex}") != f.sha256)
+                .unwrap_or(true)
+        })
+        .map(|f| f.id.clone())
+        .collect();
+    if !changed.is_empty() {
+        v.fingerprint = Some(Checked::result(
+            false,
+            format!(
+                "the file(s) {} under files/ are missing or not the sha256 recorded: nils software install {} fetches them again",
+                changed.join(", "),
+                m.spec()
+            ),
+        ));
     }
     // the version probe, in the tool, with no network
     let rt = (pack.is_some_and(|k| k.probe.is_some() || k.test.is_some()))
@@ -1153,6 +1175,7 @@ fn package_doc(
         "verified_at": m.and_then(|m| m.verified_at.clone()),
         "verification": m.map(|m| serde_json::to_value(&m.verification).unwrap_or(Value::Null)),
         "commands": m.map(|m| m.commands.clone()).unwrap_or_default(),
+        "files": m.map(|m| m.files.clone()).unwrap_or_default(),
         "pack_sha256": m.and_then(|m| m.pack_sha256.clone()),
         "licence": licence_doc,
         "pipelines": pipelines.iter().map(|(p, _)| p.label()).collect::<Vec<_>>(),
@@ -1313,6 +1336,136 @@ static ONE_AT_A_TIME: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 /// The pipelines of the catalog whose tool is `app@version` under a pack
 /// (its own, or none).
+/// The plain files an install holds beside its image: the given pack's
+/// `source.files`, else those of the pack a pipeline of the catalog that
+/// uses the install carries.
+fn pack_files(
+    pack: Option<&(Value, PackSoftware, String)>,
+    mine: &[(Pipeline, Descriptor)],
+) -> Vec<SourceFile> {
+    if let Some((_, k, _)) = pack {
+        return k.files.clone();
+    }
+    mine.iter()
+        .filter(|(p, _)| !p.pack.is_null())
+        .filter_map(|(p, _)| layout::pack_software(&p.pack).ok())
+        .map(|k| k.files)
+        .find(|f| !f.is_empty())
+        .unwrap_or_default()
+}
+
+/// How large a plain file beside an image may be, and how long its
+/// download may take.
+const FILE_CAP: u64 = 512 * 1024 * 1024;
+const FILE_TIME_CAP: Duration = Duration::from_secs(600);
+
+/// A plain file's bytes from its address: a copy the site holds
+/// (`file://`) or an https server, within [`FILE_CAP`].
+fn fetch_file(url: &str) -> Result<Vec<u8>, String> {
+    let mut bytes = Vec::new();
+    if let Some(path) = url.strip_prefix("file://") {
+        std::fs::File::open(path)
+            .and_then(|f| f.take(FILE_CAP + 1).read_to_end(&mut bytes))
+            .map_err(|e| format!("{url}: {e}"))?;
+    } else {
+        let agent: ureq::Agent = ureq::Agent::config_builder()
+            .timeout_global(Some(FILE_TIME_CAP))
+            .build()
+            .into();
+        let mut response = agent.get(url).call().map_err(|e| format!("{url}: {e}"))?;
+        response
+            .body_mut()
+            .as_reader()
+            .take(FILE_CAP + 1)
+            .read_to_end(&mut bytes)
+            .map_err(|e| format!("{url}: {e}"))?;
+    }
+    if bytes.len() as u64 > FILE_CAP {
+        return Err(format!("{url} is over {} MiB", FILE_CAP >> 20));
+    }
+    Ok(bytes)
+}
+
+/// Each plain file of the pack in `files/<id>` of the install: one already
+/// there with the pack's sha256 is kept, any other fetched and kept only
+/// when its sha256 is the pack's. Nothing is left where a check failed.
+fn fetch_files(
+    l: &Layout,
+    app: &str,
+    version: &str,
+    files: &[SourceFile],
+) -> Result<Vec<FileEntry>, String> {
+    let mut out = Vec::new();
+    for f in files {
+        let path = l.file(app, version, &f.id);
+        if let Ok((size, hex)) = nils_pipeline::files::sha256_file(&path)
+            && format!("sha256:{hex}") == f.sha256
+        {
+            out.push(FileEntry {
+                id: f.id.clone(),
+                url: f.url.clone(),
+                sha256: f.sha256.clone(),
+                size_bytes: size,
+            });
+            continue;
+        }
+        let bytes =
+            fetch_file(&f.url).map_err(|e| format!("the file {} could not be had: {e}", f.id))?;
+        let got = format!(
+            "sha256:{}",
+            hex::encode(ring::digest::digest(&ring::digest::SHA256, &bytes).as_ref())
+        );
+        if got != f.sha256 {
+            return Err(format!(
+                "the file {} from {} is {got}, and the pack names {}: not kept",
+                f.id, f.url, f.sha256
+            ));
+        }
+        let dir = path
+            .parent()
+            .ok_or_else(|| format!("{} has no folder", path.display()))?;
+        std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+        let part = dir.join(format!(".{}.part-{}", f.id, std::process::id()));
+        std::fs::write(&part, &bytes).map_err(|e| format!("{}: {e}", part.display()))?;
+        std::fs::rename(&part, &path).map_err(|e| {
+            let _ = std::fs::remove_file(&part);
+            format!("{}: {e}", path.display())
+        })?;
+        out.push(FileEntry {
+            id: f.id.clone(),
+            url: f.url.clone(),
+            sha256: f.sha256.clone(),
+            size_bytes: bytes.len() as u64,
+        });
+    }
+    Ok(out)
+}
+
+/// Whether the install's file `id` is gone from `files/`.
+fn install_file_missing(l: &Layout, m: &Manifest, id: &str) -> bool {
+    !l.file(&m.app, &m.version, id).is_file()
+}
+
+/// The plain file `id` the install a run uses holds (`files/<id>`), for a
+/// secret of that id the site set no file for: a template a pack names by
+/// its sha256 is mounted where the descriptor's secret is.
+pub(crate) fn install_file_for(
+    registry: &mut Registry,
+    used: Option<&Used>,
+    id: &str,
+) -> Option<PathBuf> {
+    let u = used?;
+    u.manifest.files.iter().find(|f| f.id == id)?;
+    let place = place(registry).ok()?;
+    let path = place
+        .layout()
+        .file(&u.manifest.app, &u.manifest.version, id);
+    std::fs::symlink_metadata(&path)
+        .ok()
+        .filter(|m| m.is_file())
+        .map(|_| path)
+}
+
 fn pipelines_of(
     catalog: &[(Pipeline, Descriptor)],
     app: &str,
@@ -1403,7 +1556,7 @@ pub(crate) fn install(
             format!("{app}@{version} is not a package name"),
         ));
     }
-    if let Some(m) = Manifest::read(&l.manifest(&app, &version)) {
+    if let Some(mut m) = Manifest::read(&l.manifest(&app, &version)) {
         if m.how == How::Registered {
             return Err(refused(
                 409,
@@ -1416,11 +1569,37 @@ pub(crate) fn install(
         }
         let catalog = catalog(registry).map_err(|e| refused(500, e))?;
         let mine = pipelines_of(&catalog, &app, &version, pack.as_ref());
+        // a plain file the pack names that an earlier install did not
+        // fetch (a template added to the pack later) is fetched now
+        let lacking: Vec<SourceFile> = pack_files(pack.as_ref(), &mine)
+            .into_iter()
+            .filter(|f| {
+                !m.files.iter().any(|h| h.id == f.id && h.sha256 == f.sha256)
+                    || install_file_missing(&l, &m, &f.id)
+            })
+            .collect();
+        let mut fetched = Vec::new();
+        if !lacking.is_empty() {
+            let _lock = lock_install(&l, &app, &version).map_err(|e| refused(500, e))?;
+            let got = fetch_files(&l, &app, &version, &lacking).map_err(|e| refused(502, e))?;
+            for g in got {
+                fetched.push(g.id.clone());
+                m.files.retain(|h| h.id != g.id);
+                m.files.push(g);
+            }
+            m.write(&l.manifest(&app, &version))
+                .map_err(|e| refused(500, format!("the manifest: {e}")))?;
+        }
         let detected = crate::pipelines::detect_cached(registry);
         let checked = needs(registry, home, &mine, &detected);
         return Ok(json!({
             "installed": false,
-            "why": format!("{app}@{version} is installed already ({}); nils software verify {app}@{version} checks it again", m.at),
+            "fetched": fetched,
+            "why": if fetched.is_empty() {
+                format!("{app}@{version} is installed already ({}); nils software verify {app}@{version} checks it again", m.at)
+            } else {
+                format!("{app}@{version} is installed already ({}); fetched the file(s) its pack names: {}", m.at, fetched.join(", "))
+            },
             "package": package_doc(registry, &place, &app, &version, Some(&m), &mine, checked.clone()),
             "needs": checked,
         }));
@@ -1521,6 +1700,7 @@ pub(crate) fn install(
             .and_then(|k| k.1.licence.as_ref())
             .map(Licence::doc)
             .unwrap_or(Value::Null),
+        files: Vec::new(),
     };
     // the pull, by digest
     let log = dir.join("install.log");
@@ -1616,6 +1796,11 @@ pub(crate) fn install(
             m.fingerprint = m.digest.clone();
         }
     }
+    // the plain files the pack names, by their sha256
+    m.files = fetch_files(&l, &app, &version, &pack_files(pack.as_ref(), &mine)).map_err(|e| {
+        discard(&dir);
+        refused(502, e)
+    })?;
     if let Some(text) = &req.pack {
         std::fs::write(l.pack(&app, &version), text)
             .map_err(|e| refused(500, format!("the pack's copy: {e}")))?;
@@ -1745,6 +1930,7 @@ pub(crate) fn adopt_built(
             )),
         },
         licence: Value::Null,
+        files: Vec::new(),
     };
     m.write(&l.manifest(&app, &version))
         .map_err(|e| format!("the manifest: {e}"))?;
@@ -2044,6 +2230,7 @@ pub(crate) fn register(
             .and_then(|k| k.1.licence.as_ref())
             .map(Licence::doc)
             .unwrap_or(Value::Null),
+        files: Vec::new(),
     };
     let _lock = lock_install(&l, &app, &version).map_err(|e| refused(500, e))?;
     if Manifest::read(&l.manifest(&app, &version)).is_some() {

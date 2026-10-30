@@ -34,7 +34,7 @@ printf "{\"moving\": \"%s\", \"method\": \"ants-rigid-mattes\", \"brain_masked\"
 echo "$a: $con onto the T1w, rigid (determinant ${det:-?}, translation ${tl:-?} mm, rotation ${rot:-?} degrees, brain-mask Dice ${dice:-?}${note:+: $note})"; done;
 else
 tpl=/opt/templates/MNI152NLin2009cAsym_T1w.nii.gz;
-if [ ! -f "$tpl" ]; then echo "$a: no template at $tpl: the site file mni_template is not set (nils pipeline secret set mni_template --file <TemplateFlow tpl-MNI152NLin2009cAsym_res-01_T1w.nii.gz>)"; rm -rf "$w"; continue; fi;
+if [ ! -f "$tpl" ]; then echo "$a: no template at $tpl: install this member into the software place (nils software install registration-ants@ants-2.6.2), which fetches TemplateFlow tpl-MNI152NLin2009cAsym_res-01_T1w.nii.gz by its sha256"; rm -rf "$w"; continue; fi;
 N4BiasFieldCorrection -d 3 -i "$f" -o "$w/n4.nii.gz" -s 4 -b "[180]" -c "[50x50x50x50,0.0]" ${xn[@]+"${xn[@]}"} >/dev/null || { rm -rf "$w"; continue; };
 if [ -n "$mask" ]; then ImageMath 3 "$w/brain.nii.gz" m "$w/n4.nii.gz" "$mask"; stripped=1; else cp "$w/n4.nii.gz" "$w/brain.nii.gz"; stripped=0; echo "$a: no brain mask registered for the T1w, so SyN ran on the whole head"; fi;
 lm=""; xl=(); if [ "[LESIONS]" = on ]; then l=$(find "$inputs"/lesion_mask -path "*/$a/*_mask.nii.gz" -o -path "*/$a/*_dseg.nii.gz" 2>/dev/null | sort | head -n 1);

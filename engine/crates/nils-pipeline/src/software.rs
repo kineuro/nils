@@ -9,6 +9,7 @@
 //!   <app>/<version>/image            the SIF or sandbox; on docker or podman the manifest names image@sha256
 //!   <app>/<version>/manifest.json    source and digest, pack hash, size, installed or registered, by whom, when, verified when
 //!   <app>/<version>/bin/<cmd>        one command per tool entry point
+//!   <app>/<version>/files/<id>       a plain file the pack names by its sha256 (a template)
 //!   <app>/bin/<app>-run              the launcher people use today
 //!   bin/                             links for people's PATH
 //!   modules/<app>/<version>.lua      Lmod modules: module use <place>/modules
@@ -44,6 +45,7 @@ pub const LINKS: &str = "bin";
 pub const MODULES: &str = "modules";
 pub const LICENCES: &str = "licences";
 pub const EXTERNALS: &str = "externals.yaml";
+pub const FILES: &str = "files";
 
 /// Where a test run's input is mounted in a container.
 pub const TEST_INPUT: &str = "/input";
@@ -187,6 +189,12 @@ impl Layout {
     /// The copy of the pack an install was made with, where one was given.
     pub fn pack(&self, app: &str, version: &str) -> PathBuf {
         self.install_dir(app, version).join(PACK)
+    }
+
+    /// `<place>/<app>/<version>/files/<id>`: a plain file the pack's
+    /// `source.files` names, fetched by its sha256.
+    pub fn file(&self, app: &str, version: &str, id: &str) -> PathBuf {
+        self.install_dir(app, version).join(FILES).join(id)
     }
 
     /// `<place>/<app>/<version>/bin`, one command per entry point.
@@ -359,6 +367,21 @@ pub struct Manifest {
     /// acceptance is needed and the site file's variable. Never its content.
     #[serde(default)]
     pub licence: Value,
+    /// The plain files fetched beside the image (`files/<id>`), each with
+    /// the sha256 it was checked against; none for most tools.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub files: Vec<FileEntry>,
+}
+
+/// A plain file an install holds beside its image: fetched from its
+/// address and kept only when its sha256 is the pack's.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FileEntry {
+    pub id: String,
+    pub url: String,
+    /// `sha256:<hex>`.
+    pub sha256: String,
+    pub size_bytes: u64,
 }
 
 impl Manifest {
@@ -449,6 +472,18 @@ pub struct SiteFile {
     pub name: Option<String>,
 }
 
+/// A plain file the pack's `source.files` names: fetched from `url` into
+/// `files/<id>` of the install, and kept only when its sha256 is this. A
+/// run of a pipeline reading the secret `<id>` that the site has not set
+/// is given this file at the secret's mount.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct SourceFile {
+    pub id: String,
+    pub url: String,
+    /// `sha256:<hex>`.
+    pub sha256: String,
+}
+
 /// The pack's `licence` section.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Licence {
@@ -494,6 +529,8 @@ pub struct PackSoftware {
     pub key_files: Vec<String>,
     pub licence: Option<Licence>,
     pub test: Option<TestRun>,
+    /// Plain files kept beside the image, by their sha256.
+    pub files: Vec<SourceFile>,
 }
 
 fn text_of(v: &Value) -> Option<String> {
@@ -527,6 +564,52 @@ fn list_of(v: &Value) -> Vec<String> {
     }
 }
 
+/// `source.files`: each a mapping of `id`, `url` (https, or file for a
+/// copy the site holds) and `sha256`.
+fn source_files(v: &Value) -> Result<Vec<SourceFile>, String> {
+    let items = match v {
+        Value::Null => return Ok(Vec::new()),
+        Value::Array(a) => a,
+        _ => return Err("source.files is a list of {id, url, sha256}".into()),
+    };
+    let mut out: Vec<SourceFile> = Vec::new();
+    for (i, f) in items.iter().enumerate() {
+        let at = format!("source.files[{i}]");
+        let id = text_of(&f["id"]).unwrap_or_default();
+        if !name_ok(&id) {
+            return Err(format!(
+                "{at}.id is a file name of letters, digits, '.', '-', '_' or '+', not {id:?}"
+            ));
+        }
+        if out.iter().any(|o| o.id == id) {
+            return Err(format!("{at}.id {id} is named twice"));
+        }
+        let url = text_of(&f["url"]).unwrap_or_default();
+        if !(url.starts_with("https://") || url.starts_with("file://")) {
+            return Err(format!(
+                "{at}.url is an https address (or file:// for a copy the site holds), not {url:?}"
+            ));
+        }
+        let hex = text_of(&f["sha256"]).unwrap_or_default();
+        let hex = hex.strip_prefix("sha256:").unwrap_or(&hex).to_string();
+        if hex.len() != 64
+            || !hex
+                .chars()
+                .all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c))
+        {
+            return Err(format!(
+                "{at}.sha256 is the file's sha256 in 64 lowercase hex digits"
+            ));
+        }
+        out.push(SourceFile {
+            id,
+            url,
+            sha256: format!("sha256:{hex}"),
+        });
+    }
+    Ok(out)
+}
+
 /// The software sections of a pack document.
 pub fn pack_software(doc: &Value) -> Result<PackSoftware, String> {
     let mut out = PackSoftware::default();
@@ -558,6 +641,7 @@ pub fn pack_software(doc: &Value) -> Result<PackSoftware, String> {
             });
         }
         out.key_files = list_of(&source["key_files"]);
+        out.files = source_files(&source["files"])?;
     }
     let licence = &doc["licence"];
     if !licence.is_null() {
@@ -1291,6 +1375,7 @@ mod tests {
             verified_at: None,
             verification: Verification::default(),
             licence: Value::Null,
+            files: Vec::new(),
         }
     }
 
@@ -1693,6 +1778,35 @@ tests:
         let t = s.test.unwrap();
         assert_eq!(t.command[0], "mri_synthseg");
         assert_eq!(t.expect, "SynthSeg");
+        // a plain file beside the image, by its sha256
+        let (_, f, _) = parse_pack(&format!(
+            "source:\n  files:\n    - {{id: mni_template, url: \"https://example.org/t.nii.gz\", sha256: \"{}\"}}\n",
+            "ab".repeat(32)
+        ))
+        .unwrap();
+        assert_eq!(
+            f.files,
+            [SourceFile {
+                id: "mni_template".into(),
+                url: "https://example.org/t.nii.gz".into(),
+                sha256: format!("sha256:{}", "ab".repeat(32)),
+            }]
+        );
+        for (bad, words) in [
+            (
+                "[{id: ../t, url: \"https://x/t\", sha256: \"00\"}]",
+                "file name",
+            ),
+            ("[{id: t, url: \"http://x/t\", sha256: \"00\"}]", "https"),
+            (
+                "[{id: t, url: \"https://x/t\", sha256: \"00\"}]",
+                "64 lowercase hex",
+            ),
+            ("{id: t}", "a list"),
+        ] {
+            let e = parse_pack(&format!("source:\n  files: {bad}\n")).unwrap_err();
+            assert!(e.contains(words), "{bad}: {e}");
+        }
         // a pack with none of the sections reads as nothing
         let (_, none, _) = parse_pack("nils_pack: 1\n").unwrap();
         assert_eq!(none, PackSoftware::default());

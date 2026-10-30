@@ -133,7 +133,8 @@
       "properties": {
         "image": {"type": "string", "pattern": "@sha256:[0-9a-f]{64}$", "description": "The image's OCI reference with its registry manifest digest; equal to the descriptor's"},
         "probe": {"type": "object", "properties": {"command": {"type": "string"}, "expect": {"type": "string"}}, "description": "A command and the text it must print, which says the installed tool is this version"},
-        "key_files": {"type": "array", "items": {"type": "string"}, "description": "The files the fingerprint of a registered install reads"}
+        "key_files": {"type": "array", "items": {"type": "string"}, "description": "The files the fingerprint of a registered install reads"},
+        "files": {"type": "array", "items": {"type": "object", "required": ["id", "url", "sha256"], "properties": {"id": {"type": "string", "pattern": "^[A-Za-z0-9_+-][A-Za-z0-9._+-]*$", "description": "The file's name under the install's files/, and the secret it stands for where the site set none"}, "url": {"type": "string", "pattern": "^(https|file)://", "description": "An https address, or file:// for a copy the site holds"}, "sha256": {"type": "string", "pattern": "^(sha256:)?[0-9a-f]{64}$", "description": "The file's sha256; a file with another is not kept"}}}, "description": "Plain files kept beside the image by their sha256 (a template), fetched by nils software install into <app>/<version>/files/<id>; added additively on 2026-10-30"}
       }
     }
   },
