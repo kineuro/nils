@@ -5735,19 +5735,20 @@ fn a_model_is_registered_by_digest_and_named_where_it_answered() {
         &["model", "register", "--card", &head("1", &a, None)],
         "encoder",
     );
-    // a model is trained on a label set this registry wrote, by its digest
+    // a label set is named by its digest; one this registry never wrote is
+    // a foreign claim (2026-10-30), tested in models_parts.rs
     let untrained = write(
         "untrained.json",
         &serde_json::json!({
             "name": "a-pass", "version": "1", "kind": "pass",
             "digest": format!("sha256:{}", "9".repeat(64)), "task": "axis:body_part",
-            "trained_on": {"label_set": format!("sha256:{}", "c".repeat(64))},
+            "trained_on": {"label_set": "sha256:cc"},
         })
         .to_string(),
     );
     refused(
         &["model", "register", "--card", &untrained],
-        "no label set has the digest",
+        "names its label set by digest",
     );
     let first = doc(ok(&[
         "model",

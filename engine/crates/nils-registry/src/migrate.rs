@@ -11,7 +11,7 @@ use crate::schema::{self, ID_TYPES, Table, linkage_tables, registry_tables};
 use crate::store::{Error, Param, Store};
 
 /// The version this binary writes.
-pub const SCHEMA_VERSION: i64 = 112;
+pub const SCHEMA_VERSION: i64 = 113;
 
 /// Which of the two stores a migration runs against.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -502,7 +502,25 @@ pub static MIGRATIONS: &[Migration] = &[
         version: 112,
         apply: a_release_row_says_it_was_stopped,
     },
+    Migration {
+        version: 113,
+        apply: a_model_may_be_trained_on_a_set_held_elsewhere,
+    },
 ];
+
+/// A model from elsewhere registers with its training set as a foreign
+/// claim (2026-10-30): the model row says the label set its `trained_on`
+/// names is held at the training site. Only a column is added and left
+/// empty: a row from before was registered on a set this registry holds.
+fn a_model_may_be_trained_on_a_set_held_elsewhere(
+    store: &mut Store,
+    kind: Kind,
+) -> Result<(), Error> {
+    if kind != Kind::Registry {
+        return Ok(());
+    }
+    add_columns(store, "model", &["trained_on_foreign"])
+}
 
 /// Wave 7b A7 (record 57 P7 and P8, record 58 P5; 2026-10-25): workflows in
 /// the catalog (`workflow`), their runs (`workflow_run`) and each run's

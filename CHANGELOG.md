@@ -11,6 +11,7 @@ All notable changes to NILS v1 are recorded here. The format follows [Keep a Cha
 
 ### Changed
 
+- `nils model register` takes a card made at another site: a training label set this registry does not hold is kept as a foreign claim, and the model says it was trained on a label set held at the training site (digest ...) instead of the registration being refused. A set the registry holds is checked against the sealed samples as before.
 - The software page answers faster. A container image found present is remembered for a minute, so listing the packages no longer inspects every image on each load, and a run's install is read once for its secrets and its comparability key.
 
 ### Fixed
