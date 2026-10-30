@@ -251,6 +251,9 @@ struct StepRun {
     handle: i64,
     pack: String,
     pack_dir: Option<PathBuf>,
+    /// Record 57 P9: the proposal the person accepted, which every step's
+    /// run records.
+    proposed_by: Option<crate::proposed_by::ProposedBy>,
 }
 
 /// [`start`] with the runner named: every step's parameters are checked
@@ -309,7 +312,7 @@ pub(crate) fn start_with(
             job_id,
             handle_id: Some(scope.handle),
             selection: scope.selection.as_deref(),
-            person: &person.doc(),
+            person: &person.record(&who),
             steps: &json!(steps),
             principal: &who,
             actor: Some(&actor),
@@ -363,6 +366,7 @@ pub(crate) fn start_with(
             handle: scope.handle,
             pack: scope.pack.clone(),
             pack_dir: scope.pack_dir.clone(),
+            proposed_by: person.proposed_by.clone(),
         };
         handles.push(std::thread::spawn(move || run_step(&run, runner)));
     }
@@ -721,6 +725,9 @@ fn step_body(p: &StepRun, runner: Runner) -> Result<(), String> {
     for (k, v) in &p.params {
         argv.extend(["--param".to_string(), format!("{k}={v}")]);
     }
+    if let Some(pb) = &p.proposed_by {
+        argv.extend(pb.args());
+    }
     argv.push("--json".into());
     let mut args = StepCli::try_parse_from(&argv)
         .map_err(|e| format!("the step's run arguments: {e}"))?
@@ -911,6 +918,9 @@ pub(crate) fn run_doc(store: &mut Store, r: &rows::Run) -> Value {
         "job": r.job_id, "handle": r.handle_id, "selection": r.selection,
         "person": r.person, "status": r.status, "started_at": r.started_at, "finished_at": r.finished_at,
         "steps": steps, "summary": r.summary, "principal": r.principal, "error": r.error,
+        // record 57 P9: the assistant's proposal the person accepted, null
+        // where the person chose without one
+        "proposed_by": r.person["proposed_by"],
     })
 }
 
@@ -932,6 +942,10 @@ pub(crate) fn run_line(v: &Value) -> String {
 
 pub(crate) fn run_text(v: &Value) -> String {
     let mut out = vec![run_line(v)];
+    // record 57 P9: the plan the person accepted from the assistant
+    if let Some(l) = crate::proposed_by::line(&v["proposed_by"]) {
+        out.push(format!("  plan: {l}"));
+    }
     for s in v["steps"].as_array().into_iter().flatten() {
         let u = &s["units"];
         out.push(format!(
@@ -1004,6 +1018,10 @@ pub(crate) fn run_door(
             command.extend(["--knob".to_string(), format!("{step}.{k}={v}")]);
         }
     }
+    // record 57 P9: the proposal the person accepted
+    if let Some(pb) = &person.proposed_by {
+        command.extend(pb.args());
+    }
     let job = nils_registry::job::enqueue_with(
         registry.store(),
         &command,
@@ -1027,7 +1045,8 @@ pub(crate) fn located(command: Vec<String>) -> Result<Vec<String>, Reply> {
     let mut named = false;
     while let Some(arg) = it.next() {
         match arg.as_str() {
-            "--handle" | "--select" | "--goal" | "--knob" | "--pack" => {
+            "--handle" | "--select" | "--goal" | "--knob" | "--pack" | "--proposed-by"
+            | "--proposal" => {
                 let value = it.next().ok_or_else(|| {
                     Reply::error(400, format!("workflow run {arg} takes a value"))
                 })?;

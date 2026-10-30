@@ -4928,7 +4928,10 @@ x-nils:
 
 /// Record 49 A1: a person's cancel stops the units in flight and closes the
 /// run as cancelled, with the units it finished kept; `nils run --resume`
-/// goes on from there.
+/// goes on from there. A unit whose container ended before the cancel was
+/// heard is one it finished, taken in and kept, never stopped and run
+/// again (E1, 2026-10-30: under load a unit that ended in the turn the
+/// cancel was heard went back to the queue, and the resume ran it twice).
 #[test]
 fn a_cancelled_run_keeps_its_units_and_goes_on() {
     if !have("python3") {
@@ -4941,6 +4944,24 @@ fn a_cancelled_run_keeps_its_units_and_goes_on() {
     lab.add_descriptor("slow", &stack_slow("slow", "{cores: 1, memory-gb: 1}", ""));
     lab.ok(&["pipeline", "lane", "--cores", "1"], None);
     let t = lab.work.path().join("trace");
+    // each unit waits at a gate of its own, and every gate is opened at the
+    // end, so nothing the run started outlives the test
+    let gate = lab.work.path().join("gate");
+    let gate_of = |unit: &str| PathBuf::from(format!("{}-{unit}", gate.display()));
+    let pid_of = |unit: &str| PathBuf::from(format!("{}.pid", gate_of(unit).display()));
+    struct Open(PathBuf);
+    impl Drop for Open {
+        fn drop(&mut self) {
+            let dir = self.0.parent().unwrap();
+            for e in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+                let name = e.file_name().to_string_lossy().to_string();
+                if let Some(g) = name.strip_suffix(".pid").filter(|n| n.starts_with("gate-")) {
+                    let _ = std::fs::write(dir.join(g), "");
+                }
+            }
+        }
+    }
+    let _open = Open(gate.clone());
     let child = lab
         .command(&lab.path)
         .args([
@@ -4949,21 +4970,59 @@ fn a_cancelled_run_keeps_its_units_and_goes_on() {
             "--select",
             "selection:every@1",
             "--param",
-            "sleep=1",
+            "sleep=1.5",
         ])
         .env("LANE_TRACE", &t)
+        .env("SLOW_GATE", &gate)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .spawn()
         .unwrap();
-    let started = std::time::Instant::now();
-    while lab.count("SELECT COUNT(*) FROM pipeline_unit WHERE state = 'over'") < 1 {
-        assert!(started.elapsed().as_secs() < 60);
-        std::thread::sleep(std::time::Duration::from_millis(50));
-    }
+    let begun = |n: usize| -> Vec<String> {
+        let started = std::time::Instant::now();
+        loop {
+            let b: Vec<String> = trace(&t)
+                .into_iter()
+                .filter(|e| e.0 == "start")
+                .map(|e| e.2)
+                .collect();
+            if b.len() >= n && b.iter().take(n).all(|u| pid_of(u).exists()) {
+                return b;
+            }
+            assert!(started.elapsed().as_secs() < 60, "{b:?}");
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+    };
+    // the first unit is let through and ends; the second waits at its gate
+    let first = begun(1)[0].clone();
+    std::fs::write(gate_of(&first), "").unwrap();
+    let second = begun(2)[1].clone();
+    assert_eq!(
+        lab.count("SELECT COUNT(*) FROM pipeline_unit WHERE state = 'over'"),
+        1
+    );
+    // the registry is held while the second unit ends (a SQLite writer's
+    // lock, which the run waits for up to five seconds), so the run's next
+    // beat hears the cancel before it takes in a container that ended
     let job = lab.count("SELECT job_id FROM pipeline_run WHERE id = 1");
-    lab.ok(&["jobs", "cancel", &job.to_string()], None);
+    let mut holder = lab.store();
+    holder.begin().unwrap();
+    // the run's child that holds the second unit: the stand-in podman
+    let container = child_of(child.id(), read_pid(&pid_of(&second)))
+        .expect("the second unit runs under the run");
+    std::fs::write(gate_of(&second), "").unwrap();
+    let started = std::time::Instant::now();
+    // ended: the unit wrote its results and its container is a zombie the
+    // run has not reaped yet (or gone)
+    while trace(&t).iter().filter(|e| e.0 == "end").count() < 2
+        || proc_stat(container).is_some_and(|(state, _)| state != 'Z')
+    {
+        assert!(started.elapsed().as_secs() < 4, "{:?}", trace(&t));
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    nils_registry::job::request_cancel(&mut holder, job).unwrap();
+    holder.commit().unwrap();
     let out = child.wait_with_output().unwrap();
     assert!(!out.status.success());
     let err = String::from_utf8_lossy(&out.stderr);
@@ -4971,8 +5030,9 @@ fn a_cancelled_run_keeps_its_units_and_goes_on() {
     let run: Value =
         serde_json::from_str(&lab.ok(&["pipeline", "runs", "1", "--json"], None)).unwrap();
     assert_eq!(run["status"], "cancelled", "{run}");
-    let over = run["unit_states"]["over"].as_u64().unwrap();
-    assert!((1..4).contains(&over), "{run}");
+    // both units that ended are kept: the one taken in before the cancel
+    // and the one whose container ended before the cancel was heard
+    assert_eq!(run["unit_states"]["over"], 2, "{run}");
     assert!(
         run["unit_states"].get("running").is_none(),
         "none left in flight: {run}"
@@ -4987,6 +5047,40 @@ fn a_cancelled_run_keeps_its_units_and_goes_on() {
     assert_eq!(lab.count("SELECT COUNT(*) FROM derivative"), 4);
     let ends = trace(&t).iter().filter(|e| e.0 == "end").count();
     assert_eq!(ends, 4, "{:?}", trace(&t));
+}
+
+/// The pid a gated unit wrote at its gate.
+fn read_pid(path: &Path) -> u32 {
+    std::fs::read_to_string(path)
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap()
+}
+
+/// A process's state letter and its parent, as `/proc` holds them; none
+/// once it is gone.
+fn proc_stat(pid: u32) -> Option<(char, u32)> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    let (_, rest) = stat.rsplit_once(") ")?;
+    let mut words = rest.split(' ');
+    let state = words.next()?.chars().next()?;
+    let parent = words.next()?.parse().ok()?;
+    Some((state, parent))
+}
+
+/// The child of `parent` that `pid` runs under (or is).
+fn child_of(parent: u32, mut pid: u32) -> Option<u32> {
+    loop {
+        let (_, up) = proc_stat(pid)?;
+        if up == parent {
+            return Some(pid);
+        }
+        if up <= 1 {
+            return None;
+        }
+        pid = up;
+    }
 }
 
 /// 2026-10-17: a handle runs in parts (`--handle H --chunk N`), as the
@@ -15774,4 +15868,335 @@ fn a_later_step_claims_its_run_while_the_step_before_still_runs() {
         .collect();
     assert_eq!(steps_jobs.len(), 2, "{jobs}");
     assert!(steps_jobs.iter().all(|j| j["state"] == "done"), "{jobs}");
+}
+
+/// Record 57 P9 and P2: a run whose plan came from the assistant's
+/// proposal, accepted by a person. The run and every unit record
+/// `{agent, proposal, accepted_by}`, each knob the person gave names the
+/// agent, a resume keeps the proposal, a run without a pack carries it on
+/// the run and its units, the jobs door and the workflow run door take
+/// `proposed_by`, and a run with no proposal is as it was.
+#[test]
+fn p9_a_run_accepted_from_a_proposal_records_it_on_the_run_and_every_unit() {
+    if !have("python3") {
+        eprintln!(
+            "python3 is not installed; the stand-in podman needs it, so this test is skipped"
+        );
+        return;
+    }
+    on_both(
+        "pipelines-proposed-by",
+        "nils_pipelines_proposed_by",
+        |lab| {
+            let image = format!("example.org/pack-echo@sha256:{}", "e".repeat(64));
+            let descriptor = pack_echo(&image);
+            let d = nils_pipeline::descriptor::parse(&descriptor).unwrap();
+            lab.add_pair(
+                "one",
+                &descriptor,
+                &pack_echo_pack(&d.digest(), "dimension == '3D'"),
+            );
+
+            // half a pair is refused before anything is made
+            let (ok, _, err) = lab.run(
+                &[
+                    "run",
+                    "pack-echo",
+                    "--select",
+                    "selection:every@1",
+                    "--proposed-by",
+                    "plan-analysis",
+                ],
+                None,
+            );
+            assert!(!ok, "{err}");
+            assert!(err.contains("--proposal"), "{err}");
+            let (ok, _, err) = lab.run(
+                &[
+                    "run",
+                    "pack-echo",
+                    "--select",
+                    "selection:every@1",
+                    "--proposed-by",
+                    " ",
+                    "--proposal",
+                    "c-7",
+                ],
+                None,
+            );
+            assert!(!ok, "{err}");
+            assert!(err.contains("proposed_by.agent is empty"), "{err}");
+            assert!(
+                nils_registry::pipeline::runs(&mut lab.store(), None, 10)
+                    .unwrap()
+                    .is_empty(),
+                "no run was made"
+            );
+
+            let run = lab.json(&[
+                "run",
+                "pack-echo",
+                "--select",
+                "selection:every@1",
+                "--param",
+                "mode=all",
+                "--proposed-by",
+                "plan-analysis",
+                "--proposal",
+                "c-7",
+                "--json",
+            ]);
+            assert_eq!(run["status"], "done", "{run}");
+            let id = run["id"].as_i64().unwrap();
+            let doc = lab.json(&["pipeline", "runs", &id.to_string(), "--json"]);
+            let accepted = &doc["proposed_by"];
+            assert_eq!(accepted["agent"], "plan-analysis", "{doc}");
+            assert_eq!(accepted["proposal"], "c-7", "{doc}");
+            assert_eq!(accepted["accepted_by"], doc["principal"], "{doc}");
+            assert!(accepted["accepted_by"].is_string(), "{doc}");
+            assert_eq!(doc["person"]["proposed_by"], *accepted, "{doc}");
+            let units = doc["units_run"].as_array().unwrap();
+            assert_eq!(units.len(), 4, "{doc}");
+            for u in units {
+                assert_eq!(u["proposed_by"], *accepted, "{u}");
+                assert_eq!(u["knobs"]["mode"]["proposed"], "plan-analysis", "{u}");
+                assert!(
+                    u["knobs"]["mode"]["by"]
+                        .as_str()
+                        .unwrap()
+                        .starts_with("person:"),
+                    "{u}"
+                );
+                // a knob the rules chose is the rule's, never the assistant's
+                assert!(u["knobs"]["tag"].get("proposed").is_none(), "{u}");
+            }
+            // the unit's own record keeps it, so a replay reads it back
+            let mut store = lab.store();
+            for u in nils_registry::pipeline::units(&mut store, id).unwrap() {
+                assert_eq!(u.pack["proposed_by"], *accepted, "{}", u.pack);
+            }
+            drop(store);
+            let text = lab.ok(&["pipeline", "runs", &id.to_string()], None);
+            assert!(
+                text.contains("proposed by plan-analysis (proposal c-7), accepted by"),
+                "{text}"
+            );
+
+            // taken up again with no flag at all: the proposal stays the run's
+            let mut store = lab.store();
+            let units = nils_registry::pipeline::units(&mut store, id).unwrap();
+            nils_registry::pipeline::unit_requeued(&mut store, units[0].id).unwrap();
+            let sql = format!(
+                "UPDATE {} SET status = 'cancelled', results_digest = NULL, finished_at = NULL WHERE id = {id}",
+                store.qualified("pipeline_run")
+            );
+            store.execute(&sql, &[]).unwrap();
+            drop(store);
+            let resumed = lab.json(&["run", "--resume", &id.to_string(), "--json"]);
+            assert_eq!(resumed["status"], "done", "{resumed}");
+            let mut store = lab.store();
+            for u in nils_registry::pipeline::units(&mut store, id).unwrap() {
+                assert_eq!(u.pack["proposed_by"], *accepted, "{}", u.pack);
+                assert_eq!(u.pack["knobs"]["mode"]["proposed"], "plan-analysis");
+            }
+            drop(store);
+
+            // no proposal: nothing of it anywhere
+            let plain = lab.json(&[
+                "run",
+                "pack-echo",
+                "--select",
+                "selection:every@1",
+                "--param",
+                "mode=silent",
+                "--json",
+            ]);
+            let pid = plain["id"].as_i64().unwrap();
+            let pdoc = lab.json(&["pipeline", "runs", &pid.to_string(), "--json"]);
+            assert_eq!(pdoc["proposed_by"], Value::Null, "{pdoc}");
+            assert!(pdoc["person"].get("proposed_by").is_none(), "{pdoc}");
+            for u in pdoc["units_run"].as_array().unwrap() {
+                assert_eq!(u["proposed_by"], Value::Null, "{u}");
+                assert!(u["knobs"]["mode"].get("proposed").is_none(), "{u}");
+            }
+
+            // a pipeline with no pack: the run records it, and its units show it
+            lab.add_descriptor(
+                "stack-echo",
+                &stack_echo(&format!("example.org/stack-echo@sha256:{}", "a".repeat(64))),
+            );
+            let bare = lab.json(&[
+                "run",
+                "stack-echo",
+                "--select",
+                "selection:every@1",
+                "--proposed-by",
+                "plan-analysis",
+                "--proposal",
+                "c-8",
+                "--json",
+            ]);
+            let bid = bare["id"].as_i64().unwrap();
+            let bdoc = lab.json(&["pipeline", "runs", &bid.to_string(), "--json"]);
+            assert_eq!(bdoc["proposed_by"]["proposal"], "c-8", "{bdoc}");
+            assert!(!bdoc["units_run"].as_array().unwrap().is_empty(), "{bdoc}");
+            for u in bdoc["units_run"].as_array().unwrap() {
+                assert_eq!(u["proposed_by"]["proposal"], "c-8", "{u}");
+            }
+
+            // the jobs door: `proposed_by` beside the command becomes the flags;
+            // refused on a verb that is not a run, and when given twice
+            let served = lab.serve();
+            let pb = json!({"agent": "plan-analysis", "proposal": "c-9"});
+            let (status, queued) = served.call(
+        "POST",
+        "/api/jobs",
+        Some(json!({"command": ["run", "pack-echo", "--select", "selection:every@1"], "proposed_by": pb})),
+        "a-token-that-works",
+    );
+            assert_eq!(status, 202, "{queued}");
+            let command: Vec<&str> = queued["command"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter_map(Value::as_str)
+                .collect();
+            assert!(
+                command
+                    .windows(4)
+                    .any(|w| w == ["--proposed-by", "plan-analysis", "--proposal", "c-9"]),
+                "{queued}"
+            );
+            let (status, refused) = served.call(
+                "POST",
+                "/api/jobs",
+                Some(json!({"command": ["classify"], "proposed_by": pb})),
+                "a-token-that-works",
+            );
+            assert_eq!(status, 400, "{refused}");
+            let (status, refused) = served.call(
+        "POST",
+        "/api/jobs",
+        Some(json!({"command": ["run", "pack-echo", "--select", "selection:every@1", "--proposed-by", "x", "--proposal", "y"], "proposed_by": pb})),
+        "a-token-that-works",
+    );
+            assert_eq!(status, 400, "{refused}");
+            let (status, refused) = served.call(
+        "POST",
+        "/api/jobs",
+        Some(json!({"command": ["run", "pack-echo", "--select", "selection:every@1"], "proposed_by": {"agent": "plan-analysis"}})),
+        "a-token-that-works",
+    );
+            assert_eq!(status, 400, "{refused}");
+            // the flags in the command itself are taken too
+            let (status, queued) = served.call(
+        "POST",
+        "/api/jobs",
+        Some(json!({"command": ["run", "pack-echo", "--select", "selection:every@1", "--proposed-by", "plan-analysis", "--proposal", "c-10"]})),
+        "a-token-that-works",
+    );
+            assert_eq!(status, 202, "{queued}");
+            drop(served);
+        },
+    );
+}
+
+/// Record 57 P9: a workflow run started at its door with `proposed_by`
+/// records the proposal, accepted by the caller, on the workflow run, on
+/// every step's run and on every unit.
+#[test]
+fn p9_a_workflow_run_accepted_from_a_proposal_records_it_on_every_step() {
+    if !have("python3") {
+        eprintln!(
+            "python3 is not installed; the stand-in podman needs it, so this test is skipped"
+        );
+        return;
+    }
+    on_both(
+        "pipelines-workflow-proposed-by",
+        "nils_pipelines_workflow_proposed_by",
+        |lab| {
+            let image_a = format!("example.org/chain-a@sha256:{}", "a".repeat(64));
+            let image_b = format!("example.org/chain-b@sha256:{}", "b".repeat(64));
+            let da = chain_a(&image_a);
+            let db = chain_b(&image_b);
+            let dig = |d: &str| nils_pipeline::descriptor::parse(d).unwrap().digest();
+            lab.add_pair("chain-a", &da, &chain_a_pack(&dig(&da)));
+            lab.add_pair("chain-b", &db, &chain_b_pack(&dig(&db)));
+            let dir = lab.work.path().join("wf-chain");
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("nils.workflow.yml"), CHAIN_WORKFLOW).unwrap();
+            lab.json(&["workflow", "add", dir.to_str().unwrap(), "--json"]);
+
+            let served = lab.serve();
+            let (status, refused) = served.call(
+        "POST",
+        "/api/workflows/chain/run",
+        Some(json!({"select": "selection:every@1", "proposed_by": {"agent": "a", "proposal": ""}})),
+        "a-token-that-works",
+    );
+            assert_eq!(status, 400, "{refused}");
+            let (status, started) = served.call(
+        "POST",
+        "/api/workflows/chain/run",
+        Some(json!({
+            "select": "selection:every@1",
+            "proposed_by": {"agent": "plan-analysis", "proposal": "c-11", "accepted_by": "someone-else"},
+        })),
+        "a-token-that-works",
+    );
+            assert_eq!(status, 202, "{started}");
+            drop(served);
+            let said = lab.work.path().join("worker-stderr");
+            let mut worker = lab
+                .command(&lab.path)
+                .args(["jobs", "work", "--lane", "pipelines", "--once"])
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(std::fs::File::create(&said).unwrap())
+                .spawn()
+                .unwrap();
+            let begun = std::time::Instant::now();
+            let status = loop {
+                if let Some(status) = worker.try_wait().unwrap() {
+                    break status;
+                }
+                if begun.elapsed().as_secs() >= 180 {
+                    let _ = worker.kill();
+                    let _ = worker.wait();
+                    panic!(
+                        "the lane's worker did not end within 180 s: {}",
+                        std::fs::read_to_string(&said).unwrap_or_default()
+                    );
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            };
+            assert!(
+                status.success(),
+                "{}",
+                std::fs::read_to_string(&said).unwrap_or_default()
+            );
+            let runs = lab.json(&["workflow", "runs", "--json"]);
+            let wr = &runs["runs"][0];
+            assert_eq!(wr["status"], "done", "{wr}");
+            let accepted =
+                json!({"agent": "plan-analysis", "proposal": "c-11", "accepted_by": "wrk@lab"});
+            // the caller is the one who accepted, never the body's word
+            assert_eq!(wr["proposed_by"], accepted, "{wr}");
+            assert_eq!(wr["person"]["proposed_by"], accepted, "{wr}");
+            let text = lab.ok(&["workflow", "runs", &wr["id"].to_string()], None);
+            assert!(
+                text.contains("proposed by plan-analysis (proposal c-11), accepted by wrk@lab"),
+                "{text}"
+            );
+            for s in wr["steps"].as_array().unwrap() {
+                let run = s["run"].as_i64().unwrap();
+                let doc = lab.json(&["pipeline", "runs", &run.to_string(), "--json"]);
+                assert_eq!(doc["proposed_by"], accepted, "{doc}");
+                for u in doc["units_run"].as_array().unwrap() {
+                    assert_eq!(u["proposed_by"], accepted, "{u}");
+                }
+            }
+        },
+    );
 }

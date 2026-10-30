@@ -683,6 +683,7 @@ rules:
                 .collect(),
             given: Default::default(),
             proposed: Default::default(),
+            proposed_by: None,
             let_run: false,
         }
     }

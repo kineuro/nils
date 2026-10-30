@@ -384,6 +384,7 @@ fn replay_in(
                         })
                         .collect(),
                     facts: Default::default(),
+                    proposed_by: None,
                 })
                 .collect(),
         };

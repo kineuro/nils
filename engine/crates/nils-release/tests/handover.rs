@@ -116,6 +116,7 @@ fn released(home_dir: &TempDir, source: &TempDir, out: &Path) -> (Home, Registry
         compress: true,
         observations: &[],
         authors: &[],
+        workers: 0,
     };
     let report = run::run(&mut reg, &settings).unwrap();
     assert!(report.files > 0, "the release wrote something to hand over");
@@ -538,6 +539,8 @@ fn a_folder_a_newer_release_stopped_in_or_holds_a_lock_is_not_handed_over() {
         compress: true,
         observations: &[],
         authors: &[],
+        // one stack at a time: the stop is timed against the first stack
+        workers: 1,
     };
     let asked = std::sync::atomic::AtomicBool::new(false);
     let stop = || match asked.load(std::sync::atomic::Ordering::SeqCst) {

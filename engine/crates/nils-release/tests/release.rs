@@ -153,6 +153,7 @@ fn settings<'a>(out: &'a Path, policy: &'a Policy, scheme: &'a SessionScheme) ->
         compress: true,
         observations: &[],
         authors: &[],
+        workers: 0,
     }
 }
 

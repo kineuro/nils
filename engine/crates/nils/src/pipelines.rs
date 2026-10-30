@@ -1266,6 +1266,14 @@ pub(crate) fn run_doc_at(store: &mut Store, r: &Run, quasi: bool) -> Result<Valu
                 // after the third review (finding 9): the optional inputs the
                 // chain fed nothing for, each with why
                 "fed": u.pack["fed"],
+                // record 57 P9: the proposal the person accepted, as the unit
+                // recorded it, else as its run did (a run with no pack
+                // judges no unit)
+                "proposed_by": if u.pack["proposed_by"].is_object() {
+                    u.pack["proposed_by"].clone()
+                } else {
+                    r.person["proposed_by"].clone()
+                },
             }))
             .collect::<Vec<_>>()
     );
@@ -1309,6 +1317,9 @@ pub(crate) fn runs_docs(store: &mut Store, runs: &[Run]) -> Vec<Value> {
         .map(|r| {
             let mut v = serde_json::to_value(r).unwrap_or(Value::Null);
             v["pipeline"] = json!(labels.get(&r.pipeline_id));
+            // record 57 P9: the assistant's proposal the person accepted,
+            // `{agent, proposal, accepted_by}`; null where there was none
+            v["proposed_by"] = r.person["proposed_by"].clone();
             v["derivatives"] = json!(made.get(&r.id).cloned().unwrap_or_default());
             // 2026-10-12: a run that failed before its failure was recorded
             // is read from its error
@@ -2183,7 +2194,8 @@ pub(crate) fn located(pack_dir: Option<&Path>, command: Vec<String>) -> Result<V
     while let Some(arg) = it.next() {
         match arg.as_str() {
             "--select" | "--handle" | "--param" | "--model" | "--labels" | "--pack"
-            | "--threshold" | "--resume" | "--goal" | "--switch" => {
+            | "--threshold" | "--resume" | "--goal" | "--switch" | "--proposed-by"
+            | "--proposal" => {
                 resume |= arg == "--resume";
                 let value = it
                     .next()
@@ -2210,7 +2222,7 @@ pub(crate) fn located(pack_dir: Option<&Path>, command: Vec<String>) -> Result<V
                 return Err(Reply::error(
                     400,
                     format!(
-                        "run takes --select, --handle, --param, --model, --labels, --threshold, --pack, --resume, --goal, --switch, --chunk and --let-run, not {a}"
+                        "run takes --select, --handle, --param, --model, --labels, --threshold, --pack, --resume, --goal, --switch, --chunk, --let-run, --proposed-by and --proposal, not {a}"
                     ),
                 ));
             }
@@ -2591,6 +2603,15 @@ pub(crate) struct RunArgs {
     /// recorded as the person's choice
     #[arg(long)]
     pub(crate) let_run: bool,
+    /// Record 57 P9: the assistant whose proposal the person accepted, by
+    /// its purpose or name; the run and its units record it with the
+    /// person (with --proposal)
+    #[arg(long, value_name = "AGENT", requires = "proposal")]
+    pub(crate) proposed_by: Option<String>,
+    /// Record 57 P9: the id of the assistant's proposal the person
+    /// accepted (with --proposed-by)
+    #[arg(long, value_name = "ID", requires = "proposed_by")]
+    pub(crate) proposal: Option<String>,
     /// Machine-readable output
     #[arg(long)]
     pub(crate) json: bool,
@@ -3692,6 +3713,10 @@ fn run_text(doc: &Value) -> String {
         doc["selection"].as_str().unwrap_or("a handle"),
         doc["handle_id"]
     );
+    // record 57 P9: the plan the person accepted from the assistant
+    if let Some(l) = crate::proposed_by::line(&doc["proposed_by"]) {
+        let _ = writeln!(text, "  plan             {l}");
+    }
     // record 55: a dataset's or a cohort's main scans, and what was read
     if doc["main"].is_object() {
         let _ = writeln!(
@@ -5760,6 +5785,9 @@ pub(crate) fn take_up_interrupted(store: &mut Store) -> Result<usize, String> {
 
 /// `nils run`.
 pub(crate) fn run_command(home: &Home, args: RunArgs) -> Result<(), Exit> {
+    // record 57 P9: a proposal noted is checked before anything is made
+    crate::proposed_by::ProposedBy::of_args(args.proposed_by.as_deref(), args.proposal.as_deref())
+        .map_err(usage)?;
     // Wave 7b section 7: a name that is a family's, not a pipeline's,
     // routes each unit and runs one member run per member
     if let Some(name) = args.pipeline.as_deref()
@@ -6090,7 +6118,13 @@ pub(crate) fn run_command(home: &Home, args: RunArgs) -> Result<(), Exit> {
             started_in_turn(false);
             rows::set_units(registry.store(), run_id, d.units.name(), args.threshold)?;
             // Wave 7b A1: the person's choices at the pack stay with the run,
-            // so a resume judges under the same ones
+            // so a resume judges under the same ones; record 57 P9: and the
+            // proposal the person accepted, with the person, on any run
+            let proposed = crate::proposed_by::ProposedBy::of_args(
+                args.proposed_by.as_deref(),
+                args.proposal.as_deref(),
+            )
+            .map_err(usage)?;
             if crate::pipeline_pack::pack_of(&p).is_some() {
                 let asked = crate::pipeline_pack::PersonAsk::of_args(
                     args.goal.as_deref(),
@@ -6105,7 +6139,16 @@ pub(crate) fn run_command(home: &Home, args: RunArgs) -> Result<(), Exit> {
                         .map(|(k, _)| k)
                         .collect::<Vec<_>>()
                 );
+                if let Some(pb) = &proposed {
+                    kept["proposed_by"] = pb.record(&who);
+                }
                 rows::set_person(registry.store(), run_id, &kept)?;
+            } else if let Some(pb) = &proposed {
+                rows::set_person(
+                    registry.store(),
+                    run_id,
+                    &json!({"proposed_by": pb.record(&who)}),
+                )?;
             }
             let _ = job::set_arg(registry.store(), job_id, "run", json!(run_id));
             // Wave 7b A7: a step of a workflow run says which, and the
@@ -7129,6 +7172,14 @@ fn resume_command(home: &Home, args: &RunArgs, run_id: i64) -> Result<(), Exit> 
     go_on.params = params;
     go_on.selection = r.selection.clone();
     go_on.kept = Some(job_id).filter(|j| adopted(*j));
+    let kept_proposal = match crate::proposed_by::ProposedBy::of_body(&r.person) {
+        Ok(Some(k)) => Some(k),
+        _ => crate::proposed_by::ProposedBy::of_args(
+            args.proposed_by.as_deref(),
+            args.proposal.as_deref(),
+        )
+        .map_err(usage)?,
+    };
     drop(registry);
     run_command(
         home,
@@ -7153,6 +7204,9 @@ fn resume_command(home: &Home, args: &RunArgs, run_id: i64) -> Result<(), Exit> 
             goal: args.goal.clone(),
             switches: args.switches.clone(),
             let_run: args.let_run,
+            // record 57 P9: and with the proposal the person accepted
+            proposed_by: kept_proposal.as_ref().map(|k| k.agent.clone()),
+            proposal: kept_proposal.map(|k| k.proposal),
             json: args.json,
             go_on: Some(go_on),
             family: None,
@@ -8267,7 +8321,25 @@ fn execute_run(home: &Home, registry: &mut Registry, x: &Execution<'_>) -> Resul
                     .collect(),
                 _ => pairs(&x.args.params).map_err(|e| e.message)?,
             };
-            let person = person_ask.person(&pack, x.who, &given)?;
+            let mut person = person_ask.person(&pack, x.who, &given)?;
+            // record 57 P9: a plan the person accepted from the assistant's
+            // proposal: every unit records the proposal with the person, and
+            // each knob the person gave names the agent; a resume keeps the
+            // proposal the run began with
+            let accepted = match x.resume.map(|r| &r.person) {
+                Some(kept) if kept.is_object() => {
+                    Some(kept["proposed_by"].clone()).filter(Value::is_object)
+                }
+                _ => crate::proposed_by::ProposedBy::of_args(
+                    x.args.proposed_by.as_deref(),
+                    x.args.proposal.as_deref(),
+                )?
+                .map(|p| p.record(x.who)),
+            };
+            if let Some(a) = accepted {
+                person.proposed = person.given.clone();
+                person.proposed_by = Some(a);
+            }
             let roles_of = match d.layout {
                 Layout::Bids => crate::preflight::roles_of_stacks(registry.store(), x.stacks)?,
                 Layout::Stacks => BTreeMap::new(),
@@ -8569,6 +8641,27 @@ fn execute_run(home: &Home, registry: &mut Registry, x: &Execution<'_>) -> Resul
     if !running.is_empty() {
         let mut pulse = Pulse::new(x.job_id, json!({"run": x.run_id, "phase": "stop"}));
         for mut r in running.drain(..) {
+            // E1 (2026-10-30): a container that ended before the stop was
+            // heard finished its units; they are taken in as it ended and
+            // kept, never given back to be run again
+            if let Ok(Some(status)) = r.child.try_wait() {
+                if let Some(w) = &r.inv.workdir {
+                    let _ = std::fs::remove_dir_all(w);
+                }
+                let taken = take_in(
+                    registry,
+                    x,
+                    &m,
+                    &r.batch,
+                    status.code(),
+                    signal_of(&status),
+                    &row_of,
+                    &mut taken_files,
+                );
+                if taken.is_ok() {
+                    continue;
+                }
+            }
             x.runtime.stop(&r.inv);
             let _ = runtime::kill(&mut r.child);
             let _ = r.child.wait();

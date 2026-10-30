@@ -444,6 +444,7 @@ pub(crate) fn person_of(f: &Family, ask: &PersonAsk, user: &str) -> Result<Perso
         choices,
         given: BTreeSet::new(),
         proposed: BTreeSet::new(),
+        proposed_by: None,
         let_run: ask.let_run,
     })
 }
@@ -1022,6 +1023,7 @@ mod tests {
                 .collect(),
             given: Default::default(),
             proposed: Default::default(),
+            proposed_by: None,
             let_run: false,
         }
     }
@@ -1219,6 +1221,7 @@ mod tests {
                     choices: [("task".to_string(), json!(task))].into_iter().collect(),
                     given: Default::default(),
                     proposed: Default::default(),
+                    proposed_by: None,
                     let_run: false,
                 };
                 let j = nils_pipeline::pack::rules::judge(p, d, &resolved, &facts, &person);

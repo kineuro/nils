@@ -11,7 +11,7 @@ use crate::schema::{self, ID_TYPES, Table, linkage_tables, registry_tables};
 use crate::store::{Error, Param, Store};
 
 /// The version this binary writes.
-pub const SCHEMA_VERSION: i64 = 113;
+pub const SCHEMA_VERSION: i64 = 114;
 
 /// Which of the two stores a migration runs against.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -506,6 +506,10 @@ pub static MIGRATIONS: &[Migration] = &[
         version: 113,
         apply: a_model_may_be_trained_on_a_set_held_elsewhere,
     },
+    Migration {
+        version: 114,
+        apply: a_release_row_says_where_its_seconds_went,
+    },
 ];
 
 /// A model from elsewhere registers with its training set as a foreign
@@ -552,6 +556,16 @@ fn a_release_row_says_it_was_stopped(store: &mut Store, kind: Kind) -> Result<()
         return Ok(());
     }
     add_columns(store, "release", &["stopped"])
+}
+
+/// Wave 7b (3.x6): a release row says where its stacks' seconds went, in a
+/// column of its own. Only the column is added and left empty: a row from
+/// before measured nothing.
+fn a_release_row_says_where_its_seconds_went(store: &mut Store, kind: Kind) -> Result<(), Error> {
+    if kind != Kind::Registry {
+        return Ok(());
+    }
+    add_columns(store, "release", &["phases"])
 }
 
 /// Record 58 P1 (Wave 7b spec §12): a verify campaign's planting
