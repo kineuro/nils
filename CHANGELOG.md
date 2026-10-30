@@ -11,6 +11,7 @@ All notable changes to NILS v1 are recorded here. The format follows [Keep a Cha
 
 ### Changed
 
+- The LST-AI pack flushes denormal floats by default. A same-conversion repeat on 2026-10-30 put the masks' Dice within the run-to-run noise of unflushed runs, and the flush removes an hours-long skull-strip slowdown on Intel CPUs; the `denormal_flush` switch stays, so a site can turn it off.
 - The software page answers faster. A container image found present is remembered for a minute, so listing the packages no longer inspects every image on each load, and a run's install is read once for its secrets and its comparability key.
 
 ### Fixed

@@ -5,18 +5,20 @@
 # and a 3D FLAIR (Wiltgen et al. 2024: Dice 0.67 and lesion-wise F1 0.63
 # on 103 public cases, against 0.42 to 0.55 for LST, SAMSEG and nnU-Net).
 # On the archive 16,194 sessions hold a 3D T1 and a 3D FLAIR; 11,725 hold
-# the pair with one of them 2D (skipped), 3,147 no pair (step 2). Whether
-# the denormal-float flush is on is decided by one same-conversion repeat
-# (Wave 7b, section 18): until then it is a switch, off.
+# the pair with one of them 2D (skipped), 3,147 no pair (step 2). The
+# denormal-float flush is on by default (Wave 7b, section 18): a
+# same-conversion repeat on 2026-10-30 found the masks' Dice within the
+# run-to-run noise of unflushed runs, and its speed effect is on Intel CPUs
+# only. A site can still turn it off.
 nils_pack: 1
 pipeline:
   name: lst-ai
-  descriptor_sha256: "sha256:59db74ea85d89c484d2e45f593584abfd2b9d31f84496db452798bc32dd6fd7f"
+  descriptor_sha256: "sha256:2d4242c83a0cd36012ed25ed7fba183d6a587aeae3c52382af52030e3cf0782d"
   version: "1.0"
 goals:
   goal: [fast, standard, research]
-  # decided by one same-conversion repeat, then fixed in the pack
-  denormal_flush: ["off", "on"]
+  # on by default since the same-conversion repeat of 2026-10-30; the first value is the default
+  denormal_flush: ["on", "off"]
 needs:
   t1w:
     hard:
@@ -50,7 +52,7 @@ knobs:
     comparability: breaks
     set_by: person
   flush_denormals:
-    what: "flush denormal floats to zero in PyTorch, which brought one Intel CPU's skull strip from over 18 minutes to 27 seconds; off until one same-conversion repeat says it changes nothing"
+    what: "flush denormal floats to zero in PyTorch, which brought one Intel CPU's skull strip from over 18 minutes to 27 seconds; on by default, since the same-conversion repeat of 2026-10-30 found Dice within the run-to-run noise of unflushed runs"
     changes: [lesions, regions, volumes]
     comparability: breaks
     set_by: rule
@@ -62,7 +64,7 @@ rules:
   - id: flush-denormals-as-chosen
     when: "denormal_flush == 'on'"
     set: {flush_denormals: true}
-    why: "the switch is the person's until the same-conversion repeat decides; off by default"
+    why: "on by default: the same-conversion repeat of 2026-10-30 found Dice within the run-to-run noise of unflushed runs, and the speed effect is on Intel CPUs only; a person may switch it off"
     source: "the lst-ai starter's measurement; Wave 7b section 18"
 checks:
   - {metric: lesion_volume, op: "<=", action: flag, cohort: true, stratum: [site, vendor, field_strength, sequence, post_contrast], min_sessions: 30, source: "policy (record 57, research 02)"}
