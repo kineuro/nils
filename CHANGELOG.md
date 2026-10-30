@@ -7,6 +7,7 @@ All notable changes to NILS v1 are recorded here. The format follows [Keep a Cha
 ### Added
 
 - The registration family is in the starter catalog. When the engine starts and the catalog holds no family named `registration`, it adds the three members (as starters) and then the family, as `nils pipeline add` of the folder does; a family already in the catalog is left as it is.
+- The seven starters carry their packs. A new catalog seeds each starter with the pack the engine ships beside it, so its pre-flight gives the pack's skip reasons and the funnel and plan analysis read it. On a catalog already in place, the engine adds the starter with its pack as the name's next version, once; the version without the pack is left as it was, and where the starter replaces its earlier versions the listing says the new one is the same descriptor with its pack.
 
 ### Changed
 

@@ -15,6 +15,12 @@
 //! ruling of 2026-10-12), and a new run no longer takes those
 //! ([`crate::versions`]); one whose new version changes what it makes, as
 //! N4's spline distance did, leaves them selectable.
+//!
+//! Record 57 P11: each starter ships with its pack from the tree, loaded as
+//! `nils pipeline add <folder>` loads one, and the version is the pair. A
+//! catalog whose starter has no pack yet gets the pair as the name's next
+//! version once; the packless version stays as it is, so the runs that used
+//! it keep their comparability key.
 
 use nils_pipeline::descriptor;
 use nils_registry::Registry;
@@ -53,6 +59,74 @@ pub(crate) const CATALOG: [(&str, &str); 7] = [
     ),
 ];
 
+/// Each starter's pack, as the tree holds it beside its descriptor, in the
+/// catalog's order.
+pub(crate) const PACKS: [(&str, &str); 7] = [
+    (
+        "n4-bias-correction",
+        include_str!("../../../../pipelines/n4-bias-correction/nils-pack.yaml"),
+    ),
+    (
+        "synthstrip",
+        include_str!("../../../../pipelines/synthstrip/nils-pack.yaml"),
+    ),
+    (
+        "synthseg",
+        include_str!("../../../../pipelines/synthseg/nils-pack.yaml"),
+    ),
+    (
+        "samseg-lesions",
+        include_str!("../../../../pipelines/samseg-lesions/nils-pack.yaml"),
+    ),
+    (
+        "segcsvd",
+        include_str!("../../../../pipelines/segcsvd/nils-pack.yaml"),
+    ),
+    (
+        "mriqc",
+        include_str!("../../../../pipelines/mriqc/nils-pack.yaml"),
+    ),
+    (
+        "freesurfer-recon-all",
+        include_str!("../../../../pipelines/freesurfer-recon-all/nils-pack.yaml"),
+    ),
+];
+
+/// The pack text the tree ships beside a starter.
+fn pack_text(name: &str) -> Result<&'static str, String> {
+    PACKS
+        .iter()
+        .find(|(n, _)| *n == name)
+        .map(|(_, t)| *t)
+        .ok_or_else(|| format!("the starter {name} has no pack in the engine"))
+}
+
+/// A starter as the catalog keeps it: its descriptor, its pack (checked
+/// against it with the loader's words) and their digests.
+struct Starter {
+    d: descriptor::Descriptor,
+    pack: nils_pipeline::pack::PipelinePack,
+    digest: String,
+    pack_digest: String,
+    version_digest: String,
+}
+
+fn starter(registry: &mut Registry, name: &str, text: &str) -> Result<Starter, String> {
+    let d = descriptor::parse(text).map_err(|e| format!("the starter {name}: {e}"))?;
+    let pack = crate::pipeline_pack::load(registry.store(), &d, pack_text(name)?)
+        .map_err(|e| format!("the starter {name}: {}: {e}", nils_pipeline::pack::FILE))?;
+    let digest = d.digest();
+    let pack_digest = pack.digest();
+    let version_digest = nils_pipeline::pack::version_digest(&digest, Some(&pack_digest));
+    Ok(Starter {
+        d,
+        pack,
+        digest,
+        pack_digest,
+        version_digest,
+    })
+}
+
 /// Where the registry keeps whether the engine seeds its starters: `off`
 /// turns it off; anything else, or nothing, is on.
 pub(crate) const SETTING: &str = "pipeline_starter";
@@ -67,16 +141,26 @@ pub(crate) fn enabled(registry: &mut Registry) -> bool {
 
 /// What became of one starter.
 fn state_of(registry: &mut Registry, name: &str, text: &str) -> Result<(Value, bool), String> {
-    let d = descriptor::parse(text).map_err(|e| format!("the starter {name}: {e}"))?;
-    let digest = d.digest();
-    let versions = rows::versions(registry.store(), &d.name).map_err(|e| e.to_string())?;
-    let same = versions.iter().find(|p| p.descriptor_digest == digest);
+    let s = starter(registry, name, text)?;
+    let versions = rows::versions(registry.store(), &s.d.name).map_err(|e| e.to_string())?;
+    // the pair is the version (record 57 P1): the same descriptor without
+    // its pack is an older starter, which the pair follows
+    let same = versions
+        .iter()
+        .find(|p| p.version_digest.as_deref() == Some(s.version_digest.as_str()));
     let newest = versions.last();
     let (state, seed) = match (same, newest) {
         (Some(p), _) => (format!("in the catalog as {}", p.label()), false),
         (None, None) => ("absent".to_string(), true),
         (None, Some(n)) if n.origin.as_deref() == Some(STARTER) && n.state == "active" => {
-            (format!("{} is an older starter", n.label()), true)
+            if n.descriptor_digest == s.digest && n.pack_digest.is_none() {
+                (
+                    format!("{} is the starter without its pack", n.label()),
+                    true,
+                )
+            } else {
+                (format!("{} is an older starter", n.label()), true)
+            }
         }
         (None, Some(n)) if n.state != "active" => {
             (format!("{} was retired, and is left so", n.label()), false)
@@ -87,7 +171,10 @@ fn state_of(registry: &mut Registry, name: &str, text: &str) -> Result<(Value, b
         ),
     };
     Ok((
-        json!({"name": d.name, "digest": digest, "image": d.image.reference, "state": state}),
+        json!({
+            "name": s.d.name, "digest": s.digest, "image": s.d.image.reference,
+            "pack": s.pack_digest, "version_digest": s.version_digest, "state": state,
+        }),
         seed,
     ))
 }
@@ -108,8 +195,13 @@ pub(crate) fn seed(registry: &mut Registry) -> Result<Vec<Value>, String> {
         if !wanted {
             continue;
         }
-        let d = descriptor::parse(text).map_err(|e| format!("the starter {name}: {e}"))?;
-        let digest = d.digest();
+        let Starter {
+            d,
+            pack,
+            digest,
+            pack_digest,
+            version_digest,
+        } = starter(registry, name, text)?;
         let now = nils_registry::time::now_iso();
         let (p, fresh) = rows::add(
             registry.store(),
@@ -124,9 +216,9 @@ pub(crate) fn seed(registry: &mut Registry) -> Result<Vec<Value>, String> {
                 level: d.level.name(),
                 added_by: BY,
                 added_at: &now,
-                pack: None,
-                pack_digest: None,
-                version_digest: &nils_pipeline::pack::version_digest(&digest, None),
+                pack: Some(&pack.document),
+                pack_digest: Some(&pack_digest),
+                version_digest: &version_digest,
             },
         )
         .map_err(|e| e.to_string())?;
@@ -143,7 +235,8 @@ pub(crate) fn seed(registry: &mut Registry) -> Result<Vec<Value>, String> {
                 policy: None,
                 job_id: None,
                 details: Some(json!({
-                    "descriptor": p.descriptor_digest, "image": p.image_digest, "origin": STARTER,
+                    "descriptor": p.descriptor_digest, "image": p.image_digest,
+                    "pack": p.pack_digest, "version_digest": p.version_digest, "origin": STARTER,
                 })),
             },
         )
@@ -203,6 +296,211 @@ pub(crate) fn at_start(registry: &mut Registry) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A registry on one backend, in a folder of the test's own; on
+    /// Postgres in a schema of its own, none where no test server is set.
+    fn registry_on(
+        postgres: bool,
+        name: &str,
+    ) -> Option<(nils_registry::Registry, nils_dicom::synth::TempDir)> {
+        use nils_registry::{Backend, Home, InitOptions, Scheme};
+        let dsn = if postgres {
+            let Some(dsn) = std::env::var("NILS_TEST_POSTGRES_DSN")
+                .ok()
+                .filter(|d| !d.is_empty())
+            else {
+                eprintln!("NILS_TEST_POSTGRES_DSN is not set; the Postgres half is skipped");
+                return None;
+            };
+            let mut admin = nils_registry::store::Store::connect_postgres(&dsn, name).unwrap();
+            admin
+                .batch(&format!(
+                    "DROP SCHEMA IF EXISTS {name} CASCADE; DROP SCHEMA IF EXISTS {name}_linkage CASCADE"
+                ))
+                .unwrap();
+            Some(dsn)
+        } else {
+            None
+        };
+        let dir = nils_dicom::synth::TempDir::new(name);
+        let home = Home::new(dir.path());
+        home.keys(None).add("k", b"a starter packs key").unwrap();
+        let registry = home
+            .init(&InitOptions {
+                backend: if postgres {
+                    Backend::Postgres
+                } else {
+                    Backend::Sqlite
+                },
+                dsn,
+                schema: postgres.then(|| name.to_string()),
+                scheme: Scheme::DEFAULT,
+                key: "k".into(),
+                display_length: 12,
+                session_scheme: None,
+            })
+            .unwrap();
+        Some((registry, dir))
+    }
+
+    /// The digest of a starter's pack as the tree holds it, read from the
+    /// file at the test's run.
+    fn tree_pack_digest(name: &str) -> String {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../pipelines")
+            .join(name)
+            .join(nils_pipeline::pack::FILE);
+        nils_pipeline::pack::parse(&std::fs::read_to_string(&path).unwrap())
+            .unwrap()
+            .digest()
+    }
+
+    /// Every starter has its pack beside it in the tree and in [`PACKS`],
+    /// in the catalog's order.
+    #[test]
+    fn every_starter_ships_its_pack() {
+        let names: Vec<&str> = CATALOG.iter().map(|(n, _)| *n).collect();
+        let packs: Vec<&str> = PACKS.iter().map(|(n, _)| *n).collect();
+        assert_eq!(names, packs);
+        for (name, text) in PACKS {
+            assert_eq!(
+                nils_pipeline::pack::parse(text).unwrap().digest(),
+                tree_pack_digest(name),
+                "{name}"
+            );
+        }
+    }
+
+    /// Record 57 P11 on a fresh catalog: each starter is seeded with its
+    /// pack, the tree's, and the version is the pair; a second start adds
+    /// nothing. Both backends.
+    #[test]
+    fn a_fresh_catalog_s_starters_carry_their_packs() {
+        for postgres in [false, true] {
+            let Some((mut registry, _dir)) = registry_on(postgres, "nils_starter_packs_fresh")
+            else {
+                continue;
+            };
+            let added = seed(&mut registry).unwrap();
+            assert_eq!(added.len(), CATALOG.len(), "{added:?}");
+            for (name, text) in CATALOG {
+                let versions = rows::versions(registry.store(), name).unwrap();
+                assert_eq!(versions.len(), 1, "{name}");
+                let p = &versions[0];
+                let pack = tree_pack_digest(name);
+                assert_eq!(p.pack_digest.as_deref(), Some(pack.as_str()), "{name}");
+                assert!(p.pack.is_object(), "{name} keeps its pack whole");
+                let digest = descriptor::parse(text).unwrap().digest();
+                assert_eq!(
+                    p.version_digest.as_deref(),
+                    Some(nils_pipeline::pack::version_digest(&digest, Some(&pack)).as_str()),
+                    "{name}"
+                );
+                assert_eq!(p.origin.as_deref(), Some(STARTER), "{name}");
+            }
+            assert!(seed(&mut registry).unwrap().is_empty());
+            for s in list(&mut registry).unwrap() {
+                assert!(
+                    s["state"]
+                        .as_str()
+                        .unwrap()
+                        .starts_with("in the catalog as"),
+                    "{s}"
+                );
+                assert_eq!(
+                    s["pack"],
+                    json!(tree_pack_digest(s["name"].as_str().unwrap()))
+                );
+            }
+        }
+    }
+
+    /// Record 57 P11 on a catalog already in place: where a starter is
+    /// there without its pack, the pair is added as its next version, once,
+    /// and the packless version is left as it was. A person's version or a
+    /// retired starter is still left alone. Both backends.
+    #[test]
+    fn an_in_place_catalog_gets_one_version_per_packless_starter_once() {
+        for postgres in [false, true] {
+            let Some((mut registry, _dir)) = registry_on(postgres, "nils_starter_packs_in_place")
+            else {
+                continue;
+            };
+            // the catalog as an engine before record 57 P11 seeded it
+            let mut before = Vec::new();
+            for (_, text) in CATALOG {
+                let d = descriptor::parse(text).unwrap();
+                let digest = d.digest();
+                let (p, fresh) = rows::add(
+                    registry.store(),
+                    &rows::New {
+                        name: &d.name,
+                        tool_version: &d.tool_version,
+                        descriptor: &d.document,
+                        descriptor_digest: &digest,
+                        image: &d.image.reference,
+                        image_digest: &d.image.digest,
+                        layout: d.layout.name(),
+                        level: d.level.name(),
+                        added_by: BY,
+                        added_at: "2026-10-01T00:00:00Z",
+                        pack: None,
+                        pack_digest: None,
+                        version_digest: &nils_pipeline::pack::version_digest(&digest, None),
+                    },
+                )
+                .unwrap();
+                assert!(fresh);
+                rows::set_origin(registry.store(), p.id, STARTER).unwrap();
+                before.push(rows::get(registry.store(), p.id).unwrap().unwrap());
+            }
+            let listed = list(&mut registry).unwrap();
+            assert!(
+                listed.iter().all(|s| s["state"]
+                    .as_str()
+                    .unwrap()
+                    .ends_with("@1 is the starter without its pack")),
+                "{listed:?}"
+            );
+            let added = seed(&mut registry).unwrap();
+            let labels: Vec<&str> = added.iter().filter_map(|a| a["label"].as_str()).collect();
+            let want: Vec<String> = CATALOG.iter().map(|(n, _)| format!("{n}@2")).collect();
+            assert_eq!(labels, want, "{added:?}");
+            for old in &before {
+                let versions = rows::versions(registry.store(), &old.name).unwrap();
+                assert_eq!(versions.len(), 2, "{}", old.name);
+                // the packless version is as it was
+                let kept = &versions[0];
+                assert_eq!(kept.id, old.id);
+                assert_eq!(kept.pack_digest, None);
+                assert_eq!(kept.version_digest, old.version_digest);
+                assert_eq!(kept.state, "active");
+                let new = &versions[1];
+                assert_eq!(
+                    new.pack_digest.as_deref(),
+                    Some(tree_pack_digest(&old.name).as_str())
+                );
+                assert_eq!(new.descriptor_digest, old.descriptor_digest);
+                assert_eq!(new.origin.as_deref(), Some(STARTER));
+                // where it replaces, it says it adds the pack
+                let standing = crate::versions::of_versions(&versions);
+                if standing[&kept.id].replaced() {
+                    assert_eq!(
+                        standing[&kept.id].why.as_deref(),
+                        Some(crate::versions::PACK_ADDED)
+                    );
+                }
+                assert_eq!(standing[&new.id].state, "current", "{}", old.name);
+            }
+            // a second start adds nothing
+            assert!(seed(&mut registry).unwrap().is_empty());
+            let total: usize = CATALOG
+                .iter()
+                .map(|(n, _)| rows::versions(registry.store(), n).unwrap().len())
+                .sum();
+            assert_eq!(total, 2 * CATALOG.len());
+        }
+    }
 
     /// Every starter checks against the job contract, is named as the
     /// catalog lists it, is pinned by a manifest digest, and declares what
