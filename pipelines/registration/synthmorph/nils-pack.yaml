@@ -17,7 +17,7 @@
 nils_pack: 1
 pipeline:
   name: registration-synthmorph
-  descriptor_sha256: "sha256:c440739ce04fb31d53e0c69c1f0ca99901c650a608df2b9f967a730a4e1d1e30"
+  descriptor_sha256: "sha256:e651e010cd15baf2504e1dd8bb90c6387d29361b4f421328a08a3b440abd1ab6"
   version: "1.0"
 goals:
   goal: [fast, standard, research]
@@ -35,7 +35,7 @@ needs:
         source: "record 57 research 07, Table 2 (SynthMorph, about 24 GB deformable)"
 knobs:
   task:
-    what: "within a session, the FLAIR and the T2w onto the T1w; to the template, the joint model of the T1w onto MNI152NLin2009cAsym"
+    what: "within a session, the FLAIR (or a T2w alone) onto the T1w; to the template, the joint model of the T1w onto MNI152NLin2009cAsym"
     changes: [flair_xfm, flair_aligned, t2w_xfm, t2w_aligned, template_xfm, template_xfm_inverse, template_aligned, metrics]
     comparability: breaks
     set_by: rule

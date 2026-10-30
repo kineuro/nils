@@ -1424,11 +1424,23 @@ fn the_registration_scripts_hand_ants_its_bracket_arguments_whole() {
         flair["alignment_dice_note"], "the brain-mask Dice could not be computed",
         "the stand-in ImageMath writes no table: {flair}"
     );
-    let t2w = row("from-T2w_to-T1w");
-    assert_eq!(t2w["alignment_dice_note"], "no brain mask of the moving image", "{t2w}");
+    // beside a FLAIR the T2w is not registered (the rules judged the FLAIR)
+    assert!(
+        !anat
+            .join("sub-01_ses-01_from-T2w_to-T1w_desc-registration_metrics.json")
+            .exists()
+    );
+    assert!(!argv.contains("sub-01_ses-01_T2w.nii.gz"), "{argv}");
     let syn = row("from-T1w_to-MNI152NLin2009cAsym");
     assert_eq!(syn["brain_masked"], 1, "{syn}");
     assert_eq!(syn["lesion_masked"], 0, "{syn}");
+    // a T2w alone is registered, and with no mask of its own its row says
+    // why it has no Dice
+    std::fs::remove_file(data.join("sub-01/ses-01/anat/sub-01_ses-01_FLAIR.nii.gz")).unwrap();
+    run("within_session", &script);
+    let t2w = row("from-T2w_to-T1w");
+    assert_eq!(t2w["alignment_dice_note"], "no brain mask of the moving image", "{t2w}");
+    assert_eq!(t2w["brain_masked"], 1, "{t2w}");
     // a dataset with no match runs nothing and still succeeds
     std::fs::remove_dir_all(data.join("sub-01")).unwrap();
     std::fs::write(&log, "").unwrap();

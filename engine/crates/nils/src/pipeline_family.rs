@@ -1079,6 +1079,40 @@ mod tests {
         );
         assert_eq!(r.member.as_deref(), Some("ants"));
         assert_eq!(r.rule.as_deref(), Some("within-session-fine-3d-t2w"));
+        // beside a FLAIR the FLAIR is the moving image: a T2w that is a
+        // spine scan does not stop it, and the unit says the T2w is not
+        // registered (the pilot of 2026-10-30)
+        let mut beside = session(&[("t1w", "3D", 1.0), ("flair", "3D", 1.0), ("t2w", "2D", 4.0)]);
+        beside.set("t2w.body_part", Val::Text("spine".into()));
+        let r = routed(&f, &beside, &within);
+        assert_eq!(r.status, Status::Routed, "{r:?}");
+        assert_eq!(r.rule.as_deref(), Some("within-session-fine-3d"));
+        assert!(
+            r.caveats
+                .iter()
+                .any(|c| c.words.contains("the T2w beside it is not")),
+            "{:?}",
+            r.caveats
+        );
+        // a T2w alone is judged by the needs a FLAIR has: of the brain, and
+        // its body part told
+        let mut alone = session(&[("t1w", "3D", 1.0), ("t2w", "2D", 4.0)]);
+        alone.set("t2w.body_part", Val::Text("spine".into()));
+        let r = routed(&f, &alone, &within);
+        assert_eq!(r.status, Status::Skipped, "{r:?}");
+        assert!(
+            r.words.as_deref().unwrap().contains("the T2w is not of the brain"),
+            "{r:?}"
+        );
+        alone.set("t2w.body_part", Val::Unknown);
+        let r = routed(&f, &alone, &within);
+        assert_eq!(r.words.as_deref(), Some("cannot tell: t2w.body_part"));
+        let r = routed(
+            &f,
+            &session(&[("t1w", "3D", 1.0), ("flair", "3D", 1.0)]),
+            &within,
+        );
+        assert!(r.caveats.is_empty(), "{:?}", r.caveats);
         // a 2D FLAIR: SynthMorph
         let r = routed(
             &f,

@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 #
 # The ANTs member of the registration family (record 57 P6, Wave 7b P2):
-# within a session, the FLAIR and the T2w onto the T1w, rigid with Mattes
+# within a session, the FLAIR (or a T2w alone) onto the T1w, rigid with Mattes
 # mutual information (32 bins, a SynthStrip brain mask of the T1w as the
 # fixed mask where the synthstrip starter made one, no histogram matching:
 # research 07, Table 5 R3); to the template, `antsRegistrationSyN.sh -t s`
@@ -44,8 +44,8 @@ name: registration-ants
 schema-version: "0.5"
 tool-version: "ants-2.6.2"
 description: >-
-  Register a session's images with ANTs: within a session, the FLAIR and
-  the T2w onto the T1w, rigid with mutual information; to the template,
+  Register a session's images with ANTs: within a session, the FLAIR (or
+  a T2w alone) onto the T1w, rigid with mutual information; to the template,
   SyN of the T1w onto MNI152NLin2009cAsym after N4 and skull stripping.
   One session is one unit; CPU, about 5 minutes a rigid pair and 40
   minutes a SyN.
@@ -58,7 +58,7 @@ inputs:
   - id: task
     name: Task
     type: String
-    description: "within_session aligns the session's FLAIR and T2w onto its T1w, rigid; to_template aligns the T1w onto MNI152NLin2009cAsym with SyN."
+    description: "within_session aligns the session's FLAIR onto its T1w (its T2w where it has no FLAIR), rigid; to_template aligns the T1w onto MNI152NLin2009cAsym with SyN."
     value-key: "[TASK]"
     value-choices: ["within_session", "to_template"]
     default-value: "within_session"
@@ -104,6 +104,7 @@ command-line: |-
   for role in flair t2w; do
   if [ $role = flair ]; then mv=$(flair "$a"); con=FLAIR; else mv=$(t2w "$a"); con=T2w; fi;
   [ -z "$mv" ] && continue;
+  if [ $role = t2w ] && [ -n "$(flair "$a")" ]; then echo "$a: the session has a FLAIR, so the FLAIR is registered onto the T1w and its T2w is not (the rules judged the FLAIR)"; continue; fi;
   antsRegistration -d 3 --float 0 -u 0 -w "[0.005,0.995]" -r "[$f,$mv,1]" -t "Rigid[0.1]" -m "Mattes[$f,$mv,1,32,Regular,0.25]" -c "[1000x500x250x100,1e-6,10]" -f 8x4x2x1 -s 3x2x1x0vox ${xm[@]+"${xm[@]}"} -o "[$w/${con}_,]" -v 0 || { echo "$a: the rigid registration of the $con failed"; continue; };
   antsApplyTransforms -d 3 -i "$mv" -r "$f" -t "$w/${con}_0GenericAffine.mat" -n Linear -o "$d/${b}_space-T1w_desc-aligned_${con}.nii.gz" || continue;
   cp "$w/${con}_0GenericAffine.mat" "$d/${b}_from-${con}_to-T1w_mode-image_xfm.mat";

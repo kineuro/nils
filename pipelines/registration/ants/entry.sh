@@ -22,6 +22,7 @@ if [ "[TASK]" = within_session ]; then
 for role in flair t2w; do
 if [ $role = flair ]; then mv=$(flair "$a"); con=FLAIR; else mv=$(t2w "$a"); con=T2w; fi;
 [ -z "$mv" ] && continue;
+if [ $role = t2w ] && [ -n "$(flair "$a")" ]; then echo "$a: the session has a FLAIR, so the FLAIR is registered onto the T1w and its T2w is not (the rules judged the FLAIR)"; continue; fi;
 antsRegistration -d 3 --float 0 -u 0 -w "[0.005,0.995]" -r "[$f,$mv,1]" -t "Rigid[0.1]" -m "Mattes[$f,$mv,1,32,Regular,0.25]" -c "[1000x500x250x100,1e-6,10]" -f 8x4x2x1 -s 3x2x1x0vox ${xm[@]+"${xm[@]}"} -o "[$w/${con}_,]" -v 0 || { echo "$a: the rigid registration of the $con failed"; continue; };
 antsApplyTransforms -d 3 -i "$mv" -r "$f" -t "$w/${con}_0GenericAffine.mat" -n Linear -o "$d/${b}_space-T1w_desc-aligned_${con}.nii.gz" || continue;
 cp "$w/${con}_0GenericAffine.mat" "$d/${b}_from-${con}_to-T1w_mode-image_xfm.mat";

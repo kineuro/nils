@@ -34,7 +34,7 @@ goals:
 tasks:
   within_session:
     level: session
-    words: "the FLAIR and the T2w of a session onto its T1w"
+    words: "the FLAIR of a session onto its T1w, or its T2w where it has no FLAIR"
     members: [ants, synthmorph]
   across_visits:
     level: participant
@@ -70,7 +70,7 @@ needs:
         words: "the FLAIR is not of the brain or head"
         source: "record 57 research 07, Table 5 R1"
   t2w:
-    hard_if: "task == 'within_session' and present(t2w)"
+    hard_if: "task == 'within_session' and present(t2w) and not present(flair)"
     hard:
       - when: "body_part in ['brain', 'brain-neck']"
         words: "the T2w is not of the brain or head"
@@ -87,6 +87,9 @@ needs:
         words: "the visits were not acquired alike, or are 2D: they need the SynthMorph visits member, which this version does not ship (research 07, Table 5 R7)"
         source: "record 57 research 07, Table 5 R7; policy"
     soft:
+      - when: "task != 'within_session' or not (present(flair) and present(t2w))"
+        words: "the session has a FLAIR: the FLAIR is registered onto the T1w, and the T2w beside it is not"
+        source: "pilot 2026-10-30 (beside a FLAIR the T2w went unjudged: 2D TSE, spine STIR and DIR scans were registered as the session's T2w)"
       - when: "not (task == 'across_visits' and goal == 'research')"
         words: "at research grade the deformable step in the halfway space (ANTs SyN after the rigid alignment, Table 5 R8) is not yet shipped; the rigid alignment stands"
         source: "record 57 research 07, Table 5 R8"
@@ -96,8 +99,11 @@ needs:
 rules:
   # within a session: both 3D at 1.5 mm or finer is ANTs rigid (Table 5
   # R3); anything coarser or 2D is SynthMorph (R4), rigid where the pinned
-  # model has it, else affine with a flag. A session with a T2w alone is
-  # judged on the T2w.
+  # model has it, else affine with a flag. Where the session has a FLAIR,
+  # the FLAIR is the moving image and the T2w beside it is not registered
+  # (the pilot of 2026-10-30 found 2D TSE, spine STIR and DIR scans taken
+  # as the T2w when it went with the FLAIR unjudged); a session with a T2w
+  # alone is judged on the T2w, by the same needs as a FLAIR.
   - id: within-session-fine-3d
     when: "task == 'within_session' and present(flair) and t1w.dimension == '3D' and flair.dimension == '3D' and max(t1w.voxel_max_mm, flair.voxel_max_mm) <= 1.5"
     route: ants

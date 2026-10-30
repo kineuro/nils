@@ -18,7 +18,7 @@
 nils_pack: 1
 pipeline:
   name: registration-ants
-  descriptor_sha256: "sha256:9a143d8e0d4bd00e2e213276353f7d2bfbd723af887854e0dd2fa655c8ef39cf"
+  descriptor_sha256: "sha256:41f589f67f0b026953df76eb6156b229b7cd16042f145eefaa2804813e3ccddd"
   version: "1.0"
 goals:
   goal: [fast, standard, research]
@@ -53,7 +53,7 @@ needs:
         source: policy
 knobs:
   task:
-    what: "within a session, the FLAIR and the T2w onto the T1w, rigid; to the template, SyN of the T1w onto MNI152NLin2009cAsym"
+    what: "within a session, the FLAIR (or a T2w alone) onto the T1w, rigid; to the template, SyN of the T1w onto MNI152NLin2009cAsym"
     changes: [flair_xfm, flair_aligned, t2w_xfm, t2w_aligned, template_xfm, template_xfm_inverse, template_aligned, metrics]
     comparability: breaks
     set_by: rule

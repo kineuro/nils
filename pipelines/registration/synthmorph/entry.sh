@@ -32,6 +32,7 @@ if [ "[TASK]" = within_session ]; then
 for role in flair t2w; do
 if [ $role = flair ]; then mv=$(flair "$a"); con=FLAIR; else mv=$(t2w "$a"); con=T2w; fi;
 [ -z "$mv" ] && continue;
+if [ $role = t2w ] && [ -n "$(flair "$a")" ]; then echo "$a: the session has a FLAIR, so the FLAIR is registered onto the T1w and its T2w is not (the rules judged the FLAIR)"; continue; fi;
 qm=$(qc "$mv" "$w" moving_$con) || qm="";
 if [ -n "$qf" ] && [ -n "$qm" ] && fspython -c "import sys; sys.exit(0 if min(float(sys.argv[1]), float(sys.argv[2])) < 0.50 else 1)" "$qf" "$qm"; then
 echo "$a: SynthSeg scores an input under 0.50 (T1w $qf, $con $qm): the pair is refused"; printf "{\"moving\": \"%s\", \"method\": \"synthmorph\", \"qc_fixed\": %s, \"qc_moving\": %s, \"refused\": 1}\n" "$con" "$qf" "$qm" > "$d/${b}_from-${con}_to-T1w_desc-registration_metrics.json"; continue; fi;
