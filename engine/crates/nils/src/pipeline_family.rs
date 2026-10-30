@@ -281,28 +281,8 @@ fn add_members_and_family(
         ids.insert((*k).clone(), id);
         added.push(json!({"member": k, "pipeline": v["name"], "id": id, "label": v["label"], "added": v["added"]}));
     }
-    let digest = f.digest();
     let before = get(registry.store(), &f.name).map_err(fail)?;
-    let same = before
-        .as_ref()
-        .is_some_and(|b| b.digest == digest && b.members == ids);
-    let who = crate::actor();
-    let now = nils_registry::time::now_iso();
-    if !same {
-        let value = json!({
-            "digest": digest, "document": f.document, "members": ids,
-            "added_by": who, "added_at": now,
-        });
-        registry
-            .set_meta(&format!("{META_PREFIX}{}", f.name), &value.to_string())
-            .map_err(|e| fail(e.to_string()))?;
-        crate::audit(
-            registry,
-            nils_registry::audit::Action::PipelineAdd,
-            json!({"family": f.name, "members": ids}),
-            Some(json!({"digest": digest, "replaced": before.as_ref().map(|b| b.digest.clone())})),
-        )?;
-    }
+    let same = !keep(registry, f, &ids, before.as_ref())?;
     let stored = get(registry.store(), &f.name)
         .map_err(fail)?
         .ok_or_else(|| fail("the family was not kept"))?;
@@ -310,6 +290,35 @@ fn add_members_and_family(
     v["added"] = json!(!same);
     v["members_added"] = json!(added);
     Ok(v)
+}
+
+/// Keep the family with these member ids where its digest or its members
+/// moved from what the catalog kept (`before`). Answers whether it was
+/// kept.
+fn keep(
+    registry: &mut Registry,
+    f: &Family,
+    ids: &BTreeMap<String, i64>,
+    before: Option<&Stored>,
+) -> Result<bool, Exit> {
+    let digest = f.digest();
+    if before.is_some_and(|b| b.digest == digest && &b.members == ids) {
+        return Ok(false);
+    }
+    let value = json!({
+        "digest": digest, "document": f.document, "members": ids,
+        "added_by": crate::actor(), "added_at": nils_registry::time::now_iso(),
+    });
+    registry
+        .set_meta(&format!("{META_PREFIX}{}", f.name), &value.to_string())
+        .map_err(|e| fail(e.to_string()))?;
+    crate::audit(
+        registry,
+        nils_registry::audit::Action::PipelineAdd,
+        json!({"family": f.name, "members": ids}),
+        Some(json!({"digest": digest, "replaced": before.map(|b| b.digest.clone())})),
+    )?;
+    Ok(true)
 }
 
 /// The registration family as the engine ships it (Wave 7b): the family
@@ -333,15 +342,37 @@ const SHIPPED_MEMBERS: [(&str, &str, &str); 3] = [
     ),
 ];
 
+/// What became of the shipped registration family at a start.
+#[derive(Debug, Default)]
+pub(crate) struct Shipped {
+    /// The members added where the catalog held no family of its name.
+    pub seeded: Vec<Value>,
+    /// The members' new versions, and the family itself where only its
+    /// document moved, where the catalog held the engine's family at an
+    /// older digest.
+    pub refreshed: Vec<Value>,
+}
+
 /// Seed the shipped registration family where the catalog holds no family
 /// of its name: the members, then the family, as `nils pipeline add
-/// <folder>` adds them, each new member marked a starter. A family the
-/// catalog holds already, a person's or the engine's, is left as it is.
-/// Answers the labels of the members added, none when nothing was.
-pub(crate) fn seed_shipped(registry: &mut Registry) -> Result<Vec<Value>, String> {
+/// <folder>` adds them, each new member marked a starter.
+///
+/// Where the catalog holds the engine's family already (every member it
+/// keeps is a starter), each member whose shipped pair is not the newest
+/// version of its name, where that newest version is the engine's own and
+/// active, gets the pair as its next version, marked a starter as the
+/// seeding marks it; the descriptor's `x-nils.replaces` says which earlier
+/// versions it fixes ([`crate::versions`]), as for the starters. The
+/// family is kept again where its digest or its members moved. A member
+/// whose newest version a person added, or retired, is left as it is, and
+/// so is a family a person added.
+pub(crate) fn seed_shipped(registry: &mut Registry) -> Result<Shipped, String> {
     let f = family::parse(SHIPPED_FAMILY).map_err(|e| format!("the shipped family: {e}"))?;
-    if get(registry.store(), &f.name)?.is_some() {
-        return Ok(Vec::new());
+    let before = get(registry.store(), &f.name)?;
+    if let Some(b) = &before
+        && !engine_s(registry, b)?
+    {
+        return Ok(Shipped::default());
     }
     let mut members = BTreeMap::new();
     let mut texts: Vec<(&String, String, Option<String>)> = Vec::new();
@@ -360,29 +391,100 @@ pub(crate) fn seed_shipped(registry: &mut Registry) -> Result<Vec<Value>, String
     f.check(&members)
         .map_err(|e| format!("the shipped family: {e}"))?;
     registry.store().begin().map_err(|e| e.to_string())?;
-    let done = add_members_and_family(registry, &f, &texts).and_then(|v| {
-        let mut labels = Vec::new();
-        for m in v["members_added"].as_array().into_iter().flatten() {
-            if m["added"] == true
-                && let Some(id) = m["id"].as_i64()
-            {
-                rows::set_origin(registry.store(), id, rows::STARTER)
-                    .map_err(|e| fail(e.to_string()))?;
-                labels.push(json!({"id": id, "label": m["label"]}));
+    let done = match &before {
+        None => add_members_and_family(registry, &f, &texts).and_then(|v| {
+            let mut labels = Vec::new();
+            for m in v["members_added"].as_array().into_iter().flatten() {
+                if m["added"] == true
+                    && let Some(id) = m["id"].as_i64()
+                {
+                    rows::set_origin(registry.store(), id, rows::STARTER)
+                        .map_err(|e| fail(e.to_string()))?;
+                    labels.push(json!({"id": id, "label": m["label"]}));
+                }
             }
-        }
-        Ok(labels)
-    });
+            Ok(Shipped {
+                seeded: labels,
+                refreshed: Vec::new(),
+            })
+        }),
+        Some(b) => refresh(registry, &f, &members, &texts, b),
+    };
     match done {
-        Ok(labels) => {
+        Ok(shipped) => {
             registry.store().commit().map_err(|e| e.to_string())?;
-            Ok(labels)
+            Ok(shipped)
         }
         Err(e) => {
             let _ = registry.store().rollback();
             Err(format!("the shipped family {}: {}", f.name, e.message))
         }
     }
+}
+
+/// Whether a family the catalog keeps is the engine's: every member id it
+/// keeps is a version the engine seeded.
+fn engine_s(registry: &mut Registry, s: &Stored) -> Result<bool, String> {
+    for id in s.members.values() {
+        let p = rows::get(registry.store(), *id).map_err(|e| e.to_string())?;
+        if p.and_then(|p| p.origin).as_deref() != Some(rows::STARTER) {
+            return Ok(false);
+        }
+    }
+    Ok(!s.members.is_empty())
+}
+
+/// The engine's family at an older digest: each member's shipped pair as
+/// its name's next version where the newest is the engine's own, then the
+/// family kept again where it moved.
+fn refresh(
+    registry: &mut Registry,
+    f: &Family,
+    members: &family::Members,
+    texts: &MemberTexts<'_>,
+    before: &Stored,
+) -> Result<Shipped, Exit> {
+    let mut ids = before.members.clone();
+    let mut refreshed = Vec::new();
+    for (k, d_text, p_text) in texts {
+        let Some((d, pack)) = members.get(*k) else {
+            continue;
+        };
+        let version_digest = nils_pipeline::pack::version_digest(
+            &d.digest(),
+            pack.as_ref().map(PipelinePack::digest).as_deref(),
+        );
+        let versions = rows::versions(registry.store(), &d.name)?;
+        let newest = versions.last();
+        if let Some(n) = newest
+            && n.version_digest.as_deref() == Some(version_digest.as_str())
+        {
+            // in place: the family names the newest version
+            ids.insert((*k).clone(), n.id);
+            continue;
+        }
+        // a version a person added, or a retired one, is left as it is
+        let ours = newest
+            .is_none_or(|n| n.origin.as_deref() == Some(rows::STARTER) && n.state == "active");
+        if !ours {
+            continue;
+        }
+        let v = crate::pipelines::add_descriptor(registry, d_text, p_text.as_deref())?;
+        let id = v["id"].as_i64().unwrap_or_default();
+        ids.insert((*k).clone(), id);
+        if v["added"] == true {
+            rows::set_origin(registry.store(), id, rows::STARTER)
+                .map_err(|e| fail(e.to_string()))?;
+            refreshed.push(json!({"id": id, "label": v["label"], "replaces": v["replaces"]}));
+        }
+    }
+    if keep(registry, f, &ids, Some(before))? && refreshed.is_empty() {
+        refreshed.push(json!({"label": f.name}));
+    }
+    Ok(Shipped {
+        seeded: Vec::new(),
+        refreshed,
+    })
 }
 
 /// One unit of a family run: its name as a run names it, what it holds,
@@ -1486,7 +1588,7 @@ mod tests {
 
     /// The engine seeds the registration family beside its starters: the
     /// three members as starters, then the family, once; a second start
-    /// adds nothing, and a family already in the catalog is left alone.
+    /// adds nothing.
     #[test]
     fn the_shipped_registration_family_is_seeded_once() {
         use nils_registry::{Backend, Home, InitOptions, Scheme};
@@ -1507,6 +1609,8 @@ mod tests {
             })
             .unwrap();
         let added = super::seed_shipped(&mut registry).unwrap();
+        assert!(added.refreshed.is_empty(), "{added:?}");
+        let added = added.seeded;
         assert_eq!(added.len(), 3, "{added:?}");
         let s = super::get(registry.store(), "registration")
             .unwrap()
@@ -1523,7 +1627,292 @@ mod tests {
                 p.name
             );
         }
-        assert!(super::seed_shipped(&mut registry).unwrap().is_empty());
+        let again = super::seed_shipped(&mut registry).unwrap();
+        assert!(again.seeded.is_empty() && again.refreshed.is_empty());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A registry on one backend, in a folder of the test's own; on
+    /// Postgres in a schema of its own, none where no test server is set.
+    fn registry_on(
+        postgres: bool,
+        name: &str,
+    ) -> Option<(nils_registry::Registry, nils_dicom::synth::TempDir)> {
+        use nils_registry::{Backend, Home, InitOptions, Scheme};
+        let dsn = if postgres {
+            let Some(dsn) = std::env::var("NILS_TEST_POSTGRES_DSN")
+                .ok()
+                .filter(|d| !d.is_empty())
+            else {
+                eprintln!("NILS_TEST_POSTGRES_DSN is not set; the Postgres half is skipped");
+                return None;
+            };
+            let mut admin = nils_registry::store::Store::connect_postgres(&dsn, name).unwrap();
+            admin
+                .batch(&format!(
+                    "DROP SCHEMA IF EXISTS {name} CASCADE; DROP SCHEMA IF EXISTS {name}_linkage CASCADE"
+                ))
+                .unwrap();
+            Some(dsn)
+        } else {
+            None
+        };
+        let dir = nils_dicom::synth::TempDir::new(name);
+        let home = Home::new(dir.path());
+        home.keys(None).add("k", b"a family refresh key").unwrap();
+        let registry = home
+            .init(&InitOptions {
+                backend: if postgres {
+                    Backend::Postgres
+                } else {
+                    Backend::Sqlite
+                },
+                dsn,
+                schema: postgres.then(|| name.to_string()),
+                scheme: Scheme::DEFAULT,
+                key: "k".into(),
+                display_length: 12,
+                session_scheme: None,
+            })
+            .unwrap();
+        Some((registry, dir))
+    }
+
+    /// A shipped member's descriptor as an engine before its fix shipped
+    /// it: without the `x-nils.replaces` that says what it fixes.
+    fn before_its_fix(text: &str) -> String {
+        let from = text
+            .find("  # It fixes the earlier versions")
+            .expect("the member says what it fixes");
+        let to = from + text[from..].find("\n  input:").unwrap() + 1;
+        format!("{}{}", &text[..from], &text[to..])
+    }
+
+    /// A shipped member's pair before its fix: the descriptor without what
+    /// it fixes, the pack pinning that descriptor.
+    fn pair_before_its_fix(d: &str, p: &str) -> (String, String) {
+        let old = before_its_fix(d);
+        let now = nils_pipeline::descriptor::parse(d).unwrap().digest();
+        let then = nils_pipeline::descriptor::parse(&old).unwrap().digest();
+        let (now, then) = (
+            now.trim_start_matches("sha256:"),
+            then.trim_start_matches("sha256:"),
+        );
+        assert!(p.contains(now), "the pack pins the shipped descriptor");
+        (old, p.replace(now, then))
+    }
+
+    /// A catalog holding the engine's registration family at older digests
+    /// (the ANTs and robust members before their fix, the family's document
+    /// before its last change, SynthMorph as shipped) and a robust version
+    /// a person added: the start adds the shipped ANTs member as its next
+    /// version, which replaces the older one as its descriptor says, keeps
+    /// the family again with it, leaves SynthMorph and the person's robust
+    /// version alone, and says so once; a second start adds nothing. Both
+    /// backends.
+    #[test]
+    fn the_engine_s_family_at_older_digests_is_refreshed_once() {
+        use nils_registry::pipeline::{self as rows, STARTER};
+        for postgres in [false, true] {
+            let Some((mut registry, _dir)) = registry_on(postgres, "nils_family_refresh") else {
+                continue;
+            };
+            let text = |m: &str| {
+                super::SHIPPED_MEMBERS
+                    .iter()
+                    .find(|(k, _, _)| *k == m)
+                    .map(|(_, d, p)| (d.to_string(), p.to_string()))
+                    .unwrap()
+            };
+            // the catalog as the engine seeded it before the fix
+            let old_family = family::parse(&super::SHIPPED_FAMILY.replacen(
+                "version: \"1.0\"",
+                "version: \"0.9\"",
+                1,
+            ))
+            .unwrap();
+            let mut ids = std::collections::BTreeMap::new();
+            for m in ["ants", "synthmorph", "robust"] {
+                let (d, p) = text(m);
+                let (d, p) = if m == "synthmorph" {
+                    (d, p)
+                } else {
+                    pair_before_its_fix(&d, &p)
+                };
+                let v = crate::pipelines::add_descriptor(&mut registry, &d, Some(&p))
+                    .unwrap_or_else(|e| panic!("{m}: {}", e.message));
+                let id = v["id"].as_i64().unwrap();
+                rows::set_origin(registry.store(), id, STARTER).unwrap();
+                ids.insert(m.to_string(), id);
+            }
+            assert!(
+                super::keep(&mut registry, &old_family, &ids, None)
+                    .unwrap_or_else(|e| panic!("{}", e.message))
+            );
+            // a robust version a person added after it
+            let (d, p) = text("robust");
+            let mine = d.replacen("why: \"", "why: \"A person's copy. ", 1);
+            let digest = |t: &str| nils_pipeline::descriptor::parse(t).unwrap().digest();
+            let p = p.replace(
+                digest(&d).trim_start_matches("sha256:"),
+                digest(&mine).trim_start_matches("sha256:"),
+            );
+            let person = crate::pipelines::add_descriptor(&mut registry, &mine, Some(&p))
+                .unwrap_or_else(|e| panic!("{}", e.message));
+            assert_eq!(person["label"], "registration-robust@2", "{person}");
+
+            let line = crate::starter::at_start(&mut registry);
+            assert!(
+                line.contains("; registration family refreshed registration-ants@2;")
+                    || line.ends_with("; registration family refreshed registration-ants@2"),
+                "{line}"
+            );
+            assert_eq!(line.matches("registration family").count(), 1, "{line}");
+
+            // the changed member: one new version, the shipped pair, a
+            // starter, which replaces the older one as its descriptor says
+            let ants = rows::versions(registry.store(), "registration-ants").unwrap();
+            assert_eq!(ants.len(), 2);
+            let (d, p) = text("ants");
+            let d = nils_pipeline::descriptor::parse(&d).unwrap();
+            let pack = nils_pipeline::pack::parse(&p).unwrap();
+            assert_eq!(
+                ants[1].version_digest.as_deref(),
+                Some(
+                    nils_pipeline::pack::version_digest(&d.digest(), Some(&pack.digest())).as_str()
+                )
+            );
+            assert_eq!(ants[1].origin.as_deref(), Some(STARTER));
+            let standing = crate::versions::of_versions(&ants);
+            assert!(
+                standing[&ants[0].id].replaced(),
+                "{:?}",
+                standing[&ants[0].id]
+            );
+            assert_eq!(standing[&ants[1].id].state, "current");
+            // the unchanged member gets nothing
+            let synthmorph = rows::versions(registry.store(), "registration-synthmorph").unwrap();
+            assert_eq!(synthmorph.len(), 1);
+            // the person's version is untouched, and nothing goes over it
+            let robust = rows::versions(registry.store(), "registration-robust").unwrap();
+            assert_eq!(robust.len(), 2);
+            assert_eq!(robust[1].id, person["id"].as_i64().unwrap());
+            assert_eq!(robust[1].origin, None);
+            // the family is the shipped one, its members moved with it
+            let shipped = family::parse(super::SHIPPED_FAMILY).unwrap();
+            let s = super::get(registry.store(), "registration")
+                .unwrap()
+                .unwrap();
+            assert_eq!(s.digest, shipped.digest());
+            assert_eq!(s.members["ants"], ants[1].id);
+            assert_eq!(s.members["synthmorph"], ids["synthmorph"]);
+            assert_eq!(s.members["robust"], ids["robust"]);
+            s.members_exist(registry.store()).unwrap();
+
+            // a second start adds nothing and says nothing of the family
+            let again = super::seed_shipped(&mut registry).unwrap();
+            assert!(
+                again.seeded.is_empty() && again.refreshed.is_empty(),
+                "{again:?}"
+            );
+            let line = crate::starter::at_start(&mut registry);
+            assert!(!line.contains("registration family"), "{line}");
+            for (name, n) in [
+                ("registration-ants", 2),
+                ("registration-synthmorph", 1),
+                ("registration-robust", 2),
+            ] {
+                assert_eq!(
+                    rows::versions(registry.store(), name).unwrap().len(),
+                    n,
+                    "{name}"
+                );
+            }
+        }
+    }
+
+    /// Each changed member of the engine's family at older digests gets
+    /// its shipped pair as the next version, and a family a person added
+    /// is left as it is. Both backends.
+    #[test]
+    fn every_changed_member_moves_and_a_person_s_family_stays() {
+        use nils_registry::pipeline::{self as rows, STARTER};
+        for postgres in [false, true] {
+            for engine_s in [true, false] {
+                let name = if engine_s {
+                    "nils_family_refresh_all"
+                } else {
+                    "nils_family_refresh_person"
+                };
+                let Some((mut registry, _dir)) = registry_on(postgres, name) else {
+                    continue;
+                };
+                let old_family = family::parse(&super::SHIPPED_FAMILY.replacen(
+                    "version: \"1.0\"",
+                    "version: \"0.9\"",
+                    1,
+                ))
+                .unwrap();
+                let mut ids = std::collections::BTreeMap::new();
+                for (m, d, p) in super::SHIPPED_MEMBERS {
+                    let (d, p) = pair_before_its_fix(d, p);
+                    let v = crate::pipelines::add_descriptor(&mut registry, &d, Some(&p))
+                        .unwrap_or_else(|e| panic!("{m}: {}", e.message));
+                    let id = v["id"].as_i64().unwrap();
+                    if engine_s {
+                        rows::set_origin(registry.store(), id, STARTER).unwrap();
+                    }
+                    ids.insert(m.to_string(), id);
+                }
+                assert!(
+                    super::keep(&mut registry, &old_family, &ids, None)
+                        .unwrap_or_else(|e| panic!("{}", e.message))
+                );
+                let done = super::seed_shipped(&mut registry).unwrap();
+                assert!(done.seeded.is_empty());
+                let labels: Vec<&str> = done
+                    .refreshed
+                    .iter()
+                    .filter_map(|a| a["label"].as_str())
+                    .collect();
+                let s = super::get(registry.store(), "registration")
+                    .unwrap()
+                    .unwrap();
+                if engine_s {
+                    assert_eq!(
+                        labels,
+                        [
+                            "registration-ants@2",
+                            "registration-robust@2",
+                            "registration-synthmorph@2"
+                        ],
+                        "{done:?}"
+                    );
+                    assert_eq!(
+                        s.digest,
+                        family::parse(super::SHIPPED_FAMILY).unwrap().digest()
+                    );
+                    for (m, id) in &s.members {
+                        let p = rows::get(registry.store(), *id).unwrap().unwrap();
+                        assert_eq!(p.version, 2, "{m}");
+                        let versions = rows::versions(registry.store(), &p.name).unwrap();
+                        assert!(
+                            crate::versions::of_versions(&versions)[&ids[m]].replaced(),
+                            "{m}"
+                        );
+                    }
+                } else {
+                    assert!(labels.is_empty(), "{done:?}");
+                    assert_eq!(s.digest, old_family.digest());
+                    assert_eq!(s.members, ids);
+                }
+                assert!(
+                    super::seed_shipped(&mut registry)
+                        .unwrap()
+                        .refreshed
+                        .is_empty()
+                );
+            }
+        }
     }
 }
