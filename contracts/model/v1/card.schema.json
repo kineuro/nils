@@ -95,7 +95,7 @@
       "properties": {
         "label_set": {
           "$ref": "#/$defs/digest",
-          "description": "The digest of the label set the model was fitted on (labels.tsv, record 42 S7): one the registry wrote, or one registered from outside the engine with its rows keyed by DICOM identity (record 55 E6), and none holding items of a sealed certification sample, or the registration is refused (record 40 R3)"
+          "description": "The digest of the label set the model was fitted on (labels.tsv, record 42 S7): one the registry wrote, or one registered from outside the engine with its rows keyed by DICOM identity (record 55 E6), and none holding items of a sealed certification sample, or the registration is refused (record 40 R3). Since 2026-10-30 a set the registry does not hold is a foreign claim: the model registers with the digest as written, marked as trained on a set held at the training site"
         },
         "name": { "type": "string" },
         "rows": { "type": "integer", "minimum": 0 },

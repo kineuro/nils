@@ -1437,6 +1437,12 @@ fn build_registry() -> Vec<Table> {
                 col("review_item", Type::Int),
                 // the job that fitted it, when a job did
                 col("job_id", Type::Int),
+                // Whether the label set `trained_on` names is held at the
+                // training site, not in this registry (a foreign claim,
+                // 2026-10-30): the digest is kept as the card wrote it and
+                // nothing is checked against the set. Null on a row from
+                // before, which was registered on a set this registry holds.
+                col("trained_on_foreign", Type::Bool),
             ],
         )
         .unique(&["digest"])

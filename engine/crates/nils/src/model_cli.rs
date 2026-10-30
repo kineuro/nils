@@ -451,6 +451,14 @@ fn registry_command(home: &Home, cmd: RegistryCommand) -> Result<(), Exit> {
                 print_json(&m.to_json());
             } else {
                 println!("registered {}", line(&m));
+                if m.trained_on_foreign
+                    && let Some(t) = m.trained_on_words()
+                {
+                    println!("  trained on  {t}");
+                    println!(
+                        "  seals       not checked: the set is not in this registry, so its rows were not checked against the samples sealed here"
+                    );
+                }
             }
             Ok(())
         }
@@ -719,7 +727,7 @@ fn registry_command(home: &Home, cmd: RegistryCommand) -> Result<(), Exit> {
             if let Some(e) = m.encoder_model_id {
                 println!("  encoder     model {e}");
             }
-            if let Some(t) = &m.trained_on {
+            if let Some(t) = m.trained_on_words() {
                 println!("  trained on  {t}");
             }
             match m.missing().as_slice() {

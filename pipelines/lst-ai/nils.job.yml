@@ -58,11 +58,12 @@
 # with one line of HD-BET's paths.py naming that folder, whatever the
 # account's home is. The command line below is what runs in it.
 #
-# The pack beside this descriptor (record 57 P11, Wave 7b P1) offers the
-# denormal flush as a switch, off until one same-conversion repeat on a
-# server says whether it changes the lesions (Wave 7b, section 18); the
-# knob flush_denormals carries it into the unit through a sitecustomize
-# module every Python process of the container imports.
+# The pack beside this descriptor (record 57 P11, Wave 7b P1) turns the
+# denormal flush on by default and keeps it a switch a site can turn off
+# (Wave 7b, section 18): a same-conversion repeat on 2026-10-30 found the
+# masks' Dice within the run-to-run noise of unflushed runs. The knob
+# flush_denormals carries it into the unit through a sitecustomize module
+# every Python process of the container imports.
 #
 # Run under job contract v1's conditions (docker; an account with no passwd
 # entry and no home, on a read-only root; no network; /input read-only,
@@ -109,7 +110,7 @@ inputs:
   - id: flush_denormals
     name: Flush denormal floats
     type: Flag
-    description: "Have PyTorch flush denormal floats to zero (torch.set_flush_denormal) in every Python process of the unit, through a sitecustomize module on PYTHONPATH: HD-BET's forward pass fell from over 18 minutes to 27 seconds with it on one Intel CPU. Off until one same-conversion repeat decides whether it changes the lesions (Wave 7b, section 18); the pack's switch sets it."
+    description: "Have PyTorch flush denormal floats to zero (torch.set_flush_denormal) in every Python process of the unit, through a sitecustomize module on PYTHONPATH: HD-BET's forward pass fell from over 18 minutes to 27 seconds with it on one Intel CPU. The pack turns it on by default, since a same-conversion repeat on 2026-10-30 found the masks' Dice within the run-to-run noise of unflushed runs and the speed effect is on Intel CPUs only; the descriptor alone leaves it off."
     value-key: "[FLUSH]"
     command-line-flag: "--flush-denormals"
     default-value: false
@@ -149,7 +150,7 @@ x-nils:
   analysis-level: session
   # No version list: every earlier version of the name in a catalog.
   replaces:
-    why: "It takes the pack's switch for flushing denormal floats (off by default, decided by one same-conversion repeat), which the earlier versions could not."
+    why: "It takes the pack's switch for flushing denormal floats (on by default, decided by one same-conversion repeat), which the earlier versions could not."
   input:
     layout: bids
     roles: [t1w, flair]

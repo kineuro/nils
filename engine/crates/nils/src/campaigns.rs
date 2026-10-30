@@ -745,6 +745,18 @@ pub(crate) fn route(
                 if let Some(vocabulary) = vocabulary_of(&c.question, pack.as_deref()) {
                     v["question"]["vocabulary"] = vocabulary;
                 }
+                // 7b: the other names an answer may give each value by,
+                // an earlier prompt's among them, to the value
+                if let (Some(pack), "axes") =
+                    (pack.as_deref(), c.question["kind"].as_str().unwrap_or(""))
+                {
+                    let derived = strings_of(&c.question["derive"]);
+                    let asked: Vec<String> = strings_of(&c.question["axes"])
+                        .into_iter()
+                        .filter(|a| !derived.contains(a))
+                        .collect();
+                    v["question"]["earlier_names"] = nils_pack::legal::earlier_names(pack, &asked);
+                }
                 if plain(caller) {
                     let free = c.question["kind"] == "free";
                     for it in v["items"].as_array_mut().into_iter().flatten() {
@@ -1532,6 +1544,17 @@ pub(crate) fn route(
                         .map_err(|e| Reply::error(500, e.to_string()))?;
                 doc["private"] = Value::Object(private);
                 doc["private_withheld"] = json!(withheld);
+                // 7b: an audit's raters read the packet certificate 2's
+                // check read, so the stack's fingerprint values and the
+                // session's series come with the header (header text only)
+                if nils_registry::blind::purpose(registry.store(), c.id)? == "audit"
+                    && let Some((fingerprint, session)) =
+                        crate::file_header::packet(registry.store(), stack, !plain(caller))
+                            .map_err(|e| Reply::error(500, e.to_string()))?
+                {
+                    doc["fingerprint"] = Value::Object(fingerprint);
+                    doc["session"] = json!(session);
+                }
                 // record 48, after the first gold campaign: a stored header
                 // does not change, so the reader keeps it while it reads
                 let mut r = Reply::ok(doc);

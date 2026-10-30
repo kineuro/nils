@@ -32,6 +32,7 @@ mod anchored;
 mod ask_cli;
 mod ask_doors;
 mod assist_cli;
+mod audit_cli;
 mod backup;
 mod batches;
 mod browse;
@@ -53,6 +54,7 @@ mod explain;
 mod failures;
 mod file_header;
 mod folders;
+mod funnel;
 mod gate;
 mod grants;
 mod handover_doors;
@@ -369,6 +371,8 @@ enum Command {
     },
     /// Provenance (record 57 P8, record 58 P5): which steps ran on a subject, a session or a stack, with which keys and results, and each result's curation state
     Provenance(provenance::ProvenanceArgs),
+    /// The yield funnel of a selection through a pipeline or family: subjects, sessions and stacks left after each filter and each hard need, by year, base and 2D or 3D, and the error-budget line (record 58 P4)
+    Funnel(funnel::FunnelArgs),
     /// The software place (record 57 P5): the tools installed by digest and the installs a site registers, verified, with their licences as recorded acceptances
     Software {
         #[command(subcommand)]
@@ -896,6 +900,23 @@ enum AuditCommand {
         limit: usize,
         #[arg(long)]
         json: bool,
+    },
+    /// The sealed protocol (record 58 P6): a seeded draw of accepted stacks,
+    /// the verify campaign that reads them against the accepted answer, and
+    /// each drawn stack's header as a text packet named by its place in the
+    /// draw, with MANIFEST.json (the seed and the frame's digest)
+    Draw(Box<audit_cli::DrawArgs>),
+    /// The draw's counts for the label-quality passport: frame, drawn, read,
+    /// settled, wrong with its exact one-sided 95 % bound, and the readers'
+    /// disagreements, by axis, vendor and acquisition year; a cell under 5
+    /// stacks is held back (record 14). No codes, paths or header text
+    Export {
+        /// The draw (default: the newest draw by count)
+        #[arg(long, value_name = "ID")]
+        draw: Option<i64>,
+        /// Where the JSON is written
+        #[arg(long, value_name = "FILE")]
+        out: PathBuf,
     },
 }
 
@@ -2424,6 +2445,7 @@ fn main() -> ExitCode {
         Command::Software { command } => software::command(&home, command),
         Command::Workflow { command } => workflows::command(&home, command),
         Command::Provenance(args) => provenance::command(&home, args),
+        Command::Funnel(args) => funnel::command(&home, args),
         Command::Login(args) => login_command(args),
         Command::Logout => {
             if login::logout() {
@@ -2449,6 +2471,8 @@ fn main() -> ExitCode {
             limit,
             json,
         }) => audit_list(&home, principal, action, since, limit, json),
+        Command::Audit(AuditCommand::Draw(args)) => audit_cli::draw(&home, *args),
+        Command::Audit(AuditCommand::Export { draw, out }) => audit_cli::export(&home, draw, &out),
         Command::Pick { command } => pick_command(&home, command),
         Command::Session { command } => session_command(&home, command),
         Command::Synth(args) => synth(&home, args),

@@ -1864,13 +1864,15 @@ fn a_sealed_sample_seals_the_sets_that_hold_it_and_trains_nothing() {
                    "digest": digest, "task": "axis:body_part",
                    "trained_on": {"label_set": format!("sha256:{trained}")}})
         };
-        let e = nils_registry::model::register(
+        // a set no registry here holds is a foreign claim: the model
+        // registers, held at the training site
+        let foreign = nils_registry::model::register(
             reg,
             &card(&format!("sha256:{}", "1".repeat(64)), &"c".repeat(64)),
             "op@lab",
         )
-        .unwrap_err();
-        assert!(e.to_string().contains("no label set"), "{name}: {e}");
+        .unwrap();
+        assert_eq!(foreign.trained_on_held(), Some("training_site"), "{name}");
         let e = nils_registry::model::register(
             reg,
             &card(&format!("sha256:{}", "2".repeat(64)), &a),

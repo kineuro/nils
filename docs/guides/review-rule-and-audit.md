@@ -314,13 +314,24 @@ raters alone decides nothing.
    POST /api/audit/draws  {"count": 150, "seed": "<registered seed>", "raters": ["<rater-a>", "<rater-b>"]}
    ```
 
-   Give `"since": "2026-11-01T00:00:00Z"` to start the frame at a time. The
-   same seed over the same frame draws the same stacks in any registry; the
-   draw keeps its frame's size and digest and each stack's accepted answer,
+   Give `"since": "2026-11-01T00:00:00Z"` to start the frame at a time; the
+   stacks accepted at that time or after it are framed. The same seed over the
+   same frame draws the same stacks in any registry; the draw keeps its frame's
+   size and digest and each stack's accepted answer (in the pack's value names),
    vendor and acquisition year.
 
+   A second draw the same day finds nothing by default, since the default
+   starts strictly after the last draw. The refusal names that draw's time:
+   give it as `since` to take the stacks accepted at that second. A draw that
+   continues the round's draws never frames a stack an earlier draw by count
+   holds, so nothing is drawn twice.
+
 2. The two raters read each item blind through the campaign doors, as in
-   section 6. Their campaign is never adjudicated.
+   section 6. Their campaign is never adjudicated. An item's header door gives
+   the packet the raters' check read: the header's `fields`, the stack's
+   `fingerprint` values and the study's `session` list. The campaign door's
+   `question.values` and `question.vocabulary` (with each value's `meaning`)
+   are the words a rater answers in.
 
 3. Once both raters have answered every stack, make the settle:
 
@@ -332,7 +343,8 @@ raters alone decides nothing.
    accepted answer and a seeded 10 % of the stacks where both agree with it. The
    person sees the accepted answer filled in, and where a rater differs, the
    accepted and the differing answer as A and B, unlabelled. Planted values
-   guard against accepting without looking.
+   guard against accepting without looking. Asked again, the door answers the
+   settle the draw has, with its counts and `"again": true`.
 
 4. The person reads the settle campaign, then close it and grade the draw:
 
@@ -366,6 +378,52 @@ opens it once; a second call answers the same campaign:
 POST /api/audit/draws/<id>/rule-review {"reviewers": ["<principal>"]}
 ```
 
+## 8. Run the sealed protocol on your own install
+
+A site checks its own labels and returns counts only: a seeded draw of
+accepted stacks, read by your people in verify mode against the accepted
+answer, exported with a minimum cell of 5 stacks.
+
+1. Register the seed, then draw at the keyboard of the engine's host:
+
+   ```
+   nils audit draw --seed <registered seed> --count 150 --packets <new empty dir> --readers <person>,<person>
+   ```
+
+   Give `--since 2026-11-01T00:00:00Z` to start the frame at a time, and
+   `--readers-per-item 2` for a disagreement count. The same seed over the
+   same frame draws the same stacks in the same order. The command makes a
+   verify campaign over every drawn stack, the accepted answer filled in and
+   planted values from the seed, and prints its id.
+
+2. Read the packets if you want the header as text: one file per stack,
+   `0001.txt` onward in the order drawn, and `MANIFEST.json` with the seed and
+   the frame's digest. A packet holds the stored header less what names a
+   person; never a subject code, a path or anything NILS said of the stack.
+
+3. Your people read the verify campaign on the desk's verify screen. Close it
+   when they are done:
+
+   ```
+   POST /api/campaigns/<campaign>/close
+   ```
+
+4. Export the counts:
+
+   ```
+   nils audit export --draw <draw> --out passport.json
+   ```
+
+   The file holds the frame, drawn, read and settled counts, the wrong count
+   and its exact one-sided 95 % bound, the readers' disagreements, by axis,
+   by vendor and by acquisition year.
+
+> **Warning: a cell under 5 stacks is held back.** A vendor or year with 1 to 4
+> drawn stacks shows no counts (`held_back: true`), and where it is the only
+> one held, the next smallest cell of its list is held with it so that no
+> total gives it away (record 14). The export names no stack, subject code,
+> path or header text.
+
 ## Reference
 
 | Door | Grant |
@@ -392,3 +450,8 @@ POST /api/audit/draws/<id>/rule-review {"reviewers": ["<principal>"]}
 | `GET /api/audit/draws/pooled` | review:see or campaigns:see |
 | `GET /api/audit/draws/{id}/rule-review` | review:see or campaigns:see |
 | `POST /api/audit/draws/{id}/rule-review` | review:work and campaigns:work |
+
+| Command | What it does |
+|---|---|
+| `nils audit draw --seed S --count N --packets DIR --readers W [--since T] [--axes A,B] [--readers-per-item N]`, or `--raters W` in place of `--readers` | the seeded draw, its verify campaign (or with `--raters`, the raters' campaign of section 7) and the header packets |
+| `nils audit export [--draw ID] --out FILE` | the draw's counts under the minimum cell of 5 (default: the newest draw by count) |

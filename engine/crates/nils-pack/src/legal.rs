@@ -479,7 +479,9 @@ pub fn broken(
 /// Record 48, the reader's search: every name a person may know each value
 /// of the asked axes by, so typing a vendor's name finds the value. Per axis,
 /// per value the question asks: its `label` where it differs from the
-/// identity, its `description` where the pack gives one, its `terms` (the
+/// identity, its `description` where the pack gives one, its `meaning`
+/// (one line for every value: the description, else its terms, else its
+/// label, with `meaning_from` saying which), its `terms` (the
 /// pack's display synonyms) and its `keywords` (the words the pack's rules
 /// read for it, after any overlay, less the words only a route's rule
 /// reads as its cue for a whole combination). Generic vocabulary of the pack, the same
@@ -526,9 +528,71 @@ pub fn vocabulary(pack: &Pack, values: &BTreeMap<String, Vec<String>>) -> Value 
             if let Some(d) = &v.description {
                 e["description"] = json!(d);
             }
+            // 7b: one line a reader's prompt can be built from, for every
+            // value: its description where the pack gives one, else the
+            // names it goes by, else its label
+            let (meaning, from) = match &v.description {
+                Some(d) => (d.clone(), "description"),
+                None if !v.terms.is_empty() => (v.terms.join(", "), "terms"),
+                None => (v.label.clone(), "label"),
+            };
+            e["meaning"] = json!(meaning);
+            e["meaning_from"] = json!(from);
             per.insert(v.id.clone(), e);
         }
         out.insert(name.clone(), Value::Object(per));
+    }
+    Value::Object(out)
+}
+
+/// 7b, the audit's rehearsal: every other name an answer may give a value
+/// of each asked axis by, to the identity the question takes, so a reader
+/// whose prompt was written under an earlier vocabulary is translated, not
+/// guessed: a value's former identities (a rename), its label and the
+/// form rows store where they differ from the identity (`SPACE` is
+/// `3D-TSE`, `HASTE` is `SS-TSE`), and `none`, the word earlier prompts
+/// gave for "this axis has no value", to null, which is how an answer says
+/// it (on a multi-valued axis an empty list says it too). A name two
+/// values share is left out, and so is `none` where a value is named so.
+/// The identities themselves are not listed: they are the question's
+/// values.
+pub fn earlier_names(pack: &Pack, axes: &[String]) -> Value {
+    let mut out = serde_json::Map::new();
+    for name in axes {
+        let Ok((_, a)) = axis(pack, name) else {
+            continue;
+        };
+        let mut seen: BTreeMap<String, Option<String>> = BTreeMap::new();
+        let mut shared: Vec<String> = Vec::new();
+        for (i, v) in a.values.iter().enumerate() {
+            let mut names: Vec<String> = v.aliases.clone();
+            names.push(v.label.clone());
+            names.push(a.stored(i).to_string());
+            for n in names {
+                if n.is_empty() || a.values.iter().any(|x| x.id == n) {
+                    continue;
+                }
+                match seen.get(&n) {
+                    Some(Some(id)) if id != &v.id => shared.push(n),
+                    Some(_) => {}
+                    None => {
+                        seen.insert(n, Some(v.id.clone()));
+                    }
+                }
+            }
+        }
+        for n in shared {
+            seen.remove(&n);
+        }
+        let named_none = a.values.iter().enumerate().any(|(i, v)| {
+            v.id.eq_ignore_ascii_case("none")
+                || v.label.eq_ignore_ascii_case("none")
+                || a.stored(i).eq_ignore_ascii_case("none")
+        });
+        if !named_none {
+            seen.insert("none".into(), None);
+        }
+        out.insert(name.clone(), json!(seen));
     }
     Value::Object(out)
 }
@@ -578,6 +642,57 @@ mod tests {
         let c = constraints(&pack, &["base".to_string()], &values).unwrap();
         assert_eq!(c["values"]["base"], json!(["T2starw"]));
         assert!(constraints(&pack, &["colour".to_string()], &BTreeMap::new()).is_err());
+    }
+
+    /// 7b: the names an earlier vocabulary used read as the values.
+    #[test]
+    fn earlier_names_translate_to_the_values() {
+        let pack = mri();
+        let axes: Vec<String> = ["base", "technique", "modifier"]
+            .iter()
+            .map(|a| a.to_string())
+            .collect();
+        let e = earlier_names(&pack, &axes);
+        assert_eq!(e["base"]["none"], Value::Null);
+        assert!(e["base"].get("none").is_some(), "{e}");
+        assert_eq!(e["base"]["T2*w"], "T2starw");
+        assert_eq!(e["technique"]["SPACE"], "3D-TSE");
+        assert_eq!(e["technique"]["HASTE"], "SS-TSE");
+        assert_eq!(e["technique"]["SSTSE"], "SS-TSE");
+        // an identity is the question's own word, never listed here
+        assert!(e["technique"].get("SS-TSE").is_none(), "{e}");
+        assert_eq!(e["modifier"]["none"], Value::Null);
+    }
+
+    /// 7b: every value of every axis says a one-line meaning, so a reader's
+    /// prompt can be built from the served question alone.
+    #[test]
+    fn every_value_says_its_meaning() {
+        let pack = mri();
+        let mut values = BTreeMap::new();
+        for a in ["base", "technique", "modifier", "construct", "provenance"] {
+            let axis = pack.axes.iter().find(|x| x.name == a).unwrap();
+            values.insert(
+                a.to_string(),
+                axis.values.iter().map(|v| v.id.clone()).collect::<Vec<_>>(),
+            );
+        }
+        let v = vocabulary(&pack, &values);
+        for (axis, listed) in &values {
+            for id in listed {
+                let m = v[axis][id]["meaning"].as_str().unwrap_or_default();
+                assert!(!m.is_empty(), "{axis}.{id}: {}", v[axis][id]);
+            }
+        }
+        // the values the rehearsal's prompt lacked
+        assert_eq!(v["base"]["ASL"]["meaning_from"], "description");
+        assert!(v["base"]["Unknown"]["meaning"].is_string());
+        assert_eq!(
+            v["construct"]["DisplayComposite"]["meaning_from"],
+            "description"
+        );
+        assert_eq!(v["base"]["T2w"]["meaning"], "T2, T2 weighted");
+        assert_eq!(v["base"]["T2w"]["meaning_from"], "terms");
     }
 
     #[test]
