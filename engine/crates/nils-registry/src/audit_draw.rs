@@ -871,6 +871,29 @@ pub fn grade(
     settle: Value,
     who: &str,
 ) -> Result<Value, StoreError> {
+    let doc = grade_of(store, draw, reads, campaign_closed, settle)?;
+    store.update_by_id(
+        table("audit_draw"),
+        &[
+            ("grade", Param::from(doc.to_string())),
+            ("graded_at", Param::from(now_iso().as_str())),
+            ("graded_by", Param::from(who)),
+        ],
+        "id",
+        draw.id,
+    )?;
+    Ok(doc)
+}
+
+/// The grade [`grade`] keeps, computed and not kept: what `nils audit
+/// export` (record 58 P6) reads a draw by without writing to it.
+pub fn grade_of(
+    store: &mut Store,
+    draw: &Draw,
+    reads: &[Read],
+    campaign_closed: bool,
+    settle: Value,
+) -> Result<Value, StoreError> {
     let drawn = stacks(store, draw.id)?;
     let by_stack: BTreeMap<i64, &Read> = reads.iter().map(|r| (r.stack_id, r)).collect();
     let (mut n, mut k) = (0u64, 0u64);
@@ -928,16 +951,6 @@ pub fn grade(
         "settle": settle,
         "trains": false,
     });
-    store.update_by_id(
-        table("audit_draw"),
-        &[
-            ("grade", Param::from(doc.to_string())),
-            ("graded_at", Param::from(now_iso().as_str())),
-            ("graded_by", Param::from(who)),
-        ],
-        "id",
-        draw.id,
-    )?;
     Ok(doc)
 }
 
