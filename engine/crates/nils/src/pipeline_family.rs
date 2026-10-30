@@ -1101,7 +1101,10 @@ mod tests {
         let r = routed(&f, &alone, &within);
         assert_eq!(r.status, Status::Skipped, "{r:?}");
         assert!(
-            r.words.as_deref().unwrap().contains("the T2w is not of the brain"),
+            r.words
+                .as_deref()
+                .unwrap()
+                .contains("the T2w is not of the brain"),
             "{r:?}"
         );
         alone.set("t2w.body_part", Val::Unknown);
@@ -1290,10 +1293,24 @@ mod tests {
             ("ants", "inverse_consistency_mm", 0.012, 0.06, "flag", true),
             ("ants", "alignment_dice", 0.985, 0.834, "flag", true),
             ("synthmorph", "rigid_flip", 0.0, 1.0, "fail", false),
-            ("synthmorph", "rigid_translation_mm", 1.93, 18.0, "flag", true),
+            (
+                "synthmorph",
+                "rigid_translation_mm",
+                1.93,
+                18.0,
+                "flag",
+                true,
+            ),
             ("synthmorph", "rigid_rotation_deg", 2.4, 10.5, "flag", true),
             ("synthmorph", "folding_pct", 0.0, 0.02, "flag", true),
-            ("synthmorph", "inverse_consistency_mm", 0.05, 0.2, "flag", false),
+            (
+                "synthmorph",
+                "inverse_consistency_mm",
+                0.05,
+                0.2,
+                "flag",
+                false,
+            ),
             ("robust", "rigid_flip", 0.0, 1.0, "fail", false),
             ("robust", "rigid_translation_mm", 17.5, 51.0, "flag", false),
             ("robust", "rigid_rotation_deg", 6.5, 31.0, "flag", false),
@@ -1346,7 +1363,10 @@ mod tests {
             } else {
                 assert!(det.iter().any(|c| !c.holds(0.998)), "{k}");
                 assert!(det.iter().any(|c| !c.holds(1.002)), "{k}");
-                assert!(det.iter().all(|c| c.source.as_deref() == Some(PILOT)), "{k}");
+                assert!(
+                    det.iter().all(|c| c.source.as_deref() == Some(PILOT)),
+                    "{k}"
+                );
             }
             // the FreeSurfer members' label Dice is a cohort check within
             // the stratum
