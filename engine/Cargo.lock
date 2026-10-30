@@ -1745,6 +1745,7 @@ dependencies = [
  "nils-digest",
  "nils-pack",
  "nils-pipeline",
+ "nils-proc",
  "nils-pseudonymize",
  "nils-registry",
  "nils-release",
@@ -1863,10 +1864,18 @@ dependencies = [
  "glob",
  "hex",
  "libc",
+ "nils-proc",
  "ring",
  "serde",
  "serde-saphyr",
  "serde_json",
+]
+
+[[package]]
+name = "nils-proc"
+version = "1.0.0-beta.3"
+dependencies = [
+ "libc",
 ]
 
 [[package]]
@@ -1929,6 +1938,7 @@ dependencies = [
  "nils-dicom",
  "nils-digest",
  "nils-pack",
+ "nils-proc",
  "nils-registry",
  "nils-session",
  "serde",

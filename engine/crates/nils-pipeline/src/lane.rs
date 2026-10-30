@@ -18,7 +18,7 @@
 
 use std::path::Path;
 use std::process::{Command, Stdio};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 /// The default budget of the lane (record 49 R6).
 pub const DEFAULT_CORES: u32 = 48;
@@ -207,18 +207,14 @@ fn gpu_memory_mib(smi: &Path, card: u32, field: &str) -> Result<u64, String> {
         .stderr(Stdio::null())
         .spawn()
         .map_err(|e| format!("nvidia-smi: {e}"))?;
-    let started = Instant::now();
-    loop {
-        match child.try_wait() {
-            Ok(Some(_)) => break,
-            Ok(None) if started.elapsed() > Duration::from_secs(20) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err("nvidia-smi did not answer within 20 s".into());
-            }
-            Ok(None) => std::thread::sleep(Duration::from_millis(20)),
-            Err(e) => return Err(format!("nvidia-smi: {e}")),
-        }
+    match nils_proc::wait_within(
+        &mut child,
+        Duration::from_millis(20),
+        Duration::from_secs(20),
+    ) {
+        Ok(Some(_)) => {}
+        Ok(None) => return Err("nvidia-smi did not answer within 20 s".into()),
+        Err(e) => return Err(format!("nvidia-smi: {e}")),
     }
     let out = child
         .wait_with_output()

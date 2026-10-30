@@ -30,7 +30,7 @@
 
 use std::io::Read as _;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use nils_pipeline::descriptor::{self, Descriptor};
 use nils_pipeline::runtime;
@@ -751,19 +751,8 @@ fn run_logged(
     let mut child = cmd
         .spawn()
         .map_err(|e| format!("{} could not start: {e}", program.display()))?;
-    let started = Instant::now();
-    let status = loop {
-        match child.try_wait() {
-            Ok(Some(status)) => break Some(status),
-            Ok(None) if started.elapsed() > cap => {
-                let _ = child.kill();
-                let _ = child.wait();
-                break None;
-            }
-            Ok(None) => std::thread::sleep(Duration::from_millis(50)),
-            Err(e) => return Err(format!("{}: {e}", program.display())),
-        }
-    };
+    let status = nils_proc::wait_within(&mut child, Duration::from_millis(50), cap)
+        .map_err(|e| format!("{}: {e}", program.display()))?;
     let tail = log_tail(log);
     match status {
         Some(s) => Ok((s.success(), tail)),

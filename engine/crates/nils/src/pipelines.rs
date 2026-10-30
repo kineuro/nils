@@ -3912,20 +3912,25 @@ fn wait_beating(
     job_id: i64,
     progress: &Value,
 ) -> Result<(std::process::ExitStatus, bool), String> {
-    let mut beaten = Instant::now();
-    loop {
-        if let Some(status) = child.try_wait().map_err(|e| e.to_string())? {
-            return Ok((status, false));
+    let waited = nils_proc::wait_with_tick(
+        child,
+        Duration::from_millis(100),
+        Duration::from_secs(5),
+        &mut || {
+            matches!(
+                job::beat(store, job_id, Some(progress)),
+                Ok(job::Asked::Cancel)
+            )
+        },
+    )
+    .map_err(|e| e.to_string())?;
+    match waited {
+        Some(status) => Ok((status, false)),
+        None => {
+            let _ = child.kill();
+            let status = child.wait().map_err(|e| e.to_string())?;
+            Ok((status, true))
         }
-        if beaten.elapsed() >= Duration::from_secs(5) {
-            beaten = Instant::now();
-            if let Ok(job::Asked::Cancel) = job::beat(store, job_id, Some(progress)) {
-                let _ = child.kill();
-                let status = child.wait().map_err(|e| e.to_string())?;
-                return Ok((status, true));
-            }
-        }
-        std::thread::sleep(Duration::from_millis(100));
     }
 }
 

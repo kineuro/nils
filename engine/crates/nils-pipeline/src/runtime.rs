@@ -20,7 +20,7 @@
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 /// The runtimes, in the order they are looked for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -385,18 +385,10 @@ fn answer(program: &Path, args: &[&str], cap: Duration) -> Said {
     else {
         return Said::Failed;
     };
-    let started = Instant::now();
-    loop {
-        match child.try_wait() {
-            Ok(Some(_)) => break,
-            Ok(None) if started.elapsed() > cap => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Said::TimedOut;
-            }
-            Ok(None) => std::thread::sleep(Duration::from_millis(20)),
-            Err(_) => return Said::Failed,
-        }
+    match nils_proc::wait_within(&mut child, Duration::from_millis(20), cap) {
+        Ok(Some(_)) => {}
+        Ok(None) => return Said::TimedOut,
+        Err(_) => return Said::Failed,
     }
     let Ok(out) = child.wait_with_output() else {
         return Said::Failed;
@@ -604,19 +596,10 @@ pub fn image_here(cli: &Cli, image: &str, cap: Duration) -> Option<bool> {
         .stderr(Stdio::null())
         .spawn()
         .ok()?;
-    let started = Instant::now();
-    loop {
-        match child.try_wait() {
-            Ok(Some(status)) => return Some(status.success()),
-            Ok(None) if started.elapsed() > cap => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return None;
-            }
-            Ok(None) => std::thread::sleep(Duration::from_millis(20)),
-            Err(_) => return None,
-        }
-    }
+    nils_proc::wait_within(&mut child, Duration::from_millis(20), cap)
+        .ok()
+        .flatten()
+        .map(|status| status.success())
 }
 
 /// Whether an apptainer version runs `--net --network none` for an
@@ -857,26 +840,24 @@ pub fn run(
     tick: &mut dyn FnMut() -> bool,
 ) -> std::io::Result<Ended> {
     let mut child = spawn(rt, inv, log)?;
-    let mut ticked = Instant::now();
-    loop {
-        if let Some(status) = child.try_wait()? {
-            return Ok(Ended {
+    match nils_proc::wait_with_tick(
+        &mut child,
+        Duration::from_millis(100),
+        Duration::from_secs(1),
+        &mut || !tick(),
+    )? {
+        Some(status) => Ok(Ended {
+            code: status.code(),
+            stopped: false,
+        }),
+        None => {
+            rt.stop(inv);
+            let status = kill(&mut child)?;
+            Ok(Ended {
                 code: status.code(),
-                stopped: false,
-            });
+                stopped: true,
+            })
         }
-        if ticked.elapsed() >= Duration::from_secs(1) {
-            ticked = Instant::now();
-            if !tick() {
-                rt.stop(inv);
-                let status = kill(&mut child)?;
-                return Ok(Ended {
-                    code: status.code(),
-                    stopped: true,
-                });
-            }
-        }
-        std::thread::sleep(Duration::from_millis(100));
     }
 }
 
@@ -915,27 +896,11 @@ pub fn spawn(
 /// Stop a spawned invocation and every process in its group; answers how
 /// it ended.
 pub fn kill(child: &mut std::process::Child) -> std::io::Result<std::process::ExitStatus> {
-    kill_group(child.id());
-    let _ = child.kill();
-    child.wait()
+    nils_proc::end_group(child)
 }
 
 /// Send SIGKILL to the process group a spawned invocation leads.
-pub fn kill_group(leader: u32) {
-    #[cfg(unix)]
-    {
-        let _ = Command::new("kill")
-            .args(["-KILL", "--", &format!("-{leader}")])
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = leader;
-    }
-}
+pub use nils_proc::kill_group;
 
 /// Refuse a mount the runtimes' mount syntax would misread: `--volume
 /// host:container:ro` and apptainer's `--bind` split on `:` and `,`, so a
@@ -1045,6 +1010,7 @@ impl Runtime for Script {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Instant;
 
     fn inv(gpu: bool) -> Invocation {
         Invocation {

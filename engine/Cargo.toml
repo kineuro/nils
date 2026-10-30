@@ -35,6 +35,7 @@ nils-session = { path = "crates/nils-session" }
 nils-ask = { path = "crates/nils-ask" }
 nils-catalog = { path = "crates/nils-catalog" }
 nils-pipeline = { path = "crates/nils-pipeline" }
+nils-proc = { path = "crates/nils-proc" }
 
 blake2 = "0.11"
 bytes = "1"

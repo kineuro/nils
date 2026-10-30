@@ -2995,18 +2995,18 @@ fn llama_devices(server: &Path) -> Result<Vec<String>, String> {
         Err(e) if linux => return Err(format!("{}: {e}", server.display())),
         Err(_) => return Ok(Vec::new()),
     };
-    let started = std::time::Instant::now();
-    let status = loop {
-        match child.try_wait() {
-            Ok(Some(status)) => break status,
-            Ok(None) if started.elapsed() < std::time::Duration::from_secs(10) => {
-                std::thread::sleep(std::time::Duration::from_millis(100));
-            }
-            _ => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Ok(Vec::new());
-            }
+    let status = match nils_proc::wait_within(
+        &mut child,
+        std::time::Duration::from_millis(100),
+        std::time::Duration::from_secs(10),
+    ) {
+        Ok(Some(status)) => status,
+        Ok(None) => return Ok(Vec::new()),
+        // a status that cannot be read: the child is ended all the same
+        Err(_) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Ok(Vec::new());
         }
     };
     let mut said = String::new();

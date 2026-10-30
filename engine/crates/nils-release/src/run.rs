@@ -3586,12 +3586,7 @@ fn place_staged(scratch: &Path, root: &Path, path: &str) -> Result<(), String> {
     if let Some(parent) = to.parent() {
         std::fs::create_dir_all(parent).map_err(|_| "no directory to write into".to_string())?;
     }
-    if std::fs::rename(&from, &to).is_ok() {
-        return Ok(());
-    }
-    std::fs::copy(&from, &to).map_err(|_| "could not be moved into place".to_string())?;
-    std::fs::remove_file(&from).ok();
-    Ok(())
+    nils_proc::rename_or_copy(&from, &to).map_err(|_| "could not be moved into place".to_string())
 }
 
 /// Remove a stack's files, and any directory they leave empty.
@@ -4856,10 +4851,8 @@ fn export_dicom(staged: &[PathBuf], root: &Path, dir: &str) -> Vec<Result<Writte
                 .ok_or_else(|| "a staged slice without a name".to_string())?;
             let relative = PathBuf::from(dir).join(name);
             let target = root.join(&relative);
-            if std::fs::rename(from, &target).is_err() {
-                std::fs::copy(from, &target)
-                    .map_err(|_| "could not be put in the DICOM export".to_string())?;
-            }
+            nils_proc::rename_or_copy(from, &target)
+                .map_err(|_| "could not be put in the DICOM export".to_string())?;
             let bytes =
                 std::fs::read(&target).map_err(|_| "unreadable in the DICOM export".to_string())?;
             Ok(Written {
