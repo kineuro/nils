@@ -2332,7 +2332,7 @@ checks:
             "a T1 the PVS cannot read is skipped without a FLAIR too"
         );
 
-        // LST-AI: both 3D hard; MS and the link soft; the denormal switch
+        // LST-AI: both 3D hard; MS and the link soft; the denormal switch, on by default
         let l = "lst-ai";
         check_case(
             l,
@@ -2355,11 +2355,12 @@ checks:
         check_case(l, &unaligned, &[], Caveat("cannot tell: aligned:flair:t1w"));
         assert_eq!(
             judged(l, &good(), &[]).knobs["flush_denormals"].value,
-            false
+            true,
+            "the flush is on by default since the same-conversion repeat of 2026-10-30"
         );
         assert_eq!(
-            judged(l, &good(), &[("denormal_flush", "on")]).knobs["flush_denormals"].value,
-            true
+            judged(l, &good(), &[("denormal_flush", "off")]).knobs["flush_denormals"].value,
+            false
         );
     }
 
