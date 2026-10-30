@@ -1817,8 +1817,22 @@ pub(crate) fn freeze(
         .map(|s| s.grain)
         .unwrap_or(nils_ask::ast::Grain::Subject);
     let doc = crate::campaigns::freeze_document(name, saved.version, grain, want).map_err(usage)?;
+    freeze_doc(&mut registry, &pack, &doc, how, spec)
+}
+
+/// Freeze an ask document into a handle of its keys, as much of it as
+/// `how` keeps: [`freeze`] past reading the selection, and the yield
+/// funnel's rows (record 58 P4), each the selection's ask with some of its
+/// filters. `spec` names what is frozen in a refusal.
+pub(crate) fn freeze_doc(
+    registry: &mut Registry,
+    pack: &nils_pack::Pack,
+    doc: &serde_json::Value,
+    how: Freeze,
+    spec: &str,
+) -> Result<Frozen, Exit> {
     let ask = parse(&doc.to_string()).map_err(|e| fail(format!("the freezing document: {e}")))?;
-    let catalog = Catalog::build(&mut registry, &pack).map_err(|e| fail(e.to_string()))?;
+    let catalog = Catalog::build(registry, pack).map_err(|e| fail(e.to_string()))?;
     let pack_version = pack.version.to_string();
     let node = job::hostname();
     let who = principal();
@@ -1832,7 +1846,7 @@ pub(crate) fn freeze(
         ..scope()
     };
     let out = run::run(
-        &mut registry,
+        registry,
         Request {
             ask,
             names: &catalog,

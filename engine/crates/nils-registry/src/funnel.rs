@@ -205,7 +205,10 @@ pub fn row_counts(of: &BTreeMap<i64, StackOf>, stacks: &BTreeSet<i64>) -> Value 
         )
     };
     let mut doc = Counts::of(held.iter().copied()).doc();
-    doc["by_year"] = by(&|s| s.year.map_or_else(|| UNKNOWN.to_string(), |y| y.to_string()));
+    doc["by_year"] = by(&|s| {
+        s.year
+            .map_or_else(|| UNKNOWN.to_string(), |y| y.to_string())
+    });
     doc["by_base"] = by(&|s| s.base.clone().unwrap_or_else(|| UNKNOWN.to_string()));
     doc["by_dimension"] = by(&|s| s.dimension.clone().unwrap_or_else(|| UNKNOWN.to_string()));
     doc
@@ -244,13 +247,17 @@ impl Bounds {
 
     /// The certificate asked for, else the newest recorded; none where the
     /// registry records no certificate.
-    pub fn read(store: &mut Store, certificate: Option<i64>) -> Result<Bounds, crate::labels::Error> {
-        let c = match certificate {
-            Some(id) => Some(crate::labels::certificate(store, id)?.ok_or_else(|| {
-                crate::labels::Error::NotFound(format!("no certificate {id}"))
-            })?),
-            None => crate::labels::certificates(store)?.into_iter().next(),
-        };
+    pub fn read(
+        store: &mut Store,
+        certificate: Option<i64>,
+    ) -> Result<Bounds, crate::labels::Error> {
+        let c =
+            match certificate {
+                Some(id) => Some(crate::labels::certificate(store, id)?.ok_or_else(|| {
+                    crate::labels::Error::NotFound(format!("no certificate {id}"))
+                })?),
+                None => crate::labels::certificates(store)?.into_iter().next(),
+            };
         Ok(c.as_ref().map(Bounds::of).unwrap_or_default())
     }
 }
@@ -294,7 +301,9 @@ pub fn budget(bounds: &Bounds, reads: &[Read]) -> Value {
     let at_most = (bounds.stack.is_some() || !bounds.axes.is_empty()) && unbounded.is_empty();
     let n = at_most.then(|| (total - 1e-9).max(0.0).ceil() as u64);
     let words = match (n, bounds.certificate, terms.is_empty()) {
-        (_, _, true) => "the selection filters on no axis, so label error moves no stack".to_string(),
+        (_, _, true) => {
+            "the selection filters on no axis, so label error moves no stack".to_string()
+        }
         (Some(n), _, false) => format!(
             "at most {n} {} misplaced by label error",
             if n == 1 { "stack" } else { "stacks" }

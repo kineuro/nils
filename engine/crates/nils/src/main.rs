@@ -53,6 +53,7 @@ mod explain;
 mod failures;
 mod file_header;
 mod folders;
+mod funnel;
 mod gate;
 mod grants;
 mod handover_doors;
@@ -369,6 +370,8 @@ enum Command {
     },
     /// Provenance (record 57 P8, record 58 P5): which steps ran on a subject, a session or a stack, with which keys and results, and each result's curation state
     Provenance(provenance::ProvenanceArgs),
+    /// The yield funnel of a selection through a pipeline or family: subjects, sessions and stacks left after each filter and each hard need, by year, base and 2D or 3D, and the error-budget line (record 58 P4)
+    Funnel(funnel::FunnelArgs),
     /// The software place (record 57 P5): the tools installed by digest and the installs a site registers, verified, with their licences as recorded acceptances
     Software {
         #[command(subcommand)]
@@ -2424,6 +2427,7 @@ fn main() -> ExitCode {
         Command::Software { command } => software::command(&home, command),
         Command::Workflow { command } => workflows::command(&home, command),
         Command::Provenance(args) => provenance::command(&home, args),
+        Command::Funnel(args) => funnel::command(&home, args),
         Command::Login(args) => login_command(args),
         Command::Logout => {
             if login::logout() {

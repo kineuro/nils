@@ -6,6 +6,8 @@ All notable changes to NILS v1 are recorded here. The format follows [Keep a Cha
 
 ### Added
 
+- The yield funnel of a selection through a pipeline or family (record 58 P4): `nils funnel <selection> <pipeline>` and `GET /api/funnel?selection=<id>&pipeline=<id>` answer the same counts. A row for the stacks the selection starts from, one for each of its filters, one for the stacks in a unit of the run, one for the units with their inputs and one for each hard need of the pack; each counts subjects, sessions and stacks by year, base and 2D or 3D, and what it removed. The last line multiplies the certificate's bound of each axis the selection filtered on (its stack bound where it has none of the axis) by the stacks the filter read: "at most N stacks misplaced by label error". Counts only.
+- A certificate citing its graded run may carry the run's counts per axis (`result.axes`, each `{n, errors}`); the engine works out each axis's bound, which the funnel's last line reads.
 - The registration family is in the starter catalog. When the engine starts and the catalog holds no family named `registration`, it adds the three members (as starters) and then the family, as `nils pipeline add` of the folder does; a family already in the catalog is left as it is.
 
 ### Changed

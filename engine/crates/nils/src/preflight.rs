@@ -1977,6 +1977,124 @@ pub(crate) fn command(home: &Home, args: &crate::pipelines::RunArgs) -> Result<(
     Ok(())
 }
 
+/// Record 58 P4 (Wave 7b A8): one unit a run would have, as the yield
+/// funnel counts it: its stacks, the inputs it lacks and the pack's
+/// judgement of it where it has its inputs.
+pub(crate) struct FunnelUnit {
+    pub(crate) stacks: Vec<i64>,
+    pub(crate) lacks: Vec<String>,
+    pub(crate) judged: Option<nils_pipeline::pack::rules::Judgement>,
+}
+
+/// What the funnel reads of a pipeline over some stacks: the units the
+/// pre-flight plans for a new run with the descriptor's defaults (no
+/// workflow links, no run taken up again), each judged by the pack as the
+/// pre-flight judges it, the stacks no unit reaches, and the pack's hard
+/// needs in the order the pack judges them (role by role, as written).
+pub(crate) struct FunnelUnits {
+    pub(crate) pipeline: String,
+    pub(crate) pack_digest: Option<String>,
+    pub(crate) unit: &'static str,
+    pub(crate) units: Vec<FunnelUnit>,
+    pub(crate) left: Vec<(i64, String)>,
+    /// `(<role>: <when>, words)`; none where the pipeline has no pack.
+    pub(crate) needs: Option<Vec<(String, String)>>,
+}
+
+pub(crate) fn funnel_units(
+    registry: &mut Registry,
+    pipeline: &str,
+    stacks: &[i64],
+    pack: Option<&nils_pack::Pack>,
+    person: &crate::pipeline_pack::PersonAsk,
+) -> Result<FunnelUnits, String> {
+    let p = rows::resolve(registry.store(), pipeline)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("no pipeline {pipeline} in the catalog"))?;
+    let d = descriptor::from_value(p.descriptor.clone())
+        .map_err(|e| {
+            format!(
+                "{}: the catalog's descriptor no longer checks: {e}",
+                p.label()
+            )
+        })?
+        .sized_to(crate::pipelines::lane_of(registry).ledger.cores);
+    let place_ids = places_of(registry.store(), None);
+    let Planned { units, left, .. } = plan_units(
+        registry,
+        &d,
+        stacks,
+        pack,
+        &place_ids,
+        None,
+        None,
+        &crate::pipelines::Bound::default(),
+    )?;
+    if let Some(e) = crate::pipeline_pack::pack_error(&p) {
+        return Err(e);
+    }
+    let pp = crate::pipeline_pack::pack_of(&p);
+    let mut judged: Vec<Option<nils_pipeline::pack::rules::Judgement>> = vec![None; units.len()];
+    if let Some(pack) = &pp {
+        let person = person.person(pack, &crate::actor(), &[])?;
+        let resolved: serde_json::Map<String, Value> = d.resolve(&[]).unwrap_or_default();
+        let with: Vec<usize> = (0..units.len())
+            .filter(|i| units[*i].missing.is_empty())
+            .collect();
+        let of: Vec<crate::pipeline_pack::UnitOf> = with
+            .iter()
+            .map(|i| crate::pipeline_pack::UnitOf {
+                by_role: units[*i].by_role.clone(),
+                subject_id: units[*i].subject_id,
+                session_day: units[*i].session_day.clone(),
+            })
+            .collect();
+        let host = crate::pipeline_pack::host_facts(registry);
+        let js = crate::pipeline_pack::judge_units(
+            registry.store(),
+            pack,
+            &d,
+            &resolved,
+            &of,
+            &host,
+            &person,
+        );
+        for (i, j) in with.into_iter().zip(js) {
+            judged[i] = Some(j);
+        }
+    }
+    let needs = pp.as_ref().map(|pack| {
+        pack.needs
+            .iter()
+            .flat_map(|(role, rn)| {
+                rn.hard
+                    .iter()
+                    .map(move |n| (format!("{role}: {}", n.text), n.words.clone()))
+            })
+            .collect()
+    });
+    Ok(FunnelUnits {
+        pipeline: p.label(),
+        pack_digest: p.pack_digest.clone(),
+        unit: unit_word(d.layout, d.level),
+        units: units
+            .into_iter()
+            .zip(judged)
+            .map(|(u, judged)| FunnelUnit {
+                stacks: if u.stacks.is_empty() {
+                    u.stack_id.into_iter().collect()
+                } else {
+                    u.stacks
+                },
+                lacks: u.missing,
+                judged,
+            })
+            .collect(),
+        left,
+        needs,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
