@@ -334,7 +334,7 @@ Every store the registry at `<home>` keeps (backend sqlite), rendered by `nils c
 | owner | the registry's operator |
 | kept | for good: a round and a draw are what a result cites; a stack's outcome in a round is written again by the gate's next run, and dropped where the gate leaves it to a person's staged answer |
 | read | GET /api/review/rounds<br>GET /api/review/rounds/{id}<br>GET /api/audit/draws<br>GET /api/audit/draws/{id} |
-| change | POST /api/review/gate<br>POST /api/audit/draws<br>POST /api/audit/draws/{id}/grade |
+| change | POST /api/review/gate<br>POST /api/audit/draws<br>POST /api/audit/draws/{id}/grade<br>POST /api/audit/draws/{id}/rule-review |
 | export | no command |
 | delete | with the registry |
 

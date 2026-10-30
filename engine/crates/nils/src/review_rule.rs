@@ -53,7 +53,7 @@ use crate::grants::{Detail, Need};
 use crate::serve::{Caller, Doors, Reply, json_body};
 
 /// The doors, as the capabilities list them.
-pub(crate) const DOORS: [&str; 15] = [
+pub(crate) const DOORS: [&str; 17] = [
     "GET /api/review/{id}/suggestions",
     "POST /api/review/{id}/provisional",
     "GET /api/review/rounds",
@@ -69,6 +69,8 @@ pub(crate) const DOORS: [&str; 15] = [
     "POST /api/audit/draws/{id}/grade",
     "POST /api/audit/draws/{id}/settle",
     "GET /api/audit/draws/pooled",
+    "GET /api/audit/draws/{id}/rule-review",
+    "POST /api/audit/draws/{id}/rule-review",
 ];
 
 /// Each door's policy row, as `serve::policy` reads them.
@@ -200,6 +202,24 @@ pub(crate) const POLICY: &[(&str, bool, bool, &str, &str, &str, &str)] = &[
         "Settled an audit",
     ),
     (
+        "GET /api/audit/draws/{id}/rule-review",
+        false,
+        false,
+        "bounded",
+        "one campaign's counts",
+        "Reading a round's rule review",
+        "Read a round's rule review",
+    ),
+    (
+        "POST /api/audit/draws/{id}/rule-review",
+        true,
+        true,
+        "bounded",
+        "one campaign",
+        "Opening a round's rule review",
+        "Opened a round's rule review",
+    ),
+    (
         "GET /api/audit/draws/pooled",
         false,
         false,
@@ -234,7 +254,11 @@ pub(crate) fn door(method: &str, segs: &[&str]) -> Option<(Need, Detail)> {
         }
         ("POST", ["api", "audit", "draws"]) => (Need::Both("review:work", "campaigns:work"), Plain),
         ("POST", ["api", "audit", "draws", _, "grade"]) => (Need::One("review:work"), Plain),
-        ("POST", ["api", "audit", "draws", _, "settle"]) => {
+        ("GET", ["api", "audit", "draws", _, "rule-review"]) => {
+            (Need::AnyOf(&["review:see", "campaigns:see"]), Plain)
+        }
+        ("POST", ["api", "audit", "draws", _, "rule-review"])
+        | ("POST", ["api", "audit", "draws", _, "settle"]) => {
             (Need::Both("review:work", "campaigns:work"), Plain)
         }
         _ => return None,
@@ -1849,40 +1873,148 @@ fn grade_door(
     // record 58 P2: a month over the rule opens a rule review, once
     let mut review = json!({"campaign_id": d.review_campaign_id, "opened": false});
     if g["rule"]["passed"] == false && d.review_campaign_id.is_none() {
-        let stacks: Vec<i64> = g["wrong_stacks"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .filter_map(|w| w["stack_id"].as_i64())
-            .collect();
-        let r = round::get(registry.store(), d.round_id)
-            .map_err(failed)?
-            .ok_or_else(|| Reply::error(404, format!("no review round {}", d.round_id)))?;
-        let made = campaign_over(
-            registry,
-            caller,
-            &stacks,
-            Over {
-                name: format!("audit-draw-{id}-rule-review"),
-                question: c.question.clone(),
-                source: json!({"audit_draw": id, "rule_review": true}),
-                pack_version: &r.pack_version,
-                raters_per_item: 1,
-                raters: crate::campaigns::strings_of(&doc["reviewers"]),
-                adjudicators: Vec::new(),
-                adjudication: json!({"when": "disagree", "metric": "exact"}),
-                lease_seconds: 3600,
-                suggest: nils_registry::campaign::Suggest::Rules,
-            },
-        )?;
-        audit_draw::set_review(registry.store(), id, made.id).map_err(failed)?;
+        let made = open_rule_review(registry, caller, &d, &c, &g, &doc["reviewers"])?;
         review = json!({"campaign_id": made.id, "name": made.name, "opened": true,
-                        "stacks": stacks.len(), "suggest": "rules", "closes_into": "none",
+                        "stacks": wrong_of(&g).len(), "suggest": "rules", "closes_into": "none",
                         "loop": "record 56: the round's wrong stacks with the rules' answer and evidence, for proposals at /api/packs/{name}/proposals; never a certificate"});
     }
     Ok(Reply::ok(
         json!({"draw": id, "round_id": d.round_id, "grade": g, "rule_review": review}),
     ))
+}
+
+/// The wrong stacks of a grade, by id.
+fn wrong_of(grade: &Value) -> Vec<i64> {
+    grade["wrong_stacks"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|w| w["stack_id"].as_i64())
+        .collect()
+}
+
+/// The rule review of a graded draw (record 58 P2, record 56's loop): a
+/// campaign over the grade's wrong stacks that asks the raters' question,
+/// suggests the rules' answer with its evidence, is decided by one reader
+/// and closes into nothing, recorded on the draw. Made by the grade of a
+/// round over the rule and by `POST /api/audit/draws/{id}/rule-review`,
+/// with the same body.
+fn open_rule_review(
+    registry: &mut Registry,
+    caller: &Caller,
+    d: &audit_draw::Draw,
+    raters: &nils_registry::campaign::Campaign,
+    grade: &Value,
+    reviewers: &Value,
+) -> Result<nils_registry::campaign::Campaign, Reply> {
+    let stacks = wrong_of(grade);
+    let r = round::get(registry.store(), d.round_id)
+        .map_err(failed)?
+        .ok_or_else(|| Reply::error(404, format!("no review round {}", d.round_id)))?;
+    let made = campaign_over(
+        registry,
+        caller,
+        &stacks,
+        Over {
+            name: format!("audit-draw-{}-rule-review", d.id),
+            question: raters.question.clone(),
+            source: json!({"audit_draw": d.id, "rule_review": true}),
+            pack_version: &r.pack_version,
+            raters_per_item: 1,
+            raters: crate::campaigns::strings_of(reviewers),
+            adjudicators: Vec::new(),
+            adjudication: json!({"when": "disagree", "metric": "exact"}),
+            lease_seconds: 3600,
+            suggest: nils_registry::campaign::Suggest::Rules,
+        },
+    )?;
+    audit_draw::set_review(registry.store(), d.id, made.id).map_err(failed)?;
+    Ok(made)
+}
+
+/// What the rule review doors answer of a draw's review campaign: its id,
+/// name, state and counts, or null where none is open.
+fn rule_review_doc(
+    registry: &mut Registry,
+    d: &audit_draw::Draw,
+    opened: bool,
+) -> Result<Value, Reply> {
+    let review = match d.review_campaign_id {
+        None => Value::Null,
+        Some(cid) => {
+            let c = nils_registry::campaign::get(registry.store(), cid)
+                .map_err(crate::campaigns::campaign_err)?
+                .ok_or_else(|| Reply::error(404, format!("no campaign {cid}")))?;
+            let counts = nils_registry::campaign::counts(registry.store(), cid)
+                .map_err(crate::campaigns::campaign_err)?;
+            json!({"campaign_id": c.id, "name": c.name, "status": c.status,
+                   "suggest": c.suggest.name(), "closes_into": c.closes_into,
+                   "counts": counts, "opened": opened})
+        }
+    };
+    let wrong = (!d.grade.is_null()).then(|| wrong_of(&d.grade).len());
+    Ok(
+        json!({"draw": d.id, "round_id": d.round_id, "graded": !d.grade.is_null(),
+              "wrong": wrong, "passed": d.grade["rule"]["passed"],
+              "rule_review": review}),
+    )
+}
+
+/// `GET` and `POST /api/audit/draws/{id}/rule-review` (record 58 P2, the
+/// Rules page's link): the rule review of a graded round, answered where it
+/// is open and, on `POST`, opened over the grade's wrong stacks where it is
+/// not, once (a second `POST` answers the same campaign). Body as the
+/// grade's: `reviewers`. The review belongs to the round's draw, never to a
+/// rules proposal: a proposal holds typed operations, and the review is
+/// where they are found.
+fn rule_review_door(
+    registry: &mut Registry,
+    caller: &Caller,
+    id: i64,
+    body: Option<&str>,
+) -> Result<Reply, Reply> {
+    let d = audit_draw::get(registry.store(), id)
+        .map_err(failed)?
+        .ok_or_else(|| Reply::error(404, format!("no audit draw {id}")))?;
+    let Some(body) = body else {
+        return rule_review_doc(registry, &d, false).map(Reply::ok);
+    };
+    if d.review_campaign_id.is_some() {
+        return rule_review_doc(registry, &d, false).map(Reply::ok);
+    }
+    let doc = if body.trim().is_empty() {
+        json!({})
+    } else {
+        json_body(body)?
+    };
+    if d.grade.is_null() {
+        return Err(Reply::error(
+            409,
+            format!(
+                "audit draw {id} is not graded yet: its rule review is over the stacks the grade finds wrong; POST /api/audit/draws/{id}/grade first"
+            ),
+        ));
+    }
+    if wrong_of(&d.grade).is_empty() {
+        return Err(Reply::error(
+            409,
+            format!(
+                "audit draw {id} has no wrong stacks: its grade found every read stack as the rules accepted it, so there is nothing for a rule review"
+            ),
+        ));
+    }
+    let campaign = d
+        .campaign_id
+        .ok_or_else(|| Reply::error(409, format!("audit draw {id} has no campaign")))?;
+    let c = nils_registry::campaign::get(registry.store(), campaign)
+        .map_err(crate::campaigns::campaign_err)?
+        .ok_or_else(|| Reply::error(404, format!("no campaign {campaign}")))?;
+    let grade = d.grade.clone();
+    open_rule_review(registry, caller, &d, &c, &grade, &doc["reviewers"])?;
+    let d = audit_draw::get(registry.store(), id)
+        .map_err(failed)?
+        .ok_or_else(|| Reply::error(404, format!("no audit draw {id}")))?;
+    rule_review_doc(registry, &d, true).map(Reply::ok)
 }
 
 /// `GET /api/audit/draws/pooled?ids=1,2,3` (record 58 P2, spec §13.4):
@@ -2047,6 +2179,9 @@ pub(crate) fn route(
         })(),
         ["api", "audit", "draws", id, "grade"] if post => {
             id_of(id).and_then(|id| grade_door(registry, caller, id, body))
+        }
+        ["api", "audit", "draws", id, "rule-review"] if get || post => {
+            id_of(id).and_then(|id| rule_review_door(registry, caller, id, post.then_some(body)))
         }
         ["api", "audit", "draws", id, "settle"] if post => {
             id_of(id).and_then(|id| settle_door(registry, caller, id, body))

@@ -577,6 +577,27 @@ fn stream(pg: Option<(String, String)>) {
         regraded["rule_review"]["campaign_id"], review_id,
         "{regraded}"
     );
+    // the Rules page's door answers the review the grade opened, and opens no second one
+    let at = server.ok(
+        "GET",
+        &format!("/api/audit/draws/{d1}/rule-review"),
+        None,
+        &cleo,
+    );
+    assert_eq!(at["rule_review"]["campaign_id"], review_id, "{at}");
+    assert_eq!(at["wrong"], 2, "{at}");
+    assert_eq!(at["passed"], false, "{at}");
+    let pressed = server.ok(
+        "POST",
+        &format!("/api/audit/draws/{d1}/rule-review"),
+        Some(json!({})),
+        &cleo,
+    );
+    assert_eq!(
+        pressed["rule_review"]["campaign_id"], review_id,
+        "{pressed}"
+    );
+    assert_eq!(pressed["rule_review"]["opened"], false, "{pressed}");
 
     // ------------------------------------- a second round, and the pool:
     // ten stacks on the header certificate's five axes, the answers whole
@@ -833,6 +854,75 @@ fn edges(pg: Option<(String, String)>) {
     });
     assert_eq!(seen, 3);
 
+    // ---------- 5: the rule review a round is opened from (the Rules page)
+    let review = |server: &Server, method: &str, id: i64, t: &str| {
+        server.call(
+            method,
+            &format!("/api/audit/draws/{id}/rule-review"),
+            (method == "POST").then(|| json!({"reviewers": [nora_p]})),
+            t,
+        )
+    };
+    let (status, doc) = review(&server, "POST", d1, &cleo);
+    assert_eq!(status, 409, "not graded yet: {doc}");
+    assert!(doc.to_string().contains("/grade"), "says what to do: {doc}");
+    let (status, doc) = review(&server, "GET", d1, &cleo);
+    assert_eq!(status, 200, "{doc}");
+    assert_eq!(doc["graded"], false, "{doc}");
+    assert_eq!(doc["rule_review"], Value::Null, "{doc}");
+    server.ok(
+        "POST",
+        &format!("/api/campaigns/{c1}/close"),
+        Some(json!({})),
+        &cleo,
+    );
+    let g1 = server.ok("POST", &format!("/api/audit/draws/{d1}/grade"), None, &cleo);
+    let wrong1: BTreeSet<i64> = g1["grade"]["wrong_stacks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|w| w["stack_id"].as_i64().unwrap())
+        .collect();
+    // one wrong stack is within the rule, so the grade opened nothing
+    assert_eq!(wrong1.len(), 1, "{g1}");
+    assert_eq!(g1["grade"]["rule"]["passed"], true, "{g1}");
+    assert_eq!(g1["rule_review"]["campaign_id"], Value::Null, "{g1}");
+    // a rater reads it, but opening one needs review:work
+    let (status, doc) = review(&server, "GET", d1, &rater_a);
+    assert_eq!(status, 200, "{doc}");
+    let (status, doc) = review(&server, "POST", d1, &rater_a);
+    assert_eq!(status, 403, "{doc}");
+    let (status, opened) = review(&server, "POST", d1, &cleo);
+    assert_eq!(status, 200, "{opened}");
+    let r1 = &opened["rule_review"];
+    assert_eq!(r1["opened"], true, "{opened}");
+    assert_eq!(r1["status"], "open", "{opened}");
+    assert_eq!(r1["suggest"], "rules", "{opened}");
+    assert_eq!(r1["closes_into"], "none", "{opened}");
+    assert_eq!(r1["counts"]["items"]["open"], 1, "{opened}");
+    assert_eq!(opened["wrong"], 1, "{opened}");
+    let rid = r1["campaign_id"].as_i64().unwrap();
+    let rc = server.ok("GET", &format!("/api/campaigns/{rid}"), None, &cleo);
+    let items: BTreeSet<i64> = rc["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|it| it["stack_id"].as_i64().unwrap())
+        .collect();
+    assert_eq!(items, wrong1, "{rc}");
+    // opened once: a second press answers the same campaign, as the draw records it
+    let (status, again) = review(&server, "POST", d1, &cleo);
+    assert_eq!(status, 200, "{again}");
+    assert_eq!(again["rule_review"]["campaign_id"], rid, "{again}");
+    assert_eq!(again["rule_review"]["opened"], false, "{again}");
+    let shown = server.ok("GET", &format!("/api/audit/draws/{d1}"), None, &cleo);
+    assert_eq!(shown["campaigns"]["rule_review"], rid, "{shown}");
+    let (status, read) = review(&server, "GET", d1, &rater_a);
+    assert_eq!(status, 200, "{read}");
+    assert_eq!(read["rule_review"]["campaign_id"], rid, "{read}");
+    let (status, doc) = review(&server, "GET", 999_999, &cleo);
+    assert_eq!(status, 404, "{doc}");
+
     // ------------------------------------------- 4: a settle with nothing in it
     let made = draw(&server, 3, "edge-4");
     let d4 = made["draw"]["id"].as_i64().unwrap();
@@ -865,6 +955,8 @@ fn edges(pg: Option<(String, String)>) {
     assert_eq!(g4["grade"]["wrong"], 0, "{g4}");
     assert_eq!(g4["grade"]["rule"]["passed"], true, "{g4}");
     assert_eq!(g4["grade"]["settle"]["stood"], 3, "{g4}");
+    let (status, doc) = review(&server, "POST", d4, &cleo);
+    assert_eq!(status, 409, "nothing wrong to review: {doc}");
 
     // ------- 3 and 6: the default since is the round's last draw by count
     // a stack is sorted after the last count draw; a draw by share then comes
