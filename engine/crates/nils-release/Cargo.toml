@@ -18,6 +18,7 @@ nils-dicom.workspace = true
 nils-pack.workspace = true
 nils-registry.workspace = true
 nils-session.workspace = true
+nils-proc.workspace = true
 
 blake2.workspace = true
 dicom-core.workspace = true

@@ -593,13 +593,11 @@ pub(crate) fn run(
                 .stdout
                 .take()
                 .map(|o| echo_of(o, opts.quiet, Arc::clone(&log)));
-            let mut beaten = Instant::now();
-            loop {
-                if let Some(status) = child.try_wait()? {
-                    break Ok(status);
-                }
-                if beaten.elapsed() >= BEAT_EVERY {
-                    beaten = Instant::now();
+            nils_proc::wait_with_tick(
+                &mut child,
+                Duration::from_millis(250),
+                BEAT_EVERY,
+                &mut || {
                     if job::beat(
                         store,
                         worker,
@@ -609,9 +607,11 @@ pub(crate) fn run(
                     {
                         asked_to_stop = true;
                     }
-                }
-                std::thread::sleep(Duration::from_millis(250));
-            }
+                    // the worker lets the verb end; a cancel is told to it, not forced
+                    false
+                },
+            )
+            .and_then(|status| status.ok_or_else(|| std::io::Error::other("the wait was stopped")))
         });
         // The verb adopted the row and finished it itself; the worker writes
         // the outcome only when the verb did not, and then the error is what

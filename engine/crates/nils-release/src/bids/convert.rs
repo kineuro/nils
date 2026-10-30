@@ -463,29 +463,20 @@ fn output_ticking(
     let mut child = spawn(run).map_err(NotRun::Start)?;
     let stdout = drain(child.stdout.take());
     let stderr = drain(child.stderr.take());
-    let mut ticked = std::time::Instant::now();
-    let status = loop {
-        match child.try_wait() {
-            Ok(Some(status)) => break Ok(status),
-            Ok(None) => {}
-            // The child cannot be waited on: it is not left behind. It is
-            // ended and reaped, and its status is what it came to (a
-            // signal, which the callers read as a run that did not run to
-            // an end of its own, so nothing is said of the stack and the
-            // release goes on; never a converter that could not be
-            // started, which would stop the release).
-            Err(_) => break end(&mut child),
-        }
-        if ticked.elapsed() >= every {
-            ticked = std::time::Instant::now();
-            if tick() {
-                // an abort: the child and everything it started are ended
-                // and the child reaped, and its status says a signal did
-                break end(&mut child);
-            }
-        }
-        std::thread::sleep(Duration::from_millis(50));
-    };
+    // A child that cannot be waited on is not left behind. It is ended and
+    // reaped, and its status is what it came to (a signal, which the callers
+    // read as a run that did not run to an end of its own, so nothing is
+    // said of the stack and the release goes on; never a converter that
+    // could not be started, which would stop the release). An abort ends
+    // the child and everything it started the same way, and its status says
+    // a signal did.
+    let status =
+        match nils_proc::wait_with_tick(&mut child, Duration::from_millis(50), every, &mut || {
+            tick()
+        }) {
+            Ok(Some(status)) => Ok(status),
+            Ok(None) | Err(_) => nils_proc::end_group(&mut child),
+        };
     // the pipes are read to their end: a helper of the converter still
     // holding one (a compressor writing the image) ends before this returns
     let stdout = stdout.join().unwrap_or_default();
@@ -501,32 +492,6 @@ fn output_ticking(
         stdout,
         stderr,
     })
-}
-
-/// End the child and everything it started, and reap it. On a platform
-/// with process groups the child is the leader of one of its own
-/// (`process_group(0)` above), so the group is signalled, which reaches a
-/// compressor it started to write the image: ending the child alone would
-/// let that helper finish the `.nii.gz` after the stack's files were cleaned
-/// away. Elsewhere the child alone is ended, which is all the platform has.
-fn end(child: &mut std::process::Child) -> std::io::Result<std::process::ExitStatus> {
-    #[cfg(unix)]
-    #[allow(
-        unsafe_code,
-        reason = "kill(2) on the group this process made for the child, by its recorded pid"
-    )]
-    {
-        if let Ok(pid) = i32::try_from(child.id())
-            && pid > 0
-        {
-            // SAFETY: a plain system call with two integers; the group is
-            // the child's own, made at its spawn, and the pid is the one
-            // this process recorded for it
-            unsafe { libc::kill(-pid, libc::SIGKILL) };
-        }
-    }
-    child.kill().ok();
-    child.wait()
 }
 
 /// `Command::spawn`, tried again a few times on `ETXTBSY`: a file another

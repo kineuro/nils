@@ -1,0 +1,17 @@
+[package]
+name = "nils-proc"
+description = "Process and file helpers shared by the engine's crates: waiting on a child with a tick, ending a process group, moving a file across filesystems"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
+
+[lints]
+workspace = true

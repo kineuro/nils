@@ -11,6 +11,7 @@ authors.workspace = true
 publish.workspace = true
 
 [dependencies]
+nils-proc.workspace = true
 csv.workspace = true
 flate2.workspace = true
 glob.workspace = true
