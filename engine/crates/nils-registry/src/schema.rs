@@ -1983,6 +1983,10 @@ fn build_registry() -> Vec<Table> {
                 // release read, `{scope, version, digest}`, or the pack's
                 // defaults with the pack's version. Null where it read none.
                 col("pick_rules", Type::Json),
+                // Whether the run was asked to stop and did, written where it
+                // closes the row unfinished. Null on a row from before, which
+                // is read by the stopped words in its `error`.
+                col("stopped", Type::Bool),
             ],
         )
         .index(&["name"]),

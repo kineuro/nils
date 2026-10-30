@@ -12221,6 +12221,13 @@ fn release(home: &Home, args: ReleaseArgs) -> Result<(), Exit> {
     }
     if let Some(c) = &report.converter {
         println!("  converted by     {c}");
+        if converter_older_than_pin(c) {
+            println!(
+                "                   older than the build this version pins ({}): \
+                 a newer one is advised",
+                tools::DCM2NIIX_VERSION
+            );
+        }
         if let Some(path) = &converter_path {
             println!(
                 "                   {path} ({})",
@@ -12520,7 +12527,7 @@ fn releases_doc(
         "SELECT id, name, version, root, {started}, files, subjects, unchanged, moved, rewritten, \
          added, removed, layout, actor, {withdrawn}, withdrawn_by, withdrawn_why, {policy}, \
          {policies}, {scheme}, session_naming, categories, naming, purpose, {pick_rules}, \
-         {finished}, error \
+         {finished}, error, stopped \
          FROM {}{wheres} ORDER BY id DESC LIMIT {}",
         store.qualified("release"),
         limit.max(1)
@@ -12599,12 +12606,38 @@ fn releases_doc(
                 // without a word died: neither is `stopped`.
                 "finished_at": r.opt_text(25)?,
                 "error": r.opt_text(26)?,
+                // the column where the run wrote it, the stopped words in
+                // `error` for a row from before the column
                 "stopped": r.opt_text(25)?.is_none()
-                    && r.opt_text(26)?.is_some_and(nils_release::run::is_stopped),
+                    && match r.get(27) {
+                        nils_registry::store::Cell::Null => {
+                            r.opt_text(26)?.is_some_and(nils_release::run::is_stopped)
+                        }
+                        nils_registry::store::Cell::Bool(b) => *b,
+                        nils_registry::store::Cell::Int(n) => *n != 0,
+                        _ => false,
+                    },
             }))
         })
         .collect::<Result<_, nils_registry::Error>>()?;
     Ok(serde_json::json!({ "count": rows.len(), "releases": rows }))
+}
+
+/// Whether a converter's version line names a build dated before the pinned one.
+/// A line without a date in it says nothing, and gets no warning.
+fn converter_older_than_pin(line: &str) -> bool {
+    fn date_of(text: &str) -> Option<u32> {
+        let at = text.find("v1.0.")? + 5;
+        let digits: String = text[at..]
+            .chars()
+            .take_while(char::is_ascii_digit)
+            .collect();
+        (digits.len() == 8).then(|| digits.parse().ok()).flatten()
+    }
+    match (date_of(line), date_of(tools::DCM2NIIX_VERSION)) {
+        (Some(found), Some(pinned)) => found < pinned,
+        _ => false,
+    }
 }
 
 /// How many sessions each of these releases holds.
@@ -12821,7 +12854,7 @@ fn history(home: &Home, args: &ReleaseArgs) -> Result<(), Exit> {
         for (n, what) in [
             (v.counts[0], "left alone"),
             (v.counts[1], "renamed"),
-            (v.counts[2], "written again"),
+            (v.counts[2], "written again or restored"),
             (v.counts[3], "new"),
             (v.counts[4], "dropped"),
         ] {
@@ -12874,6 +12907,15 @@ mod tests {
             None,
         )
         .expect("the MRI pack loads")
+    }
+
+    #[test]
+    fn an_older_converter_is_warned_about_and_a_dateless_line_is_not() {
+        let line = |v: &str| format!("Chris Rorden's dcm2niiX version {v}  (JP2:OpenJPEG)");
+        assert!(converter_older_than_pin(&line("v1.0.20220720")));
+        assert!(!converter_older_than_pin(&line(tools::DCM2NIIX_VERSION)));
+        assert!(!converter_older_than_pin(&line("v1.0.20991231")));
+        assert!(!converter_older_than_pin("dcm2niix, some other build"));
     }
 
     /// `nils pack derive` carries answers kept anywhere through the pack

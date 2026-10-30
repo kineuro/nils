@@ -11,7 +11,7 @@ use crate::schema::{self, ID_TYPES, Table, linkage_tables, registry_tables};
 use crate::store::{Error, Param, Store};
 
 /// The version this binary writes.
-pub const SCHEMA_VERSION: i64 = 111;
+pub const SCHEMA_VERSION: i64 = 112;
 
 /// Which of the two stores a migration runs against.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -498,6 +498,10 @@ pub static MIGRATIONS: &[Migration] = &[
         version: 111,
         apply: a_workflow_chains_runs_and_a_unit_says_what_it_reused_and_its_curation,
     },
+    Migration {
+        version: 112,
+        apply: a_release_row_says_it_was_stopped,
+    },
 ];
 
 /// Wave 7b A7 (record 57 P7 and P8, record 58 P5; 2026-10-25): workflows in
@@ -520,6 +524,16 @@ fn a_workflow_chains_runs_and_a_unit_says_what_it_reused_and_its_curation(
     add_tables(store, kind, &["workflow", "workflow_run", "workflow_step"])?;
     add_columns(store, "pipeline_run", &["workflow_run_id", "step"])?;
     add_columns(store, "pipeline_unit", &["reused_from_run", "curation"])
+}
+
+/// A release row says in a column of its own that it was stopped. Only a
+/// column is added and left empty: a row from before is read by the stopped
+/// words in its `error`.
+fn a_release_row_says_it_was_stopped(store: &mut Store, kind: Kind) -> Result<(), Error> {
+    if kind != Kind::Registry {
+        return Ok(());
+    }
+    add_columns(store, "release", &["stopped"])
 }
 
 /// Record 58 P1 (Wave 7b spec §12): a verify campaign's planting
