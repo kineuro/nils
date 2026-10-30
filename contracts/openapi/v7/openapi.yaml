@@ -1003,6 +1003,25 @@ paths:
         "200": {description: "{draw, round_id, grade: {read, wrong, error, bound, confidence, method, wrong_by_axis, not_settled, cant_tell, drawn, campaign_closed, by_vendor, by_year, rule: {max_wrong: 1, passed}, wrong_stacks: [{stack_id, axes}], settle, trains: false}, rule_review: {campaign_id, opened, ...}}. Record 58 P2, added in place, additively: a settled draw is graded from the settle campaign's settled answers (a planted value the person kept is left out of its stack's read), and a stack the settle does not hold stands as the raters' agreement with the accepted answer; settle says {campaign_id, closed, items, settled, stood, planted_kept, seed, share} (null for a draw adjudicated as in Wave 7a). by_vendor and by_year count {drawn, read, wrong} per vendor and acquisition year (unknown where the registry cannot tell). rule.passed is false over one wrong, null while a stack is still to be settled, true otherwise. A round over the rule opens a rule review once (record 56's loop, never a certificate): a campaign over its wrong stacks that suggests the rules' answer and closes into nothing, recorded on the draw."}
         "404": {description: No such draw}
         "409": {description: "A draw with no campaign, or a draw by count not settled yet"}
+  /api/audit/draws/{id}/rule-review:
+    description: "Added in place, additively, by Wave 7b (record 58 P2, the Rules page's link). The rule review of a graded audit round: the campaign over the grade's wrong stacks that asks the raters' question, suggests the rules' answer with its evidence, is decided by one reader and closes into nothing (record 56's loop, never a certificate), recorded on the draw as campaigns.rule_review. It belongs to the round's draw, not to a rules proposal: proposals are what the review finds."
+    parameters: [{name: id, in: path, required: true, schema: {type: integer}}]
+    get:
+      summary: A round's rule review, where one is open (review:see or campaigns:see)
+      responses:
+        "200": {description: "{draw, round_id, graded, wrong, passed, rule_review: {campaign_id, name, status, suggest: rules, closes_into: none, counts, opened: false} | null}. wrong is the grade's count of wrong stacks (null before the grade); passed is the grade's rule."}
+        "404": {description: No such draw}
+    post:
+      summary: Open a round's rule review, once (review:work and campaigns:work)
+      description: "Opens the rule review over the grade's wrong stacks where none is open, with the same campaign the grade of a round over the rule opens; a round within the rule with a wrong stack may be reviewed too. Idempotent: where one is open it is answered as it stands, with opened false."
+      requestBody:
+        content:
+          application/json:
+            schema: {type: object, properties: {reviewers: {type: array, items: {type: string}, description: "who reads the review; anyone with campaigns:work where none are named"}}}
+      responses:
+        "200": {description: "As GET answers it, with rule_review.opened true where this call opened it"}
+        "404": {description: No such draw}
+        "409": {description: "The draw is not graded yet, its grade found no wrong stack, or it has no raters' campaign"}
   /api/audit/draws/{id}/settle:
     post:
       summary: The verify campaign a person settles an audit round in (record 58 P2, spec 13.3; review:work and campaigns:work)

@@ -8541,7 +8541,7 @@ fn custody_doc(home: &Home, registry: &mut Registry) -> Result<serde_json::Value
             "kept": "for good: a round and a draw are what a result cites; a stack's outcome in a round is written again by the gate's next run, and dropped where the gate leaves it to a person's staged answer",
             "commands": {
                 "read": ["GET /api/review/rounds", "GET /api/review/rounds/{id}", "GET /api/audit/draws", "GET /api/audit/draws/{id}"],
-                "change": ["POST /api/review/gate", "POST /api/audit/draws", "POST /api/audit/draws/{id}/grade"],
+                "change": ["POST /api/review/gate", "POST /api/audit/draws", "POST /api/audit/draws/{id}/grade", "POST /api/audit/draws/{id}/rule-review"],
                 "export": [],
                 "delete": "with the registry",
             },

@@ -6,6 +6,7 @@ All notable changes to NILS v1 are recorded here. The format follows [Keep a Cha
 
 ### Added
 
+- `GET` and `POST /api/audit/draws/{id}/rule-review` answer a graded audit round's rule review (its campaign's id, name, state and counts, or none), and the `POST` opens it over the grade's wrong stacks where none is open yet, once, with the same campaign a round over the rule opens when it is graded. A round within the rule that found a wrong stack can be reviewed too; one not graded yet, or with nothing wrong, is refused with what to do. The openapi document gains the door additively.
 - The registration family is in the starter catalog. When the engine starts and the catalog holds no family named `registration`, it adds the three members (as starters) and then the family, as `nils pipeline add` of the folder does; a family already in the catalog is left as it is.
 
 ### Changed

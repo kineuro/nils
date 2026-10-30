@@ -358,6 +358,14 @@ raters alone decides nothing.
 > grade, `campaigns.rule_review` on the draw). Fixes go through the proposals
 > of section 5. The audit's and the settle's reads never train a model.
 
+A graded round's rule review is also reached from the Rules page, and opened
+there for a round within the rule that still found a wrong stack. The door
+opens it once; a second call answers the same campaign:
+
+```
+POST /api/audit/draws/<id>/rule-review {"reviewers": ["<principal>"]}
+```
+
 ## Reference
 
 | Door | Grant |
@@ -382,3 +390,5 @@ raters alone decides nothing.
 | `POST /api/audit/draws/{id}/grade` | review:work |
 | `POST /api/audit/draws/{id}/settle` | review:work and campaigns:work |
 | `GET /api/audit/draws/pooled` | review:see or campaigns:see |
+| `GET /api/audit/draws/{id}/rule-review` | review:see or campaigns:see |
+| `POST /api/audit/draws/{id}/rule-review` | review:work and campaigns:work |
