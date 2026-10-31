@@ -231,6 +231,22 @@ impl Worked {
         doc
     }
 
+    /// A dataset's summary with its counts read now (2026-10-31): the door
+    /// answers the kept counts at once and reads them again apart when what
+    /// they count moved, saying `counting`, so the summary is asked again
+    /// until it no longer counts, a minute at most.
+    fn summary(&self, path: &str, token: &str) -> Value {
+        let mut doc = self.get(path, token);
+        for _ in 0..600 {
+            if doc["counting"] != true {
+                return doc;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            doc = self.get(path, token);
+        }
+        panic!("{path} never stopped counting: {doc}");
+    }
+
     /// Every job over, with at least `sorts` sorts and `pyramids` picture
     /// builds among them, the last step a bring-in queues: two minutes at
     /// most.
@@ -605,7 +621,7 @@ fn round(pg: Option<(String, String)>) {
     );
     assert_eq!(status, 404);
     // the one count, the Data card's need a look, says the same
-    let summary = server.get("/api/datasets/ds/summary", OPS);
+    let summary = server.summary("/api/datasets/ds/summary", OPS);
     assert_eq!(summary["need_a_look"], 3, "{summary}");
 
     // --- ER2: a page of the question's scans
@@ -813,7 +829,7 @@ fn round(pg: Option<(String, String)>) {
     let list = server.get("/api/review/questions?dataset=ds", REVIEWS);
     assert_eq!(list["questions"][0]["scans"], 1, "{list}");
     assert_eq!(list["scans"], 1, "{list}");
-    let summary = server.get("/api/datasets/ds/summary", OPS);
+    let summary = server.summary("/api/datasets/ds/summary", OPS);
     assert_eq!(summary["need_a_look"], 1, "{summary}");
     let theirs = server.get("/api/review/questions?dataset=other", REVIEWS);
     assert_eq!(

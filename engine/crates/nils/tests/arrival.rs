@@ -371,6 +371,22 @@ impl Served {
         doc
     }
 
+    /// A dataset's summary with its counts read now (2026-10-31): the door
+    /// answers the kept counts at once and reads them again apart when what
+    /// they count moved, saying `counting`, so the summary is asked again
+    /// until it no longer counts, a minute at most.
+    fn summary(&self, path: &str, token: &str) -> Value {
+        let mut doc = self.get(path, token);
+        for _ in 0..600 {
+            if doc["counting"] != true {
+                return doc;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            doc = self.get(path, token);
+        }
+        panic!("{path} never stopped counting: {doc}");
+    }
+
     /// A step's run asked for at its door.
     fn run(&self, scope: &str, step: &str, token: &str) -> (u16, Value) {
         self.call(
@@ -735,7 +751,7 @@ fn round(pg: Option<(String, String)>) {
     };
     assert_eq!(opinions, 6);
     // the body-part step waits for a person, and says what it would add
-    let s = server.get("/api/datasets/ds/summary", READS);
+    let s = server.summary("/api/datasets/ds/summary", READS);
     let bp = step(&s, "body_part");
     assert_eq!(bp["state"], "waiting", "{s}");
     assert_eq!(bp["answered"], 0, "{s}");
@@ -754,7 +770,7 @@ fn round(pg: Option<(String, String)>) {
     assert_eq!(status, 202, "{started}");
     let first_run = server.over(started["job"].as_i64().unwrap());
     assert_eq!(first_run["state"], "done", "{first_run}");
-    let s = server.get("/api/datasets/ds/summary", READS);
+    let s = server.summary("/api/datasets/ds/summary", READS);
     let bp = step(&s, "body_part");
     assert_eq!(bp["state"], "done", "{s}");
     assert_eq!(bp["answered"], 6, "{s}");
@@ -803,7 +819,7 @@ fn round(pg: Option<(String, String)>) {
     let rescore = server.over(started["job"].as_i64().unwrap());
     assert_eq!(rescore["state"], "done", "{rescore}");
     assert_eq!(reads(&read_log), 12, "the re-score read no file");
-    let s = server.get("/api/datasets/ds/summary", READS);
+    let s = server.summary("/api/datasets/ds/summary", READS);
     assert_eq!(step(&s, "body_part")["state"], "done", "{s}");
 
     // a bring-in of nothing new queues no score
