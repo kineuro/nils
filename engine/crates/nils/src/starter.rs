@@ -21,14 +21,19 @@
 //! catalog whose starter has no pack yet gets the pair as the name's next
 //! version once; the packless version stays as it is, so the runs that used
 //! it keep their comparability key.
+//!
+//! Wave 7b (Nima, 2026-10-31): LST-AI and FreeSurfer's recon-all-clinical
+//! are starters too, after the seven of R1, so a new catalog seeds nine and
+//! a catalog in place gets the two where their names are absent. A site
+//! that added either by hand keeps its version, as with any name.
 
 use nils_pipeline::descriptor;
 use nils_registry::Registry;
 use nils_registry::pipeline::{self as rows, STARTER};
 use serde_json::{Value, json};
 
-/// The starter descriptors, in R1's order.
-pub(crate) const CATALOG: [(&str, &str); 7] = [
+/// The starter descriptors, in R1's order, then the two of Wave 7b.
+pub(crate) const CATALOG: [(&str, &str); 9] = [
     (
         "n4-bias-correction",
         include_str!("../../../../pipelines/n4-bias-correction/nils.job.yml"),
@@ -57,11 +62,19 @@ pub(crate) const CATALOG: [(&str, &str); 7] = [
         "freesurfer-recon-all",
         include_str!("../../../../pipelines/freesurfer-recon-all/nils.job.yml"),
     ),
+    (
+        "lst-ai",
+        include_str!("../../../../pipelines/lst-ai/nils.job.yml"),
+    ),
+    (
+        "freesurfer-recon-all-clinical",
+        include_str!("../../../../pipelines/freesurfer-recon-all-clinical/nils.job.yml"),
+    ),
 ];
 
 /// Each starter's pack, as the tree holds it beside its descriptor, in the
 /// catalog's order.
-pub(crate) const PACKS: [(&str, &str); 7] = [
+pub(crate) const PACKS: [(&str, &str); 9] = [
     (
         "n4-bias-correction",
         include_str!("../../../../pipelines/n4-bias-correction/nils-pack.yaml"),
@@ -89,6 +102,14 @@ pub(crate) const PACKS: [(&str, &str); 7] = [
     (
         "freesurfer-recon-all",
         include_str!("../../../../pipelines/freesurfer-recon-all/nils-pack.yaml"),
+    ),
+    (
+        "lst-ai",
+        include_str!("../../../../pipelines/lst-ai/nils-pack.yaml"),
+    ),
+    (
+        "freesurfer-recon-all-clinical",
+        include_str!("../../../../pipelines/freesurfer-recon-all-clinical/nils-pack.yaml"),
     ),
 ];
 
@@ -512,8 +533,9 @@ mod tests {
 
     /// Every starter checks against the job contract, is named as the
     /// catalog lists it, is pinned by a manifest digest, and declares what
-    /// the pre-flight and the ask read: its roles, its tables and checks,
-    /// and a unit's typical minutes.
+    /// the pre-flight and the ask read: its roles, its tables and checks
+    /// (in its descriptor's `qc`, or in its pack since record 57 P1), and
+    /// a unit's typical minutes.
     #[test]
     fn every_starter_is_a_valid_pinned_descriptor() {
         for (name, text) in CATALOG {
@@ -525,22 +547,36 @@ mod tests {
                 "{name} says how long a unit takes"
             );
             assert!(d.roles.contains(&"t1w".to_string()), "{name} needs a T1w");
+            let pack = nils_pipeline::pack::parse(pack_text(name).unwrap()).unwrap();
             if name != "n4-bias-correction" {
                 assert!(
                     d.outputs.iter().any(|o| o.table.is_some()),
                     "{name} writes a table the ask reads"
                 );
-                assert!(!d.checks.is_empty(), "{name} declares its checks");
+                assert!(
+                    !d.checks.is_empty() || !pack.checks.is_empty(),
+                    "{name} declares its checks"
+                );
             }
             // a check reads a column its unit writes, else it holds nothing
+            let column = |metric: &str| {
+                d.outputs
+                    .iter()
+                    .filter_map(|o| o.table.as_ref())
+                    .any(|t| t.columns.iter().any(|col| col.name == metric))
+            };
             for c in &d.checks {
                 assert!(
-                    d.outputs
-                        .iter()
-                        .filter_map(|o| o.table.as_ref())
-                        .any(|t| t.columns.iter().any(|col| col.name == c.metric)),
+                    column(&c.metric),
                     "{name}: the check {} reads no column of its tables",
                     c.text()
+                );
+            }
+            for c in &pack.checks {
+                assert!(
+                    column(&c.metric),
+                    "{name}: the pack's check on {} reads no column of its tables",
+                    c.metric
                 );
             }
         }
@@ -549,10 +585,18 @@ mod tests {
             descriptor::parse(text).unwrap()
         };
         // the review of 2026-10-12: FreeSurfer 8's recon-all takes about
-        // 24 GB (release notes) to 80 GB at a peak (install notes)
+        // 24 GB (release notes) to 80 GB at a peak (install notes);
+        // recon-all-clinical about 32 GB (Gopinath 2025)
+        for name in ["freesurfer-recon-all", "freesurfer-recon-all-clinical"] {
+            assert!(
+                starter(name).needs.memory_gb >= 32.0,
+                "{name} declares the memory FreeSurfer 8 takes"
+            );
+        }
+        // LST-AI peaked at 10 GB in a unit (the image finding of 2026-10-16)
         assert!(
-            starter("freesurfer-recon-all").needs.memory_gb >= 32.0,
-            "recon-all declares the memory FreeSurfer 8 takes"
+            starter("lst-ai").needs.memory_gb >= 16.0,
+            "lst-ai declares the memory it peaks at"
         );
         // MRIQC uploads its IQMs and reports usage unless told not to
         let mriqc = starter("mriqc");
@@ -612,6 +656,7 @@ mod tests {
                 "segcsvd",
                 "n4-bias-correction",
                 "synthstrip",
+                "lst-ai",
             ]
             .contains(&name);
             assert_eq!(r.is_some(), fixes, "{name} replaces the earlier versions");
@@ -630,15 +675,142 @@ mod tests {
             strip.document["x-nils"]["needs"]["memory-gb"].as_f64() >= Some(8.0),
             "synthstrip declares the memory it peaks at"
         );
-        let (_, recon) = CATALOG
-            .iter()
-            .find(|(name, _)| *name == "freesurfer-recon-all")
-            .unwrap();
-        let recon = descriptor::parse(recon).unwrap();
+        for name in ["freesurfer-recon-all", "freesurfer-recon-all-clinical"] {
+            let recon = starter(name);
+            assert_eq!(
+                recon.document["x-nils"]["secrets"][0]["env"], "FS_LICENSE",
+                "{name} reads the lab's licence as a secret input (R3)"
+            );
+        }
+    }
+
+    /// Wave 7b (Nima, 2026-10-31): the catalog holds nine starters, LST-AI
+    /// and recon-all-clinical after R1's seven, and an empty catalog gets
+    /// them all; a catalog in place gets the two where their names are
+    /// absent, and a version a person added (as a site that ran `nils
+    /// pipeline add` on either folder before this has) is left as it is,
+    /// with no starter beside it. Both backends.
+    #[test]
+    fn a_person_s_version_of_a_new_starter_is_left_alone() {
         assert_eq!(
-            recon.document["x-nils"]["secrets"][0]["env"], "FS_LICENSE",
-            "recon-all reads the lab's licence as a secret input (R3)"
+            CATALOG.iter().map(|(n, _)| *n).collect::<Vec<_>>(),
+            [
+                "n4-bias-correction",
+                "synthstrip",
+                "synthseg",
+                "samseg-lesions",
+                "segcsvd",
+                "mriqc",
+                "freesurfer-recon-all",
+                "lst-ai",
+                "freesurfer-recon-all-clinical",
+            ]
         );
+        for postgres in [false, true] {
+            let Some((mut registry, _dir)) = registry_on(postgres, "nils_starter_person_s_lst")
+            else {
+                continue;
+            };
+            // a catalog in place before the two were starters: lst-ai as a
+            // person added it from the folder (the pair the engine ships),
+            // and recon-all-clinical as a person added an older folder of
+            // it (another digest, no pack)
+            let (_, text) = CATALOG.iter().find(|(n, _)| *n == "lst-ai").unwrap();
+            let s = starter(&mut registry, "lst-ai", text).unwrap();
+            let (person, fresh) = rows::add(
+                registry.store(),
+                &rows::New {
+                    name: &s.d.name,
+                    tool_version: &s.d.tool_version,
+                    descriptor: &s.d.document,
+                    descriptor_digest: &s.digest,
+                    image: &s.d.image.reference,
+                    image_digest: &s.d.image.digest,
+                    layout: s.d.layout.name(),
+                    level: s.d.level.name(),
+                    added_by: "anna",
+                    added_at: "2026-10-20T00:00:00Z",
+                    pack: Some(&s.pack.document),
+                    pack_digest: Some(&s.pack_digest),
+                    version_digest: &s.version_digest,
+                },
+            )
+            .unwrap();
+            assert!(fresh);
+            assert_eq!(person.origin, None);
+            let (_, text) = CATALOG
+                .iter()
+                .find(|(n, _)| *n == "freesurfer-recon-all-clinical")
+                .unwrap();
+            let clinical = descriptor::parse(text).unwrap();
+            let mut older = clinical.document.clone();
+            older["tool-version"] = json!("8.1.0");
+            let (older_person, fresh) = rows::add(
+                registry.store(),
+                &rows::New {
+                    name: &clinical.name,
+                    tool_version: "8.1.0",
+                    descriptor: &older,
+                    descriptor_digest: "sha256:0000000000000000000000000000000000000000000000000000000000000001",
+                    image: &clinical.image.reference,
+                    image_digest: &clinical.image.digest,
+                    layout: clinical.layout.name(),
+                    level: clinical.level.name(),
+                    added_by: "anna",
+                    added_at: "2026-10-21T00:00:00Z",
+                    pack: None,
+                    pack_digest: None,
+                    version_digest: "sha256:0000000000000000000000000000000000000000000000000000000000000002",
+                },
+            )
+            .unwrap();
+            assert!(fresh);
+
+            // the start: the seven of R1 are seeded, and nothing goes
+            // beside either person's version
+            let added = seed(&mut registry).unwrap();
+            let labels: Vec<&str> = added.iter().filter_map(|a| a["label"].as_str()).collect();
+            let want: Vec<String> = CATALOG[..7].iter().map(|(n, _)| format!("{n}@1")).collect();
+            assert_eq!(labels, want, "{added:?}");
+            let listed = list(&mut registry).unwrap();
+            let state = |name: &str| {
+                listed.iter().find(|s| s["name"] == name).unwrap()["state"]
+                    .as_str()
+                    .unwrap()
+                    .to_string()
+            };
+            assert_eq!(state("lst-ai"), "in the catalog as lst-ai@1");
+            assert_eq!(
+                state("freesurfer-recon-all-clinical"),
+                "freesurfer-recon-all-clinical@1 is a person's version, and is left so"
+            );
+            for (name, _) in &CATALOG[..7] {
+                assert!(state(name).starts_with("in the catalog as"), "{name}");
+            }
+            for (name, p) in [
+                ("lst-ai", &person),
+                ("freesurfer-recon-all-clinical", &older_person),
+            ] {
+                let versions = rows::versions(registry.store(), name).unwrap();
+                assert_eq!(versions.len(), 1, "{name}");
+                assert_eq!(versions[0].id, p.id, "{name}");
+                assert_eq!(versions[0].added_by, "anna", "{name}");
+                assert_eq!(versions[0].origin, None, "{name}");
+            }
+            // a second start adds nothing
+            assert!(seed(&mut registry).unwrap().is_empty());
+        }
+        // and an empty catalog gets the nine, in the catalog's order
+        for postgres in [false, true] {
+            let Some((mut registry, _dir)) = registry_on(postgres, "nils_starter_nine") else {
+                continue;
+            };
+            let added = seed(&mut registry).unwrap();
+            let labels: Vec<&str> = added.iter().filter_map(|a| a["label"].as_str()).collect();
+            let want: Vec<String> = CATALOG.iter().map(|(n, _)| format!("{n}@1")).collect();
+            assert_eq!(labels, want, "{added:?}");
+            assert_eq!(labels.len(), 9);
+        }
     }
 
     /// Record 49, after review: each starter runs its sessions apart,

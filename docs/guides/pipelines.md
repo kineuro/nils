@@ -77,7 +77,7 @@ A unit starts only when the cores and memory its descriptor declares (`x-nils.ne
 
 ## Use the starter catalog
 
-The engine seeds the first analyses of record 49 into its catalog each time it starts, when they are not there: N4, SynthStrip, SynthSeg, SAMSEG with lesions, segcsvd, MRIQC and FreeSurfer recon-all. Each is marked as a starter, and each image is pinned by its registry manifest digest. Each runs its sessions apart (`x-nils.units: apart`), a container a session, so the lane runs as many at once as its budget holds.
+The engine seeds nine starters into its catalog each time it starts, when they are not there: the first analyses of record 49, N4, SynthStrip, SynthSeg, SAMSEG with lesions, segcsvd, MRIQC and FreeSurfer recon-all, and since Wave 7b LST-AI (multiple sclerosis lesions from a T1w and a FLAIR) and FreeSurfer recon-all-clinical (surfaces and volumes from a T1 of any resolution, where recon-all's pack routes a 2D or coarse T1). Each is marked as a starter, and each image is pinned by its registry manifest digest. Each runs its sessions apart (`x-nils.units: apart`), a container a session, so the lane runs as many at once as its budget holds.
 
 1. See what the catalog holds of each:
 
@@ -102,7 +102,7 @@ The desk shows the same on Pipelines > Catalog, under Starters, and an admin see
 
 A version a person added is never gone over, and a starter a person retired stays retired. A newer engine with newer pins adds them as the name's next version only where the newest version is the engine's own starter. A newer starter that fixes the older one replaces it (see *Choose a version*).
 
-> **Warning:** the starters' images are large (FreeSurfer 8.2.0 is about 14 GB, MRIQC about 5 GB) and are pulled on a run's first use. FreeSurfer recon-all reads the lab's licence as a secret input (record 49 R3) and does not start without it.
+> **Warning:** the starters' images are large (FreeSurfer 8.2.0 is about 14 GB, LST-AI about 11 GB to pull and 30 GB unpacked, MRIQC about 5 GB) and are pulled on a run's first use; the pre-flight says which image is missing. FreeSurfer recon-all and recon-all-clinical read the lab's licence as a secret input (record 49 R3) and do not start without it.
 
 > **Warning:** segcsvd (white-matter hyperintensities on the FLAIR, enlarged perivascular spaces on the T1w) reads each session's SynthSeg label map, so run `synthseg` over the selection first: a run of segcsvd with none is refused, and a session without one fails. Its image, segcsvd rc03 as its authors publish it (GPL-3.0), is about 13 GB. A session without a FLAIR gets the perivascular spaces alone. Its WMH model is validated for hyperintensities of vascular origin at 3 T, not for MS lesions.
 

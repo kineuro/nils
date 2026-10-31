@@ -4,7 +4,8 @@
 # T1-weighted image and a FLAIR, a deep-learning ensemble (Wiltgen,
 # McGinnis et al., NeuroImage: Clinical 42, 2024), the segmentation
 # Neuroverify had people check lesion by lesion. A starting point for job
-# type 3, check a result (record 55 H3), not a starter the engine seeds.
+# type 3, check a result (record 55 H3), and since Wave 7b (Nima,
+# 2026-10-31) a starter the engine seeds, after R1's seven.
 #
 # One session's T1w and FLAIR in; a binary lesion mask, the same lesions
 # labelled by where they lie (1 periventricular, 2 juxtacortical, 3
@@ -72,12 +73,12 @@
 # both masks on the FLAIR's grid and the table's voxels and volume those of
 # the mask, and peaked at 10 GB of memory, so the needs keep their 16. Run
 # by the engine's docker runtime, the same session's outputs were registered
-# as derivatives, the masks tied to the FLAIR. No unit-minutes is declared:
-# on a laptop CPU held to 15 W the unit took 2 h 37 min, nearly all of it
-# HD-BET's skull strip, whose forward pass ran for hours on that Intel CPU
-# until denormals were flushed (torch.set_flush_denormal(True) brought it
-# from over 18 minutes to 27 seconds), so the first run on a server says
-# what a unit takes.
+# as derivatives, the masks tied to the FLAIR. A unit is budgeted at 10
+# minutes, from the same-conversion repeat of 2026-10-30 on a 4-core server
+# CPU: 2 to 4 min a session in fast mode, and the default skull strip runs
+# five HD-BET models for its one. On a laptop CPU held to 15 W the unit took
+# 2 h 37 min, nearly all of it HD-BET's forward pass in denormal arithmetic
+# on that Intel CPU, 54.5 min with the flush the pack turns on.
 name: lst-ai
 schema-version: "0.5"
 tool-version: "1.2.0"
@@ -191,3 +192,7 @@ x-nils:
     gpu: none
     cores: 4
     memory-gb: 16
+    # the same-conversion repeat of 2026-10-30: 2 to 4 min a session in
+    # fast mode on a 4-core server CPU; the default skull strip runs five
+    # HD-BET models for its one
+    unit-minutes: 10
