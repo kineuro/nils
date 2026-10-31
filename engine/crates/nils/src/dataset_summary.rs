@@ -1524,11 +1524,11 @@ fn sorted(store: &mut Store, sources: &str, hide: bool, stacks: i64) -> Result<S
 /// is the same: ten minutes (2026-10-31; a minute until then, when the
 /// stamp carried the audit and the workers' rows), since the stamp moves
 /// with what moves them and a copy past its keep is answered while they
-/// are read again; or a few seconds while a job is not over or a batch
-/// runs, whose counts move with nothing else moving (the files a read
-/// files, the judgements a sort writes).
+/// are read again; or a minute while a job is not over or a batch runs,
+/// whose counts move with nothing else moving (the files a read files,
+/// the judgements a sort writes), read again in the background that often.
 const KEEP: Duration = Duration::from_secs(600);
-const KEEP_BUSY: Duration = Duration::from_secs(15);
+const KEEP_BUSY: Duration = Duration::from_secs(60);
 
 /// A dataset's counts as kept: under the stamp they were read under, when
 /// they were read (`as_of`, which the document says), how long they are
