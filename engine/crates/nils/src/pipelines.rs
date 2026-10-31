@@ -5861,6 +5861,25 @@ pub(crate) fn run_command(home: &Home, args: RunArgs) -> Result<(), Exit> {
         None => {
             let given = pairs(&args.params)?;
             let mut params = d.resolve(&given).map_err(usage)?;
+            // the G11 proof: a family's switch the member takes as a
+            // parameter of the same name (its task) is the run's parameter,
+            // so the run records the switch its units ran under, not the
+            // descriptor's default; a parameter given by name stands first
+            if args.family.is_some() {
+                for (k, v) in args.switches.iter().filter_map(|w| w.split_once('=')) {
+                    let k = k.trim();
+                    if given.iter().any(|(g, _)| g == k) {
+                        continue;
+                    }
+                    if let Some(value) = d
+                        .resolve(&[(k.to_string(), v.to_string())])
+                        .ok()
+                        .and_then(|one| one.get(k).cloned())
+                    {
+                        params.insert(k.to_string(), value);
+                    }
+                }
+            }
             // record 55 T24, second review: threads the caller set win; else
             // each unit is told the cores it takes at its start, and the run
             // records none

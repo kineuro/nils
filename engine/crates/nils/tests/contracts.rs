@@ -1403,8 +1403,8 @@ fn the_registration_scripts_hand_ants_its_bracket_arguments_whole() {
     has(&["-b", "[180]", "-c", "[50x50x50x50,0.0]"]);
     assert!(argv.contains("_xfm.h5,1]\n"), "{argv}");
     assert!(argv.contains("0GenericAffine.mat,1]\n"), "{argv}");
-    // the FLAIR's mask is carried onto the T1w's grid for the Dice, and the
-    // T1w's own mask (not the FLAIR's) is the fixed mask
+    // the FLAIR's mask is carried onto the T1w's grid for the Dice against
+    // the T1w's own mask (not the FLAIR's)
     assert!(
         argv.contains("_FLAIR_desc-brain_mask.nii.gz\n-r\n"),
         "{argv}"
@@ -1415,9 +1415,21 @@ fn the_registration_scripts_hand_ants_its_bracket_arguments_whole() {
         "{argv}"
     );
     assert!(
-        argv.contains("\n-x\n[") && argv.contains("sub-01_ses-01_desc-brain_mask.nii.gz,NULL]\n"),
+        argv.contains("/sub-01_ses-01_desc-brain_mask.nii.gz\n"),
         "{argv}"
     );
+    // the rigid reads no mask (proof run 2026-10-31: the T1w's brain mask
+    // as its fixed mask sent real pairs 22 to 30 mm wrong); the only -x is
+    // N4's and SyN's skull strip, never antsRegistration's
+    let rigid: Vec<&str> = argv
+        .split("== ")
+        .filter(|c| c.starts_with("antsRegistration\n"))
+        .collect();
+    assert!(!rigid.is_empty(), "{argv}");
+    for call in rigid {
+        assert!(!call.contains("\n-x\n"), "the rigid read a mask: {call}");
+    }
+    assert!(!argv.contains(",NULL]"), "{argv}");
     // every table is JSON, with 0 or 1 where a mask was read (the masks'
     // paths once leaked into brain_masked), and a row without a Dice says
     // why
@@ -1430,7 +1442,7 @@ fn the_registration_scripts_hand_ants_its_bracket_arguments_whole() {
         serde_json::from_str(&text).unwrap_or_else(|e| panic!("{name}: {e}: {text}"))
     };
     let flair = row("from-FLAIR_to-T1w");
-    assert_eq!(flair["brain_masked"], 1, "{flair}");
+    assert_eq!(flair["brain_masked"], 0, "the rigid reads no mask: {flair}");
     assert_eq!(
         flair["alignment_dice_note"], "the brain-mask Dice could not be computed",
         "the stand-in ImageMath writes no table: {flair}"
@@ -1454,7 +1466,7 @@ fn the_registration_scripts_hand_ants_its_bracket_arguments_whole() {
         t2w["alignment_dice_note"], "no brain mask of the moving image",
         "{t2w}"
     );
-    assert_eq!(t2w["brain_masked"], 1, "{t2w}");
+    assert_eq!(t2w["brain_masked"], 0, "{t2w}");
     // a dataset with no match runs nothing and still succeeds
     std::fs::remove_dir_all(data.join("sub-01")).unwrap();
     std::fs::write(&log, "").unwrap();

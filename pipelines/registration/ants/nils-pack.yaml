@@ -18,7 +18,7 @@
 nils_pack: 1
 pipeline:
   name: registration-ants
-  descriptor_sha256: "sha256:bb82dcc8ffffe26c05392c545564f9f583f2d1b86e84816df5d9874bca72abb1"
+  descriptor_sha256: "sha256:18dfde9396a274b5d97c65884a53b01d5401ad288898366582a8956476449904"
   version: "1.0"
 goals:
   goal: [fast, standard, research]

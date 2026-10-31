@@ -1466,6 +1466,50 @@ pub(crate) fn install_file_for(
         .map(|_| path)
 }
 
+/// The pack the catalog's current pipeline of the tool `app@version`
+/// carries, for an install given no pack: the newest active version of each
+/// name, kept where its tool is `app@version` and it carries a pack. The
+/// text is the pack's canonical JSON, so the sha256 recorded is the
+/// catalog's pack digest. None where no such pipeline carries a pack; an
+/// error where two carry different packs.
+fn catalog_pack(
+    catalog: &[(Pipeline, Descriptor)],
+    app: &str,
+    version: &str,
+) -> Result<Option<String>, String> {
+    let mut newest: std::collections::BTreeMap<&str, &Pipeline> = Default::default();
+    for (p, _) in catalog.iter().filter(|(p, _)| p.state == "active") {
+        let held = newest.entry(p.name.as_str()).or_insert(p);
+        if p.version > held.version {
+            *held = p;
+        }
+    }
+    let mut packs: Vec<(String, String)> = newest
+        .values()
+        .filter(|p| !p.pack.is_null())
+        .filter(|p| {
+            let k = layout::pack_software(&p.pack).ok();
+            identity(p, k.as_ref()) == (app.to_string(), version.to_string())
+        })
+        .map(|p| (p.label(), nils_pipeline::canonical(&p.pack)))
+        .collect();
+    packs.sort_by(|a, b| a.1.cmp(&b.1).then(a.0.cmp(&b.0)));
+    packs.dedup_by(|a, b| a.1 == b.1);
+    match packs.len() {
+        0 => Ok(None),
+        1 => Ok(packs.pop().map(|(_, text)| text)),
+        _ => Err(format!(
+            "the pipelines {} carry different packs for {app}@{version}: give the one to install \
+             with --pack",
+            packs
+                .iter()
+                .map(|(label, _)| label.as_str())
+                .collect::<Vec<_>>()
+                .join(" and ")
+        )),
+    }
+}
+
 fn pipelines_of(
     catalog: &[(Pipeline, Descriptor)],
     app: &str,
@@ -1526,8 +1570,19 @@ pub(crate) fn install(
     }
     let place = place_made(registry).map_err(|e| refused(409, e))?;
     let l = place.layout();
-    // the pack, where one is given
-    let pack = match &req.pack {
+    // the pack: the one given, else the one the catalog's current pipeline
+    // of the tool carries (the pack --pack would name), so the probe runs,
+    // the fingerprint covers its key files and its digest is recorded
+    let pack_text = match &req.pack {
+        Some(text) => Some(text.clone()),
+        None => catalog_pack(
+            &catalog(registry).map_err(|e| refused(500, e))?,
+            &req.app,
+            &req.version,
+        )
+        .map_err(|e| refused(422, e))?,
+    };
+    let pack = match &pack_text {
         Some(text) => Some(layout::parse_pack(text).map_err(|e| refused(422, e))?),
         None => None,
     };
@@ -1801,7 +1856,7 @@ pub(crate) fn install(
         discard(&dir);
         refused(502, e)
     })?;
-    if let Some(text) = &req.pack {
+    if let Some(text) = &pack_text {
         std::fs::write(l.pack(&app, &version), text)
             .map_err(|e| refused(500, format!("the pack's copy: {e}")))?;
     }
