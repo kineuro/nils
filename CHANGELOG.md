@@ -4,6 +4,10 @@ All notable changes to NILS v1 are recorded here. The format follows [Keep a Cha
 
 ## [Unreleased]
 
+### Added
+
+- The LST-AI lesion segmentation and FreeSurfer's recon-all-clinical are starters: a new catalog seeds nine, and a catalog in place gets the two where their names are absent; a version a person added is left as it is. Both need heavy images (LST-AI's is 11 GB to pull and 30 GB unpacked, recon-all-clinical runs in the FreeSurfer 8.2.0 image and reads the lab's licence), and the pre-flight says what is missing before a run starts.
+
 ## [1.0.0-beta.4] - 2026-10-31
 
 The fourth beta closes Wave 7b (records 57 and 58): the yield funnel of a selection with its error-budget line, the sealed audit protocol as commands, the audit stream fixes from the raters' rehearsal, a run that records the assistant's proposal and who accepted it, the starters with their packs, a foreign training claim on a model registered from another site, a release that writes its stacks in a pool of workers and says where its seconds went, and the registration family repaired, calibrated on its first pilot and refreshed by the engine. Kvasir 1.0.0-alpha.11 and the assistant 1.0.0-alpha.31 are pinned. The MRI pack 1.4.0 ships in the tree, with one more corpus case.

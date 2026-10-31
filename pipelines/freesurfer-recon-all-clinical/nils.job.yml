@@ -4,9 +4,9 @@
 # clinical scan of any contrast and resolution (Gopinath et al., Medical
 # Image Analysis 2025), the variant the recon-all pack routes a session to
 # when its T1 is 2D or coarser than 1.5 mm (record 57 P11, Wave 7b P1;
-# research 01: Greve, "this is what it is made for"). Not a starter the
-# engine seeds: it is added beside freesurfer-recon-all, whose pack names
-# it under `variants`.
+# research 01: Greve, "this is what it is made for"). Since Wave 7b (Nima,
+# 2026-10-31) a starter the engine seeds, beside freesurfer-recon-all,
+# whose pack names it under `variants`.
 #
 # One session's T1-weighted image in, whatever its slices; the FreeSurfer
 # subject folder as one archive, the aseg volumes as a table, and

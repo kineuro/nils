@@ -13,7 +13,7 @@
 nils_pack: 1
 pipeline:
   name: lst-ai
-  descriptor_sha256: "sha256:2d4242c83a0cd36012ed25ed7fba183d6a587aeae3c52382af52030e3cf0782d"
+  descriptor_sha256: "sha256:f0e4761de2aeb6b1f66f6ac943870ce08b0bb92ae3b80100512f679f03ee0a71"
   version: "1.0"
 goals:
   goal: [fast, standard, research]

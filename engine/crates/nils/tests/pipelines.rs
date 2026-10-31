@@ -7160,6 +7160,8 @@ fn the_starter_catalog_is_seeded_at_the_engine_s_start() {
         names,
         [
             "freesurfer-recon-all",
+            "freesurfer-recon-all-clinical",
+            "lst-ai",
             "mriqc",
             "n4-bias-correction",
             "registration-ants",
@@ -7180,7 +7182,7 @@ fn the_starter_catalog_is_seeded_at_the_engine_s_start() {
     // a second start adds nothing
     let server = Server::start(&lab);
     let (_, again) = server.call("GET", "/api/pipelines", None, OPERATOR);
-    assert_eq!(again["pipelines"].as_array().unwrap().len(), 10, "{again}");
+    assert_eq!(again["pipelines"].as_array().unwrap().len(), 12, "{again}");
     drop(server);
     let listed = lab.json(&["pipeline", "starter", "--json"]);
     for s in listed["starters"].as_array().unwrap() {
@@ -13100,7 +13102,7 @@ fn the_runtime_and_the_starters_are_set_at_their_doors_by_an_admin() {
     let (status, st) = server.call("GET", "/api/pipelines/starters", None, PLAIN);
     assert_eq!(status, 200, "{st}");
     assert_eq!(st["seeding"], "off", "{st}");
-    assert_eq!(st["starters"].as_array().unwrap().len(), 7, "{st}");
+    assert_eq!(st["starters"].as_array().unwrap().len(), 9, "{st}");
     assert!(
         st["starters"]
             .as_array()
@@ -13128,7 +13130,7 @@ fn the_runtime_and_the_starters_are_set_at_their_doors_by_an_admin() {
     assert_eq!(on["seeding"], "on", "{on}");
     let (status, seeded) = server.call("POST", "/api/pipelines/starters/seed", None, ADMIN);
     assert_eq!(status, 200, "{seeded}");
-    assert_eq!(seeded["added"].as_array().unwrap().len(), 7, "{seeded}");
+    assert_eq!(seeded["added"].as_array().unwrap().len(), 9, "{seeded}");
     let (status, again) = server.call("POST", "/api/pipelines/starters/seed", None, ADMIN);
     assert_eq!(status, 200, "{again}");
     assert!(again["added"].as_array().unwrap().is_empty(), "{again}");
