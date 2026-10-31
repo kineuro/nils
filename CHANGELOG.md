@@ -4,6 +4,10 @@ All notable changes to NILS v1 are recorded here. The format follows [Keep a Cha
 
 ## [Unreleased]
 
+## [1.0.0-beta.4] - 2026-10-31
+
+The fourth beta closes Wave 7b (records 57 and 58): the yield funnel of a selection with its error-budget line, the sealed audit protocol as commands, the audit stream fixes from the raters' rehearsal, a run that records the assistant's proposal and who accepted it, the starters with their packs, a foreign training claim on a model registered from another site, a release that writes its stacks in a pool of workers and says where its seconds went, and the registration family repaired, calibrated on its first pilot and refreshed by the engine. Kvasir 1.0.0-alpha.11 and the assistant 1.0.0-alpha.31 are pinned. The MRI pack 1.4.0 ships in the tree, with one more corpus case.
+
 ### Added
 
 - The software place keeps plain files beside an image, by their sha256. A pack's `source.files` names each (`id`, `url`, `sha256`); `nils software install` fetches it into `<app>/<version>/files/<id>` and keeps it only when its digest is the pack's, else nothing is installed; an install already there fetches the files it lacks and says so (`fetched`); `nils software verify` fails an install whose file is missing or changed; the package lists them (`files`). A run of a pipeline reading a secret of that id the site has not set is given the install's file at the secret's mount, never swept. The ANTs registration member names TemplateFlow's MNI152NLin2009cAsym 1 mm T1w template this way, so its template task can be set up on a site: a secret is capped at 64 KiB and the 13.7 MB template could not be set as one. The pack contract and the openapi document gain the field and the answers additively.

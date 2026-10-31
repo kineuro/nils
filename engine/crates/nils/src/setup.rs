@@ -175,8 +175,8 @@ fn image_tag(version: &str) -> String {
 /// beside.
 const KVASIR_REPO: &str = "https://github.com/kineuro/kvasir";
 const ASSISTANT_REPO: &str = "https://github.com/kineuro/nils-assistant";
-const KVASIR_REF: &str = "v1.0.0-alpha.10";
-const ASSISTANT_REF: &str = "v1.0.0-alpha.30";
+const KVASIR_REF: &str = "v1.0.0-alpha.11";
+const ASSISTANT_REF: &str = "v1.0.0-alpha.31";
 
 /// llama.cpp's server, which runs the models Kvasir downloads once an admin
 /// starts one (record 24): the build this version takes, where its archives
@@ -23250,9 +23250,9 @@ mod tests {
 
     #[test]
     fn the_clones_are_pinned_to_release_tags_and_a_lab_may_name_another_ref() {
-        assert_eq!(KVASIR_REF, "v1.0.0-alpha.10");
-        assert_eq!(ASSISTANT_REF, "v1.0.0-alpha.30");
-        assert_eq!(source_ref(KVASIR_REF, None), "v1.0.0-alpha.10");
+        assert_eq!(KVASIR_REF, "v1.0.0-alpha.11");
+        assert_eq!(ASSISTANT_REF, "v1.0.0-alpha.31");
+        assert_eq!(source_ref(KVASIR_REF, None), "v1.0.0-alpha.11");
         assert_eq!(
             source_ref(KVASIR_REF, Some("models-held")),
             "models-held",
@@ -23260,7 +23260,7 @@ mod tests {
         );
         assert_eq!(
             source_ref(ASSISTANT_REF, Some("  ")),
-            "v1.0.0-alpha.30",
+            "v1.0.0-alpha.31",
             "an empty variable names nothing"
         );
 
@@ -23272,7 +23272,7 @@ mod tests {
                 "--depth",
                 "1",
                 "--branch",
-                "v1.0.0-alpha.10",
+                "v1.0.0-alpha.11",
                 "https://github.com/kineuro/kvasir",
                 "/home/x/nils/kvasir"
             ]],
@@ -26482,7 +26482,7 @@ mod tests {
                 "--depth",
                 "1",
                 "--branch",
-                "v1.0.0-alpha.10",
+                "v1.0.0-alpha.11",
                 "https://github.com/kineuro/kvasir",
                 "/srv/nils/kvasir"
             ])
@@ -26498,7 +26498,7 @@ mod tests {
                 "--depth",
                 "1",
                 "origin",
-                "v1.0.0-alpha.10"
+                "v1.0.0-alpha.11"
             ])
         );
         assert_eq!(
@@ -26609,7 +26609,7 @@ mod tests {
                 "--depth",
                 "1",
                 "--branch",
-                "v1.0.0-alpha.30",
+                "v1.0.0-alpha.31",
                 "https://github.com/kineuro/nils-assistant",
                 "/srv/nils/assistant"
             ],
@@ -26635,7 +26635,7 @@ mod tests {
                 "--depth",
                 "1",
                 "origin",
-                "v1.0.0-alpha.30"
+                "v1.0.0-alpha.31"
             ]
         );
         assert_eq!(
