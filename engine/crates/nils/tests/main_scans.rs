@@ -183,6 +183,22 @@ impl Served {
         held
     }
 
+    /// A dataset's summary with its counts read now (2026-10-31): the door
+    /// answers the kept counts at once and reads them again apart when what
+    /// they count moved, saying `counting`, so the summary is asked again
+    /// until it no longer counts, a minute at most.
+    fn summary(&self, path: &str, token: &str) -> (u16, Value) {
+        let (mut status, mut doc) = self.call("GET", path, None, token);
+        for _ in 0..600 {
+            if status != 200 || doc["counting"] != true {
+                return (status, doc);
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            (status, doc) = self.call("GET", path, None, token);
+        }
+        panic!("{path} never stopped counting: {doc}");
+    }
+
     fn call(&self, method: &str, path: &str, body: Option<Value>, token: &str) -> (u16, Value) {
         use std::io::Read as _;
         let mut stream = std::net::TcpStream::connect(("127.0.0.1", self.port)).unwrap();
@@ -1386,7 +1402,7 @@ fn uncached(pg: Option<(String, String)>) {
     home.ok(&["digest", &tree("later"), "--name", "later"]);
     sort(&home);
     let server = Served::start(&home, root.path());
-    let (status, summary) = server.call("GET", "/api/datasets/later/summary", None, OPS);
+    let (status, summary) = server.summary("/api/datasets/later/summary", OPS);
     assert_eq!(status, 200, "{summary}");
     assert_eq!(summary["subjects"], 2, "{summary}");
     assert!(
@@ -1410,9 +1426,9 @@ fn uncached(pg: Option<(String, String)>) {
     );
     assert_eq!(status, 200, "{strips}");
     assert_eq!(strips["subjects"].as_array().unwrap().len(), 2, "{strips}");
-    let (_, summary) = server.call("GET", "/api/datasets/later/summary", None, OPS);
+    let (_, summary) = server.summary("/api/datasets/later/summary", OPS);
     assert_eq!(summary["sessions"], 2, "{summary}");
-    let (_, summary) = server.call("GET", "/api/datasets/fresh/summary", None, OPS);
+    let (_, summary) = server.summary("/api/datasets/fresh/summary", OPS);
     assert_eq!(summary["sessions"], 3, "{summary}");
 }
 

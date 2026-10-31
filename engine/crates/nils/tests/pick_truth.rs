@@ -480,6 +480,22 @@ impl Served {
         )
     }
 
+    /// A dataset's summary with its counts read now (2026-10-31): the door
+    /// answers the kept counts at once and reads them again apart when what
+    /// they count moved, saying `counting`, so the summary is asked again
+    /// until it no longer counts, a minute at most.
+    fn summary(&self, path: &str) -> Value {
+        let mut doc = self.ok("GET", path, None);
+        for _ in 0..600 {
+            if doc["counting"] != true {
+                return doc;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            doc = self.ok("GET", path, None);
+        }
+        panic!("{path} never stopped counting: {doc}");
+    }
+
     fn ok(&self, method: &str, path: &str, body: Option<Value>) -> Value {
         let (status, doc) = self.call(method, path, body);
         assert!(
@@ -746,7 +762,7 @@ fn agree(pg: Option<(String, String)>) {
         assert_eq!(s["roles"]["t1w"]["picked"], n, "{q}: {s}");
     }
     for (name, n) in [("alpha", 3), ("beta", 2)] {
-        let s = server.ok("GET", &format!("/api/datasets/{name}/summary"), None);
+        let s = server.summary(&format!("/api/datasets/{name}/summary"));
         let main = s["steps"]
             .as_array()
             .unwrap()

@@ -335,6 +335,22 @@ impl Served {
         doc
     }
 
+    /// A dataset's summary with its counts read now (2026-10-31): the door
+    /// answers the kept counts at once and reads them again apart when what
+    /// they count moved, saying `counting`, so the summary is asked again
+    /// until it no longer counts, a minute at most.
+    fn summary(&self, path: &str, token: &str) -> Value {
+        let mut doc = self.get(path, token);
+        for _ in 0..600 {
+            if doc["counting"] != true {
+                return doc;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            doc = self.get(path, token);
+        }
+        panic!("{path} never stopped counting: {doc}");
+    }
+
     /// A step's run asked for at its door.
     fn run(&self, scope: &str, step: &str, token: &str) -> (u16, Value) {
         self.call(
@@ -579,7 +595,7 @@ fn round(pg: Option<(String, String)>) {
 
     // no pipeline answers the step yet
     let server = Served::start(&home, &path, false, &logged);
-    let s = server.get("/api/datasets/ds/summary", READS);
+    let s = server.summary("/api/datasets/ds/summary", READS);
     let pc = step(&s, "post_contrast");
     assert_eq!(pc["refusal"]["reason"], "no_pipeline", "{s}");
     assert_eq!(pc["label"]["labelled"], 5, "{s}");
@@ -643,7 +659,7 @@ fn round(pg: Option<(String, String)>) {
     }
     // admitted, the cascade waits for a person to promote it
     let server = Served::start(&home, &path, false, &logged);
-    let s = server.get("/api/datasets/ds/summary", READS);
+    let s = server.summary("/api/datasets/ds/summary", READS);
     let refusal = step(&s, "post_contrast")["refusal"].clone();
     assert_eq!(refusal["reason"], "no_model", "{s}");
     assert!(
@@ -714,7 +730,7 @@ fn round(pg: Option<(String, String)>) {
     assert_eq!(show(stacks[2])["reason"], "R_window");
     assert_eq!(show(stacks[4])["injection_ref"], "first_post_t1");
     // on the step, and on the stack's evidence line
-    let s = server.get("/api/datasets/ds/summary", READS);
+    let s = server.summary("/api/datasets/ds/summary", READS);
     let pc = step(&s, "post_contrast");
     assert_eq!(pc["label"]["in_anchored_sessions"], 5, "{s}");
     assert_eq!(pc["label"]["by_state"]["post"], 2, "{s}");

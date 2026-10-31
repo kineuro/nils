@@ -176,6 +176,22 @@ impl Worked {
         doc
     }
 
+    /// A dataset's summary with its counts read now (2026-10-31): the door
+    /// answers the kept counts at once and reads them again apart when what
+    /// they count moved, saying `counting`, so the summary is asked again
+    /// until it no longer counts, a minute at most.
+    fn summary(&self, path: &str, token: &str) -> Value {
+        let mut doc = self.get(path, token);
+        for _ in 0..600 {
+            if doc["counting"] != true {
+                return doc;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            doc = self.get(path, token);
+        }
+        panic!("{path} never stopped counting: {doc}");
+    }
+
     /// The dataset's jobs once every kind of `kinds` has one and all are
     /// over, two minutes at most.
     fn settled(&self, dataset: &str, kinds: &[&str]) -> Vec<Value> {
@@ -396,7 +412,7 @@ fn round(pg: Option<(String, String)>) {
     assert_eq!(status, 404);
 
     // the summary: what it holds and where it is, at plain
-    let s = server.get("/api/datasets/ds/summary", READS);
+    let s = server.summary("/api/datasets/ds/summary", READS);
     assert_eq!(s["dataset"], "ds", "{s}");
     assert_eq!(s["detail"], "plain", "{s}");
     assert_eq!(s["state"], "anonymised", "{s}");
@@ -519,7 +535,7 @@ fn round(pg: Option<(String, String)>) {
         "running",
         r#"{"done": 2, "total": 3, "built": 2, "current": 0, "failed": 0}"#,
     );
-    let making = server.get("/api/datasets/ds/summary", READS);
+    let making = server.summary("/api/datasets/ds/summary", READS);
     preview_job(
         "done",
         r#"{"done": 3, "total": 3, "built": 3, "current": 0, "failed": 0}"#,
@@ -548,10 +564,10 @@ fn round(pg: Option<(String, String)>) {
             store.execute(&format!("DELETE FROM {t}"), &[]).unwrap();
         }
     }
-    let unbuilt = server.get("/api/datasets/ds/summary", READS);
+    let unbuilt = server.summary("/api/datasets/ds/summary", READS);
     assert!(unbuilt["sessions"].is_null(), "{unbuilt}");
     home.ok(&["session", "rebuild"]);
-    let built = server.get("/api/datasets/ds/summary", READS);
+    let built = server.summary("/api/datasets/ds/summary", READS);
     assert_eq!(built["sessions"], 2, "{built}");
 
     // a stack of a sample sealed now is counted by no kind
@@ -580,7 +596,7 @@ fn round(pg: Option<(String, String)>) {
             )
             .unwrap();
     }
-    let after_seal = server.get("/api/datasets/ds/summary", READS);
+    let after_seal = server.summary("/api/datasets/ds/summary", READS);
     assert_eq!(t1w(&after_seal), said - 1, "{after_seal}");
     // the scans are still counted, as the card counts them
     assert_eq!(after_seal["scans"], 3, "{after_seal}");
@@ -610,7 +626,7 @@ fn round(pg: Option<(String, String)>) {
         (ids, nils_registry::time::now_iso())
     };
     assert_eq!(stack_ids.len(), 3, "{stack_ids:?}");
-    let before = server.get("/api/datasets/ds/summary", READS);
+    let before = server.summary("/api/datasets/ds/summary", READS);
     {
         let mut store = home.store();
         let item = store.qualified("review_item");
@@ -630,7 +646,7 @@ fn round(pg: Option<(String, String)>) {
                 .unwrap();
         }
     }
-    let asked = server.get("/api/datasets/ds/summary", READS);
+    let asked = server.summary("/api/datasets/ds/summary", READS);
     let look_kinds = |doc: &Value| doc["look_kinds"].as_object().unwrap().clone();
     let of_kind =
         |doc: &Value, k: &str| look_kinds(doc).get(k).and_then(Value::as_i64).unwrap_or(0);
@@ -687,7 +703,7 @@ fn round(pg: Option<(String, String)>) {
             )
             .unwrap();
     }
-    let served = server.get("/api/datasets/ds/summary", READS);
+    let served = server.summary("/api/datasets/ds/summary", READS);
     let bp = step(&served, "body_part");
     assert_eq!(bp["state"], "waiting", "{served}");
     assert_eq!(bp["served"], true, "{served}");
@@ -774,7 +790,7 @@ fn round(pg: Option<(String, String)>) {
         }
         (job_id, run_id)
     };
-    let running = server.get("/api/datasets/ds/summary", READS);
+    let running = server.summary("/api/datasets/ds/summary", READS);
     let bp = step(&running, "body_part");
     assert_eq!(bp["state"], "running", "{running}");
     assert_eq!(bp["job"], job_id, "{running}");
@@ -844,7 +860,7 @@ fn round(pg: Option<(String, String)>) {
             }
         }
     }
-    let done = server.get("/api/datasets/ds/summary", READS);
+    let done = server.summary("/api/datasets/ds/summary", READS);
     let bp = step(&done, "body_part");
     assert_eq!(bp["state"], "done", "{done}");
     assert_eq!(bp["answered"], 2, "{done}");
@@ -858,7 +874,7 @@ fn round(pg: Option<(String, String)>) {
     assert_eq!(done["need_a_look"], asked["need_a_look"], "{done}");
 
     // a dataset nothing has read: every step waits but the found one
-    let o = server.get("/api/datasets/other/summary", READS);
+    let o = server.summary("/api/datasets/other/summary", READS);
     assert_eq!(o["scans"], 0, "{o}");
     assert_eq!(o["kinds"], json!([]), "{o}");
     for name in ["read", "sorted", "main_scans", "pictures", "views"] {
@@ -1698,7 +1714,7 @@ S-0002|1.2.9.D|1.2.9.D.2|20260510|sc t2";
     assert_eq!(digests, 4, "{ds}");
 
     // the summary, step by step
-    let summary = server.get("/api/datasets/looks/summary", READS);
+    let summary = server.summary("/api/datasets/looks/summary", READS);
     assert_eq!(summary["need_a_look"], totals["to_sort"], "{summary}");
     assert_eq!(summary["sure"], totals["sure"], "{summary}");
     assert_eq!(summary["unsorted"], totals["unsorted"], "{summary}");
@@ -1843,7 +1859,7 @@ fn a_folder_added_again_shows_none_of_the_removed_dataset_s_runs() {
         jobs.iter().any(|j| j["state"] == "failed"),
         "the first dataset's read failed: {jobs:?}"
     );
-    let before = server.get("/api/datasets/first/summary", OPS);
+    let before = server.summary("/api/datasets/first/summary", OPS);
     assert_eq!(step(&before, "read")["state"], "failed", "{before}");
 
     // the first dataset removed as the desk removes it, the folder added
@@ -1870,7 +1886,7 @@ fn a_folder_added_again_shows_none_of_the_removed_dataset_s_runs() {
         mine["count"], 0,
         "the removed dataset's runs are not the new one's: {mine}"
     );
-    let s = server.get("/api/datasets/again/summary", OPS);
+    let s = server.summary("/api/datasets/again/summary", OPS);
     for (name, st) in steps(&s) {
         assert_ne!(
             st["state"], "failed",
@@ -2201,7 +2217,7 @@ S-0002|1.2.9.C|1.2.9.C.2|20260407|t2 tse";
         "{two}"
     );
 
-    let summary = server.get("/api/datasets/second/summary", READS);
+    let summary = server.summary("/api/datasets/second/summary", READS);
     assert_eq!(summary["scans"], 2, "{summary}");
     assert_eq!(summary["subjects"], 1, "{summary}");
     let read = step(&summary, "read");
@@ -2231,7 +2247,7 @@ S-0002|1.2.9.C|1.2.9.C.2|20260407|t2 tse";
     let grid = server.get("/api/datasets/second/subjects", READS);
     assert_eq!(grid["subjects"].as_array().unwrap().len(), 1, "{grid}");
     // the first dataset is as it was
-    let summary = server.get("/api/datasets/first/summary", READS);
+    let summary = server.summary("/api/datasets/first/summary", READS);
     assert_eq!(summary["scans"], 4, "{summary}");
     assert_eq!(step(&summary, "read")["new"], 4, "{summary}");
 
@@ -2300,11 +2316,14 @@ S-0002|1.2.9.C|1.2.9.C.2|20260407|t2 tse";
         "{done}"
     );
     // the next read files it as a copy; the other question stays
-    let before = step(&server.get("/api/datasets/second/summary", READS), "read");
+    let before = step(
+        &server.summary("/api/datasets/second/summary", READS),
+        "read",
+    );
     drop(server);
     home.ok(&["digest", "--name", "second", "--no-private", "@second"]);
     let server = Worked::serve(&home, false);
-    let summary = server.get("/api/datasets/second/summary", READS);
+    let summary = server.summary("/api/datasets/second/summary", READS);
     let read = step(&summary, "read");
     assert_eq!(read["same_instance"], 1, "{summary}");
     assert_eq!(
@@ -2477,7 +2496,7 @@ fn set_aside(pg: Option<(String, String)>) {
     assert_eq!(open_items(&home), ["not_dicom"]);
 
     let server = Worked::serve(&home, false);
-    let s = server.get("/api/datasets/ds/summary", READS);
+    let s = server.summary("/api/datasets/ds/summary", READS);
     assert_eq!(s["scans"], 2, "{s}");
     assert_eq!(s["files"]["read"], 2, "{s}");
     assert_eq!(s["files"]["refused"], 5, "{s}");
@@ -2835,7 +2854,7 @@ fn folders(pg: Option<(String, String)>) {
 
     // the first identified dataset counts P alone; its set-aside files are
     // three, two of them of one subject with no stack in it
-    let summary = |name: &str| server.get(&format!("/api/datasets/{name}/summary"), READS);
+    let summary = |name: &str| server.summary(&format!("/api/datasets/{name}/summary"), READS);
     let sm = summary("ids");
     assert_eq!(sm["subjects"], 1, "{sm}");
     assert_eq!(sm["scans"], 1, "{sm}");
@@ -3016,7 +3035,7 @@ fn found_counts(pg: Option<(String, String)>) {
     }
     let found = |home: &Home| -> (Value, Value) {
         let server = Worked::serve(home, false);
-        let s = server.get("/api/datasets/found/summary", READS);
+        let s = server.summary("/api/datasets/found/summary", READS);
         (step(&s, "found"), s["files"].clone())
     };
     // before a read: the probe's count, which says it stopped short
@@ -3171,7 +3190,7 @@ fn copy_counts(pg: Option<(String, String)>) {
     let bytes = bytes_under(&ids.path().join("derivatives/dcm-original"));
     let summary = |home: &Home| -> (Value, Value, Value) {
         let server = Worked::serve(home, false);
-        let s = server.get("/api/datasets/copied/summary", READS);
+        let s = server.summary("/api/datasets/copied/summary", READS);
         let sources = server.get("/api/sources", READS);
         let source = sources["sources"]
             .as_array()

@@ -32,6 +32,20 @@
 //! the counts are kept under a stamp of what they read and read once for
 //! the requests that ask at the same time ([`kept`]); the jobs, the steps'
 //! states and their progress are read on every request.
+//!
+//! The counts answer at once (2026-10-31): a kept copy is answered whatever
+//! its age, and when what it was read under moved, a door wrote or its
+//! keep ran out, one reading runs apart in the background while the
+//! requests keep answering the copy, which the document says
+//! (`counts_as_of`, `counting`); only a dataset with no copy at all waits,
+//! once, for the first reading. The stamp names what moves the counts and
+//! nothing else ([`stamp`]): the batches, the newest finished job that is
+//! no worker, the questions, the judgements, the merges, the samples sealed,
+//! the labels and the session cache; not the audit, which a person's every
+//! look moves, and not the workers' rows, which run as long as the engine
+//! does. The pictures and the 3D views are looked for
+//! on disk under a key of their own ([`made_key`]), the newest finished
+//! pictures or 3D-views job and the working place, never on a page visit.
 
 use std::collections::{BTreeSet, HashMap};
 use std::path::Path;
@@ -954,6 +968,63 @@ fn made(working: &Path, stacks: &[i64]) -> (i64, i64) {
     })
 }
 
+/// The kinds of the jobs that make pictures and 3D views.
+const PICTURE_KINDS: &str = "'preview', 'pyramid'";
+
+/// A dataset's pictures and 3D views as last looked for, under the key
+/// they were looked for under ([`made_key`]).
+struct Made {
+    key: String,
+    pictures: i64,
+    views: i64,
+}
+
+/// The pictures and the 3D views of each dataset (its place's folder and
+/// id) as last looked for.
+static MADE: LazyLock<Mutex<HashMap<(String, i64), Made>>> = LazyLock::new(Default::default);
+
+/// What a dataset's pictures and 3D views are counted under (2026-10-31):
+/// the newest finished pictures or 3D-views job and the working place. A
+/// look at a file on a working place on a share takes a third of a
+/// millisecond, and a dataset of 456,000 scans took 15 seconds on eight
+/// threads to look at on every page visit; nothing but such a job, or a
+/// working place bound anew, makes a picture, so they are looked for again
+/// only then, and a door's write ([`forget`]) leaves them as they are.
+fn made_key(store: &mut Store, working: &Path) -> Result<String, StoreError> {
+    let job = store.query(
+        &format!(
+            "SELECT MAX(id) FROM {} WHERE kind IN ({PICTURE_KINDS}) AND finished_at IS NOT NULL",
+            store.qualified("job")
+        ),
+        &[],
+    )?[0]
+        .opt_int(0)?
+        .unwrap_or(0);
+    Ok(format!("{job}|{}", working.display()))
+}
+
+/// A dataset's pictures and 3D views as last looked for, where they were
+/// looked for under `key`.
+fn made_before(dataset: &Place, key: &str) -> Option<(i64, i64)> {
+    let held = MADE.lock().unwrap_or_else(|e| e.into_inner());
+    held.get(&(dataset.path.clone(), dataset.id))
+        .filter(|m| m.key == key)
+        .map(|m| (m.pictures, m.views))
+}
+
+/// Keep a dataset's pictures and 3D views as looked for under `key`.
+fn made_keep(dataset: &Place, key: String, (pictures, views): (i64, i64)) {
+    let mut held = MADE.lock().unwrap_or_else(|e| e.into_inner());
+    held.insert(
+        (dataset.path.clone(), dataset.id),
+        Made {
+            key,
+            pictures,
+            views,
+        },
+    );
+}
+
 /// A step's state: the open job's, else done or waiting.
 fn state_of(open: Option<&Light>, done: bool) -> &'static str {
     match open.map(|j| j.state.as_str()) {
@@ -1266,8 +1337,20 @@ pub(crate) fn counts(
         // file of
         let looking = match working {
             Some(w) if c.stacks > 0 => {
-                let looked = crate::preview::dataset_stacks(store, dataset).map_err(failed)?;
-                Some(scope.spawn(move || made(w, &looked)))
+                let key = made_key(store, w).map_err(failed)?;
+                match made_before(dataset, &key) {
+                    Some(made) => {
+                        (c.pictures, c.views) = made;
+                        None
+                    }
+                    None => {
+                        #[cfg(test)]
+                        tests::looked(&dataset.path);
+                        let looked =
+                            crate::preview::dataset_stacks(store, dataset).map_err(failed)?;
+                        Some((key, scope.spawn(move || made(w, &looked))))
+                    }
+                }
             }
             _ => None,
         };
@@ -1292,8 +1375,9 @@ pub(crate) fn counts(
             c.regions = s.regions;
             c.sorts = s.sorts;
         }
-        if let Some(looking) = looking {
+        if let Some((key, looking)) = looking {
             (c.pictures, c.views) = looking.join().unwrap_or((0, 0));
+            made_keep(dataset, key, (c.pictures, c.views));
         }
         Ok(())
     })?;
@@ -1437,22 +1521,38 @@ fn sorted(store: &mut Store, sources: &str, hide: bool, stacks: i64) -> Result<S
 }
 
 /// How long a dataset's counts are kept while what they were read under
-/// is the same: a minute, as the sources door's document is kept, or a few
-/// seconds while a job is not over or a batch runs, whose counts move with
-/// nothing else moving (the files a read files, the pictures a sort makes).
-const KEEP: Duration = Duration::from_secs(60);
+/// is the same: ten minutes (2026-10-31; a minute until then, when the
+/// stamp carried the audit and the workers' rows), since the stamp moves
+/// with what moves them and a copy past its keep is answered while they
+/// are read again; or a few seconds while a job is not over or a batch
+/// runs, whose counts move with nothing else moving (the files a read
+/// files, the judgements a sort writes).
+const KEEP: Duration = Duration::from_secs(600);
 const KEEP_BUSY: Duration = Duration::from_secs(15);
 
-/// A dataset's counts as kept, under the stamp they were read under.
+/// A dataset's counts as kept: under the stamp they were read under, when
+/// they were read (`as_of`, which the document says), how long they are
+/// kept, and whether a door wrote since (`stale`: answered still, and read
+/// again at the next request).
 struct Kept {
     stamp: String,
     at: Instant,
+    as_of: String,
     ttl: Duration,
+    stale: bool,
     counts: Arc<Counts>,
 }
 
+/// A dataset's counts as answered: the counts, when they were read, and
+/// whether they are being read again now.
+pub(crate) struct Answer {
+    pub(crate) counts: Arc<Counts>,
+    pub(crate) as_of: String,
+    pub(crate) counting: bool,
+}
+
 /// One dataset's counts, for callers who read a sample sealed now or for
-/// those who do not: the counts kept, whether a request reads them now, and
+/// those who do not: the counts kept, whether they are being read now, and
 /// how many times they were read from the registry rather than answered
 /// from the kept ones or another request's reading.
 #[derive(Default)]
@@ -1472,28 +1572,42 @@ static KEPT: LazyLock<(Mutex<HashMap<Key, Slot>>, Condvar)> = LazyLock::new(Defa
 
 /// How many times the kept counts were forgotten: a reading that began
 /// before a door wrote may have read what the write changed, so what it
-/// read is answered and never kept.
+/// read is kept stale, answered and read again at the next request.
 static FORGOTTEN: AtomicU64 = AtomicU64::new(0);
 
-/// The quiet acts of the audit: a stack's pixels opened, a sealed sample
-/// read, an identifier looked up or revealed, a derivative read. They
-/// change nothing the counts read and come often, so they move no stamp.
-const QUIET: &str =
-    "'instance.open', 'sealed.read', 'linkage.resolve', 'linkage.reveal', 'derivative.read'";
+/// The kinds of the jobs whose rows say nothing of a dataset's counts: the
+/// workers of the engine's queue, which run as long as the engine does.
+fn worker_kinds() -> String {
+    format!(
+        "'worker', '{}', '{}'",
+        nils_registry::job::PIPELINE_WORKER,
+        nils_registry::job::PICTURE_WORKER
+    )
+}
 
-/// What a dataset's counts are read under (2026-10-17), read again on every
+/// What a dataset's counts are read under (2026-10-31), read again on every
 /// request from indexes and small tables, in milliseconds whatever the
-/// registry holds: the registry's epoch, which moves with every judgement,
-/// merge and read's commit; every batch, which a read or a pseudonymise run
-/// begins and ends; the newest job and every job not over with its state
-/// (a sort, a pick, the pictures, a pipeline); the newest act of a person
-/// the audit keeps; the newest question, visit, post-contrast label and the
-/// samples sealed now; the dataset's place, its sources and the working
-/// place. The counts are read again when any of these moves, but for what a
-/// run moves as it goes: the epoch while a read runs, which it moves with
-/// every few hundred files it files, and the newest question while a job
-/// runs. While a job is not over (the previews a sort queued among them)
-/// or a batch runs (`true`), they are kept a few seconds only.
+/// registry holds: what moves the counts and nothing else. Every batch,
+/// which a read or a pseudonymise run begins and ends, and how many are not
+/// over; the newest finished job that is no worker (a sort, a pick, a model
+/// run, a pipeline, the pictures, a build of the session cache: whatever
+/// it wrote is there once it is over); the newest question and how many
+/// are open, which a person's decision closes; the newest judgement, which
+/// a sort or a person writes; the subjects merged; the samples sealed now;
+/// the newest post-contrast label and label set; the session cache's
+/// newest row and how many it holds, which a rebuild at the command line
+/// writes with no job; the dataset's place, its sources and the working
+/// place.
+///
+/// Until 2026-10-31 (from 2026-10-17) the stamp carried the registry's
+/// epoch, the newest act of the audit and the newest job row with every
+/// job not over too, and on a site whose workers' rows and raters' acts
+/// moved every few seconds nearly every visit read the counts again, for
+/// seconds: a person's look at a scan moves no count, a worker's row is no
+/// run, and a job queued has written nothing yet. While a job is not
+/// over or a batch runs (`true`), what a run moves as it goes (the
+/// questions a sort raises, the judgements it writes) is left out and the
+/// counts are kept a few seconds only.
 fn stamp(
     store: &mut Store,
     dataset: &Place,
@@ -1501,61 +1615,49 @@ fn stamp(
     working: Option<&Place>,
 ) -> Result<(String, bool), StoreError> {
     let q = |t: &str| store.qualified(t);
-    let (meta, batch, job, audit) = (q("registry_meta"), q("ingest_batch"), q("job"), q("audit"));
-    let (item, session, session_study, label, sealed) = (
+    let (batch, job, item, judgement) = (
+        q("ingest_batch"),
+        q("job"),
         q("review_item"),
-        q("session_cache"),
-        q("session_cache_study"),
-        q("contrast_label"),
-        q("sealed_stack"),
+        q("classification"),
     );
+    let (subject, sealed, label, set, session) = (
+        q("subject"),
+        q("sealed_stack"),
+        q("contrast_label"),
+        q("label_set"),
+        q("session_cache"),
+    );
+    let workers = worker_kinds();
     let sql = format!(
-        "SELECT (SELECT value FROM {meta} WHERE key = 'epoch'), \
-         (SELECT COUNT(*) FROM {batch}), (SELECT MAX(id) FROM {batch}), \
+        "SELECT (SELECT COUNT(*) FROM {batch}), (SELECT MAX(id) FROM {batch}), \
          (SELECT COUNT(*) FROM {batch} WHERE finished_at IS NULL), \
-         (SELECT MAX(id) FROM {job}), \
-         (SELECT MAX(a.id) FROM (SELECT id, action FROM {audit} ORDER BY id DESC LIMIT 200) a \
-          WHERE a.action NOT IN ({QUIET})), \
-         (SELECT MAX(id) FROM {item}), (SELECT MAX(id) FROM {session}), \
-         (SELECT MAX(id) FROM {session_study}), (SELECT MAX(id) FROM {label}), \
-         (SELECT COUNT(*) FROM {sealed} WHERE unsealed_at IS NULL)"
+         (SELECT MAX(id) FROM {job} WHERE finished_at IS NOT NULL AND kind NOT IN ({workers})), \
+         (SELECT COUNT(*) FROM {job} WHERE state IN ('queued', 'running', 'cancelling') \
+          AND kind NOT IN ({workers})), \
+         (SELECT MAX(id) FROM {item}), (SELECT COUNT(*) FROM {item} WHERE status = 'open'), \
+         (SELECT MAX(id) FROM {judgement}), \
+         (SELECT COUNT(*) FROM {subject} WHERE merged_into IS NOT NULL), \
+         (SELECT COUNT(*) FROM {sealed} WHERE unsealed_at IS NULL), \
+         (SELECT MAX(id) FROM {label}), (SELECT MAX(id) FROM {set}), \
+         (SELECT MAX(id) FROM {session}), (SELECT COUNT(*) FROM {session})"
     );
     let r = &store.query(&sql, &[])?[0];
-    let epoch = r.opt_text(0)?.unwrap_or_default().to_string();
     let n = |i: usize| -> Result<i64, StoreError> { Ok(r.opt_int(i)?.unwrap_or(0)) };
-    let (batches, last_batch, running, last_job, act) = (n(1)?, n(2)?, n(3)?, n(4)?, n(5)?);
-    let (question, sessions, visits, labels, sealed) = (n(6)?, n(7)?, n(8)?, n(9)?, n(10)?);
-    // the jobs not over, but the workers' own rows, which run as long as
-    // the engine does
-    let mut open = Vec::new();
-    for r in store.query(
-        &format!(
-            "SELECT id, state, kind FROM {job} WHERE state IN ('queued', 'running', 'cancelling') ORDER BY id"
-        ),
-        &[],
-    )? {
-        if !nils_registry::job::is_worker(r.text(2)?) {
-            open.push(format!("{}:{}", r.int(0)?, r.text(1)?));
-        }
-    }
-    // while a read runs, the epoch it moves with every few hundred files it
-    // files is left out, and while a job runs, the newest question, which a
-    // sort or a model raises as it goes: what they change is read again
-    // every few seconds while they run, and at once when they end. A
-    // person's act moves the audit's newest row whatever runs.
-    let epoch = if running > 0 { "-".to_string() } else { epoch };
-    let question = if open.is_empty() {
-        question.to_string()
-    } else {
+    let (batches, last_batch, running, finished, open) = (n(0)?, n(1)?, n(2)?, n(3)?, n(4)?);
+    let (question, open_questions, judged, merged) = (n(5)?, n(6)?, n(7)?, n(8)?);
+    let (sealed, labels, sets, sessions, visits) = (n(9)?, n(10)?, n(11)?, n(12)?, n(13)?);
+    // while a run goes on, the questions it raises and the judgements it
+    // writes are read again every few seconds, and at once when it ends
+    let busy = running > 0 || open > 0;
+    let moving = if busy {
         "-".to_string()
+    } else {
+        format!("{question}|{open_questions}|{judged}")
     };
-    // the pictures of what a sort judged are a job of their own (2026-10-17),
-    // so while they are made that job is among the jobs not over
-    let busy = running > 0 || !open.is_empty();
     let key = format!(
-        "{epoch}|{batches}|{last_batch}|{running}|{last_job}|{act}|{question}|{sessions}|\
-         {visits}|{labels}|{sealed}|{}|{ids:?}|{}|{}",
-        open.join(","),
+        "{batches}|{last_batch}|{running}|{finished}|{moving}|{merged}|{sealed}|{labels}|{sets}|\
+         {sessions}:{visits}|{ids:?}|{}|{}",
         dataset.as_json(),
         working
             .map(|w| format!("{}:{}", w.id, w.path))
@@ -1580,6 +1682,65 @@ impl Drop for Reading {
     }
 }
 
+/// What a reading of a dataset's counts is asked for: the dataset, its
+/// sources, whether a sealed sample is left out, the working place, and
+/// the stamp and the keep they are kept under once read.
+struct Asked {
+    key: Key,
+    stamp: String,
+    busy: bool,
+    dataset: Place,
+    ids: Vec<i64>,
+    hide: bool,
+    working: Option<Place>,
+}
+
+/// Read a dataset's counts now and keep them under their stamp: stale
+/// where a door wrote meanwhile, since the reading may have read what the
+/// write changed.
+fn read_and_keep(registry: &mut Registry, asked: &Asked) -> Result<Answer, Reply> {
+    let as_of = nils_registry::time::now_iso();
+    let forgotten = FORGOTTEN.load(Ordering::SeqCst);
+    let counts = Arc::new(counts(
+        registry,
+        &asked.dataset,
+        &asked.ids,
+        asked.hide,
+        asked.working.as_ref().map(|w| Path::new(&w.path)),
+    )?);
+    let (slots, _) = &*KEPT;
+    let mut held = slots.lock().unwrap_or_else(|e| e.into_inner());
+    held.entry(asked.key.clone()).or_default().kept = Some(Kept {
+        stamp: asked.stamp.clone(),
+        at: Instant::now(),
+        as_of: as_of.clone(),
+        ttl: if asked.busy { KEEP_BUSY } else { KEEP },
+        stale: FORGOTTEN.load(Ordering::SeqCst) != forgotten,
+        counts: Arc::clone(&counts),
+    });
+    Ok(Answer {
+        counts,
+        as_of,
+        counting: false,
+    })
+}
+
+/// Read a dataset's counts on a thread of its own, on a connection of its
+/// own to the registry `home` names, while the requests answer the kept
+/// ones; `reading` is let go when it is over, whatever becomes of it, and
+/// where no thread starts it is let go at once and the next request reads
+/// them apart again.
+fn read_apart(home: nils_registry::Home, asked: Asked, reading: Reading) {
+    let _ = std::thread::Builder::new()
+        .name("dataset-summary".to_string())
+        .spawn(move || {
+            let _reading = reading;
+            if let Ok(mut registry) = home.open() {
+                let _ = read_and_keep(&mut registry, &asked);
+            }
+        });
+}
+
 /// A dataset's counts (2026-10-17): the kept ones while what they were read
 /// under is the same, else read now, once however many ask at the same
 /// time. On a dataset of 30 million files the desk asked for the summary
@@ -1587,24 +1748,55 @@ impl Drop for Reading {
 /// readings of the same counts ran at once, each slowing the others; a
 /// request that finds another reading them waits for that reading and
 /// answers with it.
+///
+/// Answered at once (2026-10-31): the kept counts whatever their age, said
+/// to be counted again (`counting`) while a reading runs apart; a reading
+/// is started where what they were read under moved, a door wrote since or
+/// their keep ran out, and none while one runs. Only a dataset with no kept
+/// counts at all waits for its first reading, and the requests at once
+/// with it wait for the same one.
 fn kept(
     registry: &mut Registry,
     dataset: &Place,
     ids: &[i64],
     hide: bool,
     working: Option<&Place>,
-) -> Result<Arc<Counts>, Reply> {
+) -> Result<Answer, Reply> {
     let (stamp, busy) = stamp(registry.store(), dataset, ids, working).map_err(failed)?;
     let key: Key = (dataset.path.clone(), dataset.id, hide);
+    let asked = || Asked {
+        key: key.clone(),
+        stamp: stamp.clone(),
+        busy,
+        dataset: dataset.clone(),
+        ids: ids.to_vec(),
+        hide,
+        working: working.cloned(),
+    };
     let (slots, over) = &*KEPT;
     let mut held = slots.lock().unwrap_or_else(|e| e.into_inner());
     loop {
         let slot = held.entry(key.clone()).or_default();
-        if let Some(k) = &slot.kept
-            && k.stamp == stamp
-            && k.at.elapsed() < k.ttl
-        {
-            return Ok(Arc::clone(&k.counts));
+        if let Some(k) = &slot.kept {
+            let answer = Answer {
+                counts: Arc::clone(&k.counts),
+                as_of: k.as_of.clone(),
+                counting: true,
+            };
+            if !k.stale && k.stamp == stamp && k.at.elapsed() < k.ttl {
+                return Ok(Answer {
+                    counting: false,
+                    ..answer
+                });
+            }
+            if slot.reading {
+                return Ok(answer);
+            }
+            slot.reading = true;
+            slot.reads += 1;
+            drop(held);
+            read_apart(registry.home().clone(), asked(), Reading(key.clone()));
+            return Ok(answer);
         }
         if !slot.reading {
             slot.reading = true;
@@ -1615,35 +1807,52 @@ fn kept(
     }
     drop(held);
     let reading = Reading(key.clone());
-    let forgotten = FORGOTTEN.load(Ordering::SeqCst);
-    let counts = Arc::new(counts(
-        registry,
-        dataset,
-        ids,
-        hide,
-        working.map(|w| Path::new(&w.path)),
-    )?);
-    {
-        let mut held = slots.lock().unwrap_or_else(|e| e.into_inner());
-        let slot = held.entry(key.clone()).or_default();
-        slot.kept = (FORGOTTEN.load(Ordering::SeqCst) == forgotten).then(|| Kept {
-            stamp,
-            at: Instant::now(),
-            ttl: if busy { KEEP_BUSY } else { KEEP },
-            counts: Arc::clone(&counts),
-        });
-    }
+    let answer = read_and_keep(registry, &asked())?;
     drop(reading);
-    Ok(counts)
+    Ok(answer)
 }
 
-/// Forget every dataset's kept counts: a write at a door may have changed
-/// them.
+/// Mark every dataset's kept counts stale: a write at a door may have
+/// changed them, so they are read again at the next request, which they
+/// still answer (2026-10-31; forgotten outright until then, so the request
+/// after a write waited for the reading).
 pub(crate) fn forget() {
     let (slots, _) = &*KEPT;
     let mut held = slots.lock().unwrap_or_else(|e| e.into_inner());
     FORGOTTEN.fetch_add(1, Ordering::SeqCst);
     for slot in held.values_mut() {
+        if let Some(k) = &mut slot.kept {
+            k.stale = true;
+        }
+    }
+}
+
+/// Wait until no reading of the dataset's counts runs apart, for the tests.
+#[cfg(test)]
+fn settled(dataset: &Place, hide: bool) {
+    let key: Key = (dataset.path.clone(), dataset.id, hide);
+    let (slots, over) = &*KEPT;
+    let began = Instant::now();
+    let mut held = slots.lock().unwrap_or_else(|e| e.into_inner());
+    while held.get(&key).is_some_and(|s| s.reading) {
+        assert!(
+            began.elapsed() < Duration::from_secs(60),
+            "a reading never ended"
+        );
+        held = over
+            .wait_timeout(held, Duration::from_millis(200))
+            .unwrap_or_else(|e| e.into_inner())
+            .0;
+    }
+}
+
+/// Drop the dataset's kept counts, as a start of the engine leaves them,
+/// for the tests.
+#[cfg(test)]
+fn dropped(dataset: &Place, hide: bool) {
+    let (slots, _) = &*KEPT;
+    let mut held = slots.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(slot) = held.get_mut(&(dataset.path.clone(), dataset.id, hide)) {
         slot.kept = None;
     }
 }
@@ -1660,7 +1869,9 @@ fn reads_of(dataset: &Place, hide: bool) -> usize {
 
 /// The summary of one dataset, as `GET /api/datasets/{name}/summary`
 /// answers it: the counts kept while nothing they read moved ([`kept`]),
-/// the jobs, the steps' states and their progress read now.
+/// answered at once and read again apart when something did, with when
+/// they were read (`counts_as_of`) and whether they are being read again
+/// (`counting`); the jobs, the steps' states and their progress read now.
 pub(crate) fn document(
     registry: &mut Registry,
     access: &Access,
@@ -1685,13 +1896,14 @@ pub(crate) fn document(
     // what the registry holds of it, kept while nothing it read moved: a
     // stack of a sample sealed now is never counted by kind or region for a
     // caller who does not read sealed stacks (record 48)
-    let c = kept(
+    let answer = kept(
         registry,
         dataset,
         &ids,
         !crate::sealed::reads(access),
         working.as_ref(),
     )?;
+    let c = Arc::clone(&answer.counts);
     let store = registry.store();
     let jobs = jobs_sorted(store, dataset, WINDOW, Some(&c.sorts)).map_err(failed)?;
     let newest_of = |kinds: &[&str]| jobs.iter().find(|j| kinds.contains(&j.kind.as_str()));
@@ -1979,6 +2191,10 @@ pub(crate) fn document(
         },
         "proposals": proposals,
         "pictures_place": working.map(|w| w.name),
+        // when the counts were read, and whether they are read again now
+        // (2026-10-31): the kept ones answer at once while a reading runs
+        "counts_as_of": answer.as_of,
+        "counting": answer.counting,
         "steps": steps,
     }))
 }
@@ -2561,6 +2777,33 @@ mod tests {
         }
     }
 
+    /// The tests of the kept counts, one at a time: a door's write
+    /// ([`super::forget`]) marks every dataset's kept counts stale, whichever
+    /// test's they are.
+    static KEPT_TESTS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// How many times each dataset's pictures were looked for on disk, by
+    /// its path.
+    static LOOKED: std::sync::Mutex<std::collections::BTreeMap<String, usize>> =
+        std::sync::Mutex::new(std::collections::BTreeMap::new());
+
+    pub(super) fn looked(dataset: &str) {
+        *LOOKED
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .entry(dataset.to_string())
+            .or_default() += 1;
+    }
+
+    fn looks_of(dataset: &str) -> usize {
+        LOOKED
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(dataset)
+            .copied()
+            .unwrap_or(0)
+    }
+
     use nils_dicom::synth::TempDir;
     use nils_registry::home::{Home, InitOptions};
     use nils_registry::place::{self, Place};
@@ -3029,17 +3272,75 @@ mod tests {
         assert!(carried.len() > 2);
     }
 
+    /// What of a summary is counts: the document without the fields that
+    /// say when they were read and whether they are read again now.
+    fn counted_of(doc: &Value) -> Value {
+        let mut d = doc.clone();
+        let m = d.as_object_mut().unwrap();
+        m.remove("counts_as_of");
+        m.remove("counting");
+        d
+    }
+
+    /// The dataset's counts as read now: a request, which answers the kept
+    /// counts and starts a reading apart where what they count moved, the
+    /// end of that reading, and the answer after it.
+    fn fresh(m: &mut MadeUp) -> Value {
+        summary(&mut m.registry, &m.dataset);
+        super::settled(&m.dataset, true);
+        summary(&mut m.registry, &m.dataset)
+    }
+
+    /// Eight requests at once, each on a connection of its own, while the
+    /// reading of the dataset's counts takes a while.
+    fn eight_at_once(m: &MadeUp) -> Vec<Value> {
+        *HOLD.lock().unwrap() = Some((
+            m.dataset.path.clone(),
+            std::time::Duration::from_millis(400),
+        ));
+        let at_once = std::sync::Arc::new(std::sync::Barrier::new(8));
+        let answers: Vec<Value> = (0..8)
+            .map(|_| {
+                let (home, dataset, at_once) = (m.home.clone(), m.dataset.clone(), at_once.clone());
+                std::thread::spawn(move || {
+                    let mut registry = home.open().unwrap();
+                    at_once.wait();
+                    summary(&mut registry, &dataset)
+                })
+            })
+            .collect::<Vec<_>>()
+            .into_iter()
+            .map(|h| h.join().unwrap())
+            .collect();
+        super::settled(&m.dataset, true);
+        *HOLD.lock().unwrap() = None;
+        answers
+    }
+
     /// 2026-10-17: a dataset's counts are read once and kept while nothing
     /// they read moves, and the kept answer is the one read fresh; requests
-    /// asked at once meet one reading; a read, a job, an act of a person or
-    /// a question moves them, and an opening of a scan's pixels does not.
+    /// asked at once meet one reading; a read, a job that ends or a question
+    /// moves them. Amended 2026-10-31: the kept counts are answered at once
+    /// whatever moved, said to be counted again while one reading runs
+    /// apart, and the answer after it is the fresh one; a door's write marks
+    /// them stale and the next request still answers; only a dataset with
+    /// no kept counts waits; and an act of a person in the audit, a worker's
+    /// row or its heartbeat moves nothing, where until then a person's act
+    /// read the counts again.
     #[test]
-    fn a_summary_is_read_once_for_requests_at_once_and_kept_while_nothing_it_counts_moves() {
+    fn a_summary_answers_its_kept_counts_at_once_and_reads_them_again_apart_when_what_they_count_moves()
+     {
+        let _one_at_a_time = KEPT_TESTS.lock().unwrap_or_else(|e| e.into_inner());
         let mut m = made_up("summary-kept");
         let hide = true;
         let reads = |m: &MadeUp| super::reads_of(&m.dataset, hide);
         let first = summary(&mut m.registry, &m.dataset);
         assert_eq!(reads(&m), 1);
+        assert_eq!(first["counting"], false, "{first}");
+        assert!(
+            first["counts_as_of"].as_str().unwrap().starts_with("20"),
+            "{first}"
+        );
         assert!(first["scans"].as_i64().unwrap() > 3, "{first}");
         assert_eq!(first["files"]["known"], 2, "{first}");
         assert_eq!(
@@ -3063,40 +3364,43 @@ mod tests {
         // kept: answered again without reading
         assert_eq!(summary(&mut m.registry, &m.dataset), first);
         assert_eq!(reads(&m), 1, "kept");
-        // and what was kept is what a fresh reading says
+        // a door wrote: the kept counts are answered at once, said to be
+        // counted again, and read once apart; what is read is what a fresh
+        // reading says
         super::forget();
-        assert_eq!(summary(&mut m.registry, &m.dataset), first);
-        assert_eq!(reads(&m), 2, "read again once forgotten");
+        let stale = summary(&mut m.registry, &m.dataset);
+        assert_eq!(stale["counting"], true, "{stale}");
+        assert_eq!(counted_of(&stale), counted_of(&first));
+        assert_eq!(reads(&m), 2, "read again apart once forgotten");
+        super::settled(&m.dataset, hide);
+        let again = summary(&mut m.registry, &m.dataset);
+        assert_eq!(again["counting"], false, "{again}");
+        assert_eq!(counted_of(&again), counted_of(&first));
+        assert_eq!(reads(&m), 2, "the reading apart was the one");
 
-        // eight requests at once, each on a connection of its own, while
-        // the reading takes a while: read once, the same answer to each
+        // eight requests at once while the kept counts are stale and the
+        // reading takes a while: each answered at once with the kept counts,
+        // one reading apart
         super::forget();
-        *HOLD.lock().unwrap() = Some((
-            m.dataset.path.clone(),
-            std::time::Duration::from_millis(400),
-        ));
-        let at_once = std::sync::Arc::new(std::sync::Barrier::new(8));
-        let answers: Vec<Value> = (0..8)
-            .map(|_| {
-                let (home, dataset, at_once) = (m.home.clone(), m.dataset.clone(), at_once.clone());
-                std::thread::spawn(move || {
-                    let mut registry = home.open().unwrap();
-                    at_once.wait();
-                    summary(&mut registry, &dataset)
-                })
-            })
-            .collect::<Vec<_>>()
-            .into_iter()
-            .map(|h| h.join().unwrap())
-            .collect();
-        *HOLD.lock().unwrap() = None;
-        assert_eq!(reads(&m), 3, "eight requests, one reading");
-        for answer in &answers {
-            assert_eq!(answer, &first);
+        for answer in eight_at_once(&m) {
+            assert_eq!(answer["counting"], true, "{answer}");
+            assert_eq!(counted_of(&answer), counted_of(&first));
         }
+        assert_eq!(reads(&m), 3, "eight requests, one reading apart");
 
-        // a read begins: its files are counted, and while it runs the
-        // counts are kept a while; it ends: they are read again
+        // eight requests at once with no kept counts at all, as after a
+        // start of the engine: one reading, waited for by all, the same
+        // answer to each
+        super::dropped(&m.dataset, hide);
+        for answer in eight_at_once(&m) {
+            assert_eq!(answer["counting"], false, "{answer}");
+            assert_eq!(counted_of(&answer), counted_of(&first));
+        }
+        assert_eq!(reads(&m), 4, "eight requests, one reading");
+
+        // a read begins: the kept counts are answered while its files are
+        // counted apart, and while it runs they are kept a few seconds; it
+        // ends: they are read again
         let store = m.registry.store();
         let now = "2026-10-17T01:00:00Z";
         exec(
@@ -3116,8 +3420,13 @@ mod tests {
                 m.source
             ),
         );
+        let began = summary(&mut m.registry, &m.dataset);
+        assert_eq!(began["counting"], true, "a read began: counted apart");
+        assert_eq!(began["files"]["new"], first["files"]["new"]);
+        super::settled(&m.dataset, hide);
         let running = summary(&mut m.registry, &m.dataset);
-        assert_eq!(reads(&m), 4, "a read began");
+        assert_eq!(reads(&m), 5, "a read began");
+        assert_eq!(running["counting"], false);
         assert_eq!(
             running["files"]["new"],
             first["files"]["new"].as_i64().unwrap() + 1
@@ -3128,13 +3437,19 @@ mod tests {
                 "UPDATE ingest_batch SET state = 'done', finished_at = '{now}' WHERE id = {batch}"
             ),
         );
-        let ended = summary(&mut m.registry, &m.dataset);
-        assert_eq!(reads(&m), 5, "a read ended");
+        let ended = fresh(&mut m);
+        assert_eq!(reads(&m), 6, "a read ended");
         super::forget();
-        assert_eq!(summary(&mut m.registry, &m.dataset), ended, "as read fresh");
-        assert_eq!(reads(&m), 6);
+        assert_eq!(
+            counted_of(&fresh(&mut m)),
+            counted_of(&ended),
+            "as read fresh"
+        );
+        assert_eq!(reads(&m), 7);
 
-        // an opening of a scan's pixels moves nothing; a person's act does
+        // an act of a person in the audit moves nothing, nor a worker of the
+        // engine's queue, which runs as long as the engine does, nor its
+        // heartbeat (2026-10-31)
         let audit = |store: &mut Store, action: &str| {
             exec(
                 store,
@@ -3143,13 +3458,26 @@ mod tests {
                 ),
             )
         };
-        audit(m.registry.store(), "instance.open");
-        summary(&mut m.registry, &m.dataset);
-        assert_eq!(reads(&m), 6, "an opening moves nothing");
-        audit(m.registry.store(), "review.accept");
-        summary(&mut m.registry, &m.dataset);
-        assert_eq!(reads(&m), 7, "an act of a person");
-        // a question raised
+        for action in ["instance.open", "review.accept", "decision"] {
+            audit(m.registry.store(), action);
+            fresh(&mut m);
+            assert_eq!(reads(&m), 7, "an act of a person ({action}) moves nothing");
+        }
+        exec(
+            m.registry.store(),
+            &format!(
+                "INSERT INTO job (kind, name, state, started_at) VALUES ('worker', 'queue', 'running', '{now}')"
+            ),
+        );
+        fresh(&mut m);
+        assert_eq!(reads(&m), 7, "a worker began");
+        exec(
+            m.registry.store(),
+            &format!("UPDATE job SET heartbeat_at = '{now}' WHERE kind = 'worker'"),
+        );
+        fresh(&mut m);
+        assert_eq!(reads(&m), 7, "a worker's heartbeat");
+        // a question raised is counted
         exec(
             m.registry.store(),
             &format!(
@@ -3158,31 +3486,9 @@ mod tests {
                 m.source
             ),
         );
-        let asked = summary(&mut m.registry, &m.dataset);
-        assert_eq!(reads(&m), 8, "a question raised");
+        let asked = fresh(&mut m);
+        assert_eq!(reads(&m), 8, "a question raised while a worker waits");
         assert_eq!(asked["identity_questions"], 2);
-
-        // a worker of the engine's queue runs as long as the engine does,
-        // and is no run: a question raised while it runs is counted at once
-        exec(
-            m.registry.store(),
-            &format!(
-                "INSERT INTO job (kind, name, state, started_at) VALUES ('worker', 'queue', 'running', '{now}')"
-            ),
-        );
-        summary(&mut m.registry, &m.dataset);
-        assert_eq!(reads(&m), 9, "a worker began");
-        exec(
-            m.registry.store(),
-            &format!(
-                "INSERT INTO review_item (kind, scope, status, created_at, group_key) \
-                 VALUES ('identity.same_instance', 'file', 'open', '{now}', 'source:{}|same/3.dcm')",
-                m.source
-            ),
-        );
-        let raised = summary(&mut m.registry, &m.dataset);
-        assert_eq!(reads(&m), 10, "a question raised while a worker waits");
-        assert_eq!(raised["identity_questions"], 3);
 
         // a pseudonymise run queued and running, with its batch: its
         // progress moves on every request while the counts are kept
@@ -3211,8 +3517,8 @@ mod tests {
                 .unwrap()
                 .clone()
         };
-        let one_file = summary(&mut m.registry, &m.dataset);
-        assert_eq!(reads(&m), 11, "a run queued");
+        let one_file = fresh(&mut m);
+        assert_eq!(reads(&m), 9, "a run queued with its batch");
         assert_eq!(step(&one_file)["job"], job);
         assert_eq!(step(&one_file)["progress"], json!({"files": 1}));
         exec(
@@ -3220,12 +3526,14 @@ mod tests {
             &format!("UPDATE job SET progress = '{{\"files\": 2}}' WHERE id = {job}"),
         );
         let two_files = summary(&mut m.registry, &m.dataset);
-        assert_eq!(reads(&m), 11, "kept while the run goes on");
+        assert_eq!(reads(&m), 9, "kept while the run goes on");
+        assert_eq!(two_files["counting"], false);
         assert_eq!(step(&two_files)["state"], "running");
         assert_eq!(step(&two_files)["progress"], json!({"files": 2}));
-        // what a run moves as it goes, the epoch a read moves with every
-        // commit and the questions a sort raises, is read again every few
-        // seconds while it runs, never on every request
+        // what a run moves as it goes, the questions a sort raises and the
+        // epoch a read moves with every commit, is read again every few
+        // seconds while it runs, never on every request; a person's act
+        // in the audit moves nothing whatever runs
         exec(
             m.registry.store(),
             "UPDATE registry_meta SET value = value || '1' WHERE key = 'epoch'",
@@ -3236,12 +3544,9 @@ mod tests {
                 "INSERT INTO review_item (kind, scope, status, created_at) VALUES ('base:missing', 'stack', 'open', '{now}')"
             ),
         );
-        summary(&mut m.registry, &m.dataset);
-        assert_eq!(reads(&m), 11, "kept a while, as a run goes on");
-        // a person's act is read at once, whatever runs
         audit(m.registry.store(), "decision");
-        summary(&mut m.registry, &m.dataset);
-        assert_eq!(reads(&m), 12, "an act of a person while a run goes on");
+        fresh(&mut m);
+        assert_eq!(reads(&m), 9, "kept a while, as a run goes on");
         exec(
             m.registry.store(),
             &format!("UPDATE job SET state = 'done', finished_at = '{now}' WHERE id = {job}"),
@@ -3252,10 +3557,190 @@ mod tests {
                 "UPDATE ingest_batch SET state = 'done', finished_at = '{now}' WHERE job_id = {job}"
             ),
         );
-        let over = summary(&mut m.registry, &m.dataset);
-        assert_eq!(reads(&m), 13, "the run ended");
+        let over = fresh(&mut m);
+        assert_eq!(reads(&m), 10, "the run ended");
         assert_eq!(step(&over)["progress"], Value::Null);
         super::forget();
-        assert_eq!(summary(&mut m.registry, &m.dataset), over, "as read fresh");
+        assert_eq!(
+            counted_of(&fresh(&mut m)),
+            counted_of(&over),
+            "as read fresh"
+        );
+        assert_eq!(reads(&m), 11);
+        // two subjects merged
+        exec(
+            m.registry.store(),
+            &format!(
+                "UPDATE subject SET merged_into = (SELECT MAX(id) FROM subject), merged_at = '{now}' \
+                 WHERE id = (SELECT MIN(id) FROM subject)"
+            ),
+        );
+        fresh(&mut m);
+        assert_eq!(reads(&m), 12, "a merge");
+    }
+
+    /// 2026-10-31: the stamp a dataset's counts are kept under moves with
+    /// what moves them (a batch, a job that ends, a question, a merge) and
+    /// not with an act of a person in the audit, a worker's row or its
+    /// heartbeat, which moved it until then and read the counts again on
+    /// nearly every visit of a busy site.
+    #[test]
+    fn the_stamp_moves_with_what_moves_the_counts_and_nothing_else() {
+        let mut m = made_up("summary-stamp");
+        let working = crate::pyramid::working_place(m.registry.store(), None).ok();
+        let ids = crate::sources::source_ids(m.registry.store(), &m.dataset).unwrap();
+        let read = |m: &mut MadeUp| {
+            super::stamp(m.registry.store(), &m.dataset, &ids, working.as_ref()).unwrap()
+        };
+        let now = "2026-10-31T01:00:00Z";
+        let (still, busy) = read(&mut m);
+        assert!(!busy);
+        for action in ["instance.open", "review.accept", "decision"] {
+            exec(
+                m.registry.store(),
+                &format!(
+                    "INSERT INTO audit (at, principal, action, scope) VALUES ('{now}', 'anna@lab', '{action}', '{{}}')"
+                ),
+            );
+            assert_eq!(
+                read(&mut m),
+                (still.clone(), false),
+                "an audit row ({action})"
+            );
+        }
+        for kind in [
+            "worker",
+            nils_registry::job::PIPELINE_WORKER,
+            nils_registry::job::PICTURE_WORKER,
+        ] {
+            exec(
+                m.registry.store(),
+                &format!(
+                    "INSERT INTO job (kind, name, state, started_at) VALUES ('{kind}', 'queue', 'running', '{now}')"
+                ),
+            );
+            assert_eq!(
+                read(&mut m),
+                (still.clone(), false),
+                "a worker's row ({kind})"
+            );
+        }
+        exec(
+            m.registry.store(),
+            &format!("UPDATE job SET heartbeat_at = '{now}' WHERE kind = 'worker'"),
+        );
+        assert_eq!(read(&mut m), (still.clone(), false), "a worker's heartbeat");
+        // a sort queued: busy, and the stamp still, since it has written
+        // nothing; ended: the stamp moves
+        exec(
+            m.registry.store(),
+            &format!(
+                "INSERT INTO job (kind, name, state, started_at) VALUES ('classify', 'ward', 'queued', '{now}')"
+            ),
+        );
+        let (queued, busy) = read(&mut m);
+        assert!(busy, "a sort queued");
+        exec(
+            m.registry.store(),
+            &format!(
+                "UPDATE job SET state = 'done', finished_at = '{now}' WHERE kind = 'classify'"
+            ),
+        );
+        let (ended, busy) = read(&mut m);
+        assert!(!busy);
+        assert_ne!(ended, still, "a sort ended");
+        assert_ne!(ended, queued);
+        // a question raised, and a merge
+        exec(
+            m.registry.store(),
+            &format!(
+                "INSERT INTO review_item (kind, scope, status, created_at) VALUES ('base:missing', 'stack', 'open', '{now}')"
+            ),
+        );
+        let (asked, _) = read(&mut m);
+        assert_ne!(asked, ended, "a question raised");
+        exec(
+            m.registry.store(),
+            &format!(
+                "UPDATE subject SET merged_into = (SELECT MAX(id) FROM subject), merged_at = '{now}' \
+                 WHERE id = (SELECT MIN(id) FROM subject)"
+            ),
+        );
+        let (merged, _) = read(&mut m);
+        assert_ne!(merged, asked, "a merge");
+    }
+
+    /// 2026-10-31: a dataset's pictures and 3D views are looked for on disk
+    /// once, and again only when a pictures or a 3D-views job has ended
+    /// since; not when a door writes, not when a sort ends and the counts
+    /// are read again.
+    #[test]
+    fn the_pictures_are_looked_for_once_until_a_pictures_job_ends() {
+        let _one_at_a_time = KEPT_TESTS.lock().unwrap_or_else(|e| e.into_inner());
+        let mut m = made_up("summary-pictures");
+        let looks = |m: &MadeUp| looks_of(&m.dataset.path);
+        let made = |doc: &Value, name: &str| {
+            doc["steps"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|s| s["step"] == name)
+                .unwrap()["made"]
+                .clone()
+        };
+        let first = summary(&mut m.registry, &m.dataset);
+        assert_eq!(looks(&m), 1);
+        assert_eq!(made(&first, "pictures"), 3, "{first}");
+        assert_eq!(made(&first, "views"), 1, "{first}");
+        // a door wrote: the counts are read again, the pictures not looked for
+        super::forget();
+        fresh(&mut m);
+        assert_eq!(looks(&m), 1, "a door wrote");
+        // a sort ended: the same
+        let now = "2026-10-31T01:00:00Z";
+        exec(
+            m.registry.store(),
+            &format!(
+                "INSERT INTO job (kind, name, state, started_at, finished_at) \
+                 VALUES ('classify', 'ward', 'done', '{now}', '{now}')"
+            ),
+        );
+        fresh(&mut m);
+        assert_eq!(looks(&m), 1, "a sort ended");
+        // a picture made of a fourth scan, and the pictures job that made it
+        // ended: looked for again, and the picture counted
+        let work = m._dir.path().join("work");
+        let stacks = crate::preview::dataset_stacks(m.registry.store(), &m.dataset).unwrap();
+        let bare = stacks
+            .iter()
+            .find(|s| !crate::preview::path(&work, **s, false).is_file())
+            .unwrap();
+        let picture = crate::preview::path(&work, *bare, false);
+        std::fs::create_dir_all(picture.parent().unwrap()).unwrap();
+        std::fs::write(&picture, b"p").unwrap();
+        fresh(&mut m);
+        assert_eq!(looks(&m), 1, "a picture made, no job ended");
+        exec(
+            m.registry.store(),
+            &format!(
+                "INSERT INTO job (kind, name, state, started_at, finished_at) \
+                 VALUES ('preview', 'ward', 'done', '{now}', '{now}')"
+            ),
+        );
+        let fourth = fresh(&mut m);
+        assert_eq!(looks(&m), 2, "a pictures job ended");
+        assert_eq!(made(&fourth, "pictures"), 4, "{fourth}");
+        super::forget();
+        fresh(&mut m);
+        assert_eq!(looks(&m), 2, "a door wrote after");
+        exec(
+            m.registry.store(),
+            &format!(
+                "INSERT INTO job (kind, name, state, started_at, finished_at) \
+                 VALUES ('pyramid', 'ward', 'done', '{now}', '{now}')"
+            ),
+        );
+        fresh(&mut m);
+        assert_eq!(looks(&m), 3, "a 3D-views job ended");
     }
 }

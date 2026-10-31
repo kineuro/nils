@@ -278,6 +278,22 @@ impl Served {
         doc
     }
 
+    /// A dataset's summary with its counts read now (2026-10-31): the door
+    /// answers the kept counts at once and reads them again apart when what
+    /// they count moved, saying `counting`, so the summary is asked again
+    /// until it no longer counts, a minute at most.
+    fn summary(&self, path: &str, token: &str) -> Value {
+        let mut doc = self.get(path, token);
+        for _ in 0..600 {
+            if doc["counting"] != true {
+                return doc;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            doc = self.get(path, token);
+        }
+        panic!("{path} never stopped counting: {doc}");
+    }
+
     /// A step's run asked for at its door.
     fn run(&self, scope: &str, step: &str, token: &str) -> (u16, Value) {
         self.call(
@@ -469,7 +485,7 @@ fn round(pg: Option<(String, String)>) {
     assert_eq!(read["state"], "done", "{read}");
 
     // nothing runs either step yet, and each says why
-    let s = server.get("/api/datasets/ds/summary", READS);
+    let s = server.summary("/api/datasets/ds/summary", READS);
     assert_eq!(s["scans"], 3, "{s}");
     let bp = step(&s, "body_part");
     assert_eq!(bp["state"], "off", "{s}");
@@ -540,7 +556,7 @@ fn round(pg: Option<(String, String)>) {
     let pipeline = added["label"].as_str().unwrap().to_string();
     assert_eq!(pipeline, "bodypart-infer-fusion@1", "{added}");
     let server = Served::start(&home, &path, false, &logged);
-    let s = server.get("/api/datasets/ds/summary", READS);
+    let s = server.summary("/api/datasets/ds/summary", READS);
     let bp = step(&s, "body_part");
     assert_eq!(bp["refusal"]["reason"], "no_model", "{s}");
     assert_eq!(
@@ -612,13 +628,13 @@ fn round(pg: Option<(String, String)>) {
 
     // a server with no worker: the run waits in the queue
     let server = Served::start(&home, &path, false, &logged);
-    let s = server.get("/api/datasets/ds/summary", READS);
+    let s = server.summary("/api/datasets/ds/summary", READS);
     let bp = step(&s, "body_part");
     assert_eq!(bp["state"], "waiting", "{s}");
     assert_eq!(bp["served"], true, "{s}");
     assert!(bp["refusal"].is_null(), "{s}");
     // a dataset with no scans: served, and nothing to run it over
-    let e = server.get("/api/datasets/empty/summary", READS);
+    let e = server.summary("/api/datasets/empty/summary", READS);
     assert_eq!(
         step(&e, "body_part")["refusal"]["reason"],
         "no_scans",
@@ -722,7 +738,7 @@ fn round(pg: Option<(String, String)>) {
     assert_eq!(queued["args"]["for"], "dataset:ds", "{queued}");
     assert_eq!(queued["args"]["principal"], "ops@lab", "{queued}");
     // the step waits its turn, and a second run of it is refused meanwhile
-    let s = server.get("/api/datasets/ds/summary", READS);
+    let s = server.summary("/api/datasets/ds/summary", READS);
     let bp = step(&s, "body_part");
     assert_eq!(bp["state"], "queued", "{s}");
     assert_eq!(bp["job"], job, "{s}");
@@ -754,7 +770,7 @@ fn round(pg: Option<(String, String)>) {
     // dropped from the queue, the step waits again
     let (status, dropped) = server.call("POST", &format!("/api/jobs/{job}/cancel"), None, OPS);
     assert_eq!(status, 200, "{dropped}");
-    let s = server.get("/api/datasets/ds/summary", READS);
+    let s = server.summary("/api/datasets/ds/summary", READS);
     assert_eq!(step(&s, "body_part")["state"], "waiting", "{s}");
     assert!(step(&s, "body_part")["refusal"].is_null(), "{s}");
     let (status, again) = server.run("datasets/ds", "body_part", OPS);
@@ -768,7 +784,7 @@ fn round(pg: Option<(String, String)>) {
     assert_eq!(ran["state"], "done", "{ran}");
     assert_eq!(ran["kind"], "pipeline", "{ran}");
     assert_eq!(ran["args"]["step"], "body_part", "{ran}");
-    let s = server.get("/api/datasets/ds/summary", READS);
+    let s = server.summary("/api/datasets/ds/summary", READS);
     let bp = step(&s, "body_part");
     assert_eq!(bp["state"], "done", "{s}");
     assert_eq!(bp["job"], job, "{s}");
@@ -830,7 +846,7 @@ fn round(pg: Option<(String, String)>) {
     let failed_job = started["job"].as_i64().unwrap();
     let ran = server.over(failed_job);
     assert_eq!(ran["state"], "failed", "{ran}");
-    let s = server.get("/api/datasets/ds/summary", READS);
+    let s = server.summary("/api/datasets/ds/summary", READS);
     let bp = step(&s, "body_part");
     assert_eq!(bp["state"], "failed", "{s}");
     assert_eq!(bp["job"], failed_job, "{s}");
@@ -958,7 +974,7 @@ fn round(pg: Option<(String, String)>) {
     // promoted, a cascade is refused at plan time while a part is merely
     // registered, then for the part it does not name
     let refusal_of = |server: &Served| -> Value {
-        let s = server.get("/api/datasets/ds/summary", READS);
+        let s = server.summary("/api/datasets/ds/summary", READS);
         let refusal = step(&s, "body_part")["refusal"].clone();
         assert_eq!(refusal["reason"], "no_model", "{s}");
         refusal
@@ -1037,7 +1053,7 @@ fn round(pg: Option<(String, String)>) {
     let added = home.json(&["pipeline", "add", older.to_str().unwrap(), "--json"]);
     std::fs::remove_file(&older).unwrap();
     assert_eq!(added["label"], "bodypart-infer-fusion@3", "{added}");
-    let s = server.get("/api/datasets/ds/summary", READS);
+    let s = server.summary("/api/datasets/ds/summary", READS);
     let refusal = &step(&s, "body_part")["refusal"];
     assert_eq!(refusal["reason"], "no_pipeline", "{s}");
     assert!(
@@ -1092,7 +1108,7 @@ fn round(pg: Option<(String, String)>) {
     // a machine with no container runtime: the door still answers, and says why
     let nothing = TempDir::new("steps-no-path");
     let server = Served::start(&home, nothing.path().as_os_str(), false, &logged);
-    let s = server.get("/api/datasets/ds/summary", READS);
+    let s = server.summary("/api/datasets/ds/summary", READS);
     let bp = step(&s, "body_part");
     assert_eq!(bp["refusal"]["reason"], "no_runtime", "{s}");
     assert!(
@@ -1131,7 +1147,7 @@ fn round(pg: Option<(String, String)>) {
             .int(0)
             .unwrap()
     };
-    let s = server.get("/api/datasets/ds/summary", READS);
+    let s = server.summary("/api/datasets/ds/summary", READS);
     let bp = step(&s, "body_part");
     assert_eq!(bp["state"], "running", "{s}");
     assert_eq!(bp["job"], taken, "{s}");
@@ -1150,7 +1166,7 @@ fn round(pg: Option<(String, String)>) {
             )
             .unwrap();
     }
-    let s = server.get("/api/datasets/ds/summary", READS);
+    let s = server.summary("/api/datasets/ds/summary", READS);
     let bp = step(&s, "body_part");
     assert_eq!(bp["state"], "failed", "{s}");
     assert_eq!(bp["job"], taken, "{s}");
