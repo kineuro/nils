@@ -8789,19 +8789,23 @@ struct LaneHeld {
     runs: usize,
 }
 
-fn lane_held(store: &mut Store, run_id: i64, host: &str, card: u32) -> Result<LaneHeld, String> {
+fn lane_held(
+    store: &mut Store,
+    run_id: i64,
+    host: &str,
+    card: u32,
+    smi: Option<&Path>,
+) -> Result<LaneHeld, String> {
     let err = |e: nils_registry::Error| e.to_string();
     let d = store.dialect();
     // one container holds its unit's ask once, however many units it runs
     // together: the rows are counted by container, not by unit
     let sql = format!(
-        "SELECT c.run_id, r.job_id, CAST(COALESCE(SUM(c.cores), 0) AS BIGINT), \
-         CAST(COALESCE(SUM(c.memory_mb), 0) AS BIGINT), \
-         CAST(COALESCE(SUM(CASE WHEN c.gpu_card = {} THEN c.gpu_memory_mb ELSE 0 END), 0) AS BIGINT) \
-         FROM (SELECT DISTINCT run_id, container, cores, memory_mb, gpu_card, gpu_memory_mb \
+        "SELECT c.run_id, r.job_id, c.cores, c.memory_mb, \
+         CASE WHEN c.gpu_card = {} THEN c.gpu_memory_mb ELSE 0 END, c.pid \
+         FROM (SELECT DISTINCT run_id, container, cores, memory_mb, gpu_card, gpu_memory_mb, pid \
          FROM {} WHERE state = 'running' AND host = {}) c \
-         JOIN {} r ON r.id = c.run_id WHERE r.status = 'running' \
-         GROUP BY c.run_id, r.job_id",
+         JOIN {} r ON r.id = c.run_id WHERE r.status = 'running'",
         d.param(1, Type::Int),
         store.qualified("pipeline_unit"),
         d.param(2, Type::Text),
@@ -8810,23 +8814,48 @@ fn lane_held(store: &mut Store, run_id: i64, host: &str, card: u32) -> Result<La
     let rows = store
         .query(&sql, &[Param::Int(i64::from(card)), Param::from(host)])
         .map_err(err)?;
+    // the memory each process holds on the card, asked once and only where
+    // a unit declared card memory; where nvidia-smi does not answer, every
+    // lease counts whole
+    let mut apps: Option<Vec<(u32, u64)>> = None;
+    let mut asked = false;
     let mut held = LaneHeld::default();
+    let mut counted = std::collections::BTreeSet::new();
     for r in rows {
         let run = r.int(0).map_err(err)?;
         let job_id = r.opt_int(1).map_err(err)?;
         if run != run_id && !job_id.is_some_and(|j| job_alive(store, j)) {
             continue;
         }
-        let n = |i: usize| r.int(i).map(|v| v.max(0) as u64).map_err(err);
+        let n = |i: usize| {
+            r.opt_int(i)
+                .map(|v| v.unwrap_or(0).max(0) as u64)
+                .map_err(err)
+        };
         held.cores = held
             .cores
             .saturating_add(n(2)?.min(u64::from(u32::MAX)) as u32);
         held.memory_mib += n(3)?;
-        held.gpu_mib += n(4)?;
-        if run == run_id {
-            held.own_gpu_mib += n(4)?;
+        let mut gpu = n(4)?;
+        if gpu > 0
+            && let Some(smi) = smi
+            && let Some(pid) = r.opt_int(5).map_err(err)?.and_then(|p| u32::try_from(p).ok())
+        {
+            if !asked {
+                asked = true;
+                apps = lane::gpu_apps_mib(smi, card).ok();
+            }
+            if let Some(apps) = &apps {
+                gpu = lane::lease_pending(gpu, &lane::process_tree(pid), apps);
+            }
         }
-        held.runs += 1;
+        held.gpu_mib += gpu;
+        if run == run_id {
+            held.own_gpu_mib += gpu;
+        }
+        if counted.insert(run) {
+            held.runs += 1;
+        }
     }
     Ok(held)
 }
@@ -8877,7 +8906,7 @@ fn start_next(
     pending: &mut std::collections::VecDeque<Batch>,
     l: &mut Lanes,
 ) -> Result<Option<Running>, String> {
-    let held = lane_held(registry.store(), x.run_id, &l.host, l.card)?;
+    let held = lane_held(registry.store(), x.run_id, &l.host, l.card, l.smi.as_deref())?;
     l.looked = Some(Instant::now());
     l.seen = x.lane.ledger;
     l.seen.held_cores = held.cores;
@@ -8940,10 +8969,11 @@ fn start_next(
         };
         let held_gpu = held.gpu_mib;
         let own = held.own_gpu_mib;
-        // every lease counts whole: the card's memory in use cannot be told
-        // apart by tenant, so subtracting it from the leases would let a
-        // foreign tenant's memory cancel this lane's own and overfill the
-        // card. Counting a lease that has loaded twice only waits longer.
+        // a lease counts what its unit's processes have still to load
+        // (`lane_held`, per process from nvidia-smi's compute list), so
+        // memory a tenant holds cannot cancel this lane's own; where
+        // nvidia-smi cannot say, or a unit's processes are not among the
+        // card's, the lease counts whole
         // what keeps the lease: none, this run's own leases (which end with
         // its units), or memory another tenant or another run holds
         let short = match free {
@@ -9216,7 +9246,7 @@ fn schedule(
             beaten = Some(Instant::now());
             if l.looked
                 .is_none_or(|t| t.elapsed() >= Duration::from_secs(1))
-                && let Ok(held) = lane_held(registry.store(), x.run_id, &l.host, l.card)
+                && let Ok(held) = lane_held(registry.store(), x.run_id, &l.host, l.card, None)
             {
                 l.seen.held_cores = held.cores;
                 l.seen.held_memory_mib = held.memory_mib;

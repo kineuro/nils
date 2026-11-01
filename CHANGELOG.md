@@ -33,6 +33,7 @@ The fifth beta is a maintenance release beside the fourth: a dataset's summary a
 - A campaign's maker who does not rate in it reads its progress while it is open: the stats door answers the counts and pace of every rater, with a check's verdict and reason tallies left out. Answers, exports and label sets stay for an adjudicator or a holder of review:work until the campaign closes.
 - `nils status` names a finished worker row by its lane and says it is restarted with the engine, and cuts any other job's arguments to the first 80 characters, instead of printing the whole command line.
 - The Parts page lists the rule packs on disk when the release's own copy cannot be read, as on a development build, and says only that the comparison is not possible. `nils update --channel` and `nils setup --channel` record the channel in the setup record, and the supervisor's parts door and the mending of the packs read the engine's release from it.
+- A GPU unit's lease on the lane's card counts what its own processes have still to load. The scheduler reads `nvidia-smi --query-compute-apps` and takes from a lease the memory the unit's processes already hold on the card, so memory a loaded unit holds is no longer counted twice (once as used, once as leased) and another tenant's memory cannot cancel the lane's own. Where `nvidia-smi` is absent or does not answer, or a unit's processes are not among the card's, the lease counts whole, as before.
 
 ## [1.0.0-beta.4] - 2026-10-31
 

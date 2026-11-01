@@ -226,6 +226,114 @@ fn gpu_memory_mib(smi: &Path, card: u32, field: &str) -> Result<u64, String> {
         .ok_or_else(|| format!("nvidia-smi's answer for card {card} is not a memory size"))
 }
 
+/// The compute processes on one card and the memory each holds, in MiB, as
+/// `nvidia-smi --query-compute-apps=pid,used_memory --format=csv,
+/// noheader,nounits -i <card>` says it. Err where nvidia-smi does not
+/// answer, so a caller falls back to counting every lease whole.
+pub fn gpu_apps_mib(smi: &Path, card: u32) -> Result<Vec<(u32, u64)>, String> {
+    let mut child = Command::new(smi)
+        .args([
+            "--query-compute-apps=pid,used_memory",
+            "--format=csv,noheader,nounits",
+            "-i",
+            &card.to_string(),
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|e| format!("nvidia-smi: {e}"))?;
+    match nils_proc::wait_within(
+        &mut child,
+        Duration::from_millis(20),
+        Duration::from_secs(20),
+    ) {
+        Ok(Some(_)) => {}
+        Ok(None) => return Err("nvidia-smi did not answer within 20 s".into()),
+        Err(e) => return Err(format!("nvidia-smi: {e}")),
+    }
+    let out = child
+        .wait_with_output()
+        .map_err(|e| format!("nvidia-smi: {e}"))?;
+    if !out.status.success() {
+        return Err(format!("nvidia-smi does not answer for card {card}"));
+    }
+    parse_apps(&String::from_utf8_lossy(&out.stdout))
+        .ok_or_else(|| "nvidia-smi's list of compute processes is not readable".to_string())
+}
+
+/// `pid, used_memory` lines (MiB, no units) as pairs; none where a line is
+/// not two numbers. A process whose memory nvidia-smi withholds (`[N/A]`)
+/// is taken to hold none, so its lease counts whole.
+pub fn parse_apps(text: &str) -> Option<Vec<(u32, u64)>> {
+    let mut apps = Vec::new();
+    for line in text.lines().map(str::trim).filter(|l| !l.is_empty()) {
+        let (pid, mem) = line.split_once(',')?;
+        let pid: u32 = pid.trim().parse().ok()?;
+        let mem = mem.trim();
+        let mib = if mem.starts_with('[') {
+            0
+        } else {
+            mem.parse::<u64>().ok()?
+        };
+        apps.push((pid, mib));
+    }
+    Some(apps)
+}
+
+/// A process and every process under it, read from `/proc`; just the
+/// process where `/proc` cannot be read.
+pub fn process_tree(root: u32) -> Vec<u32> {
+    let mut parent_of = std::collections::BTreeMap::new();
+    if let Ok(dir) = std::fs::read_dir("/proc") {
+        for e in dir.flatten() {
+            let Some(pid) = e.file_name().to_str().and_then(|n| n.parse::<u32>().ok()) else {
+                continue;
+            };
+            let Ok(stat) = std::fs::read_to_string(e.path().join("stat")) else {
+                continue;
+            };
+            // the command is in parentheses and may hold spaces
+            let Some(rest) = stat.rsplit_once(')').map(|(_, r)| r) else {
+                continue;
+            };
+            if let Some(ppid) = rest
+                .split_whitespace()
+                .nth(1)
+                .and_then(|w| w.parse::<u32>().ok())
+            {
+                parent_of.insert(pid, ppid);
+            }
+        }
+    }
+    let mut tree = vec![root];
+    let mut i = 0;
+    while i < tree.len() {
+        let at = tree[i];
+        for (pid, ppid) in &parent_of {
+            if *ppid == at && !tree.contains(pid) {
+                tree.push(*pid);
+            }
+        }
+        i += 1;
+    }
+    tree
+}
+
+/// What a lease still has to load: the card memory a unit declared, less
+/// what its own processes hold now. A unit whose processes are not among
+/// the card's (a container runtime that keeps them outside the unit's
+/// process tree) holds nothing the card can attribute, so its lease counts
+/// whole, as before.
+pub fn lease_pending(declared_mib: u64, tree: &[u32], apps: &[(u32, u64)]) -> u64 {
+    let held: u64 = apps
+        .iter()
+        .filter(|(pid, _)| tree.contains(pid))
+        .map(|(_, mib)| mib)
+        .sum();
+    declared_mib.saturating_sub(held)
+}
+
 /// `12345 MiB` (or a bare number, or GiB) as MiB.
 pub fn parse_free(text: &str) -> Option<u64> {
     let line = text.lines().map(str::trim).find(|l| !l.is_empty())?;
@@ -357,6 +465,50 @@ mod tests {
             assert!(gpu_free_mib(&smi, 0).is_err());
             assert_eq!(gpu_total_mib(&smi, 1), Ok(16376));
             assert!(gpu_total_mib(&smi, 0).is_err());
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Per-process accounting: a lease counts what its unit has still to
+    /// load, a stand-in `nvidia-smi` lists the processes, and a card that
+    /// cannot be asked is an error the caller answers with whole leases.
+    #[test]
+    fn a_lease_counts_what_its_processes_have_not_loaded() {
+        assert_eq!(
+            parse_apps("4242, 3000\n77, 12\n"),
+            Some(vec![(4242, 3000), (77, 12)])
+        );
+        assert_eq!(parse_apps("5, [N/A]\n"), Some(vec![(5, 0)]));
+        assert_eq!(parse_apps(""), Some(vec![]));
+        assert_eq!(parse_apps("no pids here"), None);
+        let apps = [(4242, 3000), (77, 12_000)];
+        // the unit's tree holds 3000 of its 8192
+        assert_eq!(lease_pending(8192, &[4200, 4242], &apps), 5192);
+        // loaded past its declaration: nothing pending
+        assert_eq!(lease_pending(2000, &[4242], &apps), 0);
+        // not among the card's processes: counted whole
+        assert_eq!(lease_pending(8192, &[9999], &apps), 8192);
+        assert_eq!(process_tree(std::process::id()), {
+            let t = process_tree(std::process::id());
+            assert_eq!(t[0], std::process::id());
+            t
+        });
+
+        let dir = std::env::temp_dir().join(format!("nils-lane-apps-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let smi = dir.join("nvidia-smi");
+        std::fs::write(
+            &smi,
+            "#!/bin/sh\n[ \"$1\" = --query-compute-apps=pid,used_memory ] || exit 9\n[ \"$4\" = 1 ] || exit 6\necho '4242, 3000'\necho '77, 12'\n",
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&smi, std::fs::Permissions::from_mode(0o755)).unwrap();
+            assert_eq!(gpu_apps_mib(&smi, 1), Ok(vec![(4242, 3000), (77, 12)]));
+            assert!(gpu_apps_mib(&smi, 0).is_err());
         }
         let _ = std::fs::remove_dir_all(&dir);
     }
