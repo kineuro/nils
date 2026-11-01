@@ -806,7 +806,10 @@ fn round(pg: Option<(String, String)>) {
         .map(|w| w.as_str().unwrap())
         .collect::<Vec<_>>()
         .join(" ");
-    assert!(door_command.contains("--param cache=/cache"), "{door_command}");
+    assert!(
+        door_command.contains("--param cache=/cache"),
+        "{door_command}"
+    );
 
     // T26, second half: a new head, chosen; the step's run reads the cache
     let (head2, _) = register(

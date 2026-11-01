@@ -277,7 +277,10 @@ fn stack_facts(f: &mut Facts, role: &str, row: Option<&StackRow>) {
 /// any pipeline measured `flair_t1_brain_dice` for them: aligned at 0.85 or
 /// more (the check's own threshold), else not. One query a chunk of
 /// `(subject, session)` pairs; a session with no measure is not in the map.
-fn aligned_from_check(store: &mut Store, sessions: &[(i64, String)]) -> BTreeMap<(i64, String), Val> {
+fn aligned_from_check(
+    store: &mut Store,
+    sessions: &[(i64, String)],
+) -> BTreeMap<(i64, String), Val> {
     let mut out = BTreeMap::new();
     for chunk in sessions.chunks(500) {
         let d = store.dialect();
@@ -423,7 +426,10 @@ pub(crate) fn facts_for(store: &mut Store, units: &[UnitOf], host: &HostFacts) -
                 f.set_aligned("flair", "t1w", aligned);
             }
             if let Some(s) = u.subject_id {
-                f.set("diagnosis", diagnosis.get(&s).cloned().unwrap_or(Val::Unknown));
+                f.set(
+                    "diagnosis",
+                    diagnosis.get(&s).cloned().unwrap_or(Val::Unknown),
+                );
             }
             // the registry holds no age it may tell here (record 55 K7:
             // only where detail allows); unknown until a clinical import

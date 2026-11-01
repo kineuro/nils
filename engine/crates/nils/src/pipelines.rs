@@ -8861,7 +8861,10 @@ fn lane_held(
         let mut gpu = n(4)?;
         if gpu > 0
             && let Some(smi) = smi
-            && let Some(pid) = r.opt_int(5).map_err(err)?.and_then(|p| u32::try_from(p).ok())
+            && let Some(pid) = r
+                .opt_int(5)
+                .map_err(err)?
+                .and_then(|p| u32::try_from(p).ok())
         {
             if !asked {
                 asked = true;
@@ -8928,7 +8931,13 @@ fn start_next(
     pending: &mut std::collections::VecDeque<Batch>,
     l: &mut Lanes,
 ) -> Result<Option<Running>, String> {
-    let held = lane_held(registry.store(), x.run_id, &l.host, l.card, l.smi.as_deref())?;
+    let held = lane_held(
+        registry.store(),
+        x.run_id,
+        &l.host,
+        l.card,
+        l.smi.as_deref(),
+    )?;
     l.looked = Some(Instant::now());
     l.seen = x.lane.ledger;
     l.seen.held_cores = held.cores;

@@ -529,11 +529,7 @@ pub(crate) fn engine_floor(range: Option<&str>, engine: &str) -> Option<Check> {
             ),
             extra,
         ),
-        Ok(range) => Check::ok(
-            "engine",
-            format!("engine {engine} is in {range}"),
-            extra,
-        ),
+        Ok(range) => Check::ok("engine", format!("engine {engine} is in {range}"), extra),
     })
 }
 
@@ -553,7 +549,9 @@ pub(crate) fn checks(registry: &mut Registry, home: &Path, a: &Asked<'_>) -> Vec
     };
     let used = match a.used {
         Some(u) => u.clone(),
-        None => crate::software::for_run(registry, a.pipeline).ok().flatten(),
+        None => crate::software::for_run(registry, a.pipeline)
+            .ok()
+            .flatten(),
     };
     out.extend(runtime_and_image(
         registry,
@@ -569,7 +567,9 @@ pub(crate) fn checks(registry: &mut Registry, home: &Path, a: &Asked<'_>) -> Vec
     ));
     out.extend(disk(registry, a.descriptor, a.units));
     // record 57 P5: the tool's terms and its site licence file (G9, G10)
-    if let Some(c) = crate::software::licence_check(registry, a.pipeline, a.descriptor, used.as_ref()) {
+    if let Some(c) =
+        crate::software::licence_check(registry, a.pipeline, a.descriptor, used.as_ref())
+    {
         out.push(c);
     }
     out
@@ -758,7 +758,11 @@ mod tests {
         let ok = engine_floor(Some(">=1.0.0-beta.3"), "1.0.0-beta.4").unwrap();
         assert!(ok.ok, "{}", ok.said);
         let dev = engine_floor(Some(">=1.0.0-beta.3"), "1.0.0-beta.3.dev.2").unwrap();
-        assert!(dev.ok, "a development build is after its release: {}", dev.said);
+        assert!(
+            dev.ok,
+            "a development build is after its release: {}",
+            dev.said
+        );
         let no = engine_floor(Some(">=1.0.0-beta.5"), "1.0.0-beta.4").unwrap();
         assert!(!no.ok);
         assert_eq!(no.cause, Some(Cause::Pipeline));
@@ -771,7 +775,11 @@ mod tests {
         );
         assert!(no.refusal().starts_with("refused before it started: "));
         let bad = engine_floor(Some("newer"), "1.0.0-beta.4").unwrap();
-        assert!(!bad.ok && bad.said.contains("x-nils.engine"), "{}", bad.said);
+        assert!(
+            !bad.ok && bad.said.contains("x-nils.engine"),
+            "{}",
+            bad.said
+        );
     }
 
     #[test]
