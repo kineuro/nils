@@ -10,6 +10,7 @@ All notable changes to NILS v1 are recorded here. The format follows [Keep a Cha
 
 ### Fixed
 
+- `nils update` registers at Kvasir the purpose of a station the assistant gained since the last update: a purpose the station manifests declare and Kvasir's configuration does not is written into it before the services start again, said by name (`registering assistant.rater at Kvasir`), so that Kvasir lists it, the stations' model takes it and the assistant's key is made again to cover it; a purpose declared already is untouched. Before, the update rebuilt the assistant and left Kvasir's purposes as they were, so the new station's purpose was reported as one Kvasir does not list and the station answered nothing. `nils setup --update` and a repair, which declared it already, now say it the same way.
 - A release's lock on a shared folder is judged live or stale by the lock file's age on the filesystem, as an unreadable one already was, and not by the time its holder wrote into it, so a difference between two nodes' clocks cannot make a live release look stale and let a second one write into the same tree.
 
 ## [1.0.0-beta.5] - 2026-11-01
