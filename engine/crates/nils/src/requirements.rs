@@ -506,9 +506,44 @@ pub(crate) fn disk(registry: &mut Registry, d: &Descriptor, units: usize) -> Opt
     })
 }
 
+/// The engines a pipeline works with (`x-nils.engine`, 2026-11-01): none
+/// where the descriptor names no range; a failed check, with why and what to
+/// do, where the running engine is outside it or the range cannot be read.
+pub(crate) fn engine_floor(range: Option<&str>, engine: &str) -> Option<Check> {
+    let text = range?;
+    let extra = json!({"engine": engine, "works_with": text});
+    Some(match nils_pack::engines::Range::parse(text) {
+        Err(e) => Check::failed(
+            "engine",
+            Cause::Pipeline,
+            format!(
+                "the pipeline names the engines it works with as {e}; ask whoever wrote it to correct x-nils.engine"
+            ),
+            extra,
+        ),
+        Ok(range) if !range.admits(engine) => Check::failed(
+            "engine",
+            Cause::Pipeline,
+            format!(
+                "the pipeline works with engines {range}, and this engine is {engine}: update the engine (nils update), then run it again"
+            ),
+            extra,
+        ),
+        Ok(range) => Check::ok(
+            "engine",
+            format!("engine {engine} is in {range}"),
+            extra,
+        ),
+    })
+}
+
 /// Every check of a run, in the order a person reads them.
 pub(crate) fn checks(registry: &mut Registry, home: &Path, a: &Asked<'_>) -> Vec<Check> {
     let mut out = Vec::new();
+    out.extend(engine_floor(
+        a.descriptor.engine.as_deref(),
+        nils_pack::engines::ENGINE_VERSION,
+    ));
     if a.descriptor.layout == Layout::Bids && a.releases {
         out.push(converter(home, a.dcm2niix));
     }
@@ -713,6 +748,30 @@ mod tests {
         assert!(!has_subids(file, Some("bo"), 1002));
         assert!(!has_subids(file, Some("empty"), 1003));
         assert!(!has_subids("", Some("anna"), 1000));
+    }
+
+    /// 2026-11-01: a descriptor's engine range is held against the running
+    /// engine, and a refusal says why and what to do.
+    #[test]
+    fn a_pipeline_whose_engine_floor_is_not_met_is_refused_with_why() {
+        assert!(engine_floor(None, "1.0.0-beta.4").is_none());
+        let ok = engine_floor(Some(">=1.0.0-beta.3"), "1.0.0-beta.4").unwrap();
+        assert!(ok.ok, "{}", ok.said);
+        let dev = engine_floor(Some(">=1.0.0-beta.3"), "1.0.0-beta.3.dev.2").unwrap();
+        assert!(dev.ok, "a development build is after its release: {}", dev.said);
+        let no = engine_floor(Some(">=1.0.0-beta.5"), "1.0.0-beta.4").unwrap();
+        assert!(!no.ok);
+        assert_eq!(no.cause, Some(Cause::Pipeline));
+        assert!(
+            no.said.contains(">=1.0.0-beta.5")
+                && no.said.contains("1.0.0-beta.4")
+                && no.said.contains("nils update"),
+            "{}",
+            no.said
+        );
+        assert!(no.refusal().starts_with("refused before it started: "));
+        let bad = engine_floor(Some("newer"), "1.0.0-beta.4").unwrap();
+        assert!(!bad.ok && bad.said.contains("x-nils.engine"), "{}", bad.said);
     }
 
     #[test]

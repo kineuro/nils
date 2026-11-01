@@ -108,6 +108,8 @@ suggested-resources:
 
 x-nils:
   contract: 1
+  # the first engine that honours `sweep: false` on a site file (below); an older one is refused at the pre-flight
+  engine: ">=1.0.0-beta.3"
   analysis-level: stack
   on-arrival: true
   input:
@@ -131,7 +133,6 @@ x-nils:
       env: NILS_PC_CALIBRATION
       optional: true
       # a site file (the site's calibration pair), not a secret: the tables echo its digest and site lines, so it is not swept.
-      # An engine before 1.0.0-beta.3 ignores sweep and sweeps it line by line, which the one-line file calibrate writes survives
       sweep: false
   outputs:
     - id: scores

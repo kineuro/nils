@@ -183,6 +183,7 @@
       "required": ["analysis-level", "input", "outputs"],
       "properties": {
         "contract": {"const": 1, "description": "The job contract version the descriptor was written to"},
+        "engine": {"type": "string", "pattern": "\\S", "description": "Added in place and additively on 2026-11-01: the engines the pipeline works with, a range of engine versions in the pack contract's spelling, bounds separated by commas, each an operator (>=, >, <=, <, =) and a version, as in `>=1.0.0-beta.5`. A pipeline that relies on an engine fix (for example that a secret declared `sweep: false` is not swept) names the first engine that has it. The pre-flight refuses a run on an engine outside the range, with why and what to do (update the engine), and the run door refuses it the same way. Left out, any engine. A reader that does not know the key keeps it"},
         "replaces": {
           "type": "object",
           "required": ["why"],
