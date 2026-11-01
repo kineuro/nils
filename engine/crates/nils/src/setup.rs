@@ -17724,6 +17724,13 @@ pub(crate) fn update_all(channel: Option<&str>, only: &[String]) -> Result<bool,
             state_path().display()
         ))
     })?;
+    // the channel named now, else the one the install was last updated
+    // from, for every lookup of this run: the engine, the desk, the parts
+    // and the packs all come from the same place
+    let resolved = channel
+        .map(str::to_string)
+        .or_else(|| state.channel.clone());
+    let channel = resolved.as_deref();
     // Each part against its own newest release: the engine's image moves
     // with the engine's releases and the desk's with the desk's, so a desk
     // released alone is taken with no engine release beside it.

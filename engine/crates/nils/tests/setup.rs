@@ -2436,6 +2436,84 @@ fn update_all_takes_the_newest_nils_first_and_hands_it_the_parts() {
     );
 }
 
+/// An install updated once with `--channel` follows it: a later update with
+/// no channel named, as the Parts page runs, takes the engine from the
+/// recorded channel and not from GitHub.
+#[cfg(unix)]
+#[test]
+fn an_update_with_no_channel_takes_the_engine_from_the_recorded_one() {
+    let nils = Installed::new("nils-update-recorded");
+    let config = TempDir::new("nils-update-recorded-config");
+    let base = TempDir::new("nils-update-recorded-base");
+    let dir = base.path().join("nils");
+    let releases = Releases::new("99.0.0");
+    // the channel carries this binary's own release too, for setup's packs
+    let own = releases
+        .dir
+        .path()
+        .join("download")
+        .join(format!("v{}", env!("CARGO_PKG_VERSION")));
+    std::fs::create_dir_all(&own).unwrap();
+    for f in ["packs.tar.gz", "SHA256SUMS"] {
+        std::fs::copy(
+            releases.dir.path().join("download/v99.0.0").join(f),
+            own.join(f),
+        )
+        .unwrap();
+    }
+    let made = setup(
+        &nils.path(),
+        config.path(),
+        &[
+            "--yes",
+            "--parts",
+            "engine,desk",
+            "--dir",
+            dir.to_str().unwrap(),
+            "--no-service",
+            "--channel",
+            &releases.url(),
+        ],
+    );
+    assert!(made.ok, "{}\n{}", made.stdout, made.stderr);
+    // a newer release appears on that channel alone
+    let newer = releases.dir.path().join("download/v99.1.0");
+    std::fs::create_dir_all(&newer).unwrap();
+    for f in std::fs::read_dir(releases.dir.path().join("download/v99.0.0")).unwrap() {
+        let f = f.unwrap().path();
+        std::fs::copy(&f, newer.join(f.file_name().unwrap())).unwrap();
+    }
+    std::fs::write(
+        releases.dir.path().join("latest/download/VERSION"),
+        "99.1.0\n",
+    )
+    .unwrap();
+    assert!(
+        state_of(config.path()).contains(&format!("channel = \"{}\"", releases.url())),
+        "{}",
+        state_of(config.path())
+    );
+    let to = base.path().join("bin");
+    let out = output(
+        Command::new(nils.path())
+            .args(["--registry", dir.join("registry").to_str().unwrap()])
+            .args(["update", "--all"])
+            .args(["--to", to.to_str().unwrap()])
+            .env("XDG_CONFIG_HOME", config.path())
+            .env("XDG_DATA_HOME", base.path().join("data"))
+            .env("NILS_UPDATE_HANDED_OVER", env!("CARGO_PKG_VERSION"))
+            .env_remove("NILS_RELEASES")
+            .env_remove("NILS_DESK_RELEASES"),
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    assert!(out.status.success(), "{stdout}\n{stderr}");
+    assert!(
+        stdout.contains("desk: ") && stdout.contains("99.1.0"),
+        "{stdout}\n{stderr}"
+    );
+}
+
 /// A `nils` an update started carries the update on and does not install
 /// itself again; with no setup recorded there are no parts, and it says so.
 #[test]
