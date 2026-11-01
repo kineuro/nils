@@ -8806,7 +8806,9 @@ struct LaneHeld {
     cores: u32,
     memory_mib: u64,
     gpu_mib: u64,
-    /// Of `gpu_mib`, what this run's own units hold.
+    /// What this run's own units declared on the card, whole: a tight card
+    /// is the run's own wait while that and the free memory cover a need.
+    /// `gpu_mib` is what the leases still have to load.
     own_gpu_mib: u64,
     runs: usize,
 }
@@ -8824,8 +8826,9 @@ fn lane_held(
     // together: the rows are counted by container, not by unit
     let sql = format!(
         "SELECT c.run_id, r.job_id, c.cores, c.memory_mb, \
-         CASE WHEN c.gpu_card = {} THEN c.gpu_memory_mb ELSE 0 END, c.pid \
-         FROM (SELECT DISTINCT run_id, container, cores, memory_mb, gpu_card, gpu_memory_mb, pid \
+         CASE WHEN c.gpu_card = {} THEN c.gpu_memory_mb ELSE 0 END, c.pid, c.started_at \
+         FROM (SELECT DISTINCT run_id, container, cores, memory_mb, gpu_card, gpu_memory_mb, pid, \
+         started_at \
          FROM {} WHERE state = 'running' AND host = {}) c \
          JOIN {} r ON r.id = c.run_id WHERE r.status = 'running'",
         d.param(1, Type::Int),
@@ -8858,7 +8861,9 @@ fn lane_held(
             .cores
             .saturating_add(n(2)?.min(u64::from(u32::MAX)) as u32);
         held.memory_mib += n(3)?;
-        let mut gpu = n(4)?;
+        // what the unit declared, whole: the run's own wait is told by it
+        let declared = n(4)?;
+        let mut gpu = declared;
         if gpu > 0
             && let Some(smi) = smi
             && let Some(pid) = r
@@ -8870,19 +8875,60 @@ fn lane_held(
                 asked = true;
                 apps = lane::gpu_apps_mib(smi, card).ok();
             }
-            if let Some(apps) = &apps {
+            // a pid the kernel gave to another process after the unit's
+            // client ended names a stranger's memory: only a process that
+            // started with or before the unit's row (a second's slack for
+            // the row's resolution) is the unit's own, else the lease
+            // counts whole
+            let began = r.text(6).ok().and_then(nils_registry::time::secs_of);
+            let ours = match (job::process_started(i64::from(pid)), began) {
+                (Some(process), Some(unit)) => process <= unit + 1,
+                _ => false,
+            };
+            if ours && let Some(apps) = &apps {
                 gpu = lane::lease_pending(gpu, &lane::process_tree(pid), apps);
             }
         }
         held.gpu_mib += gpu;
         if run == run_id {
-            held.own_gpu_mib += gpu;
+            held.own_gpu_mib += declared;
         }
         if counted.insert(run) {
             held.runs += 1;
         }
     }
     Ok(held)
+}
+
+/// Why a unit cannot lease the card now, or none where it can: `(false, _)`
+/// is the run's own wait (its units' declared leases, which end with them,
+/// would leave room), `(true, _)` memory another tenant or run holds. `held`
+/// is what the leases still have to load (they count against the free
+/// memory); `own` is what this run's units declared, whole, since the
+/// classification asks whether their ending would make room.
+fn card_shortfall(
+    free: Result<u64, String>,
+    held: u64,
+    own: u64,
+    need: u64,
+    card: u32,
+) -> Option<(bool, String)> {
+    match free {
+        Ok(free) if lane::lease_fits(free, held, need) => None,
+        Ok(free) if own > 0 && free.saturating_add(own) >= need => Some((
+            false,
+            format!(
+                "card {card}: {free} MiB free and {own} MiB held by this run's own units, and a unit needs {need} MiB: it waits for them"
+            ),
+        )),
+        Ok(free) => Some((
+            true,
+            format!(
+                "card {card}: {free} MiB free, {own} MiB of it this run's, and a unit needs {need} MiB: another tenant or run holds the rest"
+            ),
+        )),
+        Err(e) => Some((true, format!("card {card}: {e}"))),
+    }
 }
 
 /// What the scheduler of one run carries between its looks at the lane.
@@ -9007,22 +9053,7 @@ fn start_next(
         // card's, the lease counts whole
         // what keeps the lease: none, this run's own leases (which end with
         // its units), or memory another tenant or another run holds
-        let short = match free {
-            Ok(free) if lane::lease_fits(free, held_gpu, need) => None,
-            Ok(free) if own > 0 && free.saturating_add(own) >= need => Some((
-                false,
-                format!(
-                    "card {card}: {free} MiB free and {own} MiB held by this run's own units, and a unit needs {need} MiB: it waits for them"
-                ),
-            )),
-            Ok(free) => Some((
-                true,
-                format!(
-                    "card {card}: {free} MiB free, {own} MiB of it this run's, and a unit needs {need} MiB: another tenant or run holds the rest"
-                ),
-            )),
-            Err(e) => Some((true, format!("card {card}: {e}"))),
-        };
+        let short = card_shortfall(free, held_gpu, own, need, card);
         match short {
             None => {
                 l.card_short = None;
@@ -9277,6 +9308,8 @@ fn schedule(
             beaten = Some(Instant::now());
             if l.looked
                 .is_none_or(|t| t.elapsed() >= Duration::from_secs(1))
+                // the refresh keeps the ledger's cores and memory, which carry
+                // no per-process figure; the card is read at admission alone
                 && let Ok(held) = lane_held(registry.store(), x.run_id, &l.host, l.card, None)
             {
                 l.seen.held_cores = held.cores;
@@ -10191,9 +10224,11 @@ fn ensure_image(
     // the install found at the run's start; looked for again only where
     // there was none, since a run that began at the same time may have
     // built the image into the place meanwhile
+    // (and where the carried install's image is gone, removed while the run
+    // waited, as then the image is built or adopted again)
     let found = match x.used {
-        Some(u) => Some(u.clone()),
-        None => crate::software::for_run(registry, x.pipeline)?,
+        Some(u) if !u.manifest.kind.on_disk() || Path::new(&u.runnable).exists() => Some(u.clone()),
+        _ => crate::software::for_run(registry, x.pipeline)?,
     };
     if let Some(used) = found.as_ref()
         && used.manifest.kind.on_disk()
@@ -12969,6 +13004,24 @@ mod tests {
     }
 
     use super::*;
+
+    /// Review 1 of #548: a run whose own containers have loaded what they
+    /// declared has nothing pending, yet the tight card is still its own
+    /// wait (no stall clock), not another tenant's.
+    #[test]
+    fn a_tight_card_is_the_run_s_own_wait_once_its_containers_have_loaded() {
+        // 24 GiB card, two own containers of 10 GiB loaded: 4 GiB free,
+        // nothing pending, a third unit needs 10 GiB
+        let own = 20_480;
+        let (foreign, why) = card_shortfall(Ok(4_096), 0, own, 10_240, 0).unwrap();
+        assert!(!foreign, "{why}");
+        assert!(why.contains("waits for them"), "{why}");
+        // a tenant holding the rest is foreign
+        let (foreign, _) = card_shortfall(Ok(4_096), 0, 4_096, 20_480, 0).unwrap();
+        assert!(foreign);
+        assert!(card_shortfall(Ok(12_000), 0, own, 10_240, 0).is_none());
+        assert!(card_shortfall(Err("no".into()), 0, own, 1, 0).unwrap().0);
+    }
 
     /// The trust check hashes a model's file once for all the parts of a
     /// run, however many go at once, and a file that is not the admitted

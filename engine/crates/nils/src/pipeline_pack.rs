@@ -288,11 +288,10 @@ fn aligned_from_check(
         let mut pairs = Vec::new();
         for (s, day) in chunk {
             let n = params.len();
-            pairs.push(format!(
-                "({}, {})",
-                d.param(n + 1, nils_registry::schema::Type::Int),
-                d.param(n + 2, nils_registry::schema::Type::Date)
-            ));
+            // a bare parameter in a VALUES list is text on Postgres
+            let id = d.param(n + 1, nils_registry::schema::Type::Int);
+            let at = d.param(n + 2, nils_registry::schema::Type::Date);
+            pairs.push(format!("(CAST({id} AS BIGINT), {at})"));
             params.push(Param::Int(*s));
             params.push(Param::from(day.as_str()));
         }
@@ -303,8 +302,12 @@ fn aligned_from_check(
             store.qualified("measure"),
             pairs.join(", "),
         );
-        let Ok(rows) = store.query(&sql, &params) else {
-            continue;
+        let rows = match store.query(&sql, &params) {
+            Ok(rows) => rows,
+            Err(e) => {
+                eprintln!("the alignment checks could not be read: {e}");
+                continue;
+            }
         };
         for r in rows {
             let (Ok(s), Ok(day), Ok(Some(dice))) = (r.int(0), r.text(1), r.opt_double(2)) else {
@@ -1326,6 +1329,79 @@ pub(crate) fn pooling_refusal(store: &mut Store, ask: &nils_ask::ast::Ask) -> Op
 mod tests {
     use super::*;
     use nils_pipeline::pack::rules::Status;
+    use nils_registry::store::Store;
+
+    /// The alignment a check measured is read in one batched query on both
+    /// backends (on Postgres a bare id in the VALUES list is text and the
+    /// comparison fails): the newest measure of a session wins, a session
+    /// with none is not in the map.
+    fn alignment_round(store: &mut Store) {
+        for (id, subject, day, dice) in [
+            (1, 7, "2026-01-02", 0.5),
+            (2, 7, "2026-01-02", 0.9),
+            (3, 8, "2026-02-03", 0.4),
+        ] {
+            store
+                .execute(
+                    &format!(
+                        "INSERT INTO {} (run_id, pipeline_id, pipeline, source, scope, subject_id, \
+                         session_day, unit_id, name, type, number, created_at) VALUES \
+                         ({id}, 1, 'p', 't', 'session', {subject}, '{day}', 'u{id}', \
+                         'flair_t1_brain_dice', 'number', {dice}, '2026-03-01 00:00:00')",
+                        store.qualified("measure")
+                    ),
+                    &[],
+                )
+                .unwrap();
+        }
+        let asked = vec![
+            (7, "2026-01-02".to_string()),
+            (8, "2026-02-03".to_string()),
+            (9, "2026-02-03".to_string()),
+        ];
+        let got = aligned_from_check(store, &asked);
+        assert_eq!(
+            got.get(&(7, "2026-01-02".to_string())),
+            Some(&Val::Bool(true))
+        );
+        assert_eq!(
+            got.get(&(8, "2026-02-03".to_string())),
+            Some(&Val::Bool(false))
+        );
+        assert_eq!(got.len(), 2, "{got:?}");
+    }
+
+    #[test]
+    fn the_alignment_a_check_measured_is_read_in_one_query_on_sqlite() {
+        let mut store = Store::sqlite_in_memory().unwrap();
+        nils_registry::migrate::migrate(&mut store, nils_registry::migrate::Kind::Registry)
+            .unwrap();
+        alignment_round(&mut store);
+    }
+
+    #[test]
+    fn the_alignment_a_check_measured_is_read_in_one_query_on_postgres() {
+        let Some(dsn) = std::env::var("NILS_TEST_POSTGRES_DSN")
+            .ok()
+            .filter(|d| !d.is_empty())
+        else {
+            eprintln!("NILS_TEST_POSTGRES_DSN is not set; the Postgres half is skipped");
+            return;
+        };
+        const SCHEMA: &str = "nils_align_batch";
+        let mut store = Store::connect_postgres(&dsn, SCHEMA).expect("connect");
+        store
+            .batch(&format!(
+                "DROP SCHEMA IF EXISTS {SCHEMA} CASCADE; CREATE SCHEMA {SCHEMA}"
+            ))
+            .unwrap();
+        nils_registry::migrate::migrate(&mut store, nils_registry::migrate::Kind::Registry)
+            .unwrap();
+        alignment_round(&mut store);
+        store
+            .batch(&format!("DROP SCHEMA IF EXISTS {SCHEMA} CASCADE"))
+            .unwrap();
+    }
 
     #[test]
     fn a_raw_series_is_never_skull_stripped_and_a_derivative_is_not_told() {
