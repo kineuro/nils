@@ -47,6 +47,9 @@ const KIND_SEALED: &str = "nils participation sealed read";
 const KEY_DIR: &str = "participation";
 const KEY_FILE: &str = "signing.key";
 
+/// How much of a receiver's answer a send row and its audit row keep.
+const ERROR_CHARS: usize = 300;
+
 /// The receiver's cap on a body, and the send's wait.
 const BODY_CAP: usize = 2 * 1024 * 1024;
 const SEND_TIMEOUT: Duration = Duration::from_secs(15);
@@ -62,6 +65,15 @@ fn b64() -> base64::engine::GeneralPurpose {
 
 fn sha256_hex(bytes: &[u8]) -> String {
     nils_registry::verify::sha256_hex(bytes)
+}
+
+/// The first `n` characters of some words, with a mark where they were cut.
+fn shortened(s: &str, n: usize) -> String {
+    if s.chars().count() <= n {
+        return s.to_string();
+    }
+    let kept: String = s.chars().take(n).collect();
+    format!("{kept} [...]")
 }
 
 // ------------------------------------------------------------ canonical JSON
@@ -322,14 +334,17 @@ fn tier1(
     );
     let mut held: Vec<String> = Vec::new();
     // ---- the archive
-    let by_modality = grouped(
-        store,
-        &format!(
-            "SELECT k, COUNT(*) FROM (SELECT UPPER(COALESCE(NULLIF(x.modality, ''), f.modality, 'unknown')) AS k \
-             FROM {stack} x LEFT JOIN {fpt} f ON f.stack_id = x.id) t GROUP BY k"
-        ),
-    )
-    .map_err(failed)?;
+    let by_modality = fold_labels(
+        grouped(
+            store,
+            &format!(
+                "SELECT k, COUNT(*) FROM (SELECT COALESCE(NULLIF(x.modality, ''), f.modality) AS k \
+                 FROM {stack} x LEFT JOIN {fpt} f ON f.stack_id = x.id) t GROUP BY k"
+            ),
+        )
+        .map_err(failed)?,
+        label_word,
+    );
     let by_vendor = fold_labels(
         grouped(
             store,
@@ -433,13 +448,19 @@ fn tier1(
             None => e.1 += n,
         }
     }
+    // the abstentions are one cell of the axis's list, so the complement
+    // rule covers them: the stacks less the shown values would give a
+    // small abstained count away
     let mut answers = Map::new();
     for (axis, (values, abstained)) in &per_axis {
+        let mut cells = values.clone();
+        *cells.entry("abstained".to_string()).or_default() += *abstained;
+        let celled = celled(&format!("answers.{axis}"), &cells, &mut held);
         answers.insert(
             axis.clone(),
             json!({
-                "by_value": celled(&format!("answers.{axis}"), values, &mut held),
-                "abstained": total(*abstained),
+                "by_value": celled,
+                "abstained": celled["abstained"].clone(),
             }),
         );
     }
@@ -668,6 +689,9 @@ fn tier3(
     // settles in (on the people path, the verify campaign itself); the
     // raters' campaign is the model's
     let mut readers: BTreeSet<String> = BTreeSet::new();
+    // and, on the people path, the share of the drawn items read twice:
+    // the settle campaign's items that want more raters than the campaign
+    let mut read_twice = 0usize;
     if let Some(c) = d.settle_campaign_id {
         for a in nils_registry::campaign::current_answers(store, c)
             .map_err(crate::campaigns::campaign_err)?
@@ -676,7 +700,35 @@ fn tier3(
                 readers.insert(a.principal);
             }
         }
+        if let Some(campaign) =
+            nils_registry::campaign::get(store, c).map_err(crate::campaigns::campaign_err)?
+        {
+            read_twice = nils_registry::campaign::items(store, c)
+                .map_err(crate::campaigns::campaign_err)?
+                .iter()
+                .filter(|i| i.raters_wanted(&campaign) > campaign.raters_per_item)
+                .count();
+        }
     }
+    let double_read_share = if drawn.is_empty() {
+        0.0
+    } else {
+        read_twice as f64 / drawn.len() as f64
+    };
+    // the share the path's protocol is read by: the settle's share of the
+    // agreements where a model read first, the share of the items read
+    // twice where people read all
+    let (share, share_of) = if path == "model-first" {
+        (
+            json!(d.settle_share),
+            "the settle's share of the agreements a person read too",
+        )
+    } else {
+        (
+            json!(double_read_share),
+            "the share of the drawn items two people read",
+        )
+    };
     let mut doc = export;
     let m = doc.as_object_mut().expect("the export is an object");
     m.insert("kind".into(), json!(KIND_SEALED));
@@ -690,7 +742,11 @@ fn tier3(
         "protocol".into(),
         json!({
             "path": path,
-            "share": d.settle_share,
+            "share": share,
+            "share_of": share_of,
+            "settle_share": d.settle_share,
+            "double_read_share": double_read_share,
+            "read_twice": total(read_twice as u64),
             "planted": planted,
             "readers": readers.len(),
         }),
@@ -1105,6 +1161,16 @@ pub(crate) fn send(
             ));
         }
     };
+    // participation turned off while the document was made: nothing leaves
+    let still = rows::get(registry.store()).map_err(failed)?;
+    if !still.is_some_and(|q| q.tiers.contains(&tier)) {
+        return Err(Reply::error(
+            409,
+            format!(
+                "participation was turned off while the tier {tier} document was being made; nothing was sent"
+            ),
+        ));
+    }
     let body = canonical(&doc);
     let body_digest = sha256_hex(body.as_bytes());
     let posted = post(&receiver, &p.site, &key, body.as_bytes());
@@ -1119,7 +1185,7 @@ pub(crate) fn send(
                 "the receiver's receipt {receipt} is not the body's digest {body_digest}"
             )),
         ),
-        Err(e) => (None, None, Some(e.clone())),
+        Err(e) => (None, None, Some(shortened(e, ERROR_CHARS))),
     };
     let by = if auto { "auto" } else { who };
     let id = rows::record_send(
@@ -1649,16 +1715,25 @@ fn take_report(
     if let Err(e) = std::fs::create_dir_all(&site_dir) {
         return refuse(500, format!("the site's folder could not be made: {e}"));
     }
-    // the same body again is answered as the first time, nothing written
+    // the same body again is answered as the first time, nothing written:
+    // a kept file named by the digest's first characters is read whole and
+    // its digest compared, so that a body sharing those characters is not
+    // taken for it; such a body is kept under a longer name
+    let mut long_name = false;
     if let Ok(entries) = std::fs::read_dir(&site_dir) {
         for e in entries.flatten() {
             let name = e.file_name().to_string_lossy().to_string();
-            if name.ends_with(&format!("-{short}.json")) {
+            if !name.ends_with(".json") || !name.contains(&format!("-{short}")) {
+                continue;
+            }
+            let kept = std::fs::read(e.path()).unwrap_or_default();
+            if same_bytes(sha256_hex(&kept).as_bytes(), digest.as_bytes()) {
                 return Answer {
                     status: 200,
                     body: json!({"receipt": digest, "stored_as": name}),
                 };
             }
+            long_name = true;
         }
     }
     let day = doc["made_at"]
@@ -1666,7 +1741,11 @@ fn take_report(
         .and_then(|t| t.get(0..10))
         .filter(|d| d.len() == 10 && d.chars().all(|c| c.is_ascii_digit() || c == '-'))
         .unwrap_or("undated");
-    let name = format!("{day}-tier{tier}-{short}.json");
+    let name = if long_name {
+        format!("{day}-tier{tier}-{digest}.json")
+    } else {
+        format!("{day}-tier{tier}-{short}.json")
+    };
     let path = site_dir.join(&name);
     let written = std::fs::OpenOptions::new()
         .write(true)
@@ -1803,6 +1882,15 @@ mod tests {
         assert_eq!(content_digest(&a), content_digest(&b));
         let c = json!({"kind": KIND_COUNTS, "x": 2});
         assert_ne!(content_digest(&a), content_digest(&c));
+    }
+
+    #[test]
+    fn a_receivers_words_are_cut_before_they_are_kept() {
+        assert_eq!(shortened("short", 300), "short");
+        let long = "x".repeat(1000);
+        let cut = shortened(&long, 300);
+        assert_eq!(cut.chars().count(), 300 + " [...]".len());
+        assert!(cut.ends_with(" [...]"));
     }
 
     #[test]

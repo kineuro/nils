@@ -683,7 +683,7 @@ fn flow(pg: Option<(String, String)>) {
     let archive = &doc1["archive"];
     assert_eq!(archive["stacks"], STACKS, "{archive}");
     assert_eq!(archive["subjects"], STACKS / 2, "{archive}");
-    assert_eq!(archive["by_modality"]["MR"], STACKS, "{archive}");
+    assert_eq!(archive["by_modality"]["mr"], STACKS, "{archive}");
     let philips = (0..STACKS).filter(|i| is_philips(*i)).count();
     assert!(philips < 5, "the fixture keeps one maker under the minimum");
     assert_eq!(
@@ -1024,6 +1024,18 @@ fn flow(pg: Option<(String, String)>) {
     assert_eq!(doc3["draw"]["id"], draw3);
     assert_eq!(doc3["protocol"]["path"], "people", "{}", doc3["protocol"]);
     assert_eq!(doc3["protocol"]["readers"], 2, "{}", doc3["protocol"]);
+    assert_eq!(doc3["protocol"]["share"], 0.25, "{}", doc3["protocol"]);
+    assert_eq!(
+        doc3["protocol"]["double_read_share"], 0.25,
+        "{}",
+        doc3["protocol"]
+    );
+    assert_eq!(doc3["protocol"]["read_twice"], 5, "{}", doc3["protocol"]);
+    assert_eq!(
+        doc3["protocol"]["settle_share"], 1.0,
+        "{}",
+        doc3["protocol"]
+    );
     assert!(
         doc3["protocol"]["planted"]["planted"].as_u64().is_some(),
         "{}",
@@ -1183,6 +1195,11 @@ fn flow(pg: Option<(String, String)>) {
         doc["protocol"]
     );
     assert_eq!(doc["protocol"]["share"], 0.2, "{}", doc["protocol"]);
+    assert_eq!(
+        doc["protocol"]["double_read_share"], 0.0,
+        "{}",
+        doc["protocol"]
+    );
     assert_eq!(doc["protocol"]["readers"], 1, "{}", doc["protocol"]);
     holds_none_of(&doc, &never, "the model-first sealed read");
     // a preview of one draw does not let another be sent
