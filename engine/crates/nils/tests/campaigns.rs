@@ -1935,6 +1935,74 @@ fn an_agent_at_the_keyboard_answers_as_an_agent_and_explain_names_it() {
     );
 }
 
+/// 2026-10-30, decision 3: while a campaign is open its maker, who does not
+/// rate in it, reads the progress at the stats door (counts and pace of every
+/// rater) and never an answer: the answers door, the exports and the label
+/// set stay for an adjudicator or a holder of review:work.
+#[test]
+fn an_open_campaign_shows_its_maker_the_progress_and_never_the_answers() {
+    let home = registry();
+    let server = Server::start(&home);
+    server.ok(
+        "PUT",
+        "/api/ask/selections/every-stack",
+        Some(json!({"document": {
+            "ast_version": 1,
+            "sets": {"every": {"grain": "stack"}},
+            "out": {"set": "every", "level": "record"},
+        }})),
+        CURATOR,
+    );
+    server.ok(
+        "POST",
+        "/api/campaigns",
+        Some(json!({
+            "name": "progress",
+            "question": {"kind": "axis", "axis": "body_part"},
+            "source": {"selection": "every-stack@1"},
+            "raters_per_item": 2,
+            "raters": ["anna@lab", "bo@lab"],
+            "adjudicators": ["judge@lab"],
+            "adjudication": {"when": "disagree"},
+            "closes_into": "decision",
+        })),
+        MAKER,
+    );
+    rate(&server, "progress", ANNA, json!({"value": "brain"}));
+    rate(&server, "progress", BO, json!({"value": "spine"}));
+    rate(&server, "progress", ANNA, json!({"value": "brain"}));
+
+    // the stats door: the maker reads every rater's counts and pace
+    let stats = server.ok("GET", "/api/campaigns/progress/stats", None, MAKER);
+    assert_eq!(stats["all"]["answers"], 3, "{stats}");
+    assert_eq!(stats["raters"].as_array().unwrap().len(), 2, "{stats}");
+    assert!(stats.get("blind").is_none(), "{stats}");
+    assert!(stats["all"].get("median_seconds").is_some(), "{stats}");
+    // a rater reads their own row alone, as before
+    let own = server.ok("GET", "/api/campaigns/progress/stats", None, BO);
+    assert_eq!(own["blind"], true, "{own}");
+    assert_eq!(own["raters"].as_array().unwrap().len(), 1, "{own}");
+    assert!(own.get("all").is_none(), "{own}");
+
+    // the answers door gives the maker none
+    let answers = server.ok("GET", "/api/campaigns/progress/answers", None, MAKER);
+    assert_eq!(answers["answers"].as_array().unwrap().len(), 0, "{answers}");
+    let judge = server.ok("GET", "/api/campaigns/progress/answers", None, JUDGE);
+    assert_eq!(judge["answers"].as_array().unwrap().len(), 3, "{judge}");
+
+    // no export of answers, outcomes or counts for the maker
+    for of in ["answers", "outcomes", "counts"] {
+        let (status, doc) = server.call(
+            "POST",
+            "/api/campaigns/progress/export",
+            Some(json!({"place": "nowhere", "of": of})),
+            MAKER,
+        );
+        assert_eq!(status, 403, "{of}: {doc}");
+        assert!(doc["error"].as_str().unwrap().contains("blind"), "{doc}");
+    }
+}
+
 /// Record 55, ruling 35 (d): the person who made a campaign, and an
 /// administrator, read its results at the door: per item the answers by
 /// rater, the adjudication, the settled value and the decisions the close
