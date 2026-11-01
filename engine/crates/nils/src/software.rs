@@ -556,11 +556,8 @@ pub(crate) fn licence_file_for(
 
 /// The variables a tool's terms want set beside the licence file
 /// (`FS_ALLOW_DEEP`), from the pack of the install a run uses.
-pub(crate) fn licence_env(registry: &mut Registry, p: &Pipeline) -> Vec<(String, String)> {
-    for_run(registry, p)
-        .ok()
-        .flatten()
-        .and_then(|u| u.pack)
+pub(crate) fn licence_env(used: Option<&Used>) -> Vec<(String, String)> {
+    used.and_then(|u| u.pack.clone())
         .and_then(|k| k.licence)
         .map(|k| k.env)
         .unwrap_or_default()
@@ -576,10 +573,10 @@ pub(crate) fn licence_check(
     registry: &mut Registry,
     p: &Pipeline,
     d: &Descriptor,
+    used: Option<&Used>,
 ) -> Option<Check> {
     use nils_pipeline::failure::Cause;
-    let used = for_run(registry, p).ok().flatten();
-    let (app, version, licence) = match &used {
+    let (app, version, licence) = match used {
         Some(u) => (
             u.manifest.app.clone(),
             u.manifest.version.clone(),
@@ -622,8 +619,8 @@ pub(crate) fn licence_check(
     let mut unset: Vec<&descriptor::Secret> = Vec::new();
     for s in d.secrets.iter().filter(|s| !s.optional) {
         if crate::pipelines::secret_path(registry, &s.id).is_none()
-            && licence_file_for(registry, used.as_ref(), p, d, s).is_none()
-            && install_file_for(registry, used.as_ref(), &s.id).is_none()
+            && licence_file_for(registry, used, p, d, s).is_none()
+            && install_file_for(registry, used, &s.id).is_none()
         {
             unset.push(s);
         }
@@ -1085,6 +1082,7 @@ fn needs(
     let Some((p, d)) = pipelines.first() else {
         return Vec::new();
     };
+    let used = for_run(registry, p).ok().flatten();
     let mut checks = crate::requirements::checks(
         registry,
         home,
@@ -1095,10 +1093,11 @@ fn needs(
             units: 1,
             detected: Some(detected),
             releases: d.layout == descriptor::Layout::Bids,
+            used: Some(&used),
         },
     );
     if !checks.iter().any(|c| c.check == "licence")
-        && let Some(c) = licence_check(registry, p, d)
+        && let Some(c) = licence_check(registry, p, d, used.as_ref())
     {
         checks.push(c);
     }

@@ -129,6 +129,9 @@ pub(crate) struct Asked<'a> {
     /// new run does, a run taken up again only where it released none
     /// before (2026-10-12).
     pub(crate) releases: bool,
+    /// The install the run uses, as the caller found it already
+    /// (`software::for_run`), so it is looked for once a run; none to look.
+    pub(crate) used: Option<&'a Option<crate::software::Used>>,
 }
 
 fn found_by_words(by: &str) -> &'static str {
@@ -264,6 +267,7 @@ fn runtime_and_image(
     registry: &mut Registry,
     p: &Pipeline,
     detected: &runtime::Detected,
+    software: Option<crate::software::Used>,
 ) -> Vec<Check> {
     let detected = detected.clone();
     let Some(rt) = detected.runtime else {
@@ -283,7 +287,6 @@ fn runtime_and_image(
     )];
     // record 57 P5: the install in the software place a run uses, where
     // there is one, installed or registered
-    let software = crate::software::for_run(registry, p).ok().flatten();
     let here = match rt.kind {
         runtime::Kind::Apptainer => match &software {
             Some(u) if u.manifest.kind.on_disk() => Some(true),
@@ -513,7 +516,16 @@ pub(crate) fn checks(registry: &mut Registry, home: &Path, a: &Asked<'_>) -> Vec
         Some(d) => d.clone(),
         None => crate::pipelines::detect_cached(registry),
     };
-    out.extend(runtime_and_image(registry, a.pipeline, &detected));
+    let used = match a.used {
+        Some(u) => u.clone(),
+        None => crate::software::for_run(registry, a.pipeline).ok().flatten(),
+    };
+    out.extend(runtime_and_image(
+        registry,
+        a.pipeline,
+        &detected,
+        used.clone(),
+    ));
     out.extend(memory_and_card(
         registry,
         a.pipeline,
@@ -522,7 +534,7 @@ pub(crate) fn checks(registry: &mut Registry, home: &Path, a: &Asked<'_>) -> Vec
     ));
     out.extend(disk(registry, a.descriptor, a.units));
     // record 57 P5: the tool's terms and its site licence file (G9, G10)
-    if let Some(c) = crate::software::licence_check(registry, a.pipeline, a.descriptor) {
+    if let Some(c) = crate::software::licence_check(registry, a.pipeline, a.descriptor, used.as_ref()) {
         out.push(c);
     }
     out
@@ -663,6 +675,7 @@ pub(crate) fn at_the_door(
             releases: resumed
                 .as_ref()
                 .is_none_or(|r| r.input_release_id.is_none()),
+            used: None,
         },
     );
     let docs = || json!(all.iter().map(Check::doc).collect::<Vec<_>>());

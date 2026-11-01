@@ -5497,9 +5497,13 @@ pub(crate) fn secret_path(registry: &mut Registry, id: &str) -> Option<String> {
 /// The secrets a pipeline reads, each read now from the file the site set;
 /// one it needs and the site has not set, or that cannot be read, is
 /// refused before anything runs.
-fn secrets_for(registry: &mut Registry, d: &Descriptor, p: &Pipeline) -> Result<Vec<Given>, Exit> {
+fn secrets_for(
+    registry: &mut Registry,
+    d: &Descriptor,
+    p: &Pipeline,
+    used: &Option<crate::software::Used>,
+) -> Result<Vec<Given>, Exit> {
     let mut out = Vec::new();
-    let used = crate::software::for_run(registry, p).ok().flatten();
     for s in &d.secrets {
         // record 57 P5: a licence file placed in the software place
         // (licences/<app>/) stands where the site set no file
@@ -5901,6 +5905,8 @@ pub(crate) fn run_command(home: &Home, args: RunArgs) -> Result<(), Exit> {
     // 2026-10-12: what the run needs of this machine, checked before
     // anything is frozen or claimed; a check that fails refuses it by its
     // kind, and nothing is queued
+    // the install the run uses, looked for once and carried
+    let used = crate::software::for_run(&mut registry, &p).ok().flatten();
     let checked = crate::requirements::checks(
         &mut registry,
         home.dir(),
@@ -5911,6 +5917,7 @@ pub(crate) fn run_command(home: &Home, args: RunArgs) -> Result<(), Exit> {
             units: 1,
             detected: Some(&detected),
             releases: true,
+            used: Some(&used),
         },
     );
     if let Some(failed) = crate::requirements::refusing(&checked) {
@@ -5918,7 +5925,7 @@ pub(crate) fn run_command(home: &Home, args: RunArgs) -> Result<(), Exit> {
     }
     let (device, gpu) = device_for(&d, &p, &rt, &lane)?;
     fits(&d, &p, &lane)?;
-    let given = secrets_for(&mut registry, &d, &p)?;
+    let given = secrets_for(&mut registry, &d, &p, &used)?;
 
     // the typed inputs: models, a label set, derivatives of a kind
     let model_inputs: Vec<&descriptor::TypedInput> =
@@ -6195,7 +6202,7 @@ pub(crate) fn run_command(home: &Home, args: RunArgs) -> Result<(), Exit> {
                 )
                 .map_err(fail)?;
             }
-            let licence_env = crate::software::licence_env(registry, &p);
+            let licence_env = crate::software::licence_env(used.as_ref());
 
             let outcome = execute(
                 home,
@@ -6221,6 +6228,7 @@ pub(crate) fn run_command(home: &Home, args: RunArgs) -> Result<(), Exit> {
                     lane: &lane,
                     secrets: &given,
                     licence_env: &licence_env,
+                    used: &used,
                     resume: None,
                     verified: &verified,
                 },
@@ -6229,6 +6237,7 @@ pub(crate) fn run_command(home: &Home, args: RunArgs) -> Result<(), Exit> {
                 registry,
                 &Conclusion {
                     pipeline: &p,
+                    used: &used,
                     run_id,
                     job_id,
                     handle_id,
@@ -7021,7 +7030,9 @@ fn resume_command(home: &Home, args: &RunArgs, run_id: i64) -> Result<(), Exit> 
         )));
     }
     fits(&d, &p, &lane)?;
-    let given = secrets_for(&mut registry, &d, &p)?;
+    // the install the run uses, looked for once and carried
+    let used = crate::software::for_run(&mut registry, &p).ok().flatten();
+    let given = secrets_for(&mut registry, &d, &p, &used)?;
     let mut models = Vec::new();
     for id in r
         .model_ids
@@ -7075,6 +7086,7 @@ fn resume_command(home: &Home, args: &RunArgs, run_id: i64) -> Result<(), Exit> 
             units: 1,
             detected: Some(&detected),
             releases: r.input_release_id.is_none(),
+            used: Some(&used),
         },
     );
     if let Some(failed) = crate::requirements::refusing(&checked) {
@@ -7112,7 +7124,7 @@ fn resume_command(home: &Home, args: &RunArgs, run_id: i64) -> Result<(), Exit> 
     let job_id = claim_run(registry.store(), &p, handle_id, claimed)?;
     rows::resume(registry.store(), run_id, job_id)?;
     let _ = job::set_arg(registry.store(), job_id, "run", json!(run_id));
-    let licence_env = crate::software::licence_env(&mut registry, &p);
+    let licence_env = crate::software::licence_env(used.as_ref());
     let outcome = execute(
         home,
         &mut registry,
@@ -7137,6 +7149,7 @@ fn resume_command(home: &Home, args: &RunArgs, run_id: i64) -> Result<(), Exit> 
             lane: &lane,
             secrets: &given,
             licence_env: &licence_env,
+            used: &used,
             resume: Some(&r),
             verified: &Verified::default(),
         },
@@ -7169,6 +7182,7 @@ fn resume_command(home: &Home, args: &RunArgs, run_id: i64) -> Result<(), Exit> 
         &mut registry,
         &Conclusion {
             pipeline: &p,
+            used: &used,
             run_id,
             job_id,
             handle_id,
@@ -7418,6 +7432,9 @@ fn ingest_run(registry: &mut Registry, run_id: i64) -> Result<Value, Exit> {
 /// What closing a run needs to say.
 struct Conclusion<'a> {
     pipeline: &'a Pipeline,
+    /// The install found at the run's start; looked for again only where
+    /// there was none, since the run may have built one.
+    used: &'a Option<crate::software::Used>,
     run_id: i64,
     job_id: i64,
     handle_id: i64,
@@ -7462,9 +7479,11 @@ fn conclude(
     // its version and fingerprint
     let mut summary = summary;
     if summary.is_object()
-        && let Some(u) = crate::software::for_run(registry, c.pipeline)
-            .ok()
-            .flatten()
+        && let Some(u) = c.used.clone().or_else(|| {
+            crate::software::for_run(registry, c.pipeline)
+                .ok()
+                .flatten()
+        })
     {
         summary["software"] = u.doc();
     }
@@ -7597,6 +7616,9 @@ struct Execution<'a> {
     /// The variables a tool's terms want set beside its licence file
     /// (record 57 P5: `FS_ALLOW_DEEP`), from the pack of the install it uses.
     licence_env: &'a [(String, String)],
+    /// The install in the software place the run uses, looked for once at
+    /// the run's start and carried.
+    used: &'a Option<crate::software::Used>,
     /// The run as it stood, where this takes it up again.
     resume: Option<&'a Run>,
     /// The models whose bytes were found to be the admitted ones, once for
@@ -8255,7 +8277,7 @@ fn execute_run(home: &Home, registry: &mut Registry, x: &Execution<'_>) -> Resul
         "secrets": x.secrets.iter().map(|g| json!({"id": g.secret.id, "mount": g.secret.mount})).collect::<Vec<_>>(),
         // record 57 P5: the install that made it, installed or registered,
         // with its version and fingerprint, so a result says what made it
-        "software": crate::software::for_run(registry, p).ok().flatten().map(|u| u.doc()),
+        "software": x.used.as_ref().map(|u| u.doc()),
     });
     std::fs::write(
         inputs.join("manifest.json"),
@@ -10157,7 +10179,7 @@ fn ensure_image(
     run_dir: &Path,
 ) -> Result<Option<PathBuf>, String> {
     let form = image_form(registry);
-    if let Some(used) = crate::software::for_run(registry, x.pipeline)?
+    if let Some(used) = x.used.as_ref()
         && used.manifest.kind.on_disk()
     {
         if let Some(why) = crate::software::failed_verification(&used) {

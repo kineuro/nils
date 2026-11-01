@@ -1316,6 +1316,7 @@ pub(crate) fn check(registry: &mut Registry, asked: &Asked<'_>) -> Result<Value,
             releases: taken
                 .as_ref()
                 .is_none_or(|t| t.run.input_release_id.is_none()),
+            used: None,
         },
     );
     for c in requirements.iter().filter(|c| !c.ok) {
