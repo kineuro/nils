@@ -450,8 +450,14 @@ answer, exported with a minimum cell of 5 stacks.
 | `GET /api/audit/draws/pooled` | review:see or campaigns:see |
 | `GET /api/audit/draws/{id}/rule-review` | review:see or campaigns:see |
 | `POST /api/audit/draws/{id}/rule-review` | review:work and campaigns:work |
+| `GET /api/participation`, `/participation/sends` | database:see |
+| `POST /api/participation`, `/participation/send`, `GET /api/participation/preview` | database:work |
 
 | Command | What it does |
 |---|---|
 | `nils audit draw --seed S --count N --packets DIR --readers W [--since T] [--axes A,B] [--readers-per-item N]`, or `--raters W` in place of `--readers` | the seeded draw, its verify campaign (or with `--raters`, the raters' campaign of section 7) and the header packets |
 | `nils audit export [--draw ID] --out FILE` | the draw's counts under the minimum cell of 5 (default: the newest draw by count) |
+| `nils audit settle --draw ID [--share S] [--settlers W] [--seed WORD]` | the settle of a draw whose raters have answered: the verify campaign a person settles (the door `POST /api/audit/draws/{id}/settle`) |
+| `nils audit draw ... --no-localizers --double-read-share 0.2` | leave the localizers out of the frame; give a seeded fifth of the drawn items to two readers (the site protocol) |
+| `nils participate status`, `enable --tier N [--site NAME] [--receiver URL] [--key-file PATH] [--auto]`, `preview --tier N [--draw ID] [--out FILE]`, `send --tier N [--draw ID] [--auto]`, `disable [--tier N]` | site participation: take part, read the file before it leaves, send it signed; off by default |
+| `nils participate receive --dir DIR --sites FILE --listen ADDR` | the receiver of the sites' reports |

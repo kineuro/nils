@@ -11,7 +11,7 @@ use crate::schema::{self, ID_TYPES, Table, linkage_tables, registry_tables};
 use crate::store::{Error, Param, Store};
 
 /// The version this binary writes.
-pub const SCHEMA_VERSION: i64 = 114;
+pub const SCHEMA_VERSION: i64 = 115;
 
 /// Which of the two stores a migration runs against.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -510,7 +510,28 @@ pub static MIGRATIONS: &[Migration] = &[
         version: 114,
         apply: a_release_row_says_where_its_seconds_went,
     },
+    Migration {
+        version: 115,
+        apply: a_site_takes_part_and_an_item_may_want_its_own_raters,
+    },
 ];
+
+/// Site participation (2026-11-01): the one row that says how this install
+/// takes part (`participation`), its sends (`participation_send`), and a
+/// campaign item's own rater count (`campaign_item.raters`, null takes the
+/// campaign's). Two tables and a column are added, no row is touched: an
+/// install from before takes no part, and every item wants its campaign's
+/// raters.
+fn a_site_takes_part_and_an_item_may_want_its_own_raters(
+    store: &mut Store,
+    kind: Kind,
+) -> Result<(), Error> {
+    if kind != Kind::Registry {
+        return Ok(());
+    }
+    add_tables(store, kind, &["participation", "participation_send"])?;
+    add_columns(store, "campaign_item", &["raters"])
+}
 
 /// A model from elsewhere registers with its training set as a foreign
 /// claim (2026-10-30): the model row says the label set its `trained_on`

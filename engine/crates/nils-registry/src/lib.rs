@@ -53,6 +53,7 @@ pub mod names;
 pub mod opinion;
 pub mod overlay;
 pub mod pair;
+pub mod participation;
 pub mod personnummer;
 pub mod pick_rules;
 pub mod pick_truth;

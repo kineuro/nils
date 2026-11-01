@@ -2421,9 +2421,17 @@ pub struct Item {
     /// writes it.
     pub refused_at: Option<String>,
     pub refused_why: Option<String>,
+    /// Site participation (2026-11-01): the raters this one item wants
+    /// where it differs from the campaign's `raters_per_item`.
+    pub raters: Option<i64>,
 }
 
 impl Item {
+    /// How many raters this item wants: its own count, else the campaign's.
+    pub fn raters_wanted(&self, c: &Campaign) -> i64 {
+        self.raters.unwrap_or(c.raters_per_item)
+    }
+
     pub fn as_json(&self) -> Value {
         json!({
             "id": self.id, "campaign_id": self.campaign_id, "position": self.position,
@@ -2435,6 +2443,7 @@ impl Item {
             "resolved_at": self.resolved_at, "held_back": self.held_back,
             "derivative_id": self.derivative_id, "part_set": self.part_set,
             "part_label": self.part_label, "refused": self.refused_json(),
+            "raters": self.raters,
         })
     }
 
@@ -2447,7 +2456,7 @@ impl Item {
     }
 }
 
-const ITEM_COLUMNS: [&str; 23] = [
+const ITEM_COLUMNS: [&str; 24] = [
     "id",
     "campaign_id",
     "position",
@@ -2471,6 +2480,7 @@ const ITEM_COLUMNS: [&str; 23] = [
     "part_label",
     "refused_at",
     "refused_why",
+    "raters",
 ];
 
 fn item_of(r: &Row) -> Result<Item, StoreError> {
@@ -2498,6 +2508,7 @@ fn item_of(r: &Row) -> Result<Item, StoreError> {
         part_label: r.opt_int(20)?,
         refused_at: r.opt_text(21)?.map(str::to_string),
         refused_why: r.opt_text(22)?.map(str::to_string),
+        raters: r.opt_int(23)?,
     })
 }
 
@@ -2516,7 +2527,7 @@ pub fn open_for(
         "SELECT {} FROM {} i WHERE i.campaign_id = {} AND i.state = 'open' AND i.round = 1 \
          AND (i.held_back IS NULL OR i.held_back = 0) \
          AND (SELECT COUNT(*) FROM {a} a WHERE a.item_id = i.id AND a.role = 'rater' \
-              AND (a.state = 'submitted' OR (a.state = 'leased' AND a.lease_until >= {}))) < {} \
+              AND (a.state = 'submitted' OR (a.state = 'leased' AND a.lease_until >= {}))) < COALESCE(i.raters, {}) \
          AND NOT EXISTS (SELECT 1 FROM {a} a WHERE a.item_id = i.id AND a.principal = {}) \
          ORDER BY i.position",
         select_list(store, "campaign_item", &ITEM_COLUMNS, Some("i")),
@@ -2554,7 +2565,7 @@ pub fn held_back_open(
         "SELECT COUNT(*) FROM {} i WHERE i.campaign_id = {} AND i.state = 'open' AND i.round = 1 \
          AND i.held_back = 1 \
          AND (SELECT COUNT(*) FROM {a} a WHERE a.item_id = i.id AND a.role = 'rater' \
-              AND (a.state = 'submitted' OR (a.state = 'leased' AND a.lease_until >= {}))) < {} \
+              AND (a.state = 'submitted' OR (a.state = 'leased' AND a.lease_until >= {}))) < COALESCE(i.raters, {}) \
          AND NOT EXISTS (SELECT 1 FROM {a} a WHERE a.item_id = i.id AND a.principal = {})",
         store.qualified("campaign_item"),
         d.param(1, Type::Int),
@@ -2610,6 +2621,28 @@ pub fn hold_back(store: &mut Store, campaign: i64, items: &[i64]) -> Result<(), 
             join_ids(chunk)
         );
         store.execute(&sql, &[Param::Int(campaign)])?;
+    }
+    Ok(())
+}
+
+/// Site participation (2026-11-01): give items of a campaign a rater count
+/// of their own (two for a seeded share read twice), the rest keeping the
+/// campaign's.
+pub fn set_item_raters(
+    store: &mut Store,
+    campaign: i64,
+    items: &[i64],
+    raters: i64,
+) -> Result<(), Error> {
+    for chunk in items.chunks(500) {
+        let sql = format!(
+            "UPDATE {} SET raters = {} WHERE campaign_id = {} AND id IN ({})",
+            store.qualified("campaign_item"),
+            store.dialect().param(1, Type::Int),
+            store.dialect().param(2, Type::Int),
+            join_ids(chunk)
+        );
+        store.execute(&sql, &[Param::Int(raters), Param::Int(campaign)])?;
     }
     Ok(())
 }
@@ -5466,7 +5499,7 @@ fn settle(
         "adjudicated".to_string()
     } else {
         let raters: Vec<&Answer> = all.iter().filter(|x| x.role == "rater").collect();
-        if (raters.len() as i64) < c.raters_per_item {
+        if (raters.len() as i64) < it.raters_wanted(c) {
             it.state.clone()
         } else {
             let keys: Vec<Option<String>> = raters.iter().map(|x| question.comparable(x)).collect();
@@ -5724,7 +5757,7 @@ pub fn accept_each(
                 ));
                 continue;
             }
-            if count(0) >= c.raters_per_item {
+            if count(0) >= it.raters_wanted(&c) {
                 out.refused
                     .push((item_id, format!("item {item_id} has the raters it wants")));
                 continue;
