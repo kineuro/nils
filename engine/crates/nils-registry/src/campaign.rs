@@ -3295,7 +3295,7 @@ fn rater_order(
     let sql = format!(
         "SELECT i.id, i.position, i.stack_id, i.held_back FROM {i} i WHERE i.campaign_id = {} AND i.state = 'open' AND i.round = 1 \
          AND (SELECT COUNT(*) FROM {a} a WHERE a.item_id = i.id AND a.role = 'rater' \
-              AND a.state IN ('leased', 'submitted')) < {} \
+              AND a.state IN ('leased', 'submitted')) < COALESCE(i.raters, {}) \
          AND NOT EXISTS (SELECT 1 FROM {a} a WHERE a.item_id = i.id AND a.principal = {}) \
          ORDER BY i.position{}",
         d.param(1, Type::Int),
