@@ -2385,6 +2385,12 @@ fn routed(
     ) {
         return r;
     }
+    // site participation (2026-11-01)
+    if let Some(r) =
+        crate::participate::route(doors, registry, caller, method.as_str(), &segs, query, body)
+    {
+        return r;
+    }
     // record 42: the campaigns and the label sets
     if let Some(r) = crate::campaigns::route(
         doors,
@@ -5623,6 +5629,10 @@ pub(crate) fn door(method: &str, segs: &[&str]) -> (Need, Detail) {
     // record 55 D3, D6, D7: the review rule's doors, before the table's
     // wider patterns
     if let Some(n) = crate::review_rule::door(method, segs) {
+        return n;
+    }
+    // site participation (2026-11-01): an administrator's doors
+    if let Some(n) = crate::participate::door(method, segs) {
         return n;
     }
     // record 56 §6.4, §6.5: the Rules page's doors

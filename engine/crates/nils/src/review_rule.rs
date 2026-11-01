@@ -1295,9 +1295,10 @@ fn frame(
 /// survey or a pilot).
 fn is_localizer(answers: &BTreeMap<String, (Option<String>, bool)>) -> bool {
     answers.get("provenance").is_some_and(|(value, _)| {
-        value
-            .as_deref()
-            .is_some_and(|v| v.split(',').any(|w| w.trim() == "localizer"))
+        value.as_deref().is_some_and(|v| {
+            v.split(',')
+                .any(|w| w.trim().eq_ignore_ascii_case("localizer"))
+        })
     })
 }
 
