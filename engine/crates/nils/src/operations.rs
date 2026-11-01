@@ -1627,6 +1627,18 @@ fn withdraw_queued(store: &mut Store, id: i64) -> Result<bool, StoreError> {
     Ok(store.execute(&sql, &[nils_registry::store::Param::Int(id)])? > 0)
 }
 
+/// The parameters a pipeline declares for a run over new stacks
+/// (`x-nils.on-arrival`), as `id=value` pairs; none where it declares none
+/// or is not in the catalog.
+fn arrival_params(registry: &mut Registry, label: &str) -> Vec<(String, String)> {
+    nils_registry::pipeline::resolve(registry.store(), label)
+        .ok()
+        .flatten()
+        .and_then(|p| nils_pipeline::descriptor::from_value(p.descriptor.clone()).ok())
+        .and_then(|d| d.on_arrival)
+        .unwrap_or_default()
+}
+
 /// `POST /api/datasets/{name}/steps/{step}/run` and `POST
 /// /api/cohorts/{name}/steps/{step}/run`: the step's run over the scans it
 /// counts, frozen now into a handle, queued for the dataset or the cohort
@@ -1704,6 +1716,7 @@ pub(crate) fn run_door(
     };
     let (handle, frozen) =
         freeze(store, held, &caller.principal, epoch).map_err(|e| Reply::error(500, e))?;
+    let arrival = arrival_params(registry, &plan.pipeline);
     let mut command = vec![
         "run".to_string(),
         plan.pipeline,
@@ -1712,6 +1725,14 @@ pub(crate) fn run_door(
     ];
     for m in &plan.models {
         command.extend(["--model".to_string(), m.to_string()]);
+    }
+    // 2026-11-01 (Nima's decision 4 of 2026-10-30): a person's run from the
+    // step's door takes the parameters the pipeline declares for a run over
+    // new stacks (`x-nils.on-arrival`), as `nils score --step` does, so the
+    // first body-part run fills the slice cache and a later head or
+    // calibration update re-scores from it, not on the cache-less fast path
+    for (id, value) in arrival {
+        command.extend(["--param".to_string(), format!("{id}={value}")]);
     }
     let command = crate::pipelines::located(doors.pack_dir.as_deref(), command)?;
     // 2026-10-12: refused by its kind where it lacks what it needs here
