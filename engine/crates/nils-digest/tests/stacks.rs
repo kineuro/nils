@@ -1122,7 +1122,7 @@ fn the_echoes_of_one_volume_under_one_echo_time_are_a_stack_each() {
         let counted = dry_run(&dry).unwrap_or_else(|e| panic!("{name}: {e}"));
         assert_eq!(
             (counted.stacks, counted.echoes_kept_apart),
-            (3, 1),
+            (3, 2),
             "{name}"
         );
         assert!(
@@ -1150,6 +1150,46 @@ fn the_echoes_of_one_volume_under_one_echo_time_are_a_stack_each() {
         let report = digest(&reread(&dir), &mut reg).unwrap_or_else(|e| panic!("{name}: {e}"));
         assert_eq!(report.written.unwrap().echo_stacks_folded, 0, "{name}");
         assert_eq!(one(&mut reg, "SELECT COUNT(*) FROM {stack}"), 3, "{name}");
+    }
+}
+
+/// An enhanced object that is a whole volume in one stack: its frames agree,
+/// and it states one echo number, the echo time and a first position.
+fn enhanced_echo(series: &str, sop: &str, echo: &str) -> Vec<u8> {
+    let mut e = synth::enhanced_mr(
+        "M",
+        series,
+        sop,
+        vec![synth::fg_orientation(AXIAL)],
+        (0..4).map(|_| Vec::new()).collect(),
+    );
+    e.extend([echo_number(echo), echo_time("10"), ipp("0\\0\\5")]);
+    let e = with_patient(e, "P1");
+    synth::part10(&synth::enhanced_meta(sop), &e, true)
+}
+
+/// The dry run reads an enhanced object as the writer does: a whole object
+/// in one stack is at its first position, so two of them, one per echo, are
+/// the echoes of one volume to both, and the count says so.
+#[test]
+fn two_unsplit_enhanced_files_one_per_echo_are_kept_apart_by_the_dry_run_too() {
+    for lab in labs() {
+        let name = lab.name;
+        let dir = TempDir::new("stacks-enhanced-echoes");
+        dir.file("a/1", &enhanced_echo("M.1", "M.1.1", "1"));
+        dir.file("a/2", &enhanced_echo("M.1", "M.1.2", "2"));
+        let mut dry = settings(&dir);
+        dry.dry_run = true;
+        let counted = dry_run(&dry).unwrap_or_else(|e| panic!("{name}: {e}"));
+        assert_eq!(
+            (counted.stacks, counted.echoes_kept_apart),
+            (2, 2),
+            "{name}"
+        );
+        let mut reg = lab.open();
+        let report = digest(&settings(&dir), &mut reg).unwrap_or_else(|e| panic!("{name}: {e}"));
+        assert_eq!(report.stacks, 2, "{name}");
+        assert_eq!(one(&mut reg, "SELECT COUNT(*) FROM {stack}"), 2, "{name}");
     }
 }
 

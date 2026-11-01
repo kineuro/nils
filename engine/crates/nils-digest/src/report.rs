@@ -134,9 +134,10 @@ impl Counts {
                         Spread::default(),
                     )
                 });
-            // the frames of an enhanced object sit at more than the file's
-            // first position
-            if s.values.is_some() || x.frames.count > 1 {
+            // as the writer: only a file whose frames made several stacks
+            // has no one position for a stack (`instance_frame`); a whole
+            // enhanced object is at its first frame's
+            if s.values.is_some() {
                 entry.3.add_unknown();
             } else {
                 entry.3.add(position);
@@ -317,10 +318,22 @@ impl Counts {
         self.stacks_by(joined)
     }
 
-    /// The stacks the earlier rule joined and the digest now leaves apart,
-    /// because they are the echoes of one volume (2026-10-30).
+    /// The stacks in the groups the earlier rule joined into one and the
+    /// digest now leaves apart, because they are the echoes of one volume
+    /// (2026-10-30): all of them, not only the ones beyond the first.
     pub fn echoes_kept_apart(&self) -> u64 {
-        self.stacks() - self.stacks_by(|echoes| one_echo(echoes.iter().map(|(n, t, _)| (*n, *t))))
+        let mut by_rest: HashMap<u64, Vec<(u64, Option<u64>, Spread)>> = HashMap::new();
+        for (rest, number, time, spread) in self.stacks.values() {
+            by_rest
+                .entry(*rest)
+                .or_default()
+                .push((*number, *time, *spread));
+        }
+        by_rest
+            .into_values()
+            .filter(|echoes| one_echo(echoes.iter().map(|(n, t, _)| (*n, *t))) && !joined(echoes))
+            .map(|echoes| echoes.len() as u64)
+            .sum()
     }
 
     fn stacks_by(&self, joins: impl Fn(&[(u64, Option<u64>, Spread)]) -> bool) -> u64 {
