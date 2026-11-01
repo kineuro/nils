@@ -10188,7 +10188,14 @@ fn ensure_image(
     run_dir: &Path,
 ) -> Result<Option<PathBuf>, String> {
     let form = image_form(registry);
-    if let Some(used) = x.used.as_ref()
+    // the install found at the run's start; looked for again only where
+    // there was none, since a run that began at the same time may have
+    // built the image into the place meanwhile
+    let found = match x.used {
+        Some(u) => Some(u.clone()),
+        None => crate::software::for_run(registry, x.pipeline)?,
+    };
+    if let Some(used) = found.as_ref()
         && used.manifest.kind.on_disk()
     {
         if let Some(why) = crate::software::failed_verification(used) {
