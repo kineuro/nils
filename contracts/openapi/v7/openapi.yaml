@@ -3494,6 +3494,15 @@ paths:
         "200": {description: The evidence line}
         "403": {description: Without review:see}
         "404": {description: The stack has not been classified}
+  /api/stacks/{stack}/header:
+    get:
+      summary: The stored header facts of one stack (7b; review:see)
+      description: "What `nils explain <stack> --header` prints: {stack, detail, files, fingerprint, texts, physics, private, private_withheld}. `fingerprint` holds the values the rules read under the packet's names (echo_numbers, echo_time, image_type, scanning_sequence, repetition_time, the geometry, n_instances and the rest), `files` the stack's file count, `texts` the header's text (series description, protocol name, sequence name and the rest; the quasi-identifying text only at detail quasi), `physics` the numbers, and `private` the private elements the served pack shows, with `private_withheld` the count held back because their value looked like an identifier. It is built from the readings of GET /api/campaigns/{id}/items/{item}/header, so nothing of the subject's row, nothing the pseudonymiser always removes and no UID that names a file is ever in it. A stack of a sample sealed now is answered {stack, blind: true, sealed: true} to every caller but the certificate's holder, as the explanation is. Additive."
+      parameters: [{name: stack, in: path, required: true, schema: {type: integer}}]
+      responses:
+        "200": {description: The header facts}
+        "403": {description: Without review:see}
+        "404": {description: The stack is not in the registry}
   /api/campaigns/{id}/items/{item}/why:
     get:
       summary: The evidence line of a campaign item's stack, with the suggestion (record 48 R1; campaigns:see)

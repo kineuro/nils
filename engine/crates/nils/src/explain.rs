@@ -695,3 +695,51 @@ fn with_article(kind: &str) -> &'static str {
         _ => "a person",
     }
 }
+
+/// `nils explain <stack> --header` in words: one line a fact, the keys as the
+/// door names them.
+pub(crate) fn header_text(doc: &Value) -> String {
+    let mut out = String::new();
+    let stack = doc["stack"].as_i64().unwrap_or_default();
+    out.push_str(&format!(
+        "stack {stack}   detail {}\n",
+        doc["detail"].as_str().unwrap_or("")
+    ));
+    if doc["blind"] == json!(true) {
+        out.push_str("  nothing is told of a stack in a sample sealed now\n");
+        return out;
+    }
+    if !doc["files"].is_null() {
+        out.push_str(&format!(
+            "  files            {}\n",
+            plain_value(&doc["files"])
+        ));
+    }
+    for (title, key) in [
+        ("fingerprint", "fingerprint"),
+        ("text", "texts"),
+        ("physics", "physics"),
+        ("private", "private"),
+    ] {
+        let Some(m) = doc[key].as_object().filter(|m| !m.is_empty()) else {
+            continue;
+        };
+        out.push_str(&format!("{title}\n"));
+        for (k, v) in m {
+            out.push_str(&format!("  {k:<28} {}\n", plain_value(v)));
+        }
+    }
+    if let Some(n) = doc["private_withheld"].as_u64().filter(|n| *n > 0) {
+        out.push_str(&format!(
+            "  ({n} private element(s) withheld: shaped like an identifier)\n"
+        ));
+    }
+    out
+}
+
+fn plain_value(v: &Value) -> String {
+    match v {
+        Value::String(s) => s.clone(),
+        other => other.to_string(),
+    }
+}
