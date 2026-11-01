@@ -19,6 +19,7 @@ The fifth beta is a maintenance release beside the fourth: a dataset's summary a
 ### Changed
 
 - A dataset's summary answers at once. Its counts, kept from the last reading, are answered whatever their age while one reading runs in the background when something they count moved, a door wrote or ten minutes passed; the document says when they were read (`counts_as_of`) and whether they are being read again (`counting`). Only a dataset never summarised since the engine started waits for its first reading. The counts are read again only when something that moves them changed (a read's batch, a job that ended, a question, a judgement, a merge, a sealed sample, a label), no longer on every act in the audit or every worker's row, and the pictures and 3D views are looked for on disk only after a pictures or 3D-views job ended or the working place changed, never on a page visit. On a dataset of 30 million files on a share the door took 20 seconds on nearly every visit; it answers in milliseconds.
+- The Data page's sources door is answered from a cheaper stamp: it no longer counts the pseudonymised files by state on every request (1.7 seconds on a registry of 34 million files) and reads instead the newest file row, the batches, the registry's epoch and the places, which still move on a read or pseudonymise run, an originals purge, a place removed and a file written outside a batch.
 
 ## [1.0.0-beta.4] - 2026-10-31
 

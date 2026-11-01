@@ -127,8 +127,7 @@ fn stamp(store: &mut Store, recent: usize) -> Result<(String, bool), StoreError>
         &[],
     )?[0];
     let (batches, last, running) = (b.int(0)?, b.int(1)?, b.int(2)?);
-    let ids: Vec<i64> = listed.iter().map(|p| p.id).collect();
-    let files = copies(store, &ids)?;
+    let files = copies(store)?;
     let places: Vec<Value> = listed.iter().map(Place::as_json).collect();
     let key = format!(
         "{epoch}|{recent}|{batches}|{last}|{running}|{files}|{}",
@@ -137,37 +136,23 @@ fn stamp(store: &mut Store, recent: usize) -> Result<(String, bool), StoreError>
     Ok((key, running > 0))
 }
 
-/// What the pseudonymised files of the places say, read from indexes in
-/// milliseconds however many there are (2026-10-17: a count of every row of
+/// What the pseudonymised files say, read from an index in a millisecond
+/// however many there are (2026-10-17: a count of every row of
 /// `pseudonym_file` cost 2.5 seconds, and up to 9 under load, on a registry
-/// of 34 million, on every request to the sources door): the newest row,
-/// which moves with every file a run records for the first time, and each
-/// place's files in every state but written, which move with every file a
-/// run holds, refuses or finds unchanged, and with every one it writes that
-/// was in one of those states. Its written files are all the others, so
-/// this moves wherever a count of every state of every file would; the
-/// document reads the held ones, and a run's counts with its batch.
-fn copies(store: &mut Store, places: &[i64]) -> Result<String, StoreError> {
+/// of 34 million, on every request to the sources door; 2026-11-01: the
+/// counts of the held, refused and unchanged files grouped by place still
+/// cost 1.7 seconds): only the newest row, which moves with every file a
+/// writer records for the first time, in a batch or outside one. What a run
+/// does to files it already holds moves with its batch (the batches' count,
+/// newest id and running state are in the stamp), an originals purge with
+/// the registry's epoch and a place removed with the places' rows, which
+/// are small tables read whole.
+fn copies(store: &mut Store) -> Result<String, StoreError> {
     let files = store.qualified("pseudonym_file");
     let newest = store.query(&format!("SELECT MAX(id) FROM {files}"), &[])?[0]
         .opt_int(0)?
         .unwrap_or(0);
-    if places.is_empty() {
-        return Ok(newest.to_string());
-    }
-    let mut by_state = Vec::new();
-    for r in store.query(
-        &format!(
-            "SELECT place_id, state, COUNT(*) FROM {files} WHERE place_id IN ({}) \
-             AND state IN ('held', 'refused', 'unchanged') GROUP BY place_id, state \
-             ORDER BY place_id, state",
-            list(places)
-        ),
-        &[],
-    )? {
-        by_state.push(format!("{}:{}:{}", r.int(0)?, r.text(1)?, r.int(2)?));
-    }
-    Ok(format!("{newest}|{}", by_state.join(",")))
+    Ok(newest.to_string())
 }
 
 /// The readers of the document, one lock for each key being read (Wave 7b,
@@ -658,7 +643,7 @@ mod tests {
     /// A run that only touches a file it recorded, as it does an unchanged
     /// copy, moves neither.
     #[test]
-    fn the_stamp_moves_when_a_run_writes_holds_or_refuses_a_file() {
+    fn the_stamp_moves_on_a_batch_a_new_file_a_purge_and_a_removal_not_on_a_worker() {
         use nils_registry::home::{Home, InitOptions};
         use nils_registry::place;
         let dir = nils_dicom::synth::TempDir::new("sources-stamp");
@@ -699,19 +684,7 @@ mod tests {
         .unwrap();
         let store = registry.store();
         let files = store.qualified("pseudonym_file");
-        // the stamp before: every row counted, with the written ones
-        let counted = |store: &mut nils_registry::Store| -> (i64, i64, i64) {
-            let r = &store
-                .query(
-                    &format!(
-                        "SELECT COUNT(*), COALESCE(MAX(id), 0), \
-                         COALESCE(SUM(CASE WHEN state = 'written' THEN 1 ELSE 0 END), 0) FROM {files}"
-                    ),
-                    &[],
-                )
-                .unwrap()[0];
-            (r.int(0).unwrap(), r.int(1).unwrap(), r.int(2).unwrap())
-        };
+        let stamp = |store: &mut nils_registry::Store| super::stamp(store, 12).unwrap().0;
         // a file as a run's flush records it: upserted on its place and path
         let record = |store: &mut nils_registry::Store, path: &str, state: &str| {
             store
@@ -725,36 +698,57 @@ mod tests {
                 )
                 .unwrap();
         };
-        let mut was = (super::stamp(store, 12).unwrap().0, counted(store));
-        for (path, state, why) in [
-            ("a.dcm", "written", "a file written"),
-            ("b.dcm", "held", "a file held"),
-            ("c.dcm", "refused", "a file refused"),
-            ("d.dcm", "unchanged", "a file whose copy stands"),
-            ("a.dcm", "held", "a written file held"),
-            ("b.dcm", "written", "a held file written"),
-            ("a.dcm", "refused", "a held file refused"),
-            ("c.dcm", "written", "a refused file written"),
-            ("b.dcm", "refused", "a written file refused"),
-            ("c.dcm", "unchanged", "a written file found unchanged"),
-            ("c.dcm", "written", "an unchanged file written"),
-        ] {
-            record(store, path, state);
-            let now = (super::stamp(store, 12).unwrap().0, counted(store));
-            assert_ne!(now.0, was.0, "{why}: the stamp moves");
-            was = now;
-        }
-        // a run that touches its record of an unchanged copy moves nothing
+        let at = "2026-10-17T00:00:00Z";
+        let was = stamp(store);
+        // a worker's row, its beat and its end move nothing
         store
-            .execute(&format!("UPDATE {files} SET batch_id = 2"), &[])
+            .execute(
+                &format!("INSERT INTO job (kind, name, state, started_at) VALUES ('worker', 'queue', 'running', '{at}')"),
+                &[],
+            )
             .unwrap();
-        let now = (super::stamp(store, 12).unwrap().0, counted(store));
-        assert_eq!(now, was, "a touch moves neither");
-        // writers outside a batch: an originals purge moves the epoch, and a
-        // place removed changes the places' rows; both move the stamp
+        store
+            .execute(
+                &format!("UPDATE job SET heartbeat_at = '{at}' WHERE kind = 'worker'"),
+                &[],
+            )
+            .unwrap();
+        assert_eq!(stamp(store), was, "a worker's row");
+        // a file recorded for the first time, outside any batch, moves it
+        record(store, "a.dcm", "written");
+        let after_write = stamp(store);
+        assert_ne!(after_write, was, "a file written outside a batch");
+        // a file a run already holds, held, refused or found unchanged, moves
+        // nothing by itself: the run's batch carries it
+        for state in ["held", "refused", "unchanged", "written"] {
+            record(store, "a.dcm", state);
+            assert_eq!(stamp(store), after_write, "a file {state} again");
+        }
+        // a batch begun and ended moves it
+        store
+            .execute(
+                &format!(
+                    "INSERT INTO ingest_batch (source_id, name, config, started_at, state) \
+                     VALUES (1, 'b', '{{}}', '{at}', 'running')"
+                ),
+                &[],
+            )
+            .unwrap();
+        let begun = stamp(store);
+        assert_ne!(begun, after_write, "a batch began");
+        store
+            .execute(
+                &format!("UPDATE ingest_batch SET finished_at = '{at}', state = 'done'"),
+                &[],
+            )
+            .unwrap();
+        let ended = stamp(store);
+        assert_ne!(ended, begun, "a batch ended");
+        // an originals purge moves the epoch, and a place removed changes
+        // the places' rows; both move the stamp
         registry.next_epoch().unwrap();
         let after_purge = super::stamp(registry.store(), 12).unwrap().0;
-        assert_ne!(after_purge, now.0, "the epoch moved");
+        assert_ne!(after_purge, ended, "the epoch moved");
         place::retire(registry.store(), ward).unwrap();
         let after_removal = super::stamp(registry.store(), 12).unwrap().0;
         assert_ne!(after_removal, after_purge, "a place removed");
