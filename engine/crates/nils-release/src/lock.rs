@@ -214,6 +214,24 @@ pub fn read(root: &Path) -> Option<Lock> {
     }
 }
 
+/// Whether a readable lock is still being beaten. Judged by the lock file's
+/// age on the filesystem, as an unreadable one is, and not by the stamp the
+/// holder wrote into it: that stamp is the holder's clock, and two nodes of
+/// a shared filesystem may disagree on the time, so a live lock could look
+/// stale (or a dead one fresh). Every beat rewrites the file, so its
+/// modification time moves with the beat. Only where the file cannot be
+/// dated, or its date lies in the future, is the embedded stamp the word.
+fn lock_is_fresh(root: &Path, lock: &Lock) -> bool {
+    let age = std::fs::metadata(path(root))
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|m| m.elapsed().ok());
+    match age {
+        Some(age) => age.as_secs() < job::fresh_secs(),
+        None => job::is_fresh(lock.last()),
+    }
+}
+
 /// Whether a lock found in the root refuses this release. `Ok(None)` when
 /// the root is free; `Ok(Some(taken))` when a lock is there and may be
 /// taken over; `Err(Refusal::Refused(words))` when its release is still
@@ -257,7 +275,7 @@ pub fn check(
             Some(id) => format!(", of registry {id}"),
             None => ", of a registry it does not name".to_string(),
         };
-        return match job::is_fresh(lock.last()) {
+        return match lock_is_fresh(root, &lock) {
             true => Err(Refusal::Refused(format!(
                 "another release (job {} on {}{theirs}) is writing this folder; wait for it, \
                  or cancel it there and run again",
@@ -284,7 +302,7 @@ pub fn check(
     let host = found.host.clone().unwrap_or_else(|| lock.host.clone());
     match found.state {
         job::State::Running | job::State::Cancelling
-            if job::is_fresh(lock.last()) || job::is_live(&found) =>
+            if lock_is_fresh(root, &lock) || job::is_live(&found) =>
         {
             // a job already asked to stop needs no second asking
             let next = match found.state {
@@ -977,5 +995,50 @@ mod tests {
             .map(|e| e.unwrap().file_name().to_string_lossy().to_string())
             .collect();
         assert_eq!(left, vec![FILE.to_string()], "{left:?}");
+    }
+
+    /// A readable lock of another registry whose embedded stamp is long past
+    /// (the holder's clock, or the writer's, far from ours) but whose file
+    /// was touched just now is a live lock; the same file untouched for
+    /// longer than the window is stale, whatever its stamp says.
+    #[test]
+    fn a_foreign_locks_freshness_is_its_files_age_and_not_its_stamp() {
+        let dir = nils_dicom::synth::TempDir::new("release-lock");
+        let root = dir.path().join("tree");
+        let home = nils_dicom::synth::TempDir::new("release-lock-home");
+        let mut reg = {
+            let home = nils_registry::home::Home::new(home.path());
+            home.keys(None).add("k", b"a key of some length").unwrap();
+            home.init(&nils_registry::home::InitOptions {
+                backend: nils_registry::Backend::Sqlite,
+                dsn: None,
+                schema: None,
+                scheme: nils_registry::Scheme::Blake2b32,
+                key: "k".to_string(),
+                display_length: 12,
+                session_scheme: None,
+            })
+            .unwrap();
+            home.open().unwrap()
+        };
+        // another registry's lock, stamped 2026-10-28: stale by the stamp
+        let theirs = Lock {
+            registry: Some("other".to_string()),
+            ..a_lock(3)
+        };
+        take(&root, &theirs, None).unwrap();
+        let live = check(reg.store(), "r", &root).unwrap_err();
+        assert!(
+            matches!(&live, Refusal::Refused(w) if w.contains("is writing this folder")),
+            "{live:?}"
+        );
+        let long_ago =
+            std::time::SystemTime::now() - std::time::Duration::from_secs(job::fresh_secs() + 3600);
+        std::fs::File::open(path(&root))
+            .unwrap()
+            .set_modified(long_ago)
+            .unwrap();
+        let over = check(reg.store(), "r", &root).unwrap().expect("taken over");
+        assert_eq!(over.job.map(|j| j.0), Some(3));
     }
 }

@@ -4,6 +4,10 @@ All notable changes to NILS v1 are recorded here. The format follows [Keep a Cha
 
 ## [Unreleased]
 
+### Fixed
+
+- A release's lock on a shared folder is judged live or stale by the lock file's age on the filesystem, as an unreadable one already was, and not by the time its holder wrote into it, so a difference between two nodes' clocks cannot make a live release look stale and let a second one write into the same tree.
+
 ## [1.0.0-beta.5] - 2026-11-01
 
 The fifth beta is a maintenance release beside the fourth: a dataset's summary answers at once from its kept counts and counts again in the background, so the Data page of a large dataset on a share no longer waits on every visit, and the LST-AI lesion segmentation and FreeSurfer's recon-all-clinical join the starters. Nothing else moves: the pins, the contracts and the MRI pack 1.4.0 are the fourth beta's.
