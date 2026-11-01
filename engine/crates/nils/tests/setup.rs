@@ -259,6 +259,9 @@ fn yes_makes_a_registry_and_a_state_file_and_a_second_run_changes_nothing() {
     let config = TempDir::new("nils-setup-yes-config");
     let base = TempDir::new("nils-setup-yes-base");
     let dir = base.path().join("nils");
+    // a local channel carrying this binary's release, so that the rule packs
+    // come from it and the test reaches nothing on the Internet
+    let releases = Releases::new(env!("CARGO_PKG_VERSION"));
     let args = [
         "--yes",
         "--parts",
@@ -266,6 +269,8 @@ fn yes_makes_a_registry_and_a_state_file_and_a_second_run_changes_nothing() {
         "--dir",
         dir.to_str().unwrap(),
         "--no-service",
+        "--channel",
+        &releases.url(),
     ];
 
     let first = setup(&nils.path(), config.path(), &args);
@@ -3328,6 +3333,9 @@ fn keep_data_then_setup_then_purge_drops_the_schemas_the_first_install_made() {
     let config = TempDir::new("nils-setup-keep-postgres-config");
     let base = TempDir::new("nils-setup-keep-postgres-base");
     let dir = base.path().join("nils");
+    // a local channel, so that no step of the chain reaches the Internet
+    let releases = Releases::new(env!("CARGO_PKG_VERSION"));
+    let channel = releases.url();
     let o = setup(
         &nils.path(),
         config.path(),
@@ -3344,6 +3352,8 @@ fn keep_data_then_setup_then_purge_drops_the_schemas_the_first_install_made() {
             &dsn,
             "--schema",
             schema,
+            "--channel",
+            &channel,
         ],
     );
     assert!(o.ok, "{}\n{}", o.stdout, o.stderr);
@@ -3367,7 +3377,14 @@ fn keep_data_then_setup_then_purge_drops_the_schemas_the_first_install_made() {
     let again = setup(
         &nils.path(),
         config.path(),
-        &["--yes", "--dir", dir.to_str().unwrap(), "--no-service"],
+        &[
+            "--yes",
+            "--dir",
+            dir.to_str().unwrap(),
+            "--no-service",
+            "--channel",
+            &channel,
+        ],
     );
     assert!(again.ok, "{}\n{}", again.stdout, again.stderr);
     again.says("is already at");
