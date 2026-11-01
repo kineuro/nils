@@ -6508,7 +6508,7 @@ fn status_print(
             s(&j["state"]),
             s(&j["host"]),
             s(&j["finished_at"]),
-            j["args"]
+            other_job_detail(s(&j["kind"]), &j["args"])
         );
     }
     println!("batches (last {})", batches.len());
@@ -9179,6 +9179,23 @@ fn import_map(registry: &mut Registry, store: &mut Store, args: &ImportArgs) -> 
 
 fn s(v: &serde_json::Value) -> &str {
     v.as_str().unwrap_or("-")
+}
+
+/// What `nils status` says of a finished job beside its kind: a worker's
+/// row says its lane and that the engine starts it again (its arguments
+/// are a long command line and no news), any other job the first 80
+/// characters of its arguments.
+fn other_job_detail(kind: &str, args: &serde_json::Value) -> String {
+    if nils_registry::job::is_worker(kind) {
+        let lane = args["lane"].as_str().unwrap_or("-");
+        return format!("lane {lane}, restarted with the engine");
+    }
+    let text = args.to_string();
+    if text.chars().count() <= 80 {
+        return text;
+    }
+    let cut: String = text.chars().take(80).collect();
+    format!("{cut}...")
 }
 
 fn n(v: &serde_json::Value) -> String {
@@ -12971,6 +12988,24 @@ mod tests {
             None,
         )
         .expect("the MRI pack loads")
+    }
+
+    #[test]
+    fn status_names_a_worker_by_its_lane_and_cuts_any_other_job_s_arguments() {
+        let long = serde_json::json!({"command": "x".repeat(300)});
+        for kind in ["worker", "pipeline-worker", "picture-worker"] {
+            let said = other_job_detail(
+                kind,
+                &serde_json::json!({"once": false, "lane": "pictures"}),
+            );
+            assert_eq!(said, "lane pictures, restarted with the engine");
+            assert!(!other_job_detail(kind, &long).contains("xxx"));
+        }
+        let cut = other_job_detail("sort", &long);
+        assert_eq!(cut.chars().count(), 83, "{cut}");
+        assert!(cut.ends_with("..."), "{cut}");
+        let short = serde_json::json!({"a": 1});
+        assert_eq!(other_job_detail("sort", &short), "{\"a\":1}");
     }
 
     #[test]
