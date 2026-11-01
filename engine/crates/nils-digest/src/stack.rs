@@ -162,6 +162,86 @@ pub fn one_echo<N: Eq + Hash, T: Eq + Hash>(
     numbers.len() > 1 && times.len() < 2
 }
 
+/// Where the images of one stack sit, as a number the order of the images
+/// does not change: how many, and two sums over the hashes of their
+/// ImagePositionPatient. Two stacks with the same spread hold the same
+/// positions, which is what two echoes of one volume do and what the turns
+/// of a volume's slices at the echo number do not (each holds other slices).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Spread {
+    count: u64,
+    xor: u64,
+    sum: u64,
+    /// An image whose position is unknown (an enhanced object's frames, or a
+    /// file without one): the spread then proves nothing.
+    unknown: bool,
+}
+
+impl Spread {
+    /// Add one image at `position`, the text of its ImagePositionPatient, or
+    /// none where the file states none.
+    pub fn add(&mut self, position: Option<&str>) {
+        self.count += 1;
+        match position.map(str::trim).filter(|p| !p.is_empty()) {
+            Some(p) => {
+                let mut h = std::collections::hash_map::DefaultHasher::new();
+                p.hash(&mut h);
+                let h = std::hash::Hasher::finish(&h);
+                self.xor ^= h;
+                self.sum = self.sum.wrapping_add(h);
+            }
+            None => self.unknown = true,
+        }
+    }
+
+    /// An image whose position cannot be told.
+    pub fn add_unknown(&mut self) {
+        self.count += 1;
+        self.unknown = true;
+    }
+
+    /// Take the images of `other` into this spread.
+    pub fn merge(&mut self, other: &Spread) {
+        self.count += other.count;
+        self.xor ^= other.xor;
+        self.sum = self.sum.wrapping_add(other.sum);
+        self.unknown |= other.unknown;
+    }
+
+    fn known(&self) -> bool {
+        self.count > 0 && !self.unknown
+    }
+}
+
+/// Whether stacks that [`one_echo`] would join are in fact the echoes of one
+/// volume, which stay a stack each (Nima, 2026-10-30: a stack is one NIfTI).
+/// They are when every one of them states the same echo time and holds the
+/// same positions as the others: the echo number then tells real echoes
+/// apart, whose times only differ past the second decimal. A cine states its
+/// echo time on some of its frames only, and a volume whose slices take turns
+/// at the echo number has other positions under each, so neither is this.
+pub fn echoes_of_one_volume<T>(echoes: impl IntoIterator<Item = (Option<T>, Spread)>) -> bool {
+    let mut first: Option<Spread> = None;
+    let mut n = 0;
+    for (time, spread) in echoes {
+        n += 1;
+        if time.is_none() || !spread.known() || first.is_some_and(|f| f != spread) {
+            return false;
+        }
+        first.get_or_insert(spread);
+    }
+    n > 1
+}
+
+/// Whether stacks of one series that differ by the echo only are joined at
+/// digest: [`one_echo`] holds and they are not [`echoes_of_one_volume`].
+pub fn joined<N: Eq + Hash + Clone, T: Eq + Hash + Clone>(
+    echoes: &[(N, Option<T>, Spread)],
+) -> bool {
+    one_echo(echoes.iter().map(|(n, t, _)| (n.clone(), t.clone())))
+        && !echoes_of_one_volume(echoes.iter().map(|(_, t, s)| (t.clone(), *s)))
+}
+
 /// The canonical string of a file's signature: the fourteen values of §8 in
 /// its order, joined by `|`, a null as the empty string, a `|` or a `\` in a
 /// value escaped with a backslash.
@@ -428,6 +508,39 @@ mod tests {
 
     fn r(d: f64, decimals: usize) -> String {
         rounded(Some(&Value::Double(d)), decimals).into_owned()
+    }
+
+    #[test]
+    fn echoes_of_one_volume_need_one_stated_time_and_the_same_positions() {
+        let at = |positions: &[&str]| {
+            let mut s = Spread::default();
+            for p in positions {
+                s.add(Some(p));
+            }
+            s
+        };
+        let same = at(&["0\\0\\1", "0\\0\\2"]);
+        // two echoes of one volume
+        assert!(echoes_of_one_volume([
+            (Some("10.00"), same),
+            (Some("10.00"), same)
+        ]));
+        // a cine states its time on some frames only
+        assert!(!echoes_of_one_volume([(Some("10.00"), same), (None, same)]));
+        // the turns of a volume's slices hold other positions each
+        assert!(!echoes_of_one_volume([
+            (Some("25.50"), at(&["0\\0\\1"])),
+            (Some("25.50"), at(&["0\\0\\2"])),
+        ]));
+        // a position nobody can tell proves nothing
+        let mut unknown = same;
+        unknown.add_unknown();
+        assert!(!echoes_of_one_volume([
+            (Some("10.00"), unknown),
+            (Some("10.00"), unknown)
+        ]));
+        // one stack is not a group
+        assert!(!echoes_of_one_volume([(Some("10.00"), same)]));
     }
 
     #[test]

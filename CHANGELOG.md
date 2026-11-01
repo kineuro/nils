@@ -8,6 +8,9 @@ All notable changes to NILS v1 are recorded here. The format follows [Keep a Cha
 
 - A pipeline descriptor may name the engines it works with: `x-nils.engine`, a range such as `>=1.0.0-beta.3` in the pack contract's spelling (job contract v1, added in place and additively). The pre-flight and the run door refuse a run on an engine outside it, saying which range the pipeline works with, which engine this is and to update the engine (`nils update`); a range that cannot be read is refused too. `postcontrast-cascade` and `postcontrast-full` name `>=1.0.0-beta.3`, the first engine that leaves a site file declared `sweep: false` unswept.
 - `nils explain <stack> --header` and `GET /api/stacks/{stack}/header` (under `review:see`, as the explanation) tell a stack's stored header facts: the fingerprint values the rules read (echo numbers and times, image types, the geometry, the file count), the header's text and physics, and the private elements the served pack shows, from the same readings as a campaign item's header door, so nothing that names a person is in it.
+### Changed
+
+- The echoes of one volume stay a stack each at digest: several echo numbers that all state the same echo time and hold the same image positions are no longer joined into one stack. A cine whose echo number counts its frames, and a volume whose slices take turns at the echo number, are still one stack. A registry already digested is left as it is until a re-read. `nils digest --dry-run` counts how many stacks of a tree the change keeps apart.
 
 ### Fixed
 

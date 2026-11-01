@@ -19,6 +19,13 @@
 //! ([`crate::stack::one_echo`]). A zero or absent echo time states none
 //! (record 35, S4).
 //!
+//! Echoes of one volume stay apart (Nima, 2026-10-30: a stack is one NIfTI):
+//! stacks that each state the same echo time and hold the same image
+//! positions are not joined ([`crate::stack::echoes_of_one_volume`]); the
+//! cine, which states the echo time on some frames only, and the volume whose
+//! slices take turns at the echo number, which holds other positions under
+//! each, are still one stack.
+//!
 //! The stack that stays is the oldest, then one that states the echo time,
 //! then the one of the smallest echo number, which for a cine is its first
 //! frame: its row is the one the series is described by. It takes the
@@ -45,7 +52,7 @@ use nils_registry::empty::remove_stacks;
 use nils_registry::schema::{Column, table};
 use nils_registry::store::{Cell, Error, Store};
 
-use crate::stack::{Class, Echo, one_echo};
+use crate::stack::{Class, Echo, Spread, echoes_of_one_volume, one_echo};
 
 /// What a fold did.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
@@ -152,6 +159,16 @@ pub fn fold(store: &mut Store, series: &[i64], batch: i64) -> Result<Folded, Err
                 )
         })
         .collect();
+    // the echoes of one volume stay a stack each (2026-10-30)
+    let spreads = spreads_of(store, &plans)?;
+    plans.retain(|g| {
+        !echoes_of_one_volume(g.iter().map(|m| {
+            (
+                m.echo.time.as_deref(),
+                spreads.get(&m.id).copied().unwrap_or_default(),
+            )
+        }))
+    });
     if plans.is_empty() {
         return Ok(out);
     }
@@ -237,6 +254,34 @@ pub fn fold(store: &mut Store, series: &[i64], batch: i64) -> Result<Folded, Err
             ),
             &[],
         )?;
+    }
+    Ok(out)
+}
+
+/// Where the images of each stack of `plans` sit. A stack an enhanced
+/// object's frames reach through `instance_frame` has no one position for its
+/// images, and its spread says so.
+fn spreads_of(store: &mut Store, plans: &[Vec<Member>]) -> Result<HashMap<i64, Spread>, Error> {
+    let ids: Vec<i64> = plans.iter().flatten().map(|m| m.id).collect();
+    let mut out: HashMap<i64, Spread> = HashMap::new();
+    for chunk in ids.chunks(500) {
+        let sql = format!(
+            "SELECT stack_id, image_position_patient FROM {} WHERE stack_id IN ({})",
+            store.qualified("instance"),
+            list(chunk.iter().copied())
+        );
+        for r in store.query(&sql, &[])? {
+            let position = r.opt_text(1)?;
+            out.entry(r.int(0)?).or_default().add(position);
+        }
+        let sql = format!(
+            "SELECT DISTINCT stack_id FROM {} WHERE stack_id IN ({})",
+            store.qualified("instance_frame"),
+            list(chunk.iter().copied())
+        );
+        for r in store.query(&sql, &[])? {
+            out.entry(r.int(0)?).or_default().add_unknown();
+        }
     }
     Ok(out)
 }

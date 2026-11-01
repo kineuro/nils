@@ -12,11 +12,11 @@ use std::hash::{DefaultHasher, Hash, Hasher};
 
 use nils_dicom::extract::sop_class_name;
 use nils_dicom::refusal::{set_aside_kind, sop_class_kind, sop_class_label};
-use nils_dicom::{Diagnostic, DiagnosticKind, Extracted, QuarantineClass, Refusal};
+use nils_dicom::{Diagnostic, DiagnosticKind, Extracted, Level, QuarantineClass, Refusal, Value};
 use serde::{Deserialize, Serialize};
 
 use crate::cancel::Cancelled;
-use crate::stack::{FileStack, one_echo};
+use crate::stack::{FileStack, Spread, joined, one_echo};
 use crate::walk::SkipReason;
 
 /// How many distinct samples a diagnostic kind keeps.
@@ -48,7 +48,7 @@ pub struct Counts {
     /// Stacks as `(series, key)` pairs (§8), each with its echo, hashed: the
     /// series and the rest of its signature, the echo number, and the echo
     /// time where one is stated ([`crate::stack::Echo`]).
-    stacks: HashMap<u64, (u64, u64, Option<u64>)>,
+    stacks: HashMap<u64, (u64, u64, Option<u64>, Spread)>,
     /// Frames read, one per classic instance and one per frame of an
     /// enhanced multi-frame object (record 37, S8).
     frames: u64,
@@ -117,17 +117,30 @@ impl Counts {
         self.series.insert(hash_of(&x.series_uid));
         self.subjects
             .insert(hash_of(&format!("{id_type}\0{value}")));
+        let position = match x.value(Level::Instance, "image_position_patient") {
+            Some(Value::Text(t)) => Some(t.as_str()),
+            _ => None,
+        };
         for s in stacks {
             let echo = &s.signature.echo;
-            self.stacks
+            let entry = self
+                .stacks
                 .entry(hash_of(&format!("{}\0{}", x.series_uid, s.signature.key)))
                 .or_insert_with(|| {
                     (
                         hash_of(&format!("{}\0{}", x.series_uid, echo.rest)),
                         hash_of(&echo.number),
                         echo.time.as_deref().map(hash_of),
+                        Spread::default(),
                     )
                 });
+            // the frames of an enhanced object sit at more than the file's
+            // first position
+            if s.values.is_some() || x.frames.count > 1 {
+                entry.3.add_unknown();
+            } else {
+                entry.3.add(position);
+            }
         }
         self.frames += u64::from(x.frames.count.max(1));
         if stacks.len() > 1 {
@@ -273,7 +286,12 @@ impl Counts {
         self.series.extend(other.series);
         self.subjects.extend(other.subjects);
         for (k, v) in other.stacks {
-            self.stacks.entry(k).or_insert(v);
+            match self.stacks.entry(k) {
+                std::collections::hash_map::Entry::Vacant(e) => {
+                    e.insert(v);
+                }
+                std::collections::hash_map::Entry::Occupied(mut e) => e.get_mut().3.merge(&v.3),
+            }
         }
         merge_map(&mut self.modalities, other.modalities);
         merge_map(&mut self.sop_classes, other.sop_classes);
@@ -296,13 +314,26 @@ impl Counts {
     /// with the pairs of a series that only the echo number told apart
     /// counted once, as the digest leaves them ([`crate::echo`]).
     pub fn stacks(&self) -> u64 {
-        let mut by_rest: HashMap<u64, Vec<(u64, Option<u64>)>> = HashMap::new();
-        for (rest, number, time) in self.stacks.values() {
-            by_rest.entry(*rest).or_default().push((*number, *time));
+        self.stacks_by(joined)
+    }
+
+    /// The stacks the earlier rule joined and the digest now leaves apart,
+    /// because they are the echoes of one volume (2026-10-30).
+    pub fn echoes_kept_apart(&self) -> u64 {
+        self.stacks() - self.stacks_by(|echoes| one_echo(echoes.iter().map(|(n, t, _)| (*n, *t))))
+    }
+
+    fn stacks_by(&self, joins: impl Fn(&[(u64, Option<u64>, Spread)]) -> bool) -> u64 {
+        let mut by_rest: HashMap<u64, Vec<(u64, Option<u64>, Spread)>> = HashMap::new();
+        for (rest, number, time, spread) in self.stacks.values() {
+            by_rest
+                .entry(*rest)
+                .or_default()
+                .push((*number, *time, *spread));
         }
         by_rest
             .into_values()
-            .map(|echoes| match one_echo(echoes.iter().copied()) {
+            .map(|echoes| match joins(&echoes) {
                 true => 1,
                 false => echoes.len() as u64,
             })
@@ -613,6 +644,12 @@ pub struct Report {
     /// Distinct `(series, stack key)` pairs among the parsed files (§8).
     #[serde(default)]
     pub stacks: u64,
+    /// Of those, the stacks that only the echo number tells apart under one
+    /// stated echo time and the same positions, which the digest leaves as
+    /// stacks of their own where an earlier one joined them. A dry run over
+    /// an archive counts here what a re-digest would split.
+    #[serde(default)]
+    pub echoes_kept_apart: u64,
     /// Frames read (record 37, S8): one per classic instance, one per frame
     /// of an enhanced multi-frame object.
     #[serde(default)]
@@ -689,6 +726,7 @@ impl Report {
             series: counts.series.len() as u64,
             subjects: counts.subjects.len() as u64,
             stacks: counts.stacks(),
+            echoes_kept_apart: counts.echoes_kept_apart(),
             frames: counts.frames,
             multi_stack_files: counts.multi_stack_files,
             modalities: keyed(&counts.modalities),
@@ -950,6 +988,13 @@ impl fmt::Display for Report {
             thousands(self.stacks),
             thousands(self.subjects)
         )?;
+        if self.echoes_kept_apart > 0 {
+            writeln!(
+                f,
+                "  echoes of one volume   {} stack(s) kept apart that only the echo number tells apart (one echo time, the same positions)",
+                thousands(self.echoes_kept_apart),
+            )?;
+        }
         if self.frames > self.parsed {
             writeln!(
                 f,
