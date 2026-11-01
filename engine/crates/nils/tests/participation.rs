@@ -708,9 +708,8 @@ fn flow(pg: Option<(String, String)>) {
     );
     assert_eq!(archive["by_year"]["2019"], STACKS / 2, "{archive}");
     assert_eq!(archive["by_year"]["2024"], STACKS / 2, "{archive}");
-    assert_eq!(
+    assert!(
         archive["by_scanner_model"]["prisma"].as_u64().is_some(),
-        true,
         "{archive}"
     );
     assert!(
@@ -1025,9 +1024,8 @@ fn flow(pg: Option<(String, String)>) {
     assert_eq!(doc3["draw"]["id"], draw3);
     assert_eq!(doc3["protocol"]["path"], "people", "{}", doc3["protocol"]);
     assert_eq!(doc3["protocol"]["readers"], 2, "{}", doc3["protocol"]);
-    assert_eq!(
+    assert!(
         doc3["protocol"]["planted"]["planted"].as_u64().is_some(),
-        true,
         "{}",
         doc3["protocol"]
     );

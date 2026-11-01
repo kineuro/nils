@@ -1259,7 +1259,7 @@ fn frame(
         // site participation (2026-11-01): a protocol whose claim is on
         // the scans leaves the localizers out of the frame, which the
         // frame's digest then covers as drawn
-        if !localizers && a.is_some_and(|m| is_localizer(m)) {
+        if !localizers && a.is_some_and(is_localizer) {
             continue;
         }
         let mut accepted = serde_json::Map::new();

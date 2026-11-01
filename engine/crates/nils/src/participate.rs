@@ -668,7 +668,7 @@ fn tier3(
     // settles in (on the people path, the verify campaign itself); the
     // raters' campaign is the model's
     let mut readers: BTreeSet<String> = BTreeSet::new();
-    for c in d.settle_campaign_id {
+    if let Some(c) = d.settle_campaign_id {
         for a in nils_registry::campaign::current_answers(store, c)
             .map_err(crate::campaigns::campaign_err)?
         {
@@ -1023,6 +1023,7 @@ fn post(receiver: &str, site: &str, key: &str, body: &[u8]) -> Result<(String, S
 /// as it stands (its content digest on record); a send by `auto` needs
 /// tier 1 previewed once, `auto` on, and no send by itself today. The
 /// send is recorded whatever the receiver answered, with an audit row.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn send(
     registry: &mut Registry,
     pack_dir: Option<&Path>,
