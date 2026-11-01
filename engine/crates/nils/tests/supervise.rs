@@ -1051,6 +1051,76 @@ fn the_install_door_says_packs_behind_the_engines_release() {
     assert_eq!(doc["release"]["newer"], serde_json::Value::Null, "{doc}");
 }
 
+/// 2026-11-01: on a build the release has no copy of (a development build,
+/// a channel away) the install door lists the packs on disk and says only
+/// that the comparison is not possible; and the channel `nils update
+/// --channel` recorded in the setup record is where it reads the release's
+/// packs from, not GitHub.
+#[test]
+fn the_install_door_lists_the_packs_on_disk_and_reads_the_recorded_channel() {
+    let c = Channel::new();
+    let install = c.dir.path().join("install");
+    std::fs::create_dir_all(&install).unwrap();
+    std::fs::write(install.join("VERSION"), "1.0.0\n").unwrap();
+    let config = c.config("engine", &install, "true");
+    let home = TempDir::new("supervise-unread");
+    let packs = home.path().join("engine").join("packs");
+    std::fs::create_dir_all(packs.join("mri")).unwrap();
+    std::fs::write(packs.join("mri/pack.yml"), "pack: mri\nversion: 0.7.0\n").unwrap();
+    let settings = home.path().join("config");
+    std::fs::create_dir_all(settings.join("nils")).unwrap();
+    let record = |channel: &str| {
+        std::fs::write(
+            settings.join("nils").join("setup.toml"),
+            format!(
+                "dir = \"{}\"\nmode = \"off\"\nruntime = \"machine\"\nservice = \"none\"\n{channel}\n[parts.engine]\nversion = \"1.0.0-alpha.14\"\npath = \"{}\"\n\n[site]\npack_dir = \"{}\"\n",
+                home.path().join("nils").display(),
+                home.path().join("engine").join("nils").display(),
+                packs.display()
+            ),
+        )
+        .unwrap();
+    };
+    record("");
+    // the install follows a channel that has the release; the environment
+    // names a place that has none
+    let releases = home.path().join("channel");
+    let at = releases.join("download").join("v1.0.0-alpha.14");
+    std::fs::create_dir_all(&at).unwrap();
+    let tar = packs_tarball(&[("mri", "pack: mri\nversion: 0.8.0\n")]);
+    std::fs::write(at.join("packs.tar.gz"), &tar).unwrap();
+    std::fs::write(
+        at.join("SHA256SUMS"),
+        format!("{}  packs.tar.gz\n", sha256_hex(&tar)),
+    )
+    .unwrap();
+    let nowhere = format!("file://{}", home.path().join("nowhere").display());
+    let s = Service::start_with(
+        &config,
+        &[
+            ("XDG_CONFIG_HOME", settings.to_str().unwrap()),
+            ("NILS_RELEASES", nowhere.as_str()),
+        ],
+    );
+    let token = Some("a-supervisor-token-of-length");
+    let (status, doc) = s.call("GET", "/api/supervise/install", None, token);
+    assert_eq!(status, 200, "{doc}");
+    let unread = &doc["release"]["packs"];
+    assert_eq!(unread["comparison"], "not possible", "{doc}");
+    assert_eq!(unread["installed"][0]["name"], "mri", "{doc}");
+    assert_eq!(unread["installed"][0]["version"], "0.7.0", "{doc}");
+    assert!(unread["error"].is_string(), "{doc}");
+
+    // the record names the channel: the same door compares with its copy
+    record(&format!("channel = \"file://{}\"\n", releases.display()));
+    let (_, doc) = s.call("GET", "/api/supervise/install", None, token);
+    let read = &doc["release"]["packs"];
+    assert!(read.get("comparison").is_none(), "{doc}");
+    assert_eq!(read["bundled"][0]["version"], "0.8.0", "{doc}");
+    assert_eq!(read["installed"][0]["version"], "0.7.0", "{doc}");
+    assert_eq!(read["behind"], true, "{doc}");
+}
+
 /// A tarball holding `packs/<name>/pack.yml` for each pack given, the shape
 /// both an engine release's `packs.tar.gz` and a pack's own release carry.
 fn packs_tarball(packs: &[(&str, &str)]) -> Vec<u8> {

@@ -714,6 +714,26 @@ impl Status {
     }
 }
 
+/// What the packs door says where the release's own copy could not be read
+/// (a development build has none on GitHub, a channel may be away): what is
+/// on disk, as it is, and only that the comparison with the release is not
+/// possible. Nothing is broken on the engine, which reads the directory.
+pub(crate) fn unread_doc(dir: &Path, release: &str, why: &str) -> Value {
+    let installed: Vec<Value> = on_disk(dir)
+        .iter()
+        .map(|p| json!({ "name": p.name, "version": p.version, "digest": p.digest }))
+        .collect();
+    json!({
+        "dir": dir.display().to_string(),
+        "release": release,
+        "installed": installed,
+        "pinned": pins_in(dir).keys().collect::<Vec<_>>(),
+        "comparison": "not possible",
+        "error": why,
+        "command": "nils update --all",
+    })
+}
+
 /// What an update would do in a pack directory: the directory beside the
 /// engine's release and the packs' own releases, and the packs it would put
 /// in place, each from the release that brings it.
@@ -1132,6 +1152,22 @@ mod tests {
             digest: digest.to_string(),
             ..Pack::default()
         }
+    }
+
+    #[test]
+    fn a_release_that_cannot_be_read_still_lists_what_is_on_disk() {
+        let root = temp("unread");
+        write(
+            &root.join("mri").join("pack.yml"),
+            "pack: mri\nversion: 0.7.0\n",
+        );
+        let doc = unread_doc(&root, "1.0.0-beta.5.dev.1", "no such release");
+        assert_eq!(doc["comparison"], "not possible");
+        assert_eq!(doc["installed"][0]["name"], "mri");
+        assert_eq!(doc["installed"][0]["version"], "0.7.0");
+        assert_eq!(doc["error"], "no such release");
+        assert!(doc.get("bundled").is_none() && doc.get("behind").is_none());
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

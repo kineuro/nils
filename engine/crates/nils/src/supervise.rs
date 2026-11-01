@@ -1358,20 +1358,29 @@ static BUNDLED: OnceLock<Mutex<HashMap<String, Bundled>>> = OnceLock::new();
 /// The packs an engine release carries, kept by version: for good once read,
 /// since a release's packs never change, and for a while where they could not
 /// be.
-fn cached_bundled(every: Duration, version: &str) -> Result<Vec<crate::packs::Pack>, String> {
+fn cached_bundled(
+    every: Duration,
+    version: &str,
+    channel: Option<&str>,
+) -> Result<Vec<crate::packs::Pack>, String> {
     let held = BUNDLED.get_or_init(|| Mutex::new(HashMap::new()));
+    // the channel the install was updated from is part of what is kept
+    let key = format!("{version} {}", channel.unwrap_or_default());
     if let Ok(guard) = held.lock()
-        && let Some((at, found)) = guard.get(version)
+        && let Some((at, found)) = guard.get(&key)
         && (found.is_ok() || at.elapsed() < every)
     {
         return found.clone();
     }
-    let found =
-        crate::update::fetch_checked(&crate::update::engine_base(None), version, "packs.tar.gz")
-            .map_err(|e| e.message)
-            .and_then(|bytes| crate::packs::in_tarball(&bytes));
+    let found = crate::update::fetch_checked(
+        &crate::update::engine_base(channel),
+        version,
+        "packs.tar.gz",
+    )
+    .map_err(|e| e.message)
+    .and_then(|bytes| crate::packs::in_tarball(&bytes));
     if let Ok(mut guard) = held.lock() {
-        guard.insert(version.to_string(), (Instant::now(), found.clone()));
+        guard.insert(key, (Instant::now(), found.clone()));
     }
     found
 }
@@ -1564,7 +1573,7 @@ fn install(config: &Config, fresh: bool) -> (u16, Value) {
             .and_then(|r| r.to_take().map(str::to_string))
             .or_else(|| crate::setup::engine_version(&state));
         if let Some(release) = release {
-            let packs = match cached_bundled(every, &release) {
+            let packs = match cached_bundled(every, &release, state.channel.as_deref()) {
                 Ok(bundled) => {
                     let reads = crate::packs::Engine::of_release(&release, &bundled);
                     let carried: Vec<crate::packs::Offer> = bundled
@@ -1621,12 +1630,7 @@ fn install(config: &Config, fresh: bool) -> (u16, Value) {
                         json!(rules.iter().map(crate::rules::Row::doc).collect::<Vec<_>>());
                     status.doc()
                 }
-                Err(e) => json!({
-                    "dir": dir.display().to_string(),
-                    "release": release,
-                    "error": e,
-                    "command": "nils update --all",
-                }),
+                Err(e) => crate::packs::unread_doc(&dir, &release, &e),
             };
             doc["release"]["packs"] = packs;
         }

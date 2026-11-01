@@ -4324,6 +4324,13 @@ pub(crate) struct State {
     /// in place, so what an install classifies with is on its record.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub(crate) rules: BTreeMap<String, RulesState>,
+    /// The channel `nils update --channel` last took releases from, where
+    /// one was named (a development channel, a deployment's own). Recorded,
+    /// so that the supervisor's parts door and the mending of the packs read
+    /// the engine's release from the place the install follows, not from
+    /// GitHub, which a development build has no release on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) channel: Option<String>,
 }
 
 /// The converter an install runs with, as the record keeps it.
@@ -8681,6 +8688,12 @@ fn do_it(
             .as_ref()
             .map(|s| s.rules.clone())
             .unwrap_or_default(),
+        // the channel this run took its releases from, else the one on record
+        channel: plan
+            .channel
+            .as_deref()
+            .map(|c| c.trim_end_matches('/').to_string())
+            .or_else(|| existing.as_ref().and_then(|s| s.channel.clone())),
     };
     let previous_parts = state.parts.clone();
     let existing_places = existing.map(|s| s.places).unwrap_or_default();
@@ -18004,6 +18017,9 @@ pub(crate) fn update_all(channel: Option<&str>, only: &[String]) -> Result<bool,
     if chosen("engine") || rules {
         changed |= mend_packs(&mut state, channel, rules);
     }
+    if let Some(channel) = channel {
+        state.channel = Some(channel.trim_end_matches('/').to_string());
+    }
     state.at = nils_registry::time::now_iso();
     write_state(&state)?;
     // The record is the one the parts are at now, and the helper is written
@@ -18074,6 +18090,9 @@ fn mend_packs(state: &mut State, channel: Option<&str>, rules: bool) -> bool {
         println!("packs: the engine's version is not recorded, so its packs were left alone");
         return false;
     };
+    // the channel the install was last updated from, where none is named now
+    let recorded = state.channel.clone();
+    let channel = channel.or(recorded.as_deref());
     let base = update::engine_base(channel);
     if let Some(parent) = dir.parent() {
         let _ = std::fs::create_dir_all(parent);
@@ -20666,6 +20685,68 @@ fn remove_path(path: &Path, runtime: &str) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 2026-11-01: the channel `nils update --channel` recorded is where the
+    /// engine's packs are mended from when no channel is named, and the
+    /// record keeps it.
+    #[test]
+    fn the_packs_are_mended_from_the_channel_the_record_names() {
+        let root = std::env::temp_dir().join(format!("nils-mend-channel-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let channel = root.join("channel");
+        let into = channel.join("download").join("v9.9.9");
+        std::fs::create_dir_all(&into).unwrap();
+        let src = root.join("src").join("packs").join("mri");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(src.join("pack.yml"), "pack: mri\nversion: 0.8.0\n").unwrap();
+        let mut tar = tar::Builder::new(flate2::write::GzEncoder::new(
+            Vec::new(),
+            flate2::Compression::fast(),
+        ));
+        tar.append_dir_all("packs", root.join("src").join("packs"))
+            .unwrap();
+        let tar = tar.into_inner().unwrap().finish().unwrap();
+        std::fs::write(into.join("packs.tar.gz"), &tar).unwrap();
+        std::fs::write(
+            into.join("SHA256SUMS"),
+            format!("{}  packs.tar.gz\n", crate::supervise::sha256_hex(&tar)),
+        )
+        .unwrap();
+        let packs = root.join("engine-packs");
+        let mut state = State {
+            dir: root.join("nils").display().to_string(),
+            mode: "off".into(),
+            site: Some(Site {
+                pack_dir: Some(packs.display().to_string()),
+                ..Site::default()
+            }),
+            channel: Some(format!("file://{}", channel.display())),
+            ..State::default()
+        };
+        state.parts.insert(
+            "engine".into(),
+            PartState {
+                version: "9.9.9".into(),
+                path: root.join("bin").join("nils").display().to_string(),
+                kind: "binary".into(),
+            },
+        );
+        // no channel named now: the record's is read
+        assert!(
+            mend_packs(&mut state, None, false),
+            "the packs were put in place"
+        );
+        assert_eq!(
+            crate::packs::on_disk(&packs)[0].version.as_deref(),
+            Some("0.8.0")
+        );
+        // the record keeps it
+        let text = toml::to_string(&state).unwrap();
+        assert!(text.contains("channel = \"file://"), "{text}");
+        let back: State = toml::from_str(&text).unwrap();
+        assert_eq!(back.channel, state.channel);
+        let _ = std::fs::remove_dir_all(&root);
+    }
 
     /// The setup record rewritten by two writers at once while it is read,
     /// as the install door reads it during an update: every read is one of
