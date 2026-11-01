@@ -4,6 +4,10 @@ All notable changes to NILS v1 are recorded here. The format follows [Keep a Cha
 
 ## [Unreleased]
 
+## [1.0.0-beta.5] - 2026-11-01
+
+The fifth beta is a maintenance release beside the fourth: a dataset's summary answers at once from its kept counts and counts again in the background, so the Data page of a large dataset on a share no longer waits on every visit, and the LST-AI lesion segmentation and FreeSurfer's recon-all-clinical join the starters. Nothing else moves: the pins, the contracts and the MRI pack 1.4.0 are the fourth beta's.
+
 ### Added
 
 - The LST-AI lesion segmentation and FreeSurfer's recon-all-clinical are starters: a new catalog seeds nine, and a catalog in place gets the two where their names are absent; a version a person added is left as it is. Both need heavy images (LST-AI's is 11 GB to pull and 30 GB unpacked, recon-all-clinical runs in the FreeSurfer 8.2.0 image and reads the lab's licence), and the pre-flight says what is missing before a run starts.
