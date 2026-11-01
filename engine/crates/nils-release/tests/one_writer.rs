@@ -851,7 +851,8 @@ fn another_registrys_lock_refuses_while_fresh_and_is_taken_over_once_stale() {
             .all(|j| j.kind != "release")
     );
 
-    // the same lock, its beat an hour old: taken over
+    // the same lock, its beat an hour old and its file untouched for as
+    // long (a lock is judged by its file's age): taken over
     plant(
         out.path(),
         &lock::Lock {
@@ -860,6 +861,10 @@ fn another_registrys_lock_refuses_while_fresh_and_is_taken_over_once_stale() {
         },
     )
     .unwrap();
+    std::fs::File::open(lock::path(out.path()))
+        .unwrap()
+        .set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(3600))
+        .unwrap();
     let report = run::run(&mut reg, &settings(out.path(), &policy, &scheme)).unwrap();
     let line = report.lock_taken_over.unwrap();
     assert!(
