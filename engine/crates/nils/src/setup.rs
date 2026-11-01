@@ -13548,6 +13548,72 @@ fn assistant_purposes(plan: &Plan, declared: &serde_json::Value) -> Vec<serde_js
     out
 }
 
+/// Every purpose the assistant uses, and among them the ids of the stations'
+/// purposes `declared` does not hold yet: those Kvasir does not list, since
+/// it registers a purpose from its configuration when it starts and never
+/// from a caller, so a station added by an update of the assistant answers
+/// nothing until its purpose is written here and Kvasir starts again.
+fn station_purposes_to_register(
+    plan: &Plan,
+    declared: &serde_json::Value,
+) -> (Vec<serde_json::Value>, Vec<String>) {
+    let had: Vec<String> = declared
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|p| p["id"].as_str().map(str::to_string))
+        .collect();
+    let all = assistant_purposes(plan, declared);
+    let registered = all
+        .iter()
+        .filter_map(|p| p["id"].as_str())
+        .filter(|id| !had.iter().any(|h| h == id))
+        .map(str::to_string)
+        .collect();
+    (all, registered)
+}
+
+/// The line that says which purposes are being registered at Kvasir.
+fn registering_said(registered: &[String]) -> String {
+    format!("registering {} at Kvasir", registered.join(", "))
+}
+
+/// After an update of the assistant, the purposes of the stations it now
+/// ships registered at Kvasir before Kvasir starts again: each one its
+/// configuration does not declare yet is written into it and said, so that
+/// the restart lists it, the stations' model takes it and the assistant's
+/// key is made again to cover it. A purpose declared already is untouched,
+/// and an install without the file is left for setup. Answers the ids
+/// registered.
+fn register_station_purposes(plan: &Plan) -> Vec<String> {
+    let config = plan.dir.join("kvasir").join("kvasir.json");
+    let Some(mut value) = kvasir_config(plan) else {
+        return Vec::new();
+    };
+    let (purposes, registered) = station_purposes_to_register(plan, &value["purposes"]);
+    if registered.is_empty() {
+        return Vec::new();
+    }
+    value["purposes"] = serde_json::json!(purposes);
+    let Ok(text) = serde_json::to_string_pretty(&value) else {
+        return Vec::new();
+    };
+    match write_secret_bytes(&config, text.as_bytes()) {
+        Ok(()) => {
+            println!("{}", registering_said(&registered));
+            registered
+        }
+        Err(e) => {
+            println!(
+                "Kvasir's configuration was left alone, so it does not list {}: {}",
+                registered.join(", "),
+                e.message
+            );
+            Vec::new()
+        }
+    }
+}
+
 /// Kvasir's configuration: where it listens, an admin token made here, how
 /// it knows its callers, and every purpose the assistant uses. It names no
 /// model. Kvasir holds its models in its own database and refuses a file
@@ -13838,13 +13904,9 @@ fn repair_kvasir(plan: &Plan, console: &mut Console) -> Result<(), Exit> {
         value["bind"] = serde_json::json!(bind);
     }
 
-    let purposes = assistant_purposes(plan, &value["purposes"]);
-    let had = value["purposes"].as_array().map_or(0, Vec::len);
-    if purposes.len() > had {
-        mended.push(format!(
-            "declared {} purpose(s) the assistant's stations use",
-            purposes.len() - had
-        ));
+    let (purposes, registered) = station_purposes_to_register(plan, &value["purposes"]);
+    if !registered.is_empty() {
+        mended.push(registering_said(&registered));
         value["purposes"] = serde_json::json!(purposes);
     }
     // where llama.cpp is, and how Kvasir in a container reaches this machine
@@ -18271,9 +18333,11 @@ pub(crate) fn restart_after_update(channel: Option<&str>) {
         println!("{said}");
     }
     // Kvasir trusts what the desk signs as the desk signs it now, before it
-    // starts again (record 25)
+    // starts again (record 25), and registers the purpose of a station the
+    // assistant gained, since it reads its purposes when it starts
     if plan.has(Part::Assistant) {
         mend_kvasir_auth(&plan);
+        register_station_purposes(&plan);
     }
     let console = Console::new(true);
     println!("restarting the services");
@@ -21371,6 +21435,134 @@ mod tests {
         assert_eq!(after["bind"], "0.0.0.0:7100", "nothing else is touched");
         // and the next update has nothing left to change
         assert!(kvasir_auth_now(&plan, &after["auth"]).is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_update_registers_a_new_stations_purpose_at_kvasir_maps_it_and_makes_the_key_again() {
+        use serde_json::json;
+        let record_before = std::fs::read(state_path()).ok();
+        // An install whose assistant shipped two stations, updated to one
+        // that ships a third: Kvasir's configuration declares the two, and
+        // the key the assistant holds covers the two.
+        let dir = kvasir_dir(
+            "register-purpose",
+            json!([
+                {"id": "assistant.ask-help", "app": "nils-assistant", "content": "rows", "kind": "foreground"},
+                {"id": "assistant.operator", "app": "nils-assistant", "content": "catalog", "kind": "foreground"}
+            ]),
+        );
+        station(&dir, "ask-help", "assistant.ask-help", "rows");
+        station(&dir, "operator", "assistant.operator", "catalog");
+        station(&dir, "rater", "assistant.rater", "rows");
+        let key_file = dir.join("server.key");
+        std::fs::write(&key_file, "kvs_card0.a-secret\n").unwrap();
+        let mut plan = plan(Runtime::Machine);
+        plan.dir = dir.clone();
+        plan.model_server = Some(ModelServer {
+            url: "https://models.example.org/v1".to_string(),
+            key_file: key_file.clone(),
+            model: Some("flash-next".to_string()),
+            thinking: Thinking::On,
+        });
+
+        // before the services start again: the new purpose is registered in
+        // Kvasir's configuration, said by name, and the two declared are
+        // untouched
+        assert_eq!(
+            register_station_purposes(&plan),
+            vec!["assistant.rater".to_string()]
+        );
+        assert_eq!(
+            registering_said(&["assistant.rater".to_string()]),
+            "registering assistant.rater at Kvasir"
+        );
+        let declared = kvasir_config(&plan).unwrap();
+        let ids: Vec<&str> = declared["purposes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|p| p["id"].as_str())
+            .collect();
+        assert_eq!(
+            ids,
+            vec![
+                "assistant.ask-help",
+                "assistant.operator",
+                "assistant.rater"
+            ]
+        );
+        assert_eq!(
+            declared["purposes"][1],
+            json!({"id": "assistant.operator", "app": "nils-assistant", "content": "catalog", "kind": "foreground"})
+        );
+        assert_eq!(
+            declared["purposes"][2],
+            json!({"id": "assistant.rater", "app": "nils-assistant", "content": "rows", "kind": "foreground"})
+        );
+        assert_eq!(declared["auth"]["tokens"]["tok"], INSTALLER, "{declared}");
+        assert!(
+            register_station_purposes(&plan).is_empty(),
+            "a purpose registered once is not registered again"
+        );
+
+        // Kvasir, started again on that file, lists the three: the new one
+        // goes to the stations' model with the others, and the assistant's
+        // key is made again to cover it, the old one revoked
+        let held = std::sync::Arc::new(std::sync::Mutex::new(Held {
+            purposes: json!([
+                {"purpose": "assistant.operator", "content": "catalog", "backend": null},
+                {"purpose": "assistant.ask-help", "content": "rows", "backend": null},
+                {"purpose": "assistant.rater", "content": "rows", "backend": null},
+                {"purpose": "desk.search", "content": "rows", "backend": null}
+            ]),
+            offered: offered_by_the_card(),
+            ..Held::default()
+        }));
+        let (port, calls) = fake_kvasir(held.clone());
+        plan.ports.kvasir = port;
+        let console = Console::new(true);
+        console.strict.set(true);
+        assert_eq!(ready_kvasir(&plan, &console, None).ok(), Some(true));
+        let seen = calls.lock().unwrap().clone();
+        for purpose in [
+            "assistant.operator",
+            "assistant.ask-help",
+            "assistant.rater",
+        ] {
+            assert!(
+                seen.iter().any(
+                    |c| c.starts_with(&format!("PUT /v1/purposes/{purpose}/policy"))
+                        && c.contains(r#""backend":"models-example-org""#)
+                        && c.contains(r#""model":"flash-next""#)
+                ),
+                "{purpose}: {seen:?}"
+            );
+        }
+        let minted: Vec<serde_json::Value> = seen
+            .iter()
+            .filter_map(|c| c.strip_prefix("POST /v1/keys "))
+            .map(|body| serde_json::from_str(body).unwrap())
+            .collect();
+        assert_eq!(minted.len(), 1, "{seen:?}");
+        assert_eq!(
+            minted[0]["purposes"],
+            json!([
+                "assistant.ask-help",
+                "assistant.operator",
+                "assistant.rater"
+            ]),
+            "{seen:?}"
+        );
+        assert!(
+            seen.iter().any(|c| c.starts_with("DELETE /v1/keys/k_new")),
+            "the key it replaces is revoked: {seen:?}"
+        );
+        assert_eq!(
+            std::fs::read(state_path()).ok(),
+            record_before,
+            "the machine's own record changed"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
