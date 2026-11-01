@@ -219,6 +219,10 @@ pub enum Action {
     SoftwareVerify,
     SoftwareAccept,
     SoftwareRemove,
+    /// Site participation (2026-11-01): a report sent to the receiver, or
+    /// tried. The row names the tier, the document's digest, its size and
+    /// the receipt or the error; never the key, never the body.
+    ParticipationSend,
 }
 
 impl Action {
@@ -315,6 +319,7 @@ impl Action {
             Action::SoftwareVerify => "software.verify",
             Action::SoftwareAccept => "software.accept",
             Action::SoftwareRemove => "software.remove",
+            Action::ParticipationSend => "participation.send",
         }
     }
 
@@ -380,6 +385,7 @@ impl Action {
                 | Action::SoftwareVerify
                 | Action::SoftwareAccept
                 | Action::SoftwareRemove
+                | Action::ParticipationSend
         )
     }
 }

@@ -75,6 +75,7 @@ mod operations;
 mod originals;
 mod packs;
 mod pair;
+mod participate;
 mod pick_after;
 mod pick_scopes;
 mod pipeline_family;
@@ -252,6 +253,11 @@ enum Command {
     /// policy (Wave 4a section 9.2)
     #[command(subcommand)]
     Audit(AuditCommand),
+    /// Site participation: an opt-in, default-closed channel by which this
+    /// install shares counts (tier 1) or a sealed read (tier 3), signed,
+    /// previewed by a person before anything leaves; and the receiver
+    #[command(subcommand)]
+    Participate(participate::ParticipateCommand),
     /// The one door: the HTTP API over this registry, one route per
     /// operation, jobs for anything heavy (Wave 4a section 11)
     Serve(Box<ServeArgs>),
@@ -922,6 +928,10 @@ enum AuditCommand {
     /// each drawn stack's header as a text packet named by its place in the
     /// draw, with MANIFEST.json (the seed and the frame's digest)
     Draw(Box<audit_cli::DrawArgs>),
+    /// The settle of a draw whose raters have answered (record 58 P2): the
+    /// verify campaign a person settles, over every stack where a rater
+    /// differs from the accepted answer and a seeded share of the agreements
+    Settle(audit_cli::SettleArgs),
     /// The draw's counts for the label-quality passport: frame, drawn, read,
     /// settled, wrong with its exact one-sided 95 % bound, and the readers'
     /// disagreements, by axis, vendor and acquisition year; a cell under 5
@@ -2490,6 +2500,8 @@ fn main() -> ExitCode {
             json,
         }) => audit_list(&home, principal, action, since, limit, json),
         Command::Audit(AuditCommand::Draw(args)) => audit_cli::draw(&home, *args),
+        Command::Audit(AuditCommand::Settle(args)) => audit_cli::settle(&home, args),
+        Command::Participate(command) => participate::command(&home, command),
         Command::Audit(AuditCommand::Export { draw, out }) => audit_cli::export(&home, draw, &out),
         Command::Pick { command } => pick_command(&home, command),
         Command::Session { command } => session_command(&home, command),

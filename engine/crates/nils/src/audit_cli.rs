@@ -80,6 +80,15 @@ pub(crate) struct DrawArgs {
     /// once both have answered
     #[arg(long, value_name = "WHO", value_delimiter = ',')]
     raters: Option<Vec<String>>,
+    /// Leave the localizers (scouts, surveys, pilots) out of the frame: the
+    /// site protocol's claim is on the scans
+    #[arg(long)]
+    no_localizers: bool,
+    /// The share of the drawn stacks two people read instead of one (the
+    /// site protocol's 0.20), chosen by the seed; their disagreements are
+    /// counted by the export
+    #[arg(long, value_name = "SHARE", default_value_t = 0.0)]
+    double_read_share: f64,
     /// The pack whose round is drawn and whose axes are asked
     #[arg(long, default_value = "mri")]
     pack: String,
@@ -126,6 +135,9 @@ pub(crate) fn draw(home: &Home, a: DrawArgs) -> Result<(), Exit> {
     if let Some(axes) = &a.axes {
         doc["axes"] = json!(axes);
     }
+    if a.no_localizers {
+        doc["localizers"] = json!(false);
+    }
     let made =
         crate::review_rule::make_draw(&mut registry, Some(pack_dir.as_path()), &a.pack, &who, &doc)
             .map_err(rerr)?;
@@ -148,6 +160,8 @@ pub(crate) fn draw(home: &Home, a: DrawArgs) -> Result<(), Exit> {
                 &made,
                 a.readers.clone().unwrap_or_default(),
                 a.readers_per_item,
+                crate::review_rule::double_read_share_of(&json!(a.double_read_share))
+                    .map_err(rerr)?,
                 &Value::Null,
             )
             .map_err(rerr)?;
@@ -320,6 +334,79 @@ fn write_packets(
     Ok(chosen.len())
 }
 
+// ------------------------------------------------------------ the settle
+
+#[derive(Debug, clap::Args)]
+pub(crate) struct SettleArgs {
+    /// The draw whose raters have answered
+    #[arg(long, value_name = "ID")]
+    draw: i64,
+    /// The share of the agreements a person settles too (the monthly
+    /// round's 0.10, the site protocol's 0.20)
+    #[arg(long, value_name = "SHARE")]
+    share: Option<f64>,
+    /// The people who settle, as principals joined by commas (anyone with
+    /// campaigns:work where none are named)
+    #[arg(long, value_name = "WHO", value_delimiter = ',')]
+    settlers: Option<Vec<String>>,
+    /// The word the settle's share is drawn by (the draw's seed by default)
+    #[arg(long, value_name = "SEED")]
+    seed: Option<String>,
+    /// Machine-readable output
+    #[arg(long)]
+    json: bool,
+}
+
+/// `nils audit settle`: the settle of `POST /api/audit/draws/{id}/settle`
+/// at the keyboard, once the raters have answered every drawn stack.
+pub(crate) fn settle(home: &Home, a: SettleArgs) -> Result<(), Exit> {
+    let mut registry = crate::open(home)?;
+    let who = crate::ask_cli::principal();
+    let mut doc = json!({});
+    if let Some(share) = a.share {
+        doc["share"] = json!(share);
+    }
+    if let Some(settlers) = &a.settlers {
+        doc["settlers"] = json!(settlers);
+    }
+    if let Some(seed) = &a.seed {
+        doc["seed"] = json!(seed);
+    }
+    let reply = crate::review_rule::settle_draw(&mut registry, &who, a.draw, &doc).map_err(rerr)?;
+    let out = reply.body;
+    if a.json {
+        crate::campaigns::print(&out);
+        return Ok(());
+    }
+    let s = &out["settle"];
+    match s["campaign"]["id"].as_i64() {
+        Some(c) => println!(
+            "draw {}: settle campaign {c}, {} items ({} differences, {} of {} agreements, share {}){}",
+            a.draw,
+            s["items"],
+            s["differences"],
+            s["agreements_settled"],
+            s["agreements"],
+            s["share"],
+            if s["again"] == true {
+                " (made before)"
+            } else {
+                ""
+            }
+        ),
+        None => println!(
+            "draw {}: nothing to settle, {}",
+            a.draw,
+            s["note"].as_str().unwrap_or_default()
+        ),
+    }
+    println!(
+        "next: a person reads the settle campaign in verify mode and closes it; then nils audit export --draw {} --out <file>",
+        a.draw
+    );
+    Ok(())
+}
+
 // ------------------------------------------------------------ the export
 
 /// `nils audit export`: the draw named, or the newest draw by count.
@@ -349,7 +436,9 @@ pub(crate) fn export(home: &Home, draw: Option<i64>, out: &Path) -> Result<(), E
     Ok(())
 }
 
-fn export_doc(registry: &mut Registry, draw: Option<i64>) -> Result<Value, Exit> {
+/// The export document of a draw (the newest draw by count where none is
+/// named): counts only, under the minimum cell.
+pub(crate) fn export_doc(registry: &mut Registry, draw: Option<i64>) -> Result<Value, Exit> {
     let e = |e: nils_registry::store::Error| fail(e.to_string());
     let d = match draw {
         Some(id) => audit_draw::get(registry.store(), id)
@@ -577,7 +666,7 @@ fn assemble(
 /// stacks, every cell where the whole draw is held, and, where exactly one
 /// cell is held while others are shown, the smallest shown one too, since
 /// the draw's total less the shown cells would give the held one away.
-fn held_cells(sizes: &BTreeMap<String, u64>, all: bool) -> BTreeSet<String> {
+pub(crate) fn held_cells(sizes: &BTreeMap<String, u64>, all: bool) -> BTreeSet<String> {
     if all {
         return sizes.keys().cloned().collect();
     }

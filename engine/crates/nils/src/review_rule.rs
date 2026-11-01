@@ -1149,6 +1149,7 @@ fn frame(
     since: Cutoff<'_>,
     pack: Option<&nils_pack::Pack>,
     exclude_drawn: bool,
+    localizers: bool,
 ) -> Result<Vec<Framed>, StoreError> {
     let holds = of_round(store, r);
     let d = store.dialect();
@@ -1255,6 +1256,12 @@ fn frame(
             continue;
         }
         let a = answers.get(&id);
+        // site participation (2026-11-01): a protocol whose claim is on
+        // the scans leaves the localizers out of the frame, which the
+        // frame's digest then covers as drawn
+        if !localizers && a.is_some_and(is_localizer) {
+            continue;
+        }
         let mut accepted = serde_json::Map::new();
         for axis in axes {
             match a.and_then(|m| m.get(axis)) {
@@ -1281,6 +1288,18 @@ fn frame(
         });
     }
     Ok(out)
+}
+
+/// Whether the rules' answers of a stack call it a localizer: the
+/// provenance axis holds `localizer` (the MRI pack's word for a scout, a
+/// survey or a pilot).
+fn is_localizer(answers: &BTreeMap<String, (Option<String>, bool)>) -> bool {
+    answers.get("provenance").is_some_and(|(value, _)| {
+        value.as_deref().is_some_and(|v| {
+            v.split(',')
+                .any(|w| w.trim().eq_ignore_ascii_case("localizer"))
+        })
+    })
 }
 
 /// What a campaign the audit makes over stacks is made with.
@@ -1412,8 +1431,51 @@ fn draw_door(
         &caller.principal,
         &doc,
     )?;
-    let reply = raters_campaign(registry, &caller.principal, &made, &doc)?;
-    Ok(Reply::ok(reply))
+    // site participation (2026-11-01): with `readers`, the people path,
+    // the verify campaign of `nils audit draw` over every drawn stack,
+    // a seeded share of them read twice; else the raters' campaign
+    if doc["readers"].is_null() {
+        let reply = raters_campaign(registry, &caller.principal, &made, &doc)?;
+        return Ok(Reply::ok(reply));
+    }
+    let readers = crate::campaigns::strings_of(&doc["readers"]);
+    let v = verify_draw(
+        registry,
+        &caller.principal,
+        &made,
+        readers,
+        doc["readers_per_item"].as_i64().unwrap_or(1),
+        double_read_share_of(&doc["double_read_share"])?,
+        &doc["planted"],
+    )?;
+    let planted = nils_registry::verify::summary(registry.store(), v.campaign.id)
+        .map_err(failed)?
+        .unwrap_or(Value::Null);
+    let d = audit_draw::get(registry.store(), made.draw.id)
+        .map_err(failed)?
+        .ok_or_else(|| Reply::error(500, "the draw was not kept"))?;
+    Ok(Reply::ok(json!({
+        "draw": d.as_json(), "round": made.round.as_json(),
+        "campaign": {"id": v.campaign.id, "name": v.campaign.name, "purpose": "verify",
+                      "suggest": "imported", "closes_into": "none",
+                      "raters_per_item": v.campaign.raters_per_item,
+                      "double_read_share": v.double_read_share, "read_twice": v.read_twice,
+                      "planted": planted, "trains": false},
+        "axes": made.axes,
+        "readers": "the people read the verify campaign against the accepted answer, a seeded share of the items by two of them; close it, then grade and export",
+    })))
+}
+
+/// The share of a verify campaign's items read by two people, from a
+/// door's or a command's value: none by default, a share from 0 to 1.
+pub(crate) fn double_read_share_of(v: &Value) -> Result<f64, Reply> {
+    match v {
+        Value::Null => Ok(0.0),
+        v => v
+            .as_f64()
+            .filter(|s| (0.0..=1.0).contains(s))
+            .ok_or_else(|| Reply::error(400, "double_read_share: of the drawn items, from 0 to 1")),
+    }
 }
 
 /// A draw kept, before any campaign reads it: the draw, its round, the
@@ -1535,6 +1597,16 @@ pub(crate) fn make_draw(
             }
             None => false,
         };
+    let localizers = match &doc["localizers"] {
+        Value::Null => true,
+        Value::Bool(b) => *b,
+        _ => {
+            return Err(Reply::error(
+                400,
+                "localizers: true (the default) frames every accepted MR stack, false leaves the localizers out",
+            ));
+        }
+    };
     let framed = frame(
         registry.store(),
         &r,
@@ -1542,6 +1614,7 @@ pub(crate) fn make_draw(
         cutoff,
         pack.as_ref(),
         exclude_drawn,
+        localizers,
     )
     .map_err(failed)?;
     // 7b: a default `since` that leaves nothing to draw says the stamp it
@@ -1741,6 +1814,17 @@ fn settle_door(
     body: &str,
 ) -> Result<Reply, Reply> {
     let doc = json_body(body)?;
+    settle_draw(registry, &caller.principal, id, &doc)
+}
+
+/// The settle of [`settle_door`] and of `nils audit settle`, from the same
+/// body.
+pub(crate) fn settle_draw(
+    registry: &mut Registry,
+    who: &str,
+    id: i64,
+    doc: &Value,
+) -> Result<Reply, Reply> {
     let d = audit_draw::get(registry.store(), id)
         .map_err(failed)?
         .ok_or_else(|| Reply::error(404, format!("no audit draw {id}")))?;
@@ -1811,7 +1895,7 @@ fn settle_door(
     }
     let v = verify_over(
         registry,
-        &caller.principal,
+        who,
         &held,
         &drawn,
         Over {
@@ -1874,6 +1958,10 @@ pub(crate) struct Verified {
     pub(crate) campaign: nils_registry::campaign::Campaign,
     pub(crate) imported: Vec<Value>,
     pub(crate) refused: i64,
+    /// Site participation (2026-11-01): the share of the items given to
+    /// two readers, and how many that made.
+    pub(crate) double_read_share: f64,
+    pub(crate) read_twice: usize,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2036,6 +2124,8 @@ fn verify_over(
         campaign: settle_campaign,
         imported,
         refused,
+        double_read_share: 0.0,
+        read_twice: 0,
     })
 }
 
@@ -2051,11 +2141,12 @@ pub(crate) fn verify_draw(
     made: &Made,
     readers: Vec<String>,
     readers_per_item: i64,
+    double_read_share: f64,
     planted: &Value,
 ) -> Result<Verified, Reply> {
     let d = &made.draw;
     let held: Vec<i64> = made.chosen.iter().map(|f| f.stack_id).collect();
-    let v = verify_over(
+    let mut v = verify_over(
         registry,
         who,
         &held,
@@ -2078,6 +2169,31 @@ pub(crate) fn verify_draw(
     )?;
     audit_draw::set_settle(registry.store(), d.id, Some(v.campaign.id), &d.seed, 1.0)
         .map_err(failed)?;
+    // site participation (2026-11-01): a seeded share of the drawn items
+    // is read by two people, the rest by one, so the export counts their
+    // disagreements; chosen by the draw's seed over the drawn stacks'
+    // identities, as the draw itself was
+    if double_read_share > 0.0 {
+        let twice: BTreeSet<i64> = audit_draw::choose(
+            &format!("{}:double-read", d.seed),
+            double_read_share,
+            &made.chosen,
+        )
+        .into_iter()
+        .map(|f| f.stack_id)
+        .collect();
+        let items: Vec<i64> = nils_registry::campaign::items(registry.store(), v.campaign.id)
+            .map_err(crate::campaigns::campaign_err)?
+            .into_iter()
+            .filter(|i| i.stack_id.is_some_and(|s| twice.contains(&s)))
+            .map(|i| i.id)
+            .collect();
+        let wanted = readers_per_item.max(1) + 1;
+        nils_registry::campaign::set_item_raters(registry.store(), v.campaign.id, &items, wanted)
+            .map_err(crate::campaigns::campaign_err)?;
+        v.double_read_share = double_read_share;
+        v.read_twice = items.len();
+    }
     if v.refused > 0 {
         return Err(Reply::error(
             409,

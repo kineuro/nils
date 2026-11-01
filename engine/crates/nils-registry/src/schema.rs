@@ -1694,6 +1694,51 @@ fn build_registry() -> Vec<Table> {
             ],
         )
         .unique(&["draw_id", "stack_id"]),
+        // Site participation (2026-11-01): one row, how this install takes
+        // part: its site name, the tiers it shares as a JSON list of
+        // numbers, the receiver, the path of the file its bearer key is
+        // read from (never the key), the public half of the signing key
+        // pair made at enable (the private half lives in the registry
+        // home, never here), whether the counts go by themselves, and who
+        // turned it on when. Default closed: no row, nothing leaves.
+        Table::new(
+            "participation",
+            vec![
+                col("id", Type::Id),
+                req("site", Type::Text),
+                req("tiers", Type::Json),
+                col("receiver", Type::Text),
+                col("key_file", Type::Text),
+                req("public_key", Type::Text),
+                req("auto", Type::Int),
+                req("enabled_at", Type::Timestamp),
+                req("enabled_by", Type::Text),
+                // {tier: {digest, at}}: the newest preview of each tier,
+                // which a send of that digest needs on record
+                col("previewed", Type::Json),
+            ],
+        ),
+        // Every send, tried or made: the tier, the sha256 of the body as
+        // sent, its size, when and by whom, to which receiver, the receipt
+        // it answered or the error's words, and when the document it sent
+        // was previewed.
+        Table::new(
+            "participation_send",
+            vec![
+                col("id", Type::Id),
+                req("tier", Type::Int),
+                req("digest", Type::Text),
+                req("bytes", Type::Int),
+                req("sent_at", Type::Timestamp),
+                req("sent_by", Type::Text),
+                req("receiver", Type::Text),
+                col("receipt", Type::Text),
+                col("error", Type::Text),
+                col("previewed_at", Type::Timestamp),
+                col("draw_id", Type::Int),
+            ],
+        )
+        .index(&["tier"]),
         // Record 43: every encoder a head reads, in the order it
         // concatenates their features. A small table rather than a list
         // in the model row, so that the heads a new encoder makes stale are
@@ -2710,6 +2755,12 @@ fn build_registry() -> Vec<Table> {
                 // and clears both once it writes it.
                 col("refused_at", Type::Timestamp),
                 col("refused_why", Type::Text),
+                // Site participation (2026-11-01): how many raters this one
+                // item wants where it differs from the campaign's
+                // `raters_per_item` (a seeded share of a verify campaign's
+                // items read twice for a disagreement count); null takes
+                // the campaign's.
+                col("raters", Type::Int),
             ],
         )
         .unique(&["campaign_id", "position"])
