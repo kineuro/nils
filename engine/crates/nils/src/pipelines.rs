@@ -10191,12 +10191,12 @@ fn ensure_image(
     if let Some(used) = x.used.as_ref()
         && used.manifest.kind.on_disk()
     {
-        if let Some(why) = crate::software::failed_verification(&used) {
+        if let Some(why) = crate::software::failed_verification(used) {
             return Err(why);
         }
         // used only as verified (record 49, after review): what fails its
         // recorded fingerprint is not run
-        if crate::software::still_verified(&used)? {
+        if crate::software::still_verified(used)? {
             return Ok(Some(PathBuf::from(&used.runnable)));
         }
         return Err(format!(
