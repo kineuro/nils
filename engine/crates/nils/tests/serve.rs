@@ -9856,6 +9856,10 @@ fn the_header_facts_of_a_stack_are_told_without_what_names_a_person() {
         ],
         None,
     );
+    // before the stack is fingerprinted its file count is still told
+    let early = run(&home, &["explain", "1", "--header", "--json"], None);
+    let early: serde_json::Value = serde_json::from_str(&early).unwrap();
+    assert_eq!(early["files"], 1, "{early}");
     run(&home, &["fingerprint"], None);
 
     let pack_dir = packs();

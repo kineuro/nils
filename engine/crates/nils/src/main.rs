@@ -202,6 +202,11 @@ enum Command {
         /// sweep, echo numbers and times, image types, the file count
         #[arg(long)]
         header: bool,
+        /// With --header: the pack whose shown private elements are listed,
+        /// by name in the pack directory; the engine's --ask-pack names the
+        /// door's
+        #[arg(long, default_value = "mri", value_name = "NAME", requires = "header")]
+        pack: String,
         /// Machine-readable output
         #[arg(long)]
         json: bool,
@@ -2426,8 +2431,9 @@ fn main() -> ExitCode {
             stack,
             pack_dir,
             header,
+            pack,
             json,
-        } => explain(&home, stack, pack_dir, header, json),
+        } => explain(&home, stack, pack_dir, header, &pack, json),
         Command::Pack { command } => pack_command(&home, command),
         Command::Status(args) => status(&home, args),
         Command::Backup(args) => backup_command(&home, args),
@@ -3012,6 +3018,7 @@ fn explain(
     stack: i64,
     pack_dir_given: Option<PathBuf>,
     header: bool,
+    pack_name: &str,
     json: bool,
 ) -> Result<(), Exit> {
     let mut registry = open(home)?;
@@ -3030,7 +3037,7 @@ fn explain(
             Some(d) => Some(d),
             None => pack_dir(home, None).ok(),
         };
-        let pack = reader::served_pack(dir.as_deref(), "mri");
+        let pack = reader::served_pack(dir.as_deref(), pack_name);
         let doc = file_header::facts(registry.store(), stack, true, pack.as_deref())
             .map_err(|e| fail(e.to_string()))?
             .ok_or_else(|| fail(format!("stack {stack} is not in the registry")))?;

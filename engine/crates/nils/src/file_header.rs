@@ -656,10 +656,18 @@ pub(crate) fn facts(
     let fingerprint = fingerprint_values(store, stack)?;
     let (texts, physics) = texts_and_physics(store, stack, quasi)?;
     let (private, withheld) = private_shown(store, stack, pack)?;
+    // a stack not fingerprinted yet still has its count on the stack row
+    let files = match fingerprint.get("n_instances") {
+        Some(n) => n.clone(),
+        None => row(store, "stack", "id", stack, &["n_instances"])?
+            .remove("n_instances")
+            .map(typed)
+            .unwrap_or(Value::Null),
+    };
     Ok(Some(json!({
         "stack": stack,
         "detail": if quasi { "quasi" } else { "plain" },
-        "files": fingerprint.get("n_instances").cloned().unwrap_or(Value::Null),
+        "files": files,
         "fingerprint": fingerprint,
         "texts": texts,
         "physics": physics,
