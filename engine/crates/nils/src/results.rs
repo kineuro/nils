@@ -31,7 +31,7 @@ use crate::serve::{Caller, Reply};
 
 /// Whether the caller is the campaign's maker and does not rate in it: named
 /// as a rater, or holding a rater's assignment of it.
-fn maker_apart(
+pub(crate) fn maker_apart(
     store: &mut nils_registry::Store,
     caller: &Caller,
     c: &campaign::Campaign,

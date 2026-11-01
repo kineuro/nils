@@ -2045,8 +2045,25 @@ pub(crate) fn route(
                         r["name"] = json!(nils_registry::names::shown(&names, &p));
                     }
                 }
-                // blind as the answers are: a rater reads their own row
-                if !sees_all(registry.store(), caller, principal, &c)? {
+                // blind as the answers are: a rater reads their own row. The
+                // maker who does not rate reads the progress, the counts and
+                // the pace of every rater (2026-10-30, decision 3), and never
+                // what the answers say.
+                let all = sees_all(registry.store(), caller, principal, &c)?;
+                if !all && crate::results::maker_apart(registry.store(), caller, &c)? {
+                    // a tally of the verdicts and reasons of a check is the
+                    // answers, counted
+                    let strip = |v: &mut Value| {
+                        if let Some(m) = v.as_object_mut() {
+                            m.remove("verdicts");
+                            m.remove("reasons");
+                        }
+                    };
+                    for r in doc["raters"].as_array_mut().into_iter().flatten() {
+                        strip(r);
+                    }
+                    strip(&mut doc["all"]);
+                } else if !all {
                     if let Some(list) = doc["raters"].as_array_mut() {
                         list.retain(|r| r["principal"] == principal);
                     }
