@@ -197,6 +197,16 @@ enum Command {
         /// else `packs/` in the registry home
         #[arg(long, value_name = "DIR")]
         pack_dir: Option<PathBuf>,
+        /// Print the stack's stored header facts instead: the fingerprint
+        /// values the rules read, the header's text after the private-element
+        /// sweep, echo numbers and times, image types, the file count
+        #[arg(long)]
+        header: bool,
+        /// With --header: the pack whose shown private elements are listed,
+        /// by name in the pack directory; the engine's --ask-pack names the
+        /// door's
+        #[arg(long, default_value = "mri", value_name = "NAME", requires = "header")]
+        pack: String,
         /// Machine-readable output
         #[arg(long)]
         json: bool,
@@ -2420,8 +2430,10 @@ fn main() -> ExitCode {
         Command::Explain {
             stack,
             pack_dir,
+            header,
+            pack,
             json,
-        } => explain(&home, stack, pack_dir, json),
+        } => explain(&home, stack, pack_dir, header, &pack, json),
         Command::Pack { command } => pack_command(&home, command),
         Command::Status(args) => status(&home, args),
         Command::Backup(args) => backup_command(&home, args),
@@ -3005,6 +3017,8 @@ fn explain(
     home: &Home,
     stack: i64,
     pack_dir_given: Option<PathBuf>,
+    header: bool,
+    pack_name: &str,
     json: bool,
 ) -> Result<(), Exit> {
     let mut registry = open(home)?;
@@ -3015,6 +3029,28 @@ fn explain(
         .is_empty()
     {
         return Err(usage(sealed::refusal(&format!("stack {stack}"))));
+    }
+    if header {
+        // the keyboard reads at the full detail, as the pack-dir's served
+        // pack shows its private elements
+        let dir = match pack_dir_given {
+            Some(d) => Some(d),
+            None => pack_dir(home, None).ok(),
+        };
+        let pack = reader::served_pack(dir.as_deref(), pack_name);
+        let doc = file_header::facts(registry.store(), stack, true, pack.as_deref())
+            .map_err(|e| fail(e.to_string()))?
+            .ok_or_else(|| fail(format!("stack {stack} is not in the registry")))?;
+        if json {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&doc)
+                    .map_err(|e| fail(format!("will not serialize: {e}")))?
+            );
+        } else {
+            print!("{}", explain::header_text(&doc));
+        }
+        return Ok(());
     }
     // the pack, for the labels of the values; best effort, since the
     // explanation stands without it

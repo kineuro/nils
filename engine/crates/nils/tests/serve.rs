@@ -9813,3 +9813,105 @@ fn jobs_pack_dir_sweep(dsn: Option<&str>) {
     ]));
     assert_eq!(own["state"], "failed", "{own}");
 }
+
+/// 7b, decision 8 of 2026-10-30: the stored header facts of a stack, at the
+/// keyboard (`nils explain <stack> --header`) and at the door
+/// (`GET /api/stacks/{stack}/header`), the same document, from a header that
+/// carries a patient's name, birth date, identifiers and address, none of
+/// which is in either answer.
+#[test]
+fn the_header_facts_of_a_stack_are_told_without_what_names_a_person() {
+    let home = TempDir::new("serve-header-home");
+    let dir = TempDir::new("serve-header-src");
+    let sop = "1.2.3.HF.1.1";
+    let mut e = synth::minimal_mr("1.2.3.HF", "1.2.3.HF.1", sop);
+    e.extend([
+        synth::text(tags::PATIENT_ID, VR::LO, "197001011234"),
+        synth::text(tags::PATIENT_NAME, VR::PN, "Doeberg^Janette"),
+        synth::text(tags::PATIENT_BIRTH_DATE, VR::DA, "19700101"),
+        synth::text(tags::PATIENT_ADDRESS, VR::LO, "Hemvagen 12 Stockholm"),
+        synth::text(dicom_core::Tag(0x0010, 0x1000), VR::LO, "19700101-1234"),
+        synth::text(tags::INSTITUTION_NAME, VR::LO, "Nordsjukhuset"),
+        synth::text(tags::SERIES_DESCRIPTION, VR::LO, "sag t1 cervical"),
+        synth::text(tags::SCANNING_SEQUENCE, VR::CS, "SE"),
+        synth::text(tags::REPETITION_TIME, VR::DS, "600"),
+        synth::text(tags::ECHO_TIME, VR::DS, "12"),
+        synth::text(tags::ECHO_NUMBERS, VR::IS, "1"),
+        synth::text(tags::IMAGE_TYPE, VR::CS, "ORIGINAL\\PRIMARY\\M\\ND"),
+    ]);
+    dir.file(
+        &format!("h/{sop}"),
+        &synth::part10(&MetaFields::mr(sop), &e, true),
+    );
+    run(&home, &["key", "add", "k"], Some("a serve test key\n"));
+    run(&home, &["init", "--key", "k"], None);
+    run(
+        &home,
+        &[
+            "digest",
+            "--name",
+            "h",
+            "--no-private",
+            dir.path().to_str().unwrap(),
+        ],
+        None,
+    );
+    // before the stack is fingerprinted its file count is still told
+    let early = run(&home, &["explain", "1", "--header", "--json"], None);
+    let early: serde_json::Value = serde_json::from_str(&early).unwrap();
+    assert_eq!(early["files"], 1, "{early}");
+    run(&home, &["fingerprint"], None);
+
+    let pack_dir = packs();
+    let pack_dir = pack_dir.to_str().unwrap();
+    let json_text = run(
+        &home,
+        &["explain", "1", "--header", "--json", "--pack-dir", pack_dir],
+        None,
+    );
+    let cli: serde_json::Value = serde_json::from_str(&json_text).unwrap();
+    let words = run(
+        &home,
+        &["explain", "1", "--header", "--pack-dir", pack_dir],
+        None,
+    );
+    assert!(words.contains("echo_time"), "{words}");
+    assert!(words.contains("image_type"), "{words}");
+
+    let server = Server::start(&home, 5, &[], &[]);
+    let (status, door) = server.request("GET", "/api/stacks/1/header", None, None);
+    assert_eq!(status, 200, "{door}");
+    // the keyboard and the door answer one document
+    assert_eq!(cli, door);
+    assert_eq!(door["stack"], 1, "{door}");
+    assert_eq!(door["files"], 1, "{door}");
+    assert_eq!(door["fingerprint"]["echo_numbers"], 1, "{door}");
+    assert_eq!(door["fingerprint"]["echo_time"], 12.0, "{door}");
+    assert_eq!(
+        door["fingerprint"]["image_type"], "ORIGINAL\\PRIMARY\\M\\ND",
+        "{door}"
+    );
+    assert_eq!(
+        door["texts"]["series_description"], "sag t1 cervical",
+        "{door}"
+    );
+
+    // no name, birth date, identifier, address or institution, anywhere
+    for text in [&door.to_string(), &json_text, &words] {
+        for secret in [
+            "Doeberg",
+            "Janette",
+            "19700101",
+            "197001011234",
+            "1234",
+            "Hemvagen",
+            "Nordsjukhuset",
+        ] {
+            assert!(!text.contains(secret), "{secret} in {text}");
+        }
+    }
+
+    // a stack that is not in the registry
+    let (status, _) = server.request("GET", "/api/stacks/999/header", None, None);
+    assert_eq!(status, 404);
+}

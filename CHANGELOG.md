@@ -4,6 +4,10 @@ All notable changes to NILS v1 are recorded here. The format follows [Keep a Cha
 
 ## [Unreleased]
 
+### Added
+
+- `nils explain <stack> --header` and `GET /api/stacks/{stack}/header` (under `review:see`, as the explanation) tell a stack's stored header facts: the fingerprint values the rules read (echo numbers and times, image types, the geometry, the file count), the header's text and physics, and the private elements the served pack shows, from the same readings as a campaign item's header door, so nothing that names a person is in it.
+
 ### Fixed
 
 - A release's lock on a shared folder is judged live or stale by the lock file's age on the filesystem, as an unreadable one already was, and not by the time its holder wrote into it, so a difference between two nodes' clocks cannot make a live release look stale and let a second one write into the same tree.

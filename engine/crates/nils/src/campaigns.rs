@@ -46,6 +46,7 @@ pub(crate) const DOORS: &[&str] = &[
     "GET /api/label-sets/{id}",
     "POST /api/decisions/commit",
     "GET /api/stacks/{stack}/why",
+    "GET /api/stacks/{stack}/header",
     "GET /api/campaigns/{id}/items/{item}/why",
     "GET /api/campaigns/{id}/items/{item}/header",
     "POST /api/campaigns/{id}/items/{item}/derive",
@@ -123,7 +124,7 @@ pub(crate) fn door(method: &str, segs: &[&str]) -> Option<(Need, Detail)> {
         }
         // record 48: why one stack was judged so, one line per axis, is a
         // review reading, as the explanation is
-        ("GET", ["api", "stacks", _, "why"]) => (Need::One("review:see"), Plain),
+        ("GET", ["api", "stacks", _, "why" | "header"]) => (Need::One("review:see"), Plain),
         ("POST", ["api", "campaigns", _, "batches", _, "accept"])
         | ("POST", ["api", "campaigns", _, "gallery", "accept"]) => {
             (Need::One("campaigns:work"), Plain)
@@ -342,6 +343,15 @@ pub(crate) const POLICY: &[(&str, bool, bool, &str, &str, &str, &str)] = &[
         "one line per axis",
         "Reading why a stack was judged so",
         "Read why a stack was judged so",
+    ),
+    (
+        "GET /api/stacks/{stack}/header",
+        false,
+        false,
+        "free",
+        "one stack's header facts",
+        "Reading a stack's header facts",
+        "Read a stack's header facts",
     ),
     (
         "GET /api/campaigns/{id}/items/{item}/why",
@@ -668,7 +678,7 @@ pub(crate) fn route(
         ["api", "campaigns", ..]
             | ["api", "label-sets", ..]
             | ["api", "decisions", "commit"]
-            | ["api", "stacks", _, "why"]
+            | ["api", "stacks", _, "why" | "header"]
             | ["api", "certificates", ..]
     ) {
         return None;
@@ -1345,6 +1355,32 @@ pub(crate) fn route(
                     pack.as_deref(),
                     &mut doc,
                 )?;
+                Ok(Reply::ok(doc))
+            }
+            // 7b, decision 8 of 2026-10-30: the stored header facts of a stack
+            // the rules read, as `nils explain <stack> --header` prints them,
+            // under the explain door's grant; the same readings as the header
+            // door of a campaign's item, so the same sweep applies
+            ["api", "stacks", stack, "header"] if get => {
+                let stack = id_of(stack)?;
+                // as the explanation: a stack of a sample sealed now is told
+                // to nobody but the certificate's holder
+                if blind_to(registry.store(), caller, stack)? {
+                    return Ok(Reply::ok(json!({
+                        "stack": stack, "blind": true, "sealed": true,
+                    })));
+                }
+                let pack = crate::reader::served_pack(doors.pack_dir.as_deref(), &doors.ask_pack);
+                let doc = crate::file_header::facts(
+                    registry.store(),
+                    stack,
+                    !plain(caller),
+                    pack.as_deref(),
+                )
+                .map_err(|e| Reply::error(500, e.to_string()))?
+                .ok_or_else(|| {
+                    Reply::error(404, format!("stack {stack} is not in the registry"))
+                })?;
                 Ok(Reply::ok(doc))
             }
             ["api", "campaigns", which, "items", item, "why"] if get => {

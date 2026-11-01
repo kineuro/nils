@@ -620,6 +620,62 @@ const PACKET: &[(&str, &str)] = &[
     ("centre_z_mm", "slice_centre_z_mm"),
 ];
 
+/// The stack's fingerprint values under the packet's names.
+fn fingerprint_values(store: &mut Store, stack: i64) -> Result<Map<String, Value>, StoreError> {
+    let columns: Vec<&str> = PACKET.iter().map(|(c, _)| *c).collect();
+    let got = row(store, "stack_fingerprint", "stack_id", stack, &columns)?;
+    let mut fields = Map::new();
+    for (column, name) in PACKET {
+        if let Some(v) = got.get(*column) {
+            fields.insert(name.to_string(), typed(v.clone()));
+        }
+    }
+    Ok(fields)
+}
+
+/// The header facts of one stack, as `nils explain <stack> --header` prints
+/// them and `GET /api/stacks/{stack}/header` answers them (7b, decision 8 of
+/// 2026-10-30): the fingerprint values the rules read (echo numbers and
+/// times, image types, the geometry, the file count), the header's text and
+/// physics as the reader shows them, and the private elements the served pack
+/// shows with the count of those withheld for looking like an identifier.
+/// It is built from the same readings as the campaign header door and the
+/// reader's lines, so the same sweep applies: nothing of the subject's row,
+/// nothing the pseudonymiser always removes, no UID that names a file, and
+/// below detail quasi no quasi-identifying text. `None` where the stack is
+/// not in the registry.
+pub(crate) fn facts(
+    store: &mut Store,
+    stack: i64,
+    quasi: bool,
+    pack: Option<&nils_pack::Pack>,
+) -> Result<Option<Value>, StoreError> {
+    if keys(store, stack)?.is_none() {
+        return Ok(None);
+    }
+    let fingerprint = fingerprint_values(store, stack)?;
+    let (texts, physics) = texts_and_physics(store, stack, quasi)?;
+    let (private, withheld) = private_shown(store, stack, pack)?;
+    // a stack not fingerprinted yet still has its count on the stack row
+    let files = match fingerprint.get("n_instances") {
+        Some(n) => n.clone(),
+        None => row(store, "stack", "id", stack, &["n_instances"])?
+            .remove("n_instances")
+            .map(typed)
+            .unwrap_or(Value::Null),
+    };
+    Ok(Some(json!({
+        "stack": stack,
+        "detail": if quasi { "quasi" } else { "plain" },
+        "files": files,
+        "fingerprint": fingerprint,
+        "texts": texts,
+        "physics": physics,
+        "private": private,
+        "private_withheld": withheld,
+    })))
+}
+
 /// The audit's packet beside the header: the fingerprint values by the
 /// packet's names, and the session's series.
 pub(crate) type Packet = (Map<String, Value>, Vec<Value>);
@@ -640,14 +696,7 @@ pub(crate) fn packet(
     let Some(k) = keys(store, stack)? else {
         return Ok(None);
     };
-    let columns: Vec<&str> = PACKET.iter().map(|(c, _)| *c).collect();
-    let got = row(store, "stack_fingerprint", "stack_id", stack, &columns)?;
-    let mut fields = Map::new();
-    for (column, name) in PACKET {
-        if let Some(v) = got.get(*column) {
-            fields.insert(name.to_string(), typed(v.clone()));
-        }
-    }
+    let fields = fingerprint_values(store, stack)?;
     let d = store.dialect();
     let fp = table("stack_fingerprint");
     let sql = format!(
