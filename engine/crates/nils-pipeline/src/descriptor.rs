@@ -611,6 +611,11 @@ pub struct Descriptor {
     /// The earlier versions of its name it replaces because it fixes them
     /// (`x-nils.replaces`, 2026-10-12); none where it replaces none.
     pub replaces: Option<Replaces>,
+    /// The engines it works with (`x-nils.engine`, 2026-11-01): a range of
+    /// engine versions in the pack contract's spelling (`>=1.0.0-beta.5`),
+    /// which the pre-flight holds the running engine to; none where the
+    /// descriptor names none. Kept as written: the engine reads the range.
+    pub engine: Option<String>,
     /// Record 55 E5 (spec section 10.4): whether a dataset's bring-in runs
     /// it over its new stacks without a manual run, when it is the chosen
     /// model's pipeline of a step (`x-nils.on-arrival`: `true`, or
@@ -1391,6 +1396,9 @@ pub fn from_value(document: Value) -> Result<Descriptor, String> {
         Some(g) => return Err(format!("x-nils.needs.disk-gb is above 0, not {g}")),
     };
     let replaces = replaces(x)?;
+    let engine = opt_text(x, "engine", "x-nils.")?
+        .map(|t| t.trim().to_string())
+        .filter(|t| !t.is_empty());
     let cache = cache_of(x)?;
     if !cache.is_empty() && layout != Layout::Stacks {
         return Err(
@@ -1452,6 +1460,7 @@ pub fn from_value(document: Value) -> Result<Descriptor, String> {
         unit_minutes,
         disk_gb,
         replaces,
+        engine,
         on_arrival,
         cache,
         document,
@@ -2341,6 +2350,23 @@ x-nils:
             "  type: docker\n  container-hash: sha256:abc\n",
         );
         assert!(parse(&with_hash).unwrap_err().contains("container-hash"));
+    }
+
+    /// 2026-11-01: a descriptor may name the engines it works with, kept as
+    /// written; a form that is not text is refused.
+    #[test]
+    fn a_descriptor_may_name_the_engines_it_works_with() {
+        let base = doc(&format!("antsx/ants@sha256:{HEX}"));
+        assert_eq!(parse(&base).unwrap().engine, None);
+        let with = |r: &str| {
+            base.replace(
+                "  needs: {gpu: optional}",
+                &format!("  needs: {{gpu: optional}}\n  engine: {r}"),
+            )
+        };
+        let d = parse(&with("\">=1.0.0-beta.3\"")).unwrap();
+        assert_eq!(d.engine.as_deref(), Some(">=1.0.0-beta.3"));
+        assert!(parse(&with("[1]")).unwrap_err().contains("x-nils.engine"));
     }
 
     /// Nima's ruling of 2026-10-12: a version that fixes earlier ones says

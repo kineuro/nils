@@ -273,43 +273,76 @@ fn stack_facts(f: &mut Facts, role: &str, row: Option<&StackRow>) {
     set(f, "defaced", Val::Unknown);
 }
 
-/// The Dice the alignment check of a session wrote, where a run of any
-/// pipeline measured `flair_t1_brain_dice` for it: aligned at 0.85 or more
-/// (the check's own threshold), else not.
-fn aligned_from_check(store: &mut Store, subject_id: i64, day: &str) -> Val {
-    let d = store.dialect();
-    let sql = format!(
-        "SELECT number FROM {} WHERE name = 'flair_t1_brain_dice' AND scope = 'session' \
-         AND subject_id = {} AND session_day = {} AND number IS NOT NULL ORDER BY id DESC LIMIT 1",
-        store.qualified("measure"),
-        d.param(1, nils_registry::schema::Type::Int),
-        d.param(2, nils_registry::schema::Type::Date),
-    );
-    match store.query_opt(&sql, &[Param::Int(subject_id), Param::from(day)]) {
-        Ok(Some(r)) => r
-            .opt_double(0)
-            .ok()
-            .flatten()
-            .map_or(Val::Unknown, |dice| Val::Bool(dice >= 0.85)),
-        _ => Val::Unknown,
+/// The Dice the alignment check of the given sessions wrote, where a run of
+/// any pipeline measured `flair_t1_brain_dice` for them: aligned at 0.85 or
+/// more (the check's own threshold), else not. One query a chunk of
+/// `(subject, session)` pairs; a session with no measure is not in the map.
+fn aligned_from_check(
+    store: &mut Store,
+    sessions: &[(i64, String)],
+) -> BTreeMap<(i64, String), Val> {
+    let mut out = BTreeMap::new();
+    for chunk in sessions.chunks(500) {
+        let d = store.dialect();
+        let mut params = Vec::new();
+        let mut pairs = Vec::new();
+        for (s, day) in chunk {
+            let n = params.len();
+            // a bare parameter in a VALUES list is text on Postgres
+            let id = d.param(n + 1, nils_registry::schema::Type::Int);
+            let at = d.param(n + 2, nils_registry::schema::Type::Date);
+            pairs.push(format!("(CAST({id} AS BIGINT), {at})"));
+            params.push(Param::Int(*s));
+            params.push(Param::from(day.as_str()));
+        }
+        let sql = format!(
+            "SELECT subject_id, CAST(session_day AS TEXT), number FROM {} \
+             WHERE name = 'flair_t1_brain_dice' AND scope = 'session' \
+             AND (subject_id, session_day) IN (VALUES {}) AND number IS NOT NULL ORDER BY id DESC",
+            store.qualified("measure"),
+            pairs.join(", "),
+        );
+        let rows = match store.query(&sql, &params) {
+            Ok(rows) => rows,
+            Err(e) => {
+                eprintln!("the alignment checks could not be read: {e}");
+                continue;
+            }
+        };
+        for r in rows {
+            let (Ok(s), Ok(day), Ok(Some(dice))) = (r.int(0), r.text(1), r.opt_double(2)) else {
+                continue;
+            };
+            // the newest measure of a session is the first row of it
+            out.entry((s, day.to_string()))
+                .or_insert(Val::Bool(dice >= 0.85));
+        }
     }
+    out
 }
 
-/// A subject's diagnosis from the clinical imports: the disease's name of
-/// its standing disease row, where one is.
-fn diagnosis_of(store: &mut Store, subject_id: i64) -> Val {
-    let d = store.dialect();
-    let sql = format!(
-        "SELECT di.name FROM {} sd JOIN {} di ON di.id = sd.disease_id \
-         WHERE sd.subject_id = {} AND sd.superseded_by IS NULL ORDER BY sd.id DESC LIMIT 1",
-        store.qualified("subject_disease"),
-        store.qualified("disease"),
-        d.param(1, nils_registry::schema::Type::Int),
-    );
-    match store.query_opt(&sql, &[Param::Int(subject_id)]) {
-        Ok(Some(r)) => Val::text(r.opt_text(0).ok().flatten()),
-        _ => Val::Unknown,
+/// The diagnoses of many subjects from the clinical imports: the disease's
+/// name of each one's standing disease row, where it has one. One query a
+/// chunk of subjects.
+fn diagnosis_of(store: &mut Store, subjects: &[i64]) -> BTreeMap<i64, Val> {
+    let mut out = BTreeMap::new();
+    for chunk in subjects.chunks(500) {
+        let ids: Vec<String> = chunk.iter().map(i64::to_string).collect();
+        let sql = format!(
+            "SELECT sd.subject_id, di.name FROM {} sd JOIN {} di ON di.id = sd.disease_id \
+             WHERE sd.subject_id IN ({}) AND sd.superseded_by IS NULL ORDER BY sd.id DESC",
+            store.qualified("subject_disease"),
+            store.qualified("disease"),
+            ids.join(", "),
+        );
+        for r in store.query(&sql, &[]).unwrap_or_default() {
+            let Ok(s) = r.int(0) else { continue };
+            // the newest standing row of a subject is the first of it
+            out.entry(s)
+                .or_insert_with(|| Val::text(r.opt_text(1).ok().flatten()));
+        }
     }
+    out
 }
 
 /// The facts of many units, read from the registry a few queries at a time:
@@ -351,7 +384,23 @@ pub(crate) fn facts_for(store: &mut Store, units: &[UnitOf], host: &HostFacts) -
         eprintln!("the registration's aligned images could not be read: {e}");
         BTreeSet::new()
     });
-    let mut diagnosis: BTreeMap<i64, Val> = BTreeMap::new();
+    // the sessions whose alignment only a check can tell, and the subjects
+    // to read a diagnosis for, each read in one query a chunk
+    let from_check: Vec<(i64, String)> = flair_sessions
+        .iter()
+        .filter(|k| !registered.contains(k))
+        .cloned()
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    let checked = aligned_from_check(store, &from_check);
+    let subjects: Vec<i64> = units
+        .iter()
+        .filter_map(|u| u.subject_id)
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    let diagnosis = diagnosis_of(store, &subjects);
     units
         .iter()
         .map(|u| {
@@ -372,16 +421,18 @@ pub(crate) fn facts_for(store: &mut Store, units: &[UnitOf], host: &HostFacts) -
                 let aligned = if registered.contains(&(s, day.to_string())) {
                     Val::Bool(true)
                 } else {
-                    aligned_from_check(store, s, day)
+                    checked
+                        .get(&(s, day.to_string()))
+                        .cloned()
+                        .unwrap_or(Val::Unknown)
                 };
                 f.set_aligned("flair", "t1w", aligned);
             }
             if let Some(s) = u.subject_id {
-                let v = diagnosis
-                    .entry(s)
-                    .or_insert_with(|| diagnosis_of(store, s))
-                    .clone();
-                f.set("diagnosis", v);
+                f.set(
+                    "diagnosis",
+                    diagnosis.get(&s).cloned().unwrap_or(Val::Unknown),
+                );
             }
             // the registry holds no age it may tell here (record 55 K7:
             // only where detail allows); unknown until a clinical import
@@ -1278,6 +1329,79 @@ pub(crate) fn pooling_refusal(store: &mut Store, ask: &nils_ask::ast::Ask) -> Op
 mod tests {
     use super::*;
     use nils_pipeline::pack::rules::Status;
+    use nils_registry::store::Store;
+
+    /// The alignment a check measured is read in one batched query on both
+    /// backends (on Postgres a bare id in the VALUES list is text and the
+    /// comparison fails): the newest measure of a session wins, a session
+    /// with none is not in the map.
+    fn alignment_round(store: &mut Store) {
+        for (id, subject, day, dice) in [
+            (1, 7, "2026-01-02", 0.5),
+            (2, 7, "2026-01-02", 0.9),
+            (3, 8, "2026-02-03", 0.4),
+        ] {
+            store
+                .execute(
+                    &format!(
+                        "INSERT INTO {} (run_id, pipeline_id, pipeline, source, scope, subject_id, \
+                         session_day, unit_id, name, type, number, created_at) VALUES \
+                         ({id}, 1, 'p', 't', 'session', {subject}, '{day}', 'u{id}', \
+                         'flair_t1_brain_dice', 'number', {dice}, '2026-03-01 00:00:00')",
+                        store.qualified("measure")
+                    ),
+                    &[],
+                )
+                .unwrap();
+        }
+        let asked = vec![
+            (7, "2026-01-02".to_string()),
+            (8, "2026-02-03".to_string()),
+            (9, "2026-02-03".to_string()),
+        ];
+        let got = aligned_from_check(store, &asked);
+        assert_eq!(
+            got.get(&(7, "2026-01-02".to_string())),
+            Some(&Val::Bool(true))
+        );
+        assert_eq!(
+            got.get(&(8, "2026-02-03".to_string())),
+            Some(&Val::Bool(false))
+        );
+        assert_eq!(got.len(), 2, "{got:?}");
+    }
+
+    #[test]
+    fn the_alignment_a_check_measured_is_read_in_one_query_on_sqlite() {
+        let mut store = Store::sqlite_in_memory().unwrap();
+        nils_registry::migrate::migrate(&mut store, nils_registry::migrate::Kind::Registry)
+            .unwrap();
+        alignment_round(&mut store);
+    }
+
+    #[test]
+    fn the_alignment_a_check_measured_is_read_in_one_query_on_postgres() {
+        let Some(dsn) = std::env::var("NILS_TEST_POSTGRES_DSN")
+            .ok()
+            .filter(|d| !d.is_empty())
+        else {
+            eprintln!("NILS_TEST_POSTGRES_DSN is not set; the Postgres half is skipped");
+            return;
+        };
+        const SCHEMA: &str = "nils_align_batch";
+        let mut store = Store::connect_postgres(&dsn, SCHEMA).expect("connect");
+        store
+            .batch(&format!(
+                "DROP SCHEMA IF EXISTS {SCHEMA} CASCADE; CREATE SCHEMA {SCHEMA}"
+            ))
+            .unwrap();
+        nils_registry::migrate::migrate(&mut store, nils_registry::migrate::Kind::Registry)
+            .unwrap();
+        alignment_round(&mut store);
+        store
+            .batch(&format!("DROP SCHEMA IF EXISTS {SCHEMA} CASCADE"))
+            .unwrap();
+    }
 
     #[test]
     fn a_raw_series_is_never_skull_stripped_and_a_derivative_is_not_told() {

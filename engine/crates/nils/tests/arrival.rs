@@ -153,16 +153,25 @@ tool-version: "1"
 container-image:
   type: docker
   image: "example.org/bodypart-stand-in@sha256:{}"
+inputs:
+  - id: cache
+    name: Slice cache
+    type: String
+    value-key: "[CACHE]"
+    command-line-flag: --cache
+    value-choices: ["/cache"]
+    optional: true
 command-line: |
   python3 -c '
   import hashlib, json, os, sys
-  m = json.load(open(sys.argv[1])); out = sys.argv[2]; cache = sys.argv[4]
+  m = json.load(open(sys.argv[1])); out = sys.argv[2]; cache = sys.argv[5] if len(sys.argv) > 5 else None
   man = json.load(open(sys.argv[3] + "/manifest.json"))
   ids = {{x["input"]: x["model_id"] for x in man["models"]}}
   assert list(ids) == ["encoder", "head", "coarse"], ids
   mounts = json.loads(os.environ["FAKE_MOUNTS"])
   src = {{s["id"]: mounts[s["mount"]] for s in m["sources"]}}
-  v = os.path.join(cache, "stand-in-planes:v1"); os.makedirs(v, exist_ok=True)
+  v = os.path.join(cache, "stand-in-planes:v1") if cache else None
+  if v: os.makedirs(v, exist_ok=True)
   log = open(os.environ["STANDIN_READS"], "a")
   key = lambda pairs: hashlib.sha256(chr(10).join(sorted(u + " " + h for u, h in pairs)).encode()).hexdigest()
   units, proposals = [], []
@@ -172,7 +181,7 @@ command-line: |
       u = s["unit"]; d = os.path.join(out, u); os.makedirs(d, exist_ok=True)
       unit = {{"unit_id": u, "status": "succeeded", "derivatives": [u + "/answer.json"]}}
       known = all(i["sha256"] for i in idents)
-      if known and os.path.exists(os.path.join(v, key([(i["sop_instance_uid"], i["sha256"]) for i in idents]) + ".json")):
+      if v and known and os.path.exists(os.path.join(v, key([(i["sop_instance_uid"], i["sha256"]) for i in idents]) + ".json")):
           unit["metrics"] = {{"files_read": 0}}
       else:
           read = []
@@ -181,18 +190,18 @@ command-line: |
               log.write(f["path"] + chr(10))
               read.append({{"file": n, "sha256": "sha256:" + hashlib.sha256(b).hexdigest()}})
           k = key([(i["sop_instance_uid"], r["sha256"]) for i, r in zip(idents, read)])
-          json.dump({{"files": len(read)}}, open(os.path.join(v, k + ".json"), "w"))
+          if v: json.dump({{"files": len(read)}}, open(os.path.join(v, k + ".json"), "w"))
           unit["read"] = read; unit["metrics"] = {{"files_read": len(read)}}
       open(os.path.join(d, "answer.json"), "w").write(json.dumps({{"stack": s["stack_id"], "head": ids["head"]}}))
       units.append(unit)
       proposals.append({{"stack_id": s["stack_id"], "axis": "body_part", "value": "brain", "probabilities": {{"brain": 0.9, "spine": 0.1}}, "model_id": ids["head"]}})
       proposals.append({{"stack_id": s["stack_id"], "axis": "body_region", "value": "head", "probabilities": {{"head": 0.9, "spine": 0.1}}, "model_id": ids["coarse"]}})
   json.dump({{"schema_version": "1", "units": units, "proposals": proposals}}, open(os.path.join(out, "results.json"), "w"))
-  ' [Manifest] [OutputLocation] [Inputs] [Cache]
+  ' [Manifest] [OutputLocation] [Inputs] [CACHE]
 x-nils:
   analysis-level: stack
   input: {{layout: stacks}}
-  on-arrival: true
+  on-arrival: {{params: {{cache: /cache}}}}
   cache: {{inputs: [stand-in-planes:v1]}}
   inputs:
     - {{id: encoder, type: model}}
@@ -782,6 +791,24 @@ fn round(pg: Option<(String, String)>) {
     assert!(
         work.path().join("slice-cache/stand-in-planes:v1").is_dir(),
         "the cache's version folder"
+    );
+    // 2026-11-01: the door's own run, given the parameters the pipeline
+    // declares for new stacks (the descriptor's cache parameter, as the
+    // shipped body-part one is driven), filled the cache, one entry a stack
+    let entries = std::fs::read_dir(work.path().join("slice-cache/stand-in-planes:v1"))
+        .unwrap()
+        .count();
+    assert_eq!(entries, 6, "the first run from the door filled the cache");
+    let door_command = started["command"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|w| w.as_str().unwrap())
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert!(
+        door_command.contains("--param cache=/cache"),
+        "{door_command}"
     );
 
     // T26, second half: a new head, chosen; the step's run reads the cache

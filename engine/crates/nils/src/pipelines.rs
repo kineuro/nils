@@ -5497,9 +5497,13 @@ pub(crate) fn secret_path(registry: &mut Registry, id: &str) -> Option<String> {
 /// The secrets a pipeline reads, each read now from the file the site set;
 /// one it needs and the site has not set, or that cannot be read, is
 /// refused before anything runs.
-fn secrets_for(registry: &mut Registry, d: &Descriptor, p: &Pipeline) -> Result<Vec<Given>, Exit> {
+fn secrets_for(
+    registry: &mut Registry,
+    d: &Descriptor,
+    p: &Pipeline,
+    used: &Option<crate::software::Used>,
+) -> Result<Vec<Given>, Exit> {
     let mut out = Vec::new();
-    let used = crate::software::for_run(registry, p).ok().flatten();
     for s in &d.secrets {
         // record 57 P5: a licence file placed in the software place
         // (licences/<app>/) stands where the site set no file
@@ -5901,6 +5905,8 @@ pub(crate) fn run_command(home: &Home, args: RunArgs) -> Result<(), Exit> {
     // 2026-10-12: what the run needs of this machine, checked before
     // anything is frozen or claimed; a check that fails refuses it by its
     // kind, and nothing is queued
+    // the install the run uses, looked for once and carried
+    let used = crate::software::for_run(&mut registry, &p).ok().flatten();
     let checked = crate::requirements::checks(
         &mut registry,
         home.dir(),
@@ -5911,6 +5917,7 @@ pub(crate) fn run_command(home: &Home, args: RunArgs) -> Result<(), Exit> {
             units: 1,
             detected: Some(&detected),
             releases: true,
+            used: Some(&used),
         },
     );
     if let Some(failed) = crate::requirements::refusing(&checked) {
@@ -5918,7 +5925,7 @@ pub(crate) fn run_command(home: &Home, args: RunArgs) -> Result<(), Exit> {
     }
     let (device, gpu) = device_for(&d, &p, &rt, &lane)?;
     fits(&d, &p, &lane)?;
-    let given = secrets_for(&mut registry, &d, &p)?;
+    let given = secrets_for(&mut registry, &d, &p, &used)?;
 
     // the typed inputs: models, a label set, derivatives of a kind
     let model_inputs: Vec<&descriptor::TypedInput> =
@@ -6195,7 +6202,7 @@ pub(crate) fn run_command(home: &Home, args: RunArgs) -> Result<(), Exit> {
                 )
                 .map_err(fail)?;
             }
-            let licence_env = crate::software::licence_env(registry, &p);
+            let licence_env = crate::software::licence_env(used.as_ref());
 
             let outcome = execute(
                 home,
@@ -6221,6 +6228,7 @@ pub(crate) fn run_command(home: &Home, args: RunArgs) -> Result<(), Exit> {
                     lane: &lane,
                     secrets: &given,
                     licence_env: &licence_env,
+                    used: &used,
                     resume: None,
                     verified: &verified,
                 },
@@ -6229,6 +6237,7 @@ pub(crate) fn run_command(home: &Home, args: RunArgs) -> Result<(), Exit> {
                 registry,
                 &Conclusion {
                     pipeline: &p,
+                    used: &used,
                     run_id,
                     job_id,
                     handle_id,
@@ -7021,7 +7030,9 @@ fn resume_command(home: &Home, args: &RunArgs, run_id: i64) -> Result<(), Exit> 
         )));
     }
     fits(&d, &p, &lane)?;
-    let given = secrets_for(&mut registry, &d, &p)?;
+    // the install the run uses, looked for once and carried
+    let used = crate::software::for_run(&mut registry, &p).ok().flatten();
+    let given = secrets_for(&mut registry, &d, &p, &used)?;
     let mut models = Vec::new();
     for id in r
         .model_ids
@@ -7075,6 +7086,7 @@ fn resume_command(home: &Home, args: &RunArgs, run_id: i64) -> Result<(), Exit> 
             units: 1,
             detected: Some(&detected),
             releases: r.input_release_id.is_none(),
+            used: Some(&used),
         },
     );
     if let Some(failed) = crate::requirements::refusing(&checked) {
@@ -7112,7 +7124,7 @@ fn resume_command(home: &Home, args: &RunArgs, run_id: i64) -> Result<(), Exit> 
     let job_id = claim_run(registry.store(), &p, handle_id, claimed)?;
     rows::resume(registry.store(), run_id, job_id)?;
     let _ = job::set_arg(registry.store(), job_id, "run", json!(run_id));
-    let licence_env = crate::software::licence_env(&mut registry, &p);
+    let licence_env = crate::software::licence_env(used.as_ref());
     let outcome = execute(
         home,
         &mut registry,
@@ -7137,6 +7149,7 @@ fn resume_command(home: &Home, args: &RunArgs, run_id: i64) -> Result<(), Exit> 
             lane: &lane,
             secrets: &given,
             licence_env: &licence_env,
+            used: &used,
             resume: Some(&r),
             verified: &Verified::default(),
         },
@@ -7169,6 +7182,7 @@ fn resume_command(home: &Home, args: &RunArgs, run_id: i64) -> Result<(), Exit> 
         &mut registry,
         &Conclusion {
             pipeline: &p,
+            used: &used,
             run_id,
             job_id,
             handle_id,
@@ -7418,6 +7432,9 @@ fn ingest_run(registry: &mut Registry, run_id: i64) -> Result<Value, Exit> {
 /// What closing a run needs to say.
 struct Conclusion<'a> {
     pipeline: &'a Pipeline,
+    /// The install found at the run's start; looked for again only where
+    /// there was none, since the run may have built one.
+    used: &'a Option<crate::software::Used>,
     run_id: i64,
     job_id: i64,
     handle_id: i64,
@@ -7462,9 +7479,11 @@ fn conclude(
     // its version and fingerprint
     let mut summary = summary;
     if summary.is_object()
-        && let Some(u) = crate::software::for_run(registry, c.pipeline)
-            .ok()
-            .flatten()
+        && let Some(u) = c.used.clone().or_else(|| {
+            crate::software::for_run(registry, c.pipeline)
+                .ok()
+                .flatten()
+        })
     {
         summary["software"] = u.doc();
     }
@@ -7597,6 +7616,9 @@ struct Execution<'a> {
     /// The variables a tool's terms want set beside its licence file
     /// (record 57 P5: `FS_ALLOW_DEEP`), from the pack of the install it uses.
     licence_env: &'a [(String, String)],
+    /// The install in the software place the run uses, looked for once at
+    /// the run's start and carried.
+    used: &'a Option<crate::software::Used>,
     /// The run as it stood, where this takes it up again.
     resume: Option<&'a Run>,
     /// The models whose bytes were found to be the admitted ones, once for
@@ -8255,7 +8277,7 @@ fn execute_run(home: &Home, registry: &mut Registry, x: &Execution<'_>) -> Resul
         "secrets": x.secrets.iter().map(|g| json!({"id": g.secret.id, "mount": g.secret.mount})).collect::<Vec<_>>(),
         // record 57 P5: the install that made it, installed or registered,
         // with its version and fingerprint, so a result says what made it
-        "software": crate::software::for_run(registry, p).ok().flatten().map(|u| u.doc()),
+        "software": x.used.as_ref().map(|u| u.doc()),
     });
     std::fs::write(
         inputs.join("manifest.json"),
@@ -8784,24 +8806,31 @@ struct LaneHeld {
     cores: u32,
     memory_mib: u64,
     gpu_mib: u64,
-    /// Of `gpu_mib`, what this run's own units hold.
+    /// What this run's own units declared on the card, whole: a tight card
+    /// is the run's own wait while that and the free memory cover a need.
+    /// `gpu_mib` is what the leases still have to load.
     own_gpu_mib: u64,
     runs: usize,
 }
 
-fn lane_held(store: &mut Store, run_id: i64, host: &str, card: u32) -> Result<LaneHeld, String> {
+fn lane_held(
+    store: &mut Store,
+    run_id: i64,
+    host: &str,
+    card: u32,
+    smi: Option<&Path>,
+) -> Result<LaneHeld, String> {
     let err = |e: nils_registry::Error| e.to_string();
     let d = store.dialect();
     // one container holds its unit's ask once, however many units it runs
     // together: the rows are counted by container, not by unit
     let sql = format!(
-        "SELECT c.run_id, r.job_id, CAST(COALESCE(SUM(c.cores), 0) AS BIGINT), \
-         CAST(COALESCE(SUM(c.memory_mb), 0) AS BIGINT), \
-         CAST(COALESCE(SUM(CASE WHEN c.gpu_card = {} THEN c.gpu_memory_mb ELSE 0 END), 0) AS BIGINT) \
-         FROM (SELECT DISTINCT run_id, container, cores, memory_mb, gpu_card, gpu_memory_mb \
+        "SELECT c.run_id, r.job_id, c.cores, c.memory_mb, \
+         CASE WHEN c.gpu_card = {} THEN c.gpu_memory_mb ELSE 0 END, c.pid, c.started_at \
+         FROM (SELECT DISTINCT run_id, container, cores, memory_mb, gpu_card, gpu_memory_mb, pid, \
+         started_at \
          FROM {} WHERE state = 'running' AND host = {}) c \
-         JOIN {} r ON r.id = c.run_id WHERE r.status = 'running' \
-         GROUP BY c.run_id, r.job_id",
+         JOIN {} r ON r.id = c.run_id WHERE r.status = 'running'",
         d.param(1, Type::Int),
         store.qualified("pipeline_unit"),
         d.param(2, Type::Text),
@@ -8810,25 +8839,96 @@ fn lane_held(store: &mut Store, run_id: i64, host: &str, card: u32) -> Result<La
     let rows = store
         .query(&sql, &[Param::Int(i64::from(card)), Param::from(host)])
         .map_err(err)?;
+    // the memory each process holds on the card, asked once and only where
+    // a unit declared card memory; where nvidia-smi does not answer, every
+    // lease counts whole
+    let mut apps: Option<Vec<(u32, u64)>> = None;
+    let mut asked = false;
     let mut held = LaneHeld::default();
+    let mut counted = std::collections::BTreeSet::new();
     for r in rows {
         let run = r.int(0).map_err(err)?;
         let job_id = r.opt_int(1).map_err(err)?;
         if run != run_id && !job_id.is_some_and(|j| job_alive(store, j)) {
             continue;
         }
-        let n = |i: usize| r.int(i).map(|v| v.max(0) as u64).map_err(err);
+        let n = |i: usize| {
+            r.opt_int(i)
+                .map(|v| v.unwrap_or(0).max(0) as u64)
+                .map_err(err)
+        };
         held.cores = held
             .cores
             .saturating_add(n(2)?.min(u64::from(u32::MAX)) as u32);
         held.memory_mib += n(3)?;
-        held.gpu_mib += n(4)?;
-        if run == run_id {
-            held.own_gpu_mib += n(4)?;
+        // what the unit declared, whole: the run's own wait is told by it
+        let declared = n(4)?;
+        let mut gpu = declared;
+        if gpu > 0
+            && let Some(smi) = smi
+            && let Some(pid) = r
+                .opt_int(5)
+                .map_err(err)?
+                .and_then(|p| u32::try_from(p).ok())
+        {
+            if !asked {
+                asked = true;
+                apps = lane::gpu_apps_mib(smi, card).ok();
+            }
+            // a pid the kernel gave to another process after the unit's
+            // client ended names a stranger's memory: only a process that
+            // started with or before the unit's row (a second's slack for
+            // the row's resolution) is the unit's own, else the lease
+            // counts whole
+            let began = r.text(6).ok().and_then(nils_registry::time::secs_of);
+            let ours = match (job::process_started(i64::from(pid)), began) {
+                (Some(process), Some(unit)) => process <= unit + 1,
+                _ => false,
+            };
+            if ours && let Some(apps) = &apps {
+                gpu = lane::lease_pending(gpu, &lane::process_tree(pid), apps);
+            }
         }
-        held.runs += 1;
+        held.gpu_mib += gpu;
+        if run == run_id {
+            held.own_gpu_mib += declared;
+        }
+        if counted.insert(run) {
+            held.runs += 1;
+        }
     }
     Ok(held)
+}
+
+/// Why a unit cannot lease the card now, or none where it can: `(false, _)`
+/// is the run's own wait (its units' declared leases, which end with them,
+/// would leave room), `(true, _)` memory another tenant or run holds. `held`
+/// is what the leases still have to load (they count against the free
+/// memory); `own` is what this run's units declared, whole, since the
+/// classification asks whether their ending would make room.
+fn card_shortfall(
+    free: Result<u64, String>,
+    held: u64,
+    own: u64,
+    need: u64,
+    card: u32,
+) -> Option<(bool, String)> {
+    match free {
+        Ok(free) if lane::lease_fits(free, held, need) => None,
+        Ok(free) if own > 0 && free.saturating_add(own) >= need => Some((
+            false,
+            format!(
+                "card {card}: {free} MiB free and {own} MiB held by this run's own units, and a unit needs {need} MiB: it waits for them"
+            ),
+        )),
+        Ok(free) => Some((
+            true,
+            format!(
+                "card {card}: {free} MiB free, {own} MiB of it this run's, and a unit needs {need} MiB: another tenant or run holds the rest"
+            ),
+        )),
+        Err(e) => Some((true, format!("card {card}: {e}"))),
+    }
 }
 
 /// What the scheduler of one run carries between its looks at the lane.
@@ -8877,7 +8977,13 @@ fn start_next(
     pending: &mut std::collections::VecDeque<Batch>,
     l: &mut Lanes,
 ) -> Result<Option<Running>, String> {
-    let held = lane_held(registry.store(), x.run_id, &l.host, l.card)?;
+    let held = lane_held(
+        registry.store(),
+        x.run_id,
+        &l.host,
+        l.card,
+        l.smi.as_deref(),
+    )?;
     l.looked = Some(Instant::now());
     l.seen = x.lane.ledger;
     l.seen.held_cores = held.cores;
@@ -8940,28 +9046,14 @@ fn start_next(
         };
         let held_gpu = held.gpu_mib;
         let own = held.own_gpu_mib;
-        // every lease counts whole: the card's memory in use cannot be told
-        // apart by tenant, so subtracting it from the leases would let a
-        // foreign tenant's memory cancel this lane's own and overfill the
-        // card. Counting a lease that has loaded twice only waits longer.
+        // a lease counts what its unit's processes have still to load
+        // (`lane_held`, per process from nvidia-smi's compute list), so
+        // memory a tenant holds cannot cancel this lane's own; where
+        // nvidia-smi cannot say, or a unit's processes are not among the
+        // card's, the lease counts whole
         // what keeps the lease: none, this run's own leases (which end with
         // its units), or memory another tenant or another run holds
-        let short = match free {
-            Ok(free) if lane::lease_fits(free, held_gpu, need) => None,
-            Ok(free) if own > 0 && free.saturating_add(own) >= need => Some((
-                false,
-                format!(
-                    "card {card}: {free} MiB free and {own} MiB held by this run's own units, and a unit needs {need} MiB: it waits for them"
-                ),
-            )),
-            Ok(free) => Some((
-                true,
-                format!(
-                    "card {card}: {free} MiB free, {own} MiB of it this run's, and a unit needs {need} MiB: another tenant or run holds the rest"
-                ),
-            )),
-            Err(e) => Some((true, format!("card {card}: {e}"))),
-        };
+        let short = card_shortfall(free, held_gpu, own, need, card);
         match short {
             None => {
                 l.card_short = None;
@@ -9216,7 +9308,9 @@ fn schedule(
             beaten = Some(Instant::now());
             if l.looked
                 .is_none_or(|t| t.elapsed() >= Duration::from_secs(1))
-                && let Ok(held) = lane_held(registry.store(), x.run_id, &l.host, l.card)
+                // the refresh keeps the ledger's cores and memory, which carry
+                // no per-process figure; the card is read at admission alone
+                && let Ok(held) = lane_held(registry.store(), x.run_id, &l.host, l.card, None)
             {
                 l.seen.held_cores = held.cores;
                 l.seen.held_memory_mib = held.memory_mib;
@@ -10127,15 +10221,24 @@ fn ensure_image(
     run_dir: &Path,
 ) -> Result<Option<PathBuf>, String> {
     let form = image_form(registry);
-    if let Some(used) = crate::software::for_run(registry, x.pipeline)?
+    // the install found at the run's start; looked for again only where
+    // there was none, since a run that began at the same time may have
+    // built the image into the place meanwhile
+    // (and where the carried install's image is gone, removed while the run
+    // waited, as then the image is built or adopted again)
+    let found = match x.used {
+        Some(u) if !u.manifest.kind.on_disk() || Path::new(&u.runnable).exists() => Some(u.clone()),
+        _ => crate::software::for_run(registry, x.pipeline)?,
+    };
+    if let Some(used) = found.as_ref()
         && used.manifest.kind.on_disk()
     {
-        if let Some(why) = crate::software::failed_verification(&used) {
+        if let Some(why) = crate::software::failed_verification(used) {
             return Err(why);
         }
         // used only as verified (record 49, after review): what fails its
         // recorded fingerprint is not run
-        if crate::software::still_verified(&used)? {
+        if crate::software::still_verified(used)? {
             return Ok(Some(PathBuf::from(&used.runnable)));
         }
         return Err(format!(
@@ -12901,6 +13004,24 @@ mod tests {
     }
 
     use super::*;
+
+    /// Review 1 of #548: a run whose own containers have loaded what they
+    /// declared has nothing pending, yet the tight card is still its own
+    /// wait (no stall clock), not another tenant's.
+    #[test]
+    fn a_tight_card_is_the_run_s_own_wait_once_its_containers_have_loaded() {
+        // 24 GiB card, two own containers of 10 GiB loaded: 4 GiB free,
+        // nothing pending, a third unit needs 10 GiB
+        let own = 20_480;
+        let (foreign, why) = card_shortfall(Ok(4_096), 0, own, 10_240, 0).unwrap();
+        assert!(!foreign, "{why}");
+        assert!(why.contains("waits for them"), "{why}");
+        // a tenant holding the rest is foreign
+        let (foreign, _) = card_shortfall(Ok(4_096), 0, 4_096, 20_480, 0).unwrap();
+        assert!(foreign);
+        assert!(card_shortfall(Ok(12_000), 0, own, 10_240, 0).is_none());
+        assert!(card_shortfall(Err("no".into()), 0, own, 1, 0).unwrap().0);
+    }
 
     /// The trust check hashes a model's file once for all the parts of a
     /// run, however many go at once, and a file that is not the admitted
