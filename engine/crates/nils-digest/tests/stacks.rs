@@ -1078,6 +1078,121 @@ fn the_dry_run_counts_what_only_the_echo_number_split_as_one_stack() {
     assert!(report.written.is_none());
 }
 
+/// A volume of `slices` positions taken at `echoes` echo numbers, each echo
+/// stating the same echo time to the second decimal (the times differ past
+/// it) and holding the same positions: the echoes of one volume.
+fn multi_echo(dir: &TempDir, study: &str, series: &str, slices: u32, echoes: u32) {
+    for e in 1..=echoes {
+        for n in 1..=slices {
+            let z = 2.0 * f64::from(n);
+            dir.file(
+                &format!("{series}/{e}-{n}"),
+                &mr(
+                    study,
+                    series,
+                    &format!("{series}.{e}.{n}"),
+                    "P1",
+                    &[
+                        echo_number(&e.to_string()),
+                        instance_number(&n.to_string()),
+                        echo_time(&format!("10.00{e}")),
+                        repetition_time("60"),
+                        iop(AXIAL),
+                        ipp(&format!("-120\\-110\\{z}")),
+                    ],
+                ),
+            );
+        }
+    }
+}
+
+/// Nima, 2026-10-30: a stack is one NIfTI, so the echoes of one volume (two
+/// echo numbers, one echo time, the same positions) are a stack each, and
+/// the dry run counts what an earlier digest joined and this one leaves.
+#[test]
+fn the_echoes_of_one_volume_under_one_echo_time_are_a_stack_each() {
+    for lab in labs() {
+        let name = lab.name;
+        let dir = TempDir::new("stacks-two-echoes");
+        multi_echo(&dir, "M", "M.1", 4, 2);
+        // beside it a volume of one echo number, which stays one stack
+        multi_echo(&dir, "N", "N.1", 4, 1);
+        let mut dry = settings(&dir);
+        dry.dry_run = true;
+        let counted = dry_run(&dry).unwrap_or_else(|e| panic!("{name}: {e}"));
+        assert_eq!(
+            (counted.stacks, counted.echoes_kept_apart),
+            (3, 2),
+            "{name}"
+        );
+        assert!(
+            counted.to_string().contains("kept apart"),
+            "{name}: {counted}"
+        );
+
+        let mut reg = lab.open();
+        let report = digest(&settings(&dir), &mut reg).unwrap_or_else(|e| panic!("{name}: {e}"));
+        assert_eq!(report.stacks, 3, "{name}");
+        let w = report.written.clone().unwrap();
+        assert_eq!((w.stacks_created, w.echo_stacks_folded), (3, 0), "{name}");
+        assert_eq!(
+            stacks_by_series(&mut reg),
+            [
+                ("M.1".to_string(), 4),
+                ("M.1".to_string(), 4),
+                ("N.1".to_string(), 4)
+            ],
+            "{name}"
+        );
+        counts_add_up(&mut reg, name);
+
+        // a re-read of a file of each series folds nothing
+        let report = digest(&reread(&dir), &mut reg).unwrap_or_else(|e| panic!("{name}: {e}"));
+        assert_eq!(report.written.unwrap().echo_stacks_folded, 0, "{name}");
+        assert_eq!(one(&mut reg, "SELECT COUNT(*) FROM {stack}"), 3, "{name}");
+    }
+}
+
+/// An enhanced object that is a whole volume in one stack: its frames agree,
+/// and it states one echo number, the echo time and a first position.
+fn enhanced_echo(series: &str, sop: &str, echo: &str) -> Vec<u8> {
+    let mut e = synth::enhanced_mr(
+        "M",
+        series,
+        sop,
+        vec![synth::fg_orientation(AXIAL)],
+        (0..4).map(|_| Vec::new()).collect(),
+    );
+    e.extend([echo_number(echo), echo_time("10"), ipp("0\\0\\5")]);
+    let e = with_patient(e, "P1");
+    synth::part10(&synth::enhanced_meta(sop), &e, true)
+}
+
+/// The dry run reads an enhanced object as the writer does: a whole object
+/// in one stack is at its first position, so two of them, one per echo, are
+/// the echoes of one volume to both, and the count says so.
+#[test]
+fn two_unsplit_enhanced_files_one_per_echo_are_kept_apart_by_the_dry_run_too() {
+    for lab in labs() {
+        let name = lab.name;
+        let dir = TempDir::new("stacks-enhanced-echoes");
+        dir.file("a/1", &enhanced_echo("M.1", "M.1.1", "1"));
+        dir.file("a/2", &enhanced_echo("M.1", "M.1.2", "2"));
+        let mut dry = settings(&dir);
+        dry.dry_run = true;
+        let counted = dry_run(&dry).unwrap_or_else(|e| panic!("{name}: {e}"));
+        assert_eq!(
+            (counted.stacks, counted.echoes_kept_apart),
+            (2, 2),
+            "{name}"
+        );
+        let mut reg = lab.open();
+        let report = digest(&settings(&dir), &mut reg).unwrap_or_else(|e| panic!("{name}: {e}"));
+        assert_eq!(report.stacks, 2, "{name}");
+        assert_eq!(one(&mut reg, "SELECT COUNT(*) FROM {stack}"), 2, "{name}");
+    }
+}
+
 /// When the rows a test writes by hand were made.
 const NOW: &str = "2026-10-09T12:00:00Z";
 
