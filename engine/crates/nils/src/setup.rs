@@ -175,8 +175,8 @@ fn image_tag(version: &str) -> String {
 /// beside.
 const KVASIR_REPO: &str = "https://github.com/kineuro/kvasir";
 const ASSISTANT_REPO: &str = "https://github.com/kineuro/nils-assistant";
-const KVASIR_REF: &str = "v1.0.0-alpha.11";
-const ASSISTANT_REF: &str = "v1.0.0-alpha.31";
+const KVASIR_REF: &str = "v1.0.0-alpha.12";
+const ASSISTANT_REF: &str = "v1.0.0-alpha.32";
 
 /// llama.cpp's server, which runs the models Kvasir downloads once an admin
 /// starts one (record 24): the build this version takes, where its archives

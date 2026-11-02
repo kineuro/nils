@@ -4,6 +4,10 @@ All notable changes to NILS v1 are recorded here. The format follows [Keep a Cha
 
 ## [Unreleased]
 
+## [1.0.0-beta.6] - 2026-11-02
+
+The sixth beta opens the software place to what a site already holds and closes the cleanup round of Wave 7b. A software place is chosen in the setup record, one place of the role, moved or retired at will; a shared folder is the site's, the engine writes only a subfolder of its own in it, and the folder's own sandboxes and SIF files are found and matched to the packages that pin their image, so one registration stands for every pipeline the image serves; an image already on the machine is said as cached. The site participation doors are listed, so a desk offers the page; a stack's header facts have a command and a door; a pipeline descriptor names the engines it works with; the echoes of one volume stay a stack each; a card lease counts what a unit still has to load; a release's lock is judged by its file's age. Kvasir 1.0.0-alpha.12 and the assistant 1.0.0-alpha.32 are pinned. The MRI pack 1.4.0 ships unchanged.
+
 ### Added
 
 - A pipeline descriptor may name the engines it works with: `x-nils.engine`, a range such as `>=1.0.0-beta.3` in the pack contract's spelling (job contract v1, added in place and additively). The pre-flight and the run door refuse a run on an engine outside it, saying which range the pipeline works with, which engine this is and to update the engine (`nils update`); a range that cannot be read is refused too. `postcontrast-cascade` and `postcontrast-full` name `>=1.0.0-beta.3`, the first engine that leaves a site file declared `sweep: false` unswept.
