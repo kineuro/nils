@@ -1226,6 +1226,65 @@ pub(crate) fn send(
 
 // ------------------------------------------------------------ the doors
 
+/// The doors, as the capabilities list them: a desk offers the
+/// Participation page only where `GET /api/participation` is listed.
+pub(crate) const DOORS: [&str; 5] = [
+    "GET /api/participation",
+    "GET /api/participation/preview",
+    "POST /api/participation",
+    "POST /api/participation/send",
+    "GET /api/participation/sends",
+];
+
+/// The policy table's rows for them.
+pub(crate) const POLICY: &[(&str, bool, bool, &str, &str, &str, &str)] = &[
+    (
+        "GET /api/participation",
+        false,
+        false,
+        "free",
+        "one document",
+        "Reading what the site shares",
+        "Read what the site shares",
+    ),
+    (
+        "GET /api/participation/preview",
+        false,
+        false,
+        "bounded",
+        "one document",
+        "Reading what would be sent",
+        "Read what would be sent",
+    ),
+    (
+        "POST /api/participation",
+        true,
+        false,
+        "free",
+        "one document",
+        "Changing what the site shares",
+        "Changed what the site shares",
+    ),
+    (
+        "POST /api/participation/send",
+        true,
+        false,
+        "bounded",
+        "one document",
+        "Sending what the site shares",
+        "Sent what the site shares",
+    ),
+    (
+        "GET /api/participation/sends",
+        false,
+        false,
+        "free",
+        "the sends",
+        "Reading what was sent",
+        "Read what was sent",
+    ),
+];
+
 /// What the participation doors need: an administrator's grants, the ones
 /// the settings' change takes.
 pub(crate) fn door(method: &str, segs: &[&str]) -> Option<(Need, Detail)> {

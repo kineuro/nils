@@ -1398,9 +1398,12 @@ fn cached_rules(
     carried: &[crate::packs::Offer],
     engine: &crate::packs::Engine,
     pins: &std::collections::BTreeMap<String, String>,
+    channel: Option<&str>,
 ) -> Vec<crate::rules::Found> {
-    // a pin changes what is looked for, so it is part of what is kept
-    let key = format!("{release} {pins:?}");
+    // a pin changes what is looked for, so it is part of what is kept, and
+    // so is the channel: a dev build's install reads its own channel's
+    // rules releases, as `nils update --part rules` does (2026-11-02)
+    let key = format!("{release} {pins:?} {channel:?}");
     let held = RULES.get_or_init(|| Mutex::new(HashMap::new()));
     if let Ok(guard) = held.lock()
         && let Some((at, found)) = guard.get(&key)
@@ -1410,7 +1413,7 @@ fn cached_rules(
     }
     let packs: Vec<crate::packs::Pack> = carried.iter().map(|o| o.pack.clone()).collect();
     let found: Vec<crate::rules::Found> =
-        crate::rules::find_all(&crate::rules::base(None), &packs, engine, pins)
+        crate::rules::find_all(&crate::rules::base(channel), &packs, engine, pins)
             .iter()
             .map(crate::rules::Found::described)
             .collect();
@@ -1590,6 +1593,7 @@ fn install(config: &Config, fresh: bool) -> (u16, Value) {
                         &carried,
                         &reads,
                         &crate::packs::pins_in(&dir),
+                        state.channel.as_deref(),
                     );
                     let plan = crate::packs::plan(
                         &dir,

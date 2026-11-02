@@ -6721,6 +6721,7 @@ pub(crate) fn doors_list() -> Vec<String> {
     .chain(crate::ask_doors::DOORS.iter())
     .chain(crate::main_scans::DOORS.iter())
     .chain(crate::review_rule::DOORS.iter())
+    .chain(crate::participate::DOORS.iter())
     .chain(crate::rule_changes::DOORS.iter())
     .chain(crate::review_questions::DOORS.iter())
     .map(|d| (*d).to_string())
@@ -8968,6 +8969,7 @@ pub(crate) fn policy() -> Vec<serde_json::Value> {
             .chain(crate::clinical_doors::POLICY.iter())
             .chain(crate::rule_changes::POLICY.iter())
             .chain(crate::review_questions::POLICY.iter())
+            .chain(crate::participate::POLICY.iter())
             .map(|(door, writes, idem, cost, cap, now, then)| {
                 row(door, *writes, *idem, cost, cap, now, then)
             }),
@@ -9096,6 +9098,11 @@ mod door_list_tests {
             .collect();
         assert!(unruled.is_empty(), "listed with no policy row: {unruled:?}");
         for d in crate::main_scans::DOORS {
+            assert!(doors.iter().any(|x| x == d), "{d} is not listed");
+        }
+        // 2026-11-02: the participation doors were routed from their module
+        // and not listed, so the desk hid Settings > Participation
+        for d in crate::participate::DOORS {
             assert!(doors.iter().any(|x| x == d), "{d} is not listed");
         }
     }
