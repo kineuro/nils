@@ -437,10 +437,15 @@ fn a_tool_is_installed_by_digest_verified_and_run_by_hand_from_bin() {
         "{before}"
     );
     assert!(before["place"]["declared"].is_null());
-    // section 6.8: the place says whether the engine can write it; there is
-    // no shared-folder notion yet, so no `shared` is named
+    // section 6.8: the place says whether the engine can write it; the
+    // default under the working place is the engine's own, not shared
     assert_eq!(before["place"]["read_only"], false, "{before}");
-    assert!(before["place"].get("shared").is_none(), "{before}");
+    assert_eq!(before["place"]["shared"], false, "{before}");
+    assert_eq!(
+        before["place"]["writes_into"],
+        lab.place().display().to_string(),
+        "{before}"
+    );
     {
         use std::os::unix::fs::PermissionsExt;
         let place = lab.place();
@@ -2112,4 +2117,644 @@ fn an_install_without_pack_takes_the_catalog_pipeline_s_pack() {
         &[],
     );
     assert_eq!(verified["verified"], true, "{verified}");
+}
+
+// ------------------------------------------------- the place is chosen
+
+const DIGEST_FS: &str = "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
+const IMAGE_FS: &str = "example.org/freesurfer@sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
+
+/// A stand-in for apptainer that answers `--version` and `inspect --labels
+/// --json` (as apptainer prints a SIF's labels) and nothing else.
+const FAKE_APPTAINER_LABELS: &str = r#"#!/usr/bin/env python3
+import json, sys
+a = sys.argv[1:]
+if not a or a[0] == "--version":
+    print("apptainer version 1.3.4"); sys.exit(0)
+if a[0] == "inspect" and "--labels" in a:
+    labels = {"org.label-schema.usage.singularity.deffile.from": "example.org/segtool:rc3"}
+    print(json.dumps({"data": {"attributes": {"labels": labels}}, "type": "container"})); sys.exit(0)
+sys.exit(0)
+"#;
+
+/// A pipeline added with its pack beside it (the pair), `name@1`.
+fn add_pair(lab: &Lab, name: &str, descriptor_text: &str, pack: Option<&str>) -> String {
+    let dir = lab.bin.path().join(format!("pair-{name}"));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("nils.job.yml"), descriptor_text).unwrap();
+    if let Some(pack) = pack {
+        let digest = nils_pipeline::descriptor::parse(descriptor_text)
+            .unwrap()
+            .digest();
+        std::fs::write(
+            dir.join("nils-pack.yaml"),
+            pack.replace("sha256:00", &digest),
+        )
+        .unwrap();
+    }
+    let added = lab.json(&["pipeline", "add", dir.to_str().unwrap(), "--json"], &[]);
+    assert_eq!(added["name"], name, "{added}");
+    format!("{name}@{}", added["version"])
+}
+
+/// A mock of a site's shared software folder: a FreeSurfer-shaped sandbox
+/// whose labels name the pinned image, a stray SIF, a folder without
+/// labels, a link and a file.
+fn mock_shared_folder(root: &Path) -> PathBuf {
+    let sandbox = root.join("freesurfer/8.2.0/image");
+    std::fs::create_dir_all(sandbox.join(".singularity.d")).unwrap();
+    std::fs::create_dir_all(sandbox.join("bin")).unwrap();
+    std::fs::create_dir_all(sandbox.join("models")).unwrap();
+    std::fs::write(
+        sandbox.join(".singularity.d/labels.json"),
+        json!({
+            "org.label-schema.usage.singularity.deffile.from": "freesurfer/freesurfer:8.2.0",
+            "org.opencontainers.image.base.digest": DIGEST_FS,
+            "org.label-schema.build-date": "Monday_1_September_2026",
+        })
+        .to_string(),
+    )
+    .unwrap();
+    std::fs::write(sandbox.join("bin/recon-all"), b"#!/bin/sh\necho 8.2.0\n").unwrap();
+    std::fs::write(sandbox.join("models/synthseg.h5"), b"weights").unwrap();
+    #[cfg(unix)]
+    std::os::unix::fs::symlink("8.2.0", root.join("freesurfer/current")).unwrap();
+    std::fs::create_dir_all(root.join("segcsvd")).unwrap();
+    std::fs::write(root.join("segcsvd/segcsvd_rc03.sif"), b"SIF bytes").unwrap();
+    std::fs::create_dir_all(root.join("synthba/0.2.1/image/bin")).unwrap();
+    std::fs::write(root.join("README.txt"), b"the site's folder\n").unwrap();
+    sandbox
+}
+
+/// Item 1 and 2 of the software-select slice: a declared place's own
+/// apps are offered (`found`: a sandbox with the image its labels name, a
+/// SIF with its labels through apptainer, nothing outside the place and
+/// no symlink followed), selecting one is a registration per matched
+/// package with `pack_from`, one path for several packages, and a sandbox
+/// built from the pinned image is the pinned image for the key
+/// (`same_as_pinned`). A read-only place still lists its candidates.
+#[test]
+fn a_declared_place_offers_what_it_holds_and_selecting_registers_it() {
+    let lab = Lab::with_runtime("software-found", false);
+    executable(&lab.bin.file("apptainer", FAKE_APPTAINER_LABELS.as_bytes()));
+    let (good, _, err) = lab.run(&["pipeline", "runtime", "--set", "apptainer"], &[], None);
+    assert!(good, "{err}");
+    let fs_pack = format!(
+        r#"nils_pack: 1
+pipeline: {{name: fs-tool, descriptor_sha256: "sha256:00"}}
+source:
+  app: freesurfer
+  version: "8.2.0"
+  image: "{IMAGE_FS}"
+  key_files: [bin, models]
+licence: {{spdx: Apache-2.0, redistributable: true, accept: false}}
+"#
+    );
+    let fs_tool = add_pair(
+        &lab,
+        "fs-tool",
+        &descriptor("fs-tool", "8.2.0", IMAGE_FS, "gpu: none", ""),
+        Some(&fs_pack),
+    );
+    // a second pipeline pins the same image and carries no pack
+    let fs_b = add_pair(
+        &lab,
+        "fs-tool-b",
+        &descriptor("fs-tool-b", "8.2.0", IMAGE_FS, "gpu: none", ""),
+        None,
+    );
+    // and one pins another image nothing holds
+    lab.add_pipeline(&descriptor("echo-tool", "2.0", IMAGE_ECHO, "gpu: none", ""));
+
+    let shared = TempDir::new("software-found-shared");
+    let sandbox = mock_shared_folder(shared.path());
+    let shared_path = std::fs::canonicalize(shared.path()).unwrap();
+    let (good, _, err) = lab.run(
+        &[
+            "place",
+            "add",
+            "sw",
+            shared_path.to_str().unwrap(),
+            "--role",
+            "software",
+        ],
+        &[],
+        None,
+    );
+    assert!(good, "{err}");
+
+    let server = Server::start(&lab, 40);
+    let (status, listed) = server.send("GET", "/api/software", ADMIN, None);
+    assert_eq!(status, 200, "{listed}");
+    let place = &listed["place"];
+    assert_eq!(place["declared"], "sw", "{place}");
+    assert_eq!(place["path"], shared_path.display().to_string(), "{place}");
+    assert_eq!(place["shared"], true, "{place}");
+    assert_eq!(place["read_only"], false, "{place}");
+    assert_eq!(
+        place["writes_into"],
+        shared_path.join("nils").display().to_string(),
+        "{place}"
+    );
+    let found = listed["found"].as_array().unwrap();
+    assert_eq!(found.len(), 2, "{listed}");
+    let fs = &found[0];
+    assert_eq!(fs["path"], sandbox.display().to_string(), "{fs}");
+    assert_eq!(fs["kind"], "sandbox", "{fs}");
+    assert_eq!(fs["base"], "freesurfer/freesurfer:8.2.0", "{fs}");
+    assert_eq!(fs["base_digest"], DIGEST_FS, "{fs}");
+    assert_eq!(
+        fs["matches"],
+        json!(["freesurfer@8.2.0", "fs-tool-b@8.2.0"]),
+        "{fs}"
+    );
+    assert_eq!(fs["registered"], false, "{fs}");
+    let sif = &found[1];
+    assert_eq!(
+        sif["path"],
+        shared_path
+            .join("segcsvd/segcsvd_rc03.sif")
+            .display()
+            .to_string(),
+        "{sif}"
+    );
+    assert_eq!(sif["kind"], "sif", "{sif}");
+    // the stand-in apptainer read its labels
+    assert_eq!(sif["base"], "example.org/segtool:rc3", "{sif}");
+    assert!(sif["base_digest"].is_null(), "{sif}");
+    assert_eq!(sif["matches"], json!([]), "{sif}");
+    assert_eq!(listed["found_errors"], 0, "{listed}");
+    // the rows the place does not hold yet
+    assert_eq!(
+        Lab::package(&listed, "freesurfer@8.2.0")["status"],
+        "missing"
+    );
+    assert_eq!(
+        Lab::package(&listed, "freesurfer@8.2.0")["image_cached"],
+        false,
+        "no lane cache under apptainer"
+    );
+
+    // select = register, per matched package, the pack from the catalog
+    let (status, done) = server.send(
+        "POST",
+        "/api/software/register",
+        ADMIN,
+        Some(&json!({
+            "spec": "freesurfer@8.2.0", "kind": "sandbox",
+            "path": sandbox.display().to_string(), "pack_from": fs_tool,
+        })),
+    );
+    assert_eq!(status, 200, "{done}");
+    assert_eq!(done["registered"], true, "{done}");
+    assert_eq!(done["verified"], true, "{done}");
+    let p = &done["package"];
+    assert_eq!(p["how"], "registered", "{p}");
+    assert_eq!(
+        p["digest"], DIGEST_FS,
+        "the labels' base digest is the install's: {p}"
+    );
+    assert_eq!(p["digest_asked"], DIGEST_FS, "{p}");
+    assert!(
+        p["pack_sha256"].is_string(),
+        "the catalog's pack was taken: {p}"
+    );
+    assert_eq!(p["verification"]["fingerprint"]["passed"], true, "{p}");
+    assert!(
+        p["verification"]["fingerprint"]["said"]
+            .as_str()
+            .unwrap()
+            .contains("over bin, models"),
+        "{p}"
+    );
+    // the pinned image, for the key, and the run finds it
+    let image = Lab::need(p, "image");
+    assert_eq!(image["ok"], true, "{image}");
+    assert_eq!(image["software"]["spec"], "freesurfer@8.2.0", "{image}");
+    assert_eq!(image["key"]["same_as_pinned"], true, "{image}");
+    assert_eq!(image["key"]["how"], "registered", "{image}");
+    assert_eq!(image["key"]["key"], DIGEST_FS, "{image}");
+    // a second package on the same path, with no pack (the pipeline has none)
+    let (status, refused) = server.send(
+        "POST",
+        "/api/software/register",
+        ADMIN,
+        Some(&json!({
+            "spec": "fs-tool-b@8.2.0", "kind": "sandbox",
+            "path": sandbox.display().to_string(), "pack_from": fs_b,
+        })),
+    );
+    assert_eq!(status, 422, "{refused}");
+    assert!(
+        refused["error"]
+            .as_str()
+            .unwrap()
+            .contains("carries no pack"),
+        "{refused}"
+    );
+    let (status, done_b) = server.send(
+        "POST",
+        "/api/software/register",
+        ADMIN,
+        Some(&json!({
+            "spec": "fs-tool-b@8.2.0", "kind": "sandbox",
+            "path": sandbox.display().to_string(),
+        })),
+    );
+    assert_eq!(status, 200, "{done_b}");
+    assert_eq!(done_b["package"]["digest"], DIGEST_FS, "{done_b}");
+    assert_eq!(
+        Lab::need(&done_b["package"], "image")["software"]["spec"],
+        "fs-tool-b@8.2.0",
+        "{done_b}"
+    );
+    // what is wrong with pack_from is said
+    let (status, refused) = server.send(
+        "POST",
+        "/api/software/register",
+        ADMIN,
+        Some(&json!({
+            "spec": "x@1", "kind": "sandbox",
+            "path": sandbox.display().to_string(), "pack_from": "no-such@9",
+        })),
+    );
+    assert_eq!(status, 404, "{refused}");
+    let (status, refused) = server.send(
+        "POST",
+        "/api/software/register",
+        ADMIN,
+        Some(&json!({
+            "spec": "x@1", "kind": "sandbox", "path": sandbox.display().to_string(),
+            "pack_from": fs_tool, "pack": fs_pack,
+        })),
+    );
+    assert_eq!(status, 422, "{refused}");
+    assert!(
+        refused["error"].as_str().unwrap().contains("not both"),
+        "{refused}"
+    );
+
+    // the engine wrote only its own subfolder; the site's bytes are untouched
+    let own = shared_path.join("nils");
+    assert!(own.join("freesurfer/8.2.0/manifest.json").is_file());
+    assert!(own.join("fs-tool-b/8.2.0/manifest.json").is_file());
+    let externals = std::fs::read_to_string(own.join("externals.yaml")).unwrap();
+    assert!(
+        externals.contains("spec: \"freesurfer@8.2.0\""),
+        "{externals}"
+    );
+    assert!(
+        externals.contains("spec: \"fs-tool-b@8.2.0\""),
+        "{externals}"
+    );
+    assert_eq!(
+        externals.matches(sandbox.to_str().unwrap()).count(),
+        2,
+        "{externals}"
+    );
+    assert!(!sandbox.join("manifest.json").exists());
+    assert!(!shared_path.join("externals.yaml").exists());
+    assert!(!shared_path.join("freesurfer/8.2.0/manifest.json").exists());
+    let mut top: Vec<String> = std::fs::read_dir(&shared_path)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    top.sort();
+    assert_eq!(
+        top,
+        ["README.txt", "freesurfer", "nils", "segcsvd", "synthba"]
+    );
+
+    // listed again: the candidate says registered, the rows say registered
+    let (status, listed) = server.send("GET", "/api/software", ADMIN, None);
+    assert_eq!(status, 200, "{listed}");
+    let found = listed["found"].as_array().unwrap();
+    assert_eq!(
+        found.len(),
+        2,
+        "the engine's own folder is not a candidate: {listed}"
+    );
+    assert_eq!(found[0]["registered"], true, "{listed}");
+    assert_eq!(found[1]["registered"], false, "{listed}");
+    for spec in ["freesurfer@8.2.0", "fs-tool-b@8.2.0"] {
+        let p = Lab::package(&listed, spec);
+        assert_eq!(p["status"], "registered", "{p}");
+        assert_eq!(p["image_cached"], false, "{p}");
+    }
+    assert!(
+        Lab::package(&listed, "freesurfer@8.2.0")["pipelines"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|l| l == &json!(fs_tool)),
+        "{listed}"
+    );
+    drop(server);
+
+    // the keyboard says the same, and names the candidates
+    let (good, out, err) = lab.run(&["software", "list"], &[], None);
+    assert!(good, "{err}");
+    assert!(
+        out.contains("(shared; the engine writes into its own subfolder)"),
+        "{out}"
+    );
+    assert!(
+        out.contains("found in the place, not registered as the engine's:"),
+        "{out}"
+    );
+    assert!(
+        out.contains("segcsvd_rc03.sif (from example.org/segtool:rc3)"),
+        "{out}"
+    );
+    assert!(out.contains(": registered"), "{out}");
+
+    // a read-only place still lists its candidates; a registration into it is refused
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        // the site's folder and the engine's subfolder in it both read-only
+        for dir in [&shared_path, &own] {
+            std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o555)).unwrap();
+        }
+        let listed = lab.json(&["software", "list", "--json"], &[]);
+        assert_eq!(listed["place"]["read_only"], true, "{listed}");
+        assert_eq!(listed["found"].as_array().unwrap().len(), 2, "{listed}");
+        let (good, _, err) = lab.run(
+            &[
+                "software",
+                "register",
+                "x@1",
+                "--kind",
+                "sandbox",
+                "--path",
+                sandbox.to_str().unwrap(),
+            ],
+            &[],
+            None,
+        );
+        assert!(!good);
+        assert!(
+            err.contains("is read-only for the engine's account"),
+            "{err}"
+        );
+        assert!(err.contains(own.to_str().unwrap()), "{err}");
+        for dir in [&shared_path, &own] {
+            std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+    }
+}
+
+/// Item 3: a package whose image is in the runtime's store though nothing
+/// in the place holds it says `image_cached`, and the keyboard says it is
+/// adopted at the next run.
+#[test]
+fn a_cached_image_is_said_on_a_row_the_place_does_not_hold() {
+    let lab = echo_lab("software-image-cached");
+    let listed = lab.json(&["software", "list", "--json"], &[]);
+    let p = Lab::package(&listed, "echo-tool@2.0");
+    assert_eq!(p["status"], "missing", "{p}");
+    assert_eq!(
+        p["image_cached"], true,
+        "the stand-in docker holds every image: {p}"
+    );
+    assert_eq!(Lab::need(p, "image")["present"], true, "{p}");
+    assert_eq!(
+        listed["found"],
+        json!([]),
+        "the default place is never walked"
+    );
+    assert_eq!(listed["place"]["shared"], false, "{listed}");
+    assert_eq!(
+        listed["place"]["writes_into"], listed["place"]["path"],
+        "{listed}"
+    );
+    let (good, out, err) = lab.run(&["software", "list"], &[], None);
+    assert!(good, "{err}");
+    assert!(
+        out.contains("image cached, adopted at the next run"),
+        "{out}"
+    );
+    // installed, the row no longer says it
+    let done = lab.json(&["software", "install", "echo-tool@2.0", "--json"], &[]);
+    assert_eq!(done["installed"], true, "{done}");
+    assert_eq!(done["package"]["image_cached"], false, "{done}");
+}
+
+/// Item 4: the software place is chosen and changed. Declared outside the
+/// working place it is shared and the engine writes `<place>/nils`; under
+/// the working place it is the engine's own; a second place of the role is
+/// refused naming the first; after `nils place set` the door answers the
+/// new path at once; retired, the default returns; a read-only place lists
+/// and refuses installs in words.
+#[test]
+fn the_software_place_is_chosen_changed_and_retired() {
+    let lab = echo_lab("software-place");
+    let server = Server::start(&lab, 40);
+    let default = lab.place().display().to_string();
+    let (status, listed) = server.send("GET", "/api/software", ADMIN, None);
+    assert_eq!(status, 200, "{listed}");
+    assert_eq!(listed["place"]["path"], default, "{listed}");
+    assert!(listed["place"]["declared"].is_null(), "{listed}");
+    assert_eq!(listed["place"]["shared"], false, "{listed}");
+    assert_eq!(listed["place"]["writes_into"], default, "{listed}");
+    assert_eq!(listed["found"], json!([]), "{listed}");
+
+    // declared outside the working place: shared
+    let a = TempDir::new("software-place-a");
+    let a_path = std::fs::canonicalize(a.path()).unwrap();
+    let (good, out, err) = lab.run(
+        &[
+            "place",
+            "add",
+            "sw",
+            a_path.to_str().unwrap(),
+            "--role",
+            "software",
+        ],
+        &[],
+        None,
+    );
+    assert!(good, "{err}");
+    let id = out
+        .split_whitespace()
+        .nth(1)
+        .unwrap()
+        .trim_end_matches(':')
+        .to_string();
+    let (status, listed) = server.send("GET", "/api/software", ADMIN, None);
+    assert_eq!(status, 200, "{listed}");
+    assert_eq!(
+        listed["place"]["path"],
+        a_path.display().to_string(),
+        "{listed}"
+    );
+    assert_eq!(listed["place"]["declared"], "sw", "{listed}");
+    assert_eq!(listed["place"]["shared"], true, "{listed}");
+    assert_eq!(
+        listed["place"]["writes_into"],
+        a_path.join("nils").display().to_string(),
+        "{listed}"
+    );
+    assert_eq!(listed["place"]["read_only"], false, "{listed}");
+
+    // a second place of the role is refused naming the first, at the keyboard and the door
+    let b = TempDir::new("software-place-b");
+    let b_path = std::fs::canonicalize(b.path()).unwrap();
+    let (good, _, err) = lab.run(
+        &[
+            "place",
+            "add",
+            "sw2",
+            b_path.to_str().unwrap(),
+            "--role",
+            "software",
+        ],
+        &[],
+        None,
+    );
+    assert!(!good);
+    assert!(err.contains("the software place is sw"), "{err}");
+    assert!(
+        err.contains(&format!("nils place set {id} --path")),
+        "{err}"
+    );
+    assert!(err.contains(&format!("nils place retire {id}")), "{err}");
+    let (status, refused) = server.send(
+        "POST",
+        "/api/places",
+        ADMIN,
+        Some(&json!({"name": "sw2", "role": "software", "path": b_path.display().to_string()})),
+    );
+    assert_eq!(status, 409, "{refused}");
+    assert!(
+        refused["error"]
+            .as_str()
+            .unwrap()
+            .contains("the software place is sw"),
+        "{refused}"
+    );
+
+    // set: the door answers the new path at once, no restart
+    let (good, _, err) = lab.run(
+        &["place", "set", &id, "--path", b_path.to_str().unwrap()],
+        &[],
+        None,
+    );
+    assert!(good, "{err}");
+    let (status, listed) = server.send("GET", "/api/software", ADMIN, None);
+    assert_eq!(status, 200, "{listed}");
+    assert_eq!(
+        listed["place"]["path"],
+        b_path.display().to_string(),
+        "{listed}"
+    );
+    assert_eq!(listed["place"]["declared"], "sw", "{listed}");
+    assert_eq!(listed["place"]["shared"], true, "{listed}");
+    // an install goes into the engine's own subfolder of the shared place
+    let (status, done) = server.send(
+        "POST",
+        "/api/software/install",
+        ADMIN,
+        Some(&json!({"spec": "echo-tool@2.0"})),
+    );
+    assert_eq!(status, 200, "{done}");
+    assert_eq!(done["installed"], true, "{done}");
+    assert!(b_path.join("nils/echo-tool/2.0/manifest.json").is_file());
+    assert!(!b_path.join("echo-tool").exists());
+    assert_eq!(
+        done["package"]["place"]["writes_into"],
+        b_path.join("nils").display().to_string(),
+        "{done}"
+    );
+
+    // under the working place: the engine's own, written as it is
+    let own = lab.work.path().join("sw-own");
+    std::fs::create_dir_all(&own).unwrap();
+    let own = std::fs::canonicalize(&own).unwrap();
+    let (good, _, err) = lab.run(
+        &["place", "set", &id, "--path", own.to_str().unwrap()],
+        &[],
+        None,
+    );
+    assert!(good, "{err}");
+    let (status, listed) = server.send("GET", "/api/software", ADMIN, None);
+    assert_eq!(status, 200, "{listed}");
+    assert_eq!(listed["place"]["shared"], false, "{listed}");
+    assert_eq!(
+        listed["place"]["writes_into"],
+        own.display().to_string(),
+        "{listed}"
+    );
+    assert_eq!(listed["found"], json!([]), "{listed}");
+
+    // read-only: listed, installs and registrations refused in words
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let ro = TempDir::new("software-place-ro");
+        let ro_path = std::fs::canonicalize(ro.path()).unwrap();
+        std::fs::set_permissions(&ro_path, std::fs::Permissions::from_mode(0o555)).unwrap();
+        let (good, _, err) = lab.run(
+            &["place", "set", &id, "--path", ro_path.to_str().unwrap()],
+            &[],
+            None,
+        );
+        assert!(good, "{err}");
+        let (status, listed) = server.send("GET", "/api/software", ADMIN, None);
+        assert_eq!(status, 200, "{listed}");
+        assert_eq!(listed["place"]["read_only"], true, "{listed}");
+        assert_eq!(listed["place"]["shared"], true, "{listed}");
+        assert_eq!(listed["found"], json!([]), "{listed}");
+        let (status, refused) = server.send(
+            "POST",
+            "/api/software/install",
+            ADMIN,
+            Some(&json!({"spec": "echo-tool@2.0"})),
+        );
+        assert_eq!(status, 409, "{refused}");
+        assert!(
+            refused["error"]
+                .as_str()
+                .unwrap()
+                .contains("is read-only for the engine's account"),
+            "{refused}"
+        );
+        let (status, refused) = server.send(
+            "POST",
+            "/api/software/register",
+            ADMIN,
+            Some(&json!({"spec": "x@1", "kind": "sandbox", "path": own.display().to_string()})),
+        );
+        assert_eq!(status, 409, "{refused}");
+        assert!(
+            refused["error"]
+                .as_str()
+                .unwrap()
+                .contains("is read-only for the engine's account"),
+            "{refused}"
+        );
+        std::fs::set_permissions(&ro_path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    // retired: the default returns, and a new place of the role may be added
+    let (good, _, err) = lab.run(&["place", "retire", &id], &[], None);
+    assert!(good, "{err}");
+    let (status, listed) = server.send("GET", "/api/software", ADMIN, None);
+    assert_eq!(status, 200, "{listed}");
+    assert_eq!(listed["place"]["path"], default, "{listed}");
+    assert!(listed["place"]["declared"].is_null(), "{listed}");
+    assert_eq!(listed["place"]["shared"], false, "{listed}");
+    let (good, _, err) = lab.run(
+        &[
+            "place",
+            "add",
+            "sw2",
+            a_path.to_str().unwrap(),
+            "--role",
+            "software",
+        ],
+        &[],
+        None,
+    );
+    assert!(good, "{err}");
 }

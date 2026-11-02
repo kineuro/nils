@@ -386,6 +386,26 @@ pub fn check_registry_rule(store: &mut Store, role: Role, guarantees: &Value) ->
     }
 }
 
+/// One place has the role `software` (record 57 P5; Wave 7b, section 6):
+/// the engine reads and writes one software place, so a second is refused
+/// naming the first and the two ways on: move it, or retire it and add
+/// another.
+pub fn check_one_software_place(store: &mut Store, role: Role) -> Result<(), Error> {
+    if role != Role::Software {
+        return Ok(());
+    }
+    match active(store)?
+        .into_iter()
+        .find(|p| p.role == Role::Software)
+    {
+        None => Ok(()),
+        Some(p) => Err(Error::Message(format!(
+            "the software place is {} (place {}) at {}, and one place has this role: nils place set {} --path DIR moves it, or nils place retire {} and then add another",
+            p.name, p.id, p.path, p.id, p.id
+        ))),
+    }
+}
+
 pub struct New<'a> {
     pub name: &'a str,
     pub role: Role,
@@ -412,6 +432,7 @@ pub fn add(store: &mut Store, p: &New<'_>) -> Result<i64, Error> {
         )));
     }
     check_registry_rule(store, p.role, &p.guarantees)?;
+    check_one_software_place(store, p.role)?;
     let handling = if p.handling.is_null() {
         Value::Null
     } else {

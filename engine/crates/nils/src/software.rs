@@ -88,23 +88,42 @@ pub(crate) struct Place {
     pub(crate) path: PathBuf,
     /// The declared place's name, where one is declared.
     pub(crate) declared: Option<String>,
+    /// A site's shared folder (section 6.8): declared, and not under a
+    /// working place. The engine writes only a subfolder of its own in it.
+    pub(crate) shared: bool,
 }
 
+/// The engine's own subfolder in a shared place (section 6.8): its
+/// installs, wrappers, modules, licences and `externals.yaml` go there, so
+/// the site's own apps beside it stay as they are.
+pub(crate) const OWN_DIR: &str = "nils";
+
 impl Place {
+    /// Where the engine writes: `<place>/nils` in a shared place, else the
+    /// place itself.
+    pub(crate) fn writes_into(&self) -> PathBuf {
+        if self.shared {
+            self.path.join(OWN_DIR)
+        } else {
+            self.path.clone()
+        }
+    }
+
     pub(crate) fn doc(&self) -> Value {
-        // read_only: the engine cannot write the place (a folder a site shares
-        // read-only still lists, verifies and runs what it holds, but installs
-        // and registrations into it fail). The place has no notion of a
-        // shared folder yet, so no `shared` is named.
+        // read_only: the engine cannot write where its installs go (a folder
+        // a site shares read-only still lists, verifies and runs what it
+        // holds, but installs and registrations into it fail)
         json!({
             "path": self.path.display().to_string(),
             "declared": self.declared,
-            "read_only": !crate::places::may_write(&self.path),
+            "read_only": !crate::places::may_write(&self.writes_into()),
+            "shared": self.shared,
+            "writes_into": self.writes_into().display().to_string(),
         })
     }
 
     pub(crate) fn layout(&self) -> Layout {
-        Layout::new(&self.path)
+        Layout::new(&self.writes_into())
     }
 }
 
@@ -114,9 +133,17 @@ impl Place {
 pub(crate) fn place(registry: &mut Registry) -> Result<Place, String> {
     let active = nils_registry::place::active(registry.store()).map_err(|e| e.to_string())?;
     if let Some(p) = active.iter().find(|p| p.role == Role::Software) {
+        let path = PathBuf::from(&p.path);
+        // a declared place under a working place is the engine's own; one
+        // elsewhere is the site's shared folder (section 6.8)
+        let shared = !active
+            .iter()
+            .filter(|w| w.role == Role::Working)
+            .any(|w| path.starts_with(&w.path));
         return Ok(Place {
-            path: PathBuf::from(&p.path),
+            path,
             declared: Some(p.name.clone()),
+            shared,
         });
     }
     let working = match crate::pipelines::run_places(registry.store()) {
@@ -131,13 +158,23 @@ pub(crate) fn place(registry: &mut Registry) -> Result<Place, String> {
     Ok(Place {
         path: Path::new(&working.path).join(DEFAULT_DIR),
         declared: None,
+        shared: false,
     })
 }
 
-/// The place, made where it is not yet.
+/// The place, made where it is not yet: the engine's own folder in it. A
+/// place the engine cannot write is refused in words.
 fn place_made(registry: &mut Registry) -> Result<Place, String> {
     let p = place(registry)?;
-    std::fs::create_dir_all(&p.path).map_err(|e| format!("{}: {e}", p.path.display()))?;
+    let into = p.writes_into();
+    if !crate::places::may_write(&into) {
+        return Err(format!(
+            "the software place {} is read-only for the engine's account: it lists, verifies and runs what the place holds, but installs and registrations need {} writable (or another place: nils place set ID --path DIR)",
+            p.path.display(),
+            into.display()
+        ));
+    }
+    std::fs::create_dir_all(&into).map_err(|e| format!("{}: {e}", into.display()))?;
     Ok(p)
 }
 
@@ -154,6 +191,12 @@ pub(crate) fn identity(p: &Pipeline, pack: Option<&PackSoftware>) -> (String, St
         .filter(|v| !v.is_empty())
         .unwrap_or_else(|| p.tool_version.clone());
     (app, version)
+}
+
+/// The app and the version a catalog pipeline's tool is kept under, by
+/// the pipeline's own pack.
+fn catalog_identity(p: &Pipeline) -> (String, String) {
+    identity(p, layout::pack_software(&p.pack).ok().as_ref())
 }
 
 /// The pack an install was made with, kept beside its manifest.
@@ -325,7 +368,9 @@ pub(crate) fn for_run(registry: &mut Registry, p: &Pipeline) -> Result<Option<Us
 /// key-file fingerprint equals the pinned image's (an installed copy of it
 /// here) is the same tool, `same_as_pinned: true`, and the key keeps the
 /// pinned digest; one that differs, or that cannot be compared, has its
-/// own key, its fingerprint. An installed copy is the pinned image.
+/// own key, its fingerprint. An installed copy is the pinned image, and so
+/// is a registered sandbox whose own labels name the pinned image as the
+/// one it was built from (its `digest`, recorded at registration).
 pub(crate) fn key_part(registry: &mut Registry, p: &Pipeline, used: Option<&Used>) -> Value {
     let Some(u) = used else {
         return json!({
@@ -337,6 +382,9 @@ pub(crate) fn key_part(registry: &mut Registry, p: &Pipeline, used: Option<&Used
     let m = &u.manifest;
     let same = match m.how {
         How::Installed => true,
+        // a registered sandbox whose own labels name the pinned image as
+        // its base (an unpacked copy of it) is the pinned image
+        How::Registered if m.digest.as_deref() == Some(p.image_digest.as_str()) => true,
         How::Registered => {
             let pinned = place(registry)
                 .ok()
@@ -1104,6 +1152,276 @@ fn needs(
     checks.iter().map(Check::doc).collect()
 }
 
+// ------------------------------------------- what the declared place holds
+
+/// Something a declared software place holds that is not an install of the
+/// engine's layout (section 6.8, the site's own apps): an Apptainer sandbox
+/// (a folder with `.singularity.d/labels.json`) or a SIF file, with the base
+/// image its labels name and that image's digest, where the labels carry
+/// them. Only the declared place is ever looked at (section 4.4): never
+/// the default under the working place, never any other path.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Candidate {
+    pub(crate) path: PathBuf,
+    pub(crate) kind: Kind,
+    pub(crate) base: Option<String>,
+    pub(crate) base_digest: Option<String>,
+}
+
+/// How deep the look goes (`<app>/<version>/image` is three), how many
+/// entries it reads and candidates it keeps, how long a SIF's labels may
+/// take, and how long a look stands before the place is read again.
+const FOUND_DEPTH: usize = 3;
+const FOUND_ENTRIES: usize = 2000;
+const FOUND_CANDIDATES: usize = 200;
+const LABELS_CAP: Duration = Duration::from_secs(30);
+const FOUND_KEPT: Duration = Duration::from_secs(60);
+/// The most of an inspect's output that is read.
+const LABELS_OUTPUT_CAP: u64 = 1 << 20;
+
+const LABELS_FILE: &str = ".singularity.d/labels.json";
+const LABEL_FROM: &str = "org.label-schema.usage.singularity.deffile.from";
+const LABEL_BASE_NAME: &str = "org.opencontainers.image.base.name";
+const LABEL_BASE_DIGEST: &str = "org.opencontainers.image.base.digest";
+
+/// The last look: when, at which place, what it found and how many entries
+/// it could not read.
+type Found = (std::time::Instant, PathBuf, Vec<Candidate>, usize);
+static FOUND: std::sync::Mutex<Option<Found>> = std::sync::Mutex::new(None);
+
+/// The base image a set of labels names, and its digest.
+fn base_of(labels: &Value) -> (Option<String>, Option<String>) {
+    let text = |k: &str| {
+        labels[k]
+            .as_str()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+    };
+    (
+        text(LABEL_FROM).or_else(|| text(LABEL_BASE_NAME)),
+        text(LABEL_BASE_DIGEST),
+    )
+}
+
+/// A sandbox's labels, `.singularity.d/labels.json`: a flat object.
+fn sandbox_labels(dir: &Path) -> Option<Value> {
+    let bytes = std::fs::read(dir.join(LABELS_FILE)).ok()?;
+    serde_json::from_slice::<Value>(&bytes)
+        .ok()
+        .filter(Value::is_object)
+}
+
+/// The apptainer program of this machine, where there is one: the engine's
+/// runtime when that is apptainer, else one on the search path.
+fn apptainer_here(detected: &runtime::Detected) -> Option<PathBuf> {
+    detected
+        .runtime
+        .as_ref()
+        .filter(|r| r.kind == runtime::Kind::Apptainer)
+        .map(|r| r.program.clone())
+        .or_else(|| runtime::which("apptainer", std::env::var_os("PATH").as_deref()))
+}
+
+/// A SIF's labels, from `apptainer inspect --labels --json` (whose document
+/// is `{data: {attributes: {labels}}}`), within the cap; none where there
+/// is no apptainer, it fails or does not answer in time.
+fn sif_labels(apptainer: Option<&Path>, sif: &Path) -> Option<Value> {
+    let program = apptainer?;
+    let mut child = std::process::Command::new(program)
+        .arg("inspect")
+        .arg("--labels")
+        .arg("--json")
+        .arg(sif)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .ok()?;
+    let mut out = child.stdout.take()?;
+    let reader = std::thread::spawn(move || {
+        let mut text = String::new();
+        let _ = out
+            .by_ref()
+            .take(LABELS_OUTPUT_CAP)
+            .read_to_string(&mut text);
+        text
+    });
+    let status = nils_proc::wait_within(&mut child, Duration::from_millis(50), LABELS_CAP).ok()?;
+    let text = reader.join().ok()?;
+    if !status?.success() {
+        return None;
+    }
+    let doc: Value = serde_json::from_str(&text).ok()?;
+    let labels = &doc["data"]["attributes"]["labels"];
+    if labels.is_object() {
+        Some(labels.clone())
+    } else {
+        Some(doc).filter(Value::is_object)
+    }
+}
+
+/// The declared place walked: its sandboxes and SIF files to `FOUND_DEPTH`
+/// levels, symlinks not followed, the engine's own folder and the layout's
+/// install folders left out, errors counted and never raised. `(candidates,
+/// entries that could not be read)`.
+fn walk_place(place: &Place, detected: &runtime::Detected) -> (Vec<Candidate>, usize) {
+    let own = place.writes_into();
+    let l = place.layout();
+    let mut errors = 0usize;
+    let mut found = Vec::new();
+    let mut read = 0usize;
+    let apptainer = apptainer_here(detected);
+    // the folders still to read, each with its depth under the place
+    let mut stack: Vec<(PathBuf, usize)> = vec![(place.path.clone(), 0)];
+    while let Some((dir, depth)) = stack.pop() {
+        if found.len() >= FOUND_CANDIDATES || read >= FOUND_ENTRIES {
+            break;
+        }
+        let entries = match std::fs::read_dir(&dir) {
+            Ok(e) => e,
+            Err(_) => {
+                errors += 1;
+                continue;
+            }
+        };
+        let mut entries: Vec<PathBuf> = entries
+            .filter_map(|e| match e {
+                Ok(e) => Some(e.path()),
+                Err(_) => {
+                    errors += 1;
+                    None
+                }
+            })
+            .collect();
+        entries.sort();
+        for p in entries {
+            if found.len() >= FOUND_CANDIDATES || read >= FOUND_ENTRIES {
+                break;
+            }
+            read += 1;
+            // the engine's own folder and files are not the site's
+            if p == own || p == l.externals() || p == l.links() {
+                continue;
+            }
+            let meta = match std::fs::symlink_metadata(&p) {
+                Ok(m) => m,
+                Err(_) => {
+                    errors += 1;
+                    continue;
+                }
+            };
+            if meta.file_type().is_symlink() {
+                continue;
+            }
+            let name = p
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            if meta.is_dir() {
+                if depth == 0 && matches!(name.as_str(), layout::MODULES | layout::LICENCES) {
+                    continue;
+                }
+                // an install of the layout, `<app>/<version>/manifest.json`
+                if depth == 1 && p.join(layout::MANIFEST).is_file() {
+                    continue;
+                }
+                if let Some(labels) = sandbox_labels(&p) {
+                    let (base, base_digest) = base_of(&labels);
+                    found.push(Candidate {
+                        path: p,
+                        kind: Kind::Sandbox,
+                        base,
+                        base_digest,
+                    });
+                    continue;
+                }
+                if depth + 1 < FOUND_DEPTH {
+                    stack.push((p, depth + 1));
+                }
+            } else if meta.is_file() && name.ends_with(".sif") {
+                let (base, base_digest) = sif_labels(apptainer.as_deref(), &p)
+                    .map(|labels| base_of(&labels))
+                    .unwrap_or((None, None));
+                found.push(Candidate {
+                    path: p,
+                    kind: Kind::Sif,
+                    base,
+                    base_digest,
+                });
+            }
+        }
+    }
+    found.sort_by(|a, b| a.path.cmp(&b.path));
+    (found, errors)
+}
+
+/// What the declared place holds, from the last look where it is under a
+/// minute old, else looked for now. The default place is never walked.
+fn found_cached(place: &Place, detected: &runtime::Detected) -> (Vec<Candidate>, usize) {
+    if place.declared.is_none() {
+        return (Vec::new(), 0);
+    }
+    {
+        let kept = FOUND.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((at, path, found, errors)) = kept.as_ref()
+            && *path == place.path
+            && at.elapsed() < FOUND_KEPT
+        {
+            return (found.clone(), *errors);
+        }
+    }
+    let (found, errors) = walk_place(place, detected);
+    *FOUND.lock().unwrap_or_else(|e| e.into_inner()) = Some((
+        std::time::Instant::now(),
+        place.path.clone(),
+        found.clone(),
+        errors,
+    ));
+    (found, errors)
+}
+
+/// The candidates as `GET /api/software` lists them under `found`: each
+/// `{path, kind, base, base_digest, matches, registered}`, `matches` the
+/// catalog's packages whose pinned image digest is the candidate's base
+/// digest, `registered` whether an install in the layout names its path.
+fn found_docs(
+    place: &Place,
+    catalog: &[(Pipeline, Descriptor)],
+    installs: &[Manifest],
+    detected: &runtime::Detected,
+) -> (Vec<Value>, usize) {
+    let (found, errors) = found_cached(place, detected);
+    let docs = found
+        .iter()
+        .map(|c| {
+            let mut matches: Vec<String> = match &c.base_digest {
+                None => Vec::new(),
+                Some(d) => catalog
+                    .iter()
+                    .filter(|(p, _)| &p.image_digest == d)
+                    .map(|(p, _)| {
+                        let (app, version) = catalog_identity(p);
+                        format!("{app}@{version}")
+                    })
+                    .collect(),
+            };
+            matches.sort();
+            matches.dedup();
+            let path = c.path.display().to_string();
+            json!({
+                "path": path,
+                "kind": c.kind.name(),
+                "base": c.base,
+                "base_digest": c.base_digest,
+                "matches": matches,
+                "registered": installs.iter().any(|m| m.image == path),
+            })
+        })
+        .collect();
+    (docs, errors)
+}
+
 // -------------------------------------------------------------- listing
 
 /// How a package stands: installed, registered, missing, failed
@@ -1153,12 +1471,20 @@ fn package_doc(
         "file": {"present": file.is_some(), "name": file.as_ref().and_then(|f| f.file_name()).map(|n| n.to_string_lossy().into_owned())},
     });
     let spec = format!("{app}@{version}");
+    // the image is on this machine (the runtime's store, or the lane's
+    // image cache under apptainer) though nothing in the place holds it:
+    // the next run adopts it into the place
+    let image_cached = m.is_none()
+        && checked
+            .iter()
+            .any(|c| c["check"] == "image" && c["present"] == true);
     json!({
         "app": app, "version": version, "spec": spec,
         "kind": m.map(|m| m.kind.name()),
         "how": m.map(|m| m.how.name()),
         "managed": m.map(|m| m.managed),
         "status": status(m, &pinned),
+        "image_cached": image_cached,
         "place": place.doc(),
         "path": m.and_then(|m| m.image_path(&l)).map(|p| p.display().to_string()),
         "image": m.map(|m| m.image.clone()),
@@ -1194,16 +1520,22 @@ pub(crate) fn list(registry: &mut Registry, home: &Path) -> Result<Value, String
     let catalog = catalog(registry)?;
     let detected = crate::pipelines::detect_cached(registry);
     let mut packages: Vec<Value> = Vec::new();
+    let mut found: Vec<Value> = Vec::new();
+    let mut found_errors = 0usize;
     if let Some(place) = &place {
         let l = place.layout();
         let installs = l.installs();
+        (found, found_errors) = found_docs(place, &catalog, &installs, &detected);
         let mut seen: Vec<(String, String)> = Vec::new();
         for m in &installs {
-            let pack = pack_copy(&l, &m.app, &m.version).map(|(_, s, _)| s);
+            let pack_doc = pack_copy(&l, &m.app, &m.version).map(|(doc, _, _)| doc);
             let mine: Vec<(Pipeline, Descriptor)> = catalog
                 .iter()
                 .filter(|(p, _)| {
-                    identity(p, pack.as_ref()) == (m.app.clone(), m.version.clone())
+                    catalog_identity(p) == (m.app.clone(), m.version.clone())
+                        || pack_doc
+                            .as_ref()
+                            .is_some_and(|doc| pack_pipeline(doc) == Some(p.name.as_str()))
                         || m.digest.as_deref() == Some(p.image_digest.as_str())
                         || m.digest_asked.as_deref() == Some(p.image_digest.as_str())
                 })
@@ -1224,10 +1556,12 @@ pub(crate) fn list(registry: &mut Registry, home: &Path) -> Result<Value, String
                 seen.push((p.name.clone(), p.tool_version.clone()));
             }
         }
-        // the tools the catalog pins that are not installed
+        // the tools the catalog pins that are not installed, each under the
+        // app and version its pack names (else the pipeline's own), as a
+        // candidate's `matches` and an install name them
         let mut missing: Vec<(String, String)> = Vec::new();
         for (p, _) in &catalog {
-            let id = identity(p, None);
+            let id = catalog_identity(p);
             if !seen.contains(&id) && !missing.contains(&id) {
                 missing.push(id);
             }
@@ -1235,7 +1569,7 @@ pub(crate) fn list(registry: &mut Registry, home: &Path) -> Result<Value, String
         for (app, version) in missing {
             let mine: Vec<(Pipeline, Descriptor)> = catalog
                 .iter()
-                .filter(|(p, _)| identity(p, None) == (app.clone(), version.clone()))
+                .filter(|(p, _)| catalog_identity(p) == (app.clone(), version.clone()))
                 .cloned()
                 .collect();
             let checked = needs(registry, home, &mine, &detected);
@@ -1248,6 +1582,8 @@ pub(crate) fn list(registry: &mut Registry, home: &Path) -> Result<Value, String
     Ok(json!({
         "place": place.as_ref().map(Place::doc),
         "packages": packages,
+        "found": found,
+        "found_errors": found_errors,
         "runtime": detected.runtime.as_ref().map(|r| json!({"name": r.kind.name(), "version": r.version})),
     }))
 }
@@ -1265,6 +1601,7 @@ fn converter_package(home: &Path, place: Option<&Place>) -> Value {
         "how": present.then_some(if own { "installed" } else { "registered" }),
         "managed": present.then_some(own),
         "status": if !present { "missing" } else if t["current"] == true { "installed" } else { "update available" },
+        "image_cached": false,
         "place": place.map(Place::doc),
         "path": t["path"],
         "image": null, "source": t["install"]["source"], "digest": null,
@@ -1515,11 +1852,19 @@ fn pipelines_of(
     version: &str,
     pack: Option<&(Value, PackSoftware, String)>,
 ) -> Vec<(Pipeline, Descriptor)> {
+    // the pack's app and version belong to the pipeline the pack names,
+    // never to every pipeline of the catalog; a pipeline that pins the
+    // pack's image is the install's too
+    let pinned: Option<String> = pack
+        .and_then(|k| k.1.image.as_deref())
+        .and_then(layout::split_reference)
+        .map(|(_, d)| d.to_string());
     catalog
         .iter()
         .filter(|(p, _)| {
-            identity(p, pack.map(|k| &k.1)) == (app.to_string(), version.to_string())
+            catalog_identity(p) == (app.to_string(), version.to_string())
                 || pack.is_some_and(|(doc, _, _)| pack_pipeline(doc) == Some(p.name.as_str()))
+                || pinned.as_deref() == Some(p.image_digest.as_str())
         })
         .cloned()
         .collect()
@@ -2115,7 +2460,39 @@ pub(crate) struct RegisterRequest {
     pub(crate) kind: String,
     pub(crate) path: String,
     pub(crate) pack: Option<String>,
+    /// A catalog pipeline, `name@version` or its id, whose pack is taken
+    /// in place of `pack`'s text.
+    pub(crate) pack_from: Option<String>,
     pub(crate) principal: String,
+}
+
+/// The pack of the catalog pipeline `pack_from` names, as text: 404 where
+/// there is no such pipeline, 422 where it carries no pack.
+fn pack_of_pipeline(
+    catalog: &[(Pipeline, Descriptor)],
+    pack_from: &str,
+) -> Result<String, Refused> {
+    let asked = pack_from.trim();
+    let p = catalog
+        .iter()
+        .map(|(p, _)| p)
+        .find(|p| p.label() == asked || asked.parse::<i64>().is_ok_and(|id| id == p.id))
+        .ok_or_else(|| {
+            refused(
+                404,
+                format!("pack_from names {asked}, which is no pipeline of the catalog"),
+            )
+        })?;
+    if p.pack.is_null() {
+        return Err(refused(
+            422,
+            format!(
+                "pack_from names {}, which carries no pack: give the pack's text as pack",
+                p.label()
+            ),
+        ));
+    }
+    Ok(nils_pipeline::canonical(&p.pack))
 }
 
 /// `nils software register <app>@<version> --kind sif|sandbox|image --path
@@ -2154,7 +2531,20 @@ pub(crate) fn register(
                 .to_string(),
         ));
     }
-    let pack = match &req.pack {
+    let catalog = catalog(registry).map_err(|e| refused(500, e))?;
+    let pack_text = match (&req.pack, &req.pack_from) {
+        (Some(_), Some(_)) => {
+            return Err(refused(
+                422,
+                "the body gives one of pack (the text) or pack_from (a catalog pipeline), not both"
+                    .to_string(),
+            ));
+        }
+        (Some(text), None) => Some(text.clone()),
+        (None, Some(from)) => Some(pack_of_pipeline(&catalog, from)?),
+        (None, None) => None,
+    };
+    let pack = match &pack_text {
         Some(text) => Some(layout::parse_pack(text).map_err(|e| refused(422, e))?),
         None => None,
     };
@@ -2239,8 +2629,15 @@ pub(crate) fn register(
             (req.path.clone(), Some("apptainer".to_string()), None)
         }
     };
+    // a sandbox's own labels name the image it was built from: where they
+    // carry its digest, the install is that image unpacked, and a pipeline
+    // that pins it finds the install by digest
+    let labels_digest = (kind == Kind::Sandbox)
+        .then(|| sandbox_labels(Path::new(&req.path)))
+        .flatten()
+        .and_then(|labels| base_of(&labels).1)
+        .filter(|d| d.starts_with("sha256:"));
     let mut commands: Vec<String> = Vec::new();
-    let catalog = catalog(registry).map_err(|e| refused(500, e))?;
     let mine = pipelines_of(&catalog, &app, &version, pack.as_ref());
     commands.extend(mine.iter().filter_map(|(_, d)| entry_point(d)));
     if let Some(first) = pack
@@ -2267,8 +2664,10 @@ pub(crate) fn register(
             .and_then(|k| k.1.image.as_deref())
             .and_then(layout::split_reference)
             .map(|(_, d)| d.to_string()),
-        digest: None,
-        digest_how: None,
+        digest_how: labels_digest.as_ref().map(|_| {
+            format!("the sandbox's own labels ({LABELS_FILE}): {LABEL_BASE_DIGEST}, the image it was built from")
+        }),
+        digest: labels_digest,
         pack_sha256: pack.as_ref().map(|k| k.2.clone()),
         image,
         size_bytes: size,
@@ -2293,7 +2692,7 @@ pub(crate) fn register(
             format!("{app}@{version} was put in the software place by another process meanwhile"),
         ));
     }
-    if let Some(text) = &req.pack {
+    if let Some(text) = &pack_text {
         std::fs::write(l.pack(&app, &version), text)
             .map_err(|e| refused(500, format!("the pack's copy: {e}")))?;
     }
@@ -2909,6 +3308,11 @@ pub(crate) fn route(
                     kind: b["kind"].as_str().unwrap_or_default().to_string(),
                     path: b["path"].as_str().unwrap_or_default().to_string(),
                     pack: b["pack"].as_str().map(str::to_string),
+                    pack_from: match &b["pack_from"] {
+                        Value::String(s) => Some(s.clone()),
+                        Value::Number(n) => Some(n.to_string()),
+                        _ => None,
+                    },
                     principal: principal.to_string(),
                 },
             ))
@@ -3000,6 +3404,10 @@ pub(crate) enum SoftwareCommand {
         /// verification reads
         #[arg(long, value_name = "FILE")]
         pack: Option<PathBuf>,
+        /// A catalog pipeline, name@version or its id, whose pack is taken
+        /// in place of --pack
+        #[arg(long, value_name = "PIPELINE", conflicts_with = "pack")]
+        pack_from: Option<String>,
         /// Machine-readable output
         #[arg(long)]
         json: bool,
@@ -3120,6 +3528,9 @@ fn say_package(p: &Value) {
             .map(|x| format!(" at {x}"))
             .unwrap_or_default()
     );
+    if p["image_cached"] == true {
+        println!("    image cached, adopted at the next run");
+    }
     if let Some(f) = p["fingerprint"].as_str() {
         println!(
             "    fingerprint {f}{}",
@@ -3167,9 +3578,16 @@ pub(crate) fn command(
             } else {
                 match listed["place"]["path"].as_str() {
                     Some(path) => println!(
-                        "software place: {path}{}",
+                        "software place: {path}{}{}",
                         if listed["place"]["declared"].is_null() {
-                            " (the default under the working place; declare one with --place NAME=DIR,role=software)"
+                            " (the default under the working place; declare one with nils place add NAME DIR --role software)"
+                        } else if listed["place"]["shared"] == true {
+                            " (shared; the engine writes into its own subfolder)"
+                        } else {
+                            ""
+                        },
+                        if listed["place"]["read_only"] == true {
+                            ", read-only for the engine"
                         } else {
                             ""
                         }
@@ -3180,6 +3598,41 @@ pub(crate) fn command(
                 }
                 for p in listed["packages"].as_array().into_iter().flatten() {
                     say_package(p);
+                }
+                let found = listed["found"].as_array().cloned().unwrap_or_default();
+                if !found.is_empty() {
+                    println!("found in the place, not registered as the engine's:");
+                    for c in &found {
+                        let matches: Vec<&str> = c["matches"]
+                            .as_array()
+                            .into_iter()
+                            .flatten()
+                            .filter_map(Value::as_str)
+                            .collect();
+                        println!(
+                            "    {:<8} {}{}{}",
+                            c["kind"].as_str().unwrap_or_default(),
+                            c["path"].as_str().unwrap_or_default(),
+                            c["base"]
+                                .as_str()
+                                .map(|b| format!(" (from {b})"))
+                                .unwrap_or_default(),
+                            if c["registered"] == true {
+                                ": registered".to_string()
+                            } else if matches.is_empty() {
+                                String::new()
+                            } else {
+                                format!(
+                                    ": the image {} pins; nils software register <spec> --kind {} --path <path> --pack-from <pipeline>",
+                                    matches.join(" and "),
+                                    c["kind"].as_str().unwrap_or_default()
+                                )
+                            }
+                        );
+                    }
+                }
+                if let Some(n) = listed["found_errors"].as_u64().filter(|n| *n > 0) {
+                    println!("    ({n} entries of the place could not be read)");
                 }
             }
             Ok(())
@@ -3230,6 +3683,7 @@ pub(crate) fn command(
             kind,
             path,
             pack,
+            pack_from,
             json,
         } => {
             let (app, version) = layout::parse_spec(&spec).map_err(crate::usage)?;
@@ -3249,6 +3703,7 @@ pub(crate) fn command(
                     kind,
                     path,
                     pack: read_pack(pack.as_ref())?,
+                    pack_from,
                     principal,
                 },
             )
