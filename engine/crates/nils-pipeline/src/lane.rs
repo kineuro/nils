@@ -488,11 +488,10 @@ mod tests {
         assert_eq!(lease_pending(2000, &[4242], &apps), 0);
         // not among the card's processes: counted whole
         assert_eq!(lease_pending(8192, &[9999], &apps), 8192);
-        assert_eq!(process_tree(std::process::id()), {
-            let t = process_tree(std::process::id());
-            assert_eq!(t[0], std::process::id());
-            t
-        });
+        // read once: a sibling test's child can appear between two reads
+        let tree = process_tree(std::process::id());
+        assert_eq!(tree[0], std::process::id());
+        assert!(tree.iter().all(|p| *p > 0));
 
         let dir = std::env::temp_dir().join(format!("nils-lane-apps-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
