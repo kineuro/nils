@@ -287,7 +287,9 @@ impl Row {
                 format!("{name}: {t} is out ({newest} is newer and waits: {why})")
             }
             (Some(t), None) if self.installed.as_deref() == Some(t.as_str()) => {
-                format!("{name}: its own release of {t} is out, and differs from the one in place")
+                format!(
+                    "{name}: another build of {t} is out: its own release's files differ from the ones in place"
+                )
             }
             (Some(t), None) => format!("{name}: {t} is out"),
             (None, Some(why)) => format!("{name}: {newest} is out and waits: {why}"),
