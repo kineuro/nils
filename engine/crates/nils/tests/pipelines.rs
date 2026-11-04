@@ -6412,13 +6412,16 @@ printf 'subject,general white matter,general grey matter,general csf\nx,0.9,0.9,
             r#"printf x > "$4"; printf x > "$(dirname "$4")/thr_pvs.nii.gz""#,
         ),
         // the alignment check, the masks of the first session it is given
-        // agreeing at 0.6, the other's at 0.97; SAMSEG's folder read for
-        // its measures, and the numbers after it; otherwise an image
-        // written to its last word
+        // agreeing at 0.6, the other's at 0.97, the first claimed with the
+        // shell's own noclobber open (O_EXCL), since two units check at
+        // once and a `mkdir` claim is not atomic under uutils coreutils
+        // (the Ubuntu 26.04 runners); SAMSEG's folder read for its
+        // measures, and the numbers after it; otherwise an image written
+        // to its last word
         (
             "fspython",
             r#"case "$2" in
-*affine_transform*) if mkdir "$(dirname "$0")/samseg-low" 2>/dev/null; then echo 0.60; else echo 0.97; fi;;
+*affine_transform*) if (set -C; : > "$(dirname "$0")/samseg-low") 2>/dev/null; then echo 0.60; else echo 0.97; fi;;
 *samseg.stats*) shift 3; s='"Intra-Cranial": 1500000.0, "Lesions": 1200.0'; while [ $# -gt 1 ]; do v=$2; [ "$1" = flair_source ] && v=\"$2\"; s="$s, \"$1\": $v"; shift 2; done; echo "{$s}";;
 *) for l; do :; done; printf x > "$l";;
 esac"#,
@@ -6442,7 +6445,7 @@ esac"#,
         .unwrap();
     let python3 = format!(
         r#"case "$2" in
-*threshold_otsu*) if mkdir "$(dirname "$0")/segcsvd-low" 2>/dev/null; then echo 0.60; else echo 0.97; fi; exit 0;;
+*threshold_otsu*) if (set -C; : > "$(dirname "$0")/segcsvd-low") 2>/dev/null; then echo 0.60; else echo 0.97; fi; exit 0;;
 *nibabel*json.dumps*) shift 2; s=; while [ $# -gt 1 ]; do v=$2; case "$1" in *_volume) [ -s "$2" ] || exit 1; v=1.0;; esac; case "$v" in *[!0-9.]*) v="\"$v\"";; esac; s="$s${{s:+, }}\"$1\": $v"; shift 2; done; echo "{{$s}}"; exit 0;;
 *nibabel*) for l; do :; done; printf x > "$l"; exit 0;;
 esac
