@@ -1733,13 +1733,28 @@ pub(crate) fn route(
                     .into_iter()
                     .filter(|i| !held.contains(i))
                     .collect();
+                // 2026-11-05: the value the batch is accepted as: the
+                // suggestion, unless the person names another (a string for
+                // an axis question, an object by axis for an axes question),
+                // read as the assignment's answer door reads a value; the
+                // suggestion is kept beside each answer, so the change counts
+                let value: String = match &doc["value"] {
+                    Value::Null => batch.suggested.clone(),
+                    Value::String(s) => s.clone(),
+                    Value::Array(list) => list
+                        .iter()
+                        .map(|v| v.to_string().trim_matches('"').to_string())
+                        .collect::<Vec<_>>()
+                        .join(","),
+                    other => other.to_string(),
+                };
                 let acting = crate::serve::acting_model(registry, caller)?.map(|m| m.id);
                 let given = Given {
                     assignment: 0,
                     principal,
                     author_kind: kind_of(caller),
                     model: acting,
-                    value: Some(&batch.suggested),
+                    value: Some(&value),
                     form: None,
                     derivative_id: None,
                     why: None,
@@ -1769,6 +1784,7 @@ pub(crate) fn route(
                 Ok(Reply::ok(json!({
                     "campaign": c.id, "batch": key, "hold_back": c.hold_back,
                     "accepted": accepted, "held_back": held_list, "refused": refused,
+                    "value": value, "suggested": batch.suggested,
                 })))
             }
             // record 50 R3: suggestions from outside the engine, each with
@@ -2614,10 +2630,18 @@ pub(crate) fn route(
                     nils_registry::review::Error::Refused(m) => Reply::error(409, m),
                     other => Reply::error(500, other.to_string()),
                 })?;
+                // 2026-11-05: in force means every page reads it, so the
+                // scans the decisions reach are re-sorted at once
+                let resort = crate::review_questions::resort_committed(
+                    registry,
+                    doors.pack_dir.as_deref(),
+                    principal,
+                    &done.decisions,
+                );
                 Ok(Reply::ok(json!({
                     "committed": done.decisions, "items": done.items, "left": done.left,
                     "split": done.split, "left_out_sealed": done.left_out_sealed,
-                    "left_held": done.left_held,
+                    "left_held": done.left_held, "resort": resort,
                 })))
             }
             _ => Err(Reply::error(

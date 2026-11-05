@@ -1242,6 +1242,9 @@ impl Batches {
             "campaign": campaign.id,
             "open": self.open,
             "sealed": self.sealed,
+            // 2026-11-05: a batch may be accepted as another value than the
+            // one suggested; a desk offers the choice where this says so
+            "accepts_value": true,
             "unsuggested": self.unsuggested,
             "count": self.groups.len(),
             "groups": self.groups.iter().map(|g| {
