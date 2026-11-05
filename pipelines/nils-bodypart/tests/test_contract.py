@@ -227,7 +227,8 @@ def test_the_fusion_descriptor_declares_its_models_table_and_axes():
     assert {p["axis"] for p in x["proposals"]} == {"body_part", "body_region"}
     # record 55 A5: one image on the CPU and on a card, a card under the
     # lane's lease where it has one
-    assert x["needs"] == {"gpu": "optional", "gpu-memory-gb": 4, "cores": "lane", "cores-input": "threads", "memory-gb": 16}
+    # 2026-11-05: a base and so much a worker, sized to the cores a run takes
+    assert x["needs"] == {"gpu": "optional", "gpu-memory-gb": 4, "cores": "lane", "cores-input": "threads", "memory-gb": 4, "memory-gb-per-core": 0.5}
     (table,) = x["outputs"]
     assert (table["kind"], table["format"], table["path-template"]) == ("table", "json", "bodypart-fusion/{stack}.json")
     cols = {c["name"]: c.get("type", "number") for c in table["columns"]}

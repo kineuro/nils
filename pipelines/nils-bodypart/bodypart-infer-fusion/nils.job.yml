@@ -285,8 +285,13 @@ x-nils:
     # measured (2026-10-14, this image, 48 workers, the PSS of all the
     # run's processes): 8.3 GiB on the CPU and 9.9 on a card for a pass,
     # 8.7 and 9.4 with the slice cache; earlier 10.4 GiB at 32 workers (2026-10-12).
-    # 16 holds the 64 workers a lane may give with a margin
-    memory-gb: 16
+    # On 2026-11-05 a run of 18,932 stacks on a card, 48 workers, was killed
+    # at a 16 GB cap with 16.9 GB of anonymous memory in its 51 processes,
+    # about 330 MB a worker. The memory follows the workers since: a base
+    # for the parent and the card's context, and half a GB a worker, so a
+    # lane of 8 cores asks 8 GB and one of 64 asks 36
+    memory-gb: 4
+    memory-gb-per-core: 0.5
   proposals:
     - axis: body_part
       description: Fine mode, a value of the pack's body_part per stack with the six calibrated probabilities, by the head's digest (by the cascade's, when the run had one)

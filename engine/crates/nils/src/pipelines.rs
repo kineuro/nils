@@ -8933,7 +8933,6 @@ fn card_shortfall(
 
 /// What the scheduler of one run carries between its looks at the lane.
 struct Lanes {
-    ask: lane::Ask,
     gpu_need: Option<u64>,
     smi: Option<PathBuf>,
     card: u32,
@@ -9017,9 +9016,25 @@ fn start_next(
         ));
         return Ok(None);
     };
+    // 2026-11-05: a unit's memory follows the cores it takes, and where the
+    // lane's free memory holds fewer workers than its free cores, a unit
+    // whose threads the caller left open takes what the memory holds
+    let free_mib = l.seen.memory_mib.saturating_sub(l.seen.held_memory_mib);
+    let threads_set = x
+        .descriptor
+        .needs
+        .cores_input
+        .as_ref()
+        .and_then(|id| x.params.get(id))
+        .is_some_and(|v| !v.is_null());
+    let cores = if threads_set {
+        cores
+    } else {
+        x.descriptor.needs.cores_within_memory(cores, free_mib)
+    };
     let ask = lane::Ask {
         cores,
-        memory_mib: l.ask.memory_mib,
+        memory_mib: lane::mib_of_gb(x.descriptor.needs.memory_gb_for(cores)),
     };
     if !l.seen.fits(ask) {
         l.waiting = Some(format!(
@@ -9123,7 +9138,7 @@ fn start_next(
                 *id,
                 &rows::UnitStart {
                     cores: i64::from(ask.cores),
-                    memory_mb: l.ask.memory_mib as i64,
+                    memory_mb: ask.memory_mib as i64,
                     gpu_card: gpu_mib.map(|_| i64::from(l.card)),
                     gpu_memory_mb: gpu_mib.map(|g| g as i64),
                     device: if gpu_mib.is_some() { x.device } else { "cpu" },
@@ -9172,14 +9187,17 @@ fn schedule(
     // one where no more is free
     let least = lane::Ask {
         cores: if d.needs.lane_cores { 1 } else { ask.cores },
-        memory_mib: ask.memory_mib,
+        memory_mib: if d.needs.lane_cores {
+            lane::mib_of_gb(d.needs.memory_gb_for(1))
+        } else {
+            ask.memory_mib
+        },
     };
     // this run's own units, which alone may fill the lane
     let mut ledger = x.lane.ledger;
     let total = m.units.len();
     let mut beaten: Option<Instant> = None;
     let mut l = Lanes {
-        ask,
         gpu_need: x.gpu.then(|| lane::mib_of_gb(d.needs.gpu_memory_gb)),
         smi: runtime::which("nvidia-smi", std::env::var_os("PATH").as_deref()),
         // the one card a GPU unit leases and is given: the lane's, 0 where
@@ -9894,7 +9912,10 @@ fn invocation_of(
         ("NILS_PIPELINE".into(), p.label()),
         ("NILS_IMAGE_DIGEST".into(), p.image_digest.clone()),
         ("NILS_CORES".into(), cores.to_string()),
-        ("NILS_MEMORY_GB".into(), format!("{}", d.needs.memory_gb)),
+        (
+            "NILS_MEMORY_GB".into(),
+            format!("{}", d.needs.memory_gb_for(cores)),
+        ),
     ];
     if on_card {
         // record 55 T25: the card memory the unit is leased, which its tool
@@ -10099,7 +10120,10 @@ fn invocation_of(
         // the unit's declared cores and memory, enforced where the runtime
         // can; the lane's budget counts them either way
         cpus: shared.limits.0.then_some(cores),
-        memory_mib: shared.limits.1.then(|| lane::mib_of_gb(d.needs.memory_gb)),
+        memory_mib: shared
+            .limits
+            .1
+            .then(|| lane::mib_of_gb(d.needs.memory_gb_for(cores))),
     })
 }
 

@@ -4,6 +4,14 @@ All notable changes to NILS v1 are recorded here. The format follows [Keep a Cha
 
 ## [Unreleased]
 
+### Added
+
+- A pipeline may declare the memory a unit takes for each core it is given, `x-nils.needs.memory-gb-per-core` beside `memory-gb`, the base (job contract v1, added in place and additively). The engine sizes a unit's memory to the cores it takes, for the pre-flight and the lane's budget at the lane's cores and at each unit's start at the cores it takes then, and where the lane's free memory holds fewer such workers than its free cores a unit whose threads were left open takes as many as the memory holds, so one descriptor fits a laptop and a large server. The container is told the sized memory and held to it.
+
+### Changed
+
+- `bodypart-infer-fusion` declares 4 GB and half a GB a worker instead of 16 GB: a run of 18,932 stacks on a card with 48 workers was killed at the 16 GB cap with 16.9 GB of anonymous memory in its 51 processes, about 330 MB a worker. A lane of 48 cores now gives it 28 GB and one of 64 gives 36.
+
 ### Fixed
 
 - A cohort's sorted step counts its stacks outside the rules as the dataset's does: `outside` and `outside_by` beside `unsorted`, and the step done once every scan the rules judge is judged; a cohort of 456,000 MR scans with 31 CT scans kept reading "31 not sorted".
