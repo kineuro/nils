@@ -4946,9 +4946,18 @@ fn routed(
                 author_of(caller).0,
             )
             .map_err(review_err)?;
+            // 2026-11-05: in force means every page reads it, so the scans
+            // the decision reaches are re-sorted at once, as after an answer
+            let resort = crate::review_questions::resort_committed(
+                registry,
+                doors.pack_dir.as_deref(),
+                principal,
+                &done.decisions,
+            );
             Ok(Reply::ok(serde_json::json!({
                 "committed": done.decisions, "items": done.items,
                 "left_out_sealed": done.left_out_sealed, "left_held": done.left_held,
+                "resort": resort,
             })))
         }
         ["api", "decisions", _, "withdraw"] if post => {

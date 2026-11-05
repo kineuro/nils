@@ -4,6 +4,10 @@ All notable changes to NILS v1 are recorded here. The format follows [Keep a Cha
 
 ## [Unreleased]
 
+### Fixed
+
+- Committing a staged decision re-sorts the scans it reaches at once, as answering a question at the desk does: `POST /api/decisions/{id}/commit`, `POST /api/decisions/commit` and `nils review commit` (the reply's and the command's `resort`). Until now a committed decision was in force in the registry while the stack and session pages kept showing the sort's old value until the next sort; a site that committed a model's body-part proposals from the command line read spine beside a decision for brain-neck.
+
 ### Added
 
 - A pipeline may declare the memory a unit takes for each core it is given, `x-nils.needs.memory-gb-per-core` beside `memory-gb`, the base (job contract v1, added in place and additively). The engine sizes a unit's memory to the cores it takes, for the pre-flight and the lane's budget at the lane's cores and at each unit's start at the cores it takes then, and where the lane's free memory holds fewer such workers than its free cores a unit whose threads were left open takes as many as the memory holds, so one descriptor fits a laptop and a large server. The container is told the sized memory and held to it.

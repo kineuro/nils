@@ -1977,8 +1977,13 @@ fn resort(
     let mut sorted = 0i64;
     let mut picks = Vec::new();
     for ((name, sorted_version, overlay), list) in by_pack {
-        let pack = match pack_as_sorted(doors, registry, &name, &sorted_version, overlay.as_deref())
-        {
+        let pack = match pack_as_sorted(
+            doors.pack_dir.as_deref(),
+            registry,
+            &name,
+            &sorted_version,
+            overlay.as_deref(),
+        ) {
             Ok(p) => p,
             Err(refused) => {
                 states.push("refused");
@@ -2095,6 +2100,195 @@ fn resort(
     (resort, picks)
 }
 
+/// Re-sort the scans the committed decisions reach (2026-11-05), as an
+/// answer at the questions door is followed by one ([`resort`]): a
+/// committed decision is in force, and every page reads the axis the sort
+/// writes, so without it the stack page kept the old value beside the
+/// decision until the next sort. A classify over those stacks alone, by
+/// the pack each was sorted with; a stack no sort has judged is left to the
+/// first sort. What was done, for the door's reply and the command line's
+/// words.
+pub(crate) fn resort_committed(
+    registry: &mut Registry,
+    pack_dir: Option<&std::path::Path>,
+    who: &str,
+    decisions: &[i64],
+) -> Value {
+    if decisions.is_empty() {
+        return json!({"state": "done", "stacks": 0, "sorted": 0, "jobs": [], "words": "nothing committed"});
+    }
+    // the stacks the decisions reach: a group's members, a stack's own
+    let mut stacks: BTreeSet<i64> = BTreeSet::new();
+    let mut unreached = 0usize;
+    {
+        let store = registry.store();
+        for chunk in decisions.chunks(500) {
+            let sql = format!(
+                "SELECT scope, ref FROM {} WHERE id IN ({})",
+                store.qualified("decision"),
+                chunk
+                    .iter()
+                    .map(i64::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+            let refs: Vec<(String, String)> = match store.query(&sql, &[]) {
+                Ok(rows) => rows
+                    .iter()
+                    .filter_map(|r| {
+                        Some((r.text(0).ok()?.to_string(), r.text(1).ok()?.to_string()))
+                    })
+                    .collect(),
+                Err(e) => {
+                    return json!({
+                        "state": "failed", "stacks": 0, "sorted": 0, "jobs": [],
+                        "words": format!("the decisions could not be read: {e}"),
+                    });
+                }
+            };
+            for (scope, reference) in refs {
+                match (scope.as_str(), reference.parse::<i64>()) {
+                    ("group", Ok(item)) => match nils_registry::review::members(store, item) {
+                        Ok(members) => stacks.extend(members.into_iter().map(|m| m.stack_id)),
+                        Err(_) => unreached += 1,
+                    },
+                    ("stack", Ok(stack)) => {
+                        stacks.insert(stack);
+                    }
+                    _ => unreached += 1,
+                }
+            }
+        }
+    }
+    if stacks.is_empty() {
+        return json!({
+            "state": "done", "stacks": 0, "sorted": 0, "jobs": [], "unreached": unreached,
+            "words": "no scan to re-sort",
+        });
+    }
+    let started = std::time::Instant::now();
+    // the pack, its version and the overlay each stack was last sorted with
+    let mut by_pack: BTreeMap<(String, String, Option<String>), Vec<i64>> = BTreeMap::new();
+    {
+        let store = registry.store();
+        let all: Vec<i64> = stacks.iter().copied().collect();
+        for chunk in all.chunks(500) {
+            let sql = format!(
+                "SELECT stack_id, pack, pack_version, overlay FROM {} WHERE stack_id IN ({})",
+                store.qualified("classification"),
+                chunk
+                    .iter()
+                    .map(i64::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+            match store.query(&sql, &[]) {
+                Ok(rows) => {
+                    for r in rows {
+                        if let (Ok(s), Ok(p), Ok(v), Ok(o)) =
+                            (r.int(0), r.text(1), r.text(2), r.opt_text(3))
+                        {
+                            by_pack
+                                .entry((p.to_string(), v.to_string(), o.map(str::to_string)))
+                                .or_default()
+                                .push(s);
+                        }
+                    }
+                }
+                Err(e) => {
+                    return json!({
+                        "state": "failed", "stacks": stacks.len(), "sorted": 0, "jobs": [],
+                        "words": format!("the scans were not re-sorted: {e}"),
+                    });
+                }
+            }
+        }
+    }
+    let unsorted = stacks.len() - by_pack.values().map(Vec::len).sum::<usize>();
+    let mut jobs = Vec::new();
+    let mut states = Vec::new();
+    let mut why = Vec::new();
+    let mut sorted = 0usize;
+    for ((name, version, overlay), list) in by_pack {
+        let pack = match pack_as_sorted(pack_dir, registry, &name, &version, overlay.as_deref()) {
+            Ok(p) => p,
+            Err(refused) => {
+                states.push("refused");
+                why.push(format!(
+                    "{} of them not re-sorted: {refused}; the decisions stand, and the next sort re-sorts them",
+                    list.len()
+                ));
+                continue;
+            }
+        };
+        let settings = nils_classify::Settings {
+            name: format!(
+                "re-sort after {who} committed {} decision(s)",
+                decisions.len()
+            ),
+            stacks: nils_classify::job::Stacks::Only(std::sync::Arc::new(
+                list.iter().copied().collect(),
+            )),
+            scope: vec![format!("committed decisions: {} scans", list.len())],
+            ..nils_classify::Settings::default()
+        };
+        let cancel = nils_digest::Cancel::new();
+        let mut ran = nils_classify::classify::classify(registry, &pack, &settings, &cancel);
+        while matches!(ran, Err(nils_classify::Error::Busy { .. }))
+            && started.elapsed() < RESORT_WAIT
+        {
+            std::thread::sleep(std::time::Duration::from_millis(200));
+            ran = nils_classify::classify::classify(registry, &pack, &settings, &cancel);
+        }
+        match ran {
+            Ok(report) => {
+                jobs.push(report.job_id);
+                states.push(if report.cancelled {
+                    "cancelled"
+                } else {
+                    "done"
+                });
+                sorted += list.len();
+            }
+            Err(nils_classify::Error::Busy { job_id, .. }) => {
+                states.push("waiting");
+                why.push(format!(
+                    "sort job {job_id} holds the registry; the decisions stand, and the next sort re-sorts these scans"
+                ));
+            }
+            Err(e) => {
+                states.push("failed");
+                why.push(format!("the re-sort failed: {e}; the decisions stand"));
+            }
+        }
+    }
+    let state = if states.contains(&"failed") {
+        "failed"
+    } else if states.contains(&"waiting") || states.contains(&"refused") {
+        "waiting"
+    } else {
+        "done"
+    };
+    let words = format!(
+        "{sorted} of {} scan(s) re-sorted{}{}",
+        stacks.len(),
+        if unsorted > 0 {
+            format!(", {unsorted} never sorted and left to the first sort")
+        } else {
+            String::new()
+        },
+        if why.is_empty() {
+            String::new()
+        } else {
+            format!("; {}", why.join("; "))
+        }
+    );
+    json!({
+        "state": state, "stacks": stacks.len(), "sorted": sorted, "jobs": jobs,
+        "unreached": unreached, "words": words,
+    })
+}
+
 /// The pack a stack was last sorted with, loaded to sort it again the same
 /// way: the same pack, at the same version, under the same overlay. The
 /// adopted scoped changes it was sorted with (`proposal:<id>`) every sort
@@ -2103,16 +2297,13 @@ fn resort(
 /// one the registry keeps: a re-sort by another pack would judge the scan
 /// by rules it was not sorted with.
 fn pack_as_sorted(
-    doors: &Doors,
+    pack_dir: Option<&std::path::Path>,
     registry: &mut Registry,
     name: &str,
     version: &str,
     overlay: Option<&str>,
 ) -> Result<nils_pack::Pack, String> {
-    let dir = doors
-        .pack_dir
-        .as_ref()
-        .ok_or_else(|| format!("pack {name} is not served here"))?;
+    let dir = pack_dir.ok_or_else(|| format!("pack {name} is not served here"))?;
     // an overlay the sort was read under, by its `name@version`; scoped
     // changes are named `proposal:<id>` and come back by themselves
     let named = overlay
