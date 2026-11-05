@@ -925,6 +925,32 @@ paths:
         "400": {description: "No value and no nothing, a value not of the axis, an exception for a stack the answer does not cover, or a key that names no question"}
         "404": {description: "No such dataset or cohort, or the question asks no scan there now"}
         "409": {description: "A stack the question no longer asks (answered meanwhile), an item a campaign holds, a stack of a sample sealed now, or a decision of a higher rank on the key"}
+  /api/review/proposals:
+    get:
+      summary: What models proposed that still waits, per model and axis (UX round 1; review:see)
+      description: "Added in place, additively, on 2026-11-05. One row per registered model and axis whose `<axis>:model` items are open or staged, the most scans first. `model` is the model as a decision names it ({id, name, version, digest, state}) and `label` its name@version; `threshold` the lowest its runs staged at and `thresholds` each; `staged` the groups and scans staged at or above the threshold as the model's decisions; `held` the part of them on a scan an open campaign asks the axis of, which a commit leaves staged until that campaign closes; `commit` the rest, what `POST /api/decisions/commit` with `model` and `axis` puts in force; `drifted` the staged decisions staged before the registry moved on (a commit of them takes `anyway`); `below` the groups and the scans not decided yet below the threshold that no open campaign asks, what `POST /api/review/proposals/campaign` asks; `asked` those an open campaign asks already, with `campaigns` naming them by id and name; `runs` the runs they came from; `name` a campaign name no campaign has, for a campaign of the rest. Counts only, never a stack."
+      responses:
+        "200": {description: "{count, proposals: [{model: {id, name, version, digest, state}, label, axis, threshold, thresholds, staged: {groups, stacks}, held: {groups, stacks}, commit: {groups, stacks}, drifted, below: {groups, stacks}, asked: {groups, stacks}, campaigns: [{id, name}], runs, name}]}"}
+  /api/review/proposals/campaign:
+    post:
+      summary: A campaign of what one model proposed on one axis below its threshold, the caller its one rater and the model's answer suggested (UX round 1; campaigns:work and review:work)
+      description: "Added in place, additively, on 2026-11-05. The body: `model` (its id, digest or name@version), `axis`, and `name` (a free name made from the model and the axis when left out). The items are the model's open `<axis>:model` items on the axis that no open campaign asks, a scan for each member not decided yet. The campaign asks the axis alone (an axes question of that one axis, held to the served pack's legal values, deriving nothing), has the caller as its one rater with one rater an item and no adjudication, holds back none (a campaign that trains or measures nothing), suggests imported: each scan's suggestion is the model's value for it with its probability of every class, authored by the model's name@version, so a gallery groups like scans by it; and it closes into decisions in force. Its `source` names the model, the axis, the adopted items, the runs and the thresholds. The campaign, its items and its suggestions are written in one transaction, then audited. Anything else the body says of the campaign (question, raters, hold_back, suggest, closes_into, raters_per_item, source) is refused."
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [model, axis]
+              properties:
+                model: {type: string}
+                axis: {type: string}
+                name: {type: string}
+      responses:
+        "201": {description: "{campaign: {id, name}, adopted, suggestions: {rows, suggestions, replaced, unmatched, sealed, refused_values, no_author, authors}, counts}"}
+        "400": {description: "No model or axis, a field that is not the caller's to say, or a name that is a number"}
+        "404": {description: No registered model answers to the reference}
+        "409": {description: "Nothing the model proposed on the axis waits below its threshold outside a campaign, a campaign so named exists, or no pack is served"}
   /api/datasets/{name}/headers:
     get:
       summary: A dataset's damaged-header flag (record 56 section 3; data:see or review:see)

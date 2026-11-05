@@ -87,6 +87,7 @@ mod places;
 mod preflight;
 mod preview;
 mod profile;
+mod proposal_doors;
 mod proposed_by;
 mod provenance;
 mod pyramid;
@@ -1984,6 +1985,38 @@ enum ReviewCommand {
     Withdraw {
         /// The decision to withdraw
         id: i64,
+    },
+    /// What models proposed that still waits, per model and axis: the
+    /// scans at or above its threshold that `commit --model M --axis A`
+    /// puts in force, and the ones below it that `proposals-campaign` asks
+    /// (counts only)
+    Proposals {
+        /// Machine-readable output
+        #[arg(long)]
+        json: bool,
+    },
+    /// A campaign of what one model proposed on one axis below its
+    /// threshold and no open campaign asks: you its one rater, held back
+    /// none, the model's answer suggested on each scan, closing into
+    /// decisions in force
+    ProposalsCampaign {
+        /// The model: its id, its digest or name@version
+        #[arg(long, value_name = "MODEL")]
+        model: String,
+        /// The axis it proposed on
+        #[arg(long, value_name = "AXIS")]
+        axis: String,
+        /// What the campaign is called; made from the model and the axis
+        /// when not given
+        #[arg(long, value_name = "NAME")]
+        name: Option<String>,
+        #[arg(long, value_name = "DIR")]
+        pack_dir: Option<PathBuf>,
+        #[arg(long, default_value = "mri")]
+        pack: String,
+        /// Machine-readable output
+        #[arg(long)]
+        json: bool,
     },
     /// Acknowledge one review item: the machine was right and you checked.
     /// Not a decision, and not counted as one (Wave 4a section 13.4)
@@ -7282,6 +7315,30 @@ fn review_command(home: &Home, command: ReviewCommand) -> Result<(), Exit> {
             pack,
             pack_dir,
         } => return review_asked(home, stack, &evidence, &pack, pack_dir),
+        // UX round 1: what models proposed, per model and axis, and a
+        // campaign of what one left below its threshold
+        ReviewCommand::Proposals { json } => {
+            return crate::proposal_doors::list_verb(&mut open(home)?, json);
+        }
+        ReviewCommand::ProposalsCampaign {
+            model,
+            axis,
+            name,
+            pack_dir,
+            pack,
+            json,
+        } => {
+            return crate::proposal_doors::campaign_verb(
+                home,
+                &mut open(home)?,
+                &model,
+                &axis,
+                name.as_deref(),
+                pack_dir,
+                &pack,
+                json,
+            );
+        }
         other => other,
     };
     let mut registry = open(home)?;
@@ -7524,7 +7581,11 @@ fn review_command(home: &Home, command: ReviewCommand) -> Result<(), Exit> {
             keyboard_not_held(&mut registry, id)?;
             review_accept(&mut registry, id, why, seen, json)
         }
-        ReviewCommand::Asked { .. } => unreachable!("answered before the registry opened"),
+        ReviewCommand::Asked { .. }
+        | ReviewCommand::Proposals { .. }
+        | ReviewCommand::ProposalsCampaign { .. } => {
+            unreachable!("answered before the registry opened")
+        }
         ReviewCommand::Show { id, json } => {
             let sql = format!(
                 "SELECT {columns} FROM {} WHERE id = {}",

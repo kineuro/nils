@@ -2358,3 +2358,212 @@ fn a_close_runs_as_a_job_and_an_ended_lease_needs_no_release() {
     let after = server.ok("GET", "/api/campaigns/closing", None, CURATOR);
     assert_eq!(after["close_job"]["id"], job, "{after}");
 }
+
+/// UX round 1 (2026-11-05): what models proposed, per model and axis, at the
+/// door and at the keyboard. The commit by the model and the axis puts what
+/// was staged at or above the threshold in force and re-sorts; the rest
+/// becomes the caller's own campaign in one move: the axis alone, the caller
+/// its one rater, held back none, the model's answer suggested on each scan,
+/// closing into decisions in force; only its name is the caller's to say.
+#[test]
+fn a_model_s_proposals_commit_by_model_and_axis_and_the_rest_becomes_the_caller_s_campaign() {
+    let home = registry();
+    let model_id = {
+        let mut reg = nils_registry::home::Home::new(home.path()).open().unwrap();
+        let enc = nils_registry::embedding::register_encoder(
+            &mut reg,
+            &nils_registry::embedding::Encoder {
+                name: "biomedclip",
+                version: "9f2c1e",
+                weights_digest: &format!("sha256:{}", "b".repeat(64)),
+                image_digest: None,
+            },
+            "runner@lab",
+        )
+        .unwrap();
+        let card = json!({"name": "bp-head", "version": "1", "kind": "head",
+            "digest": format!("sha256:{}", "1".repeat(64)), "task": "axis:body_part",
+            "encoder": {"digest": enc.digest}, "threshold": 0.9});
+        let m = nils_registry::model::register(&mut reg, &card, "anna@lab").unwrap();
+        let passed = json!({"suite": "heldout", "passed": true, "checks": [{"name": "ece", "passed": true}]});
+        let m = nils_registry::model::admit(&mut reg, m.id, &passed, "anna@lab").unwrap();
+        let p = |stack: i64, value: &str, p: f64| nils_registry::proposals::Proposal {
+            stack_id: stack,
+            axis: "body_part".into(),
+            value: value.into(),
+            probabilities: [(value.to_string(), p), ("other".to_string(), 1.0 - p)]
+                .into_iter()
+                .collect(),
+            model_id: Some(m.id),
+            model_digest: None,
+            note: None,
+        };
+        let given = [
+            p(1, "brain", 0.97),
+            p(2, "brain", 0.97),
+            p(3, "spine", 0.6),
+            p(4, "neck", 0.5),
+        ];
+        nils_registry::proposals::ingest(
+            &mut reg,
+            &nils_registry::proposals::Run {
+                id: 41,
+                job_id: None,
+                principal: "runner@lab",
+                stacks: None,
+                models: None,
+            },
+            &given,
+            None,
+        )
+        .unwrap();
+        m.id
+    };
+    let server = Server::start(&home);
+
+    // what waits: two scans to commit, two below the threshold
+    let waits = server.ok("GET", "/api/review/proposals", None, CURATOR);
+    assert_eq!(waits["count"], 1, "{waits}");
+    let row = &waits["proposals"][0];
+    assert_eq!(row["label"], "bp-head@1", "{row}");
+    assert_eq!(row["axis"], "body_part", "{row}");
+    assert_eq!(row["threshold"], 0.9, "{row}");
+    assert_eq!(row["commit"], json!({"groups": 1, "stacks": 2}), "{row}");
+    assert_eq!(row["below"], json!({"groups": 2, "stacks": 2}), "{row}");
+    assert_eq!(row["name"], "bp-head-body_part-unsure", "{row}");
+    // a rater reads none of it
+    let (status, _) = server.call("GET", "/api/review/proposals", None, ANNA);
+    assert_eq!(status, 403);
+
+    // the commit by the model and the axis, and the re-sort after it
+    let done = server.ok(
+        "POST",
+        "/api/decisions/commit",
+        Some(json!({"model": model_id.to_string(), "axis": "body_part", "anyway": true})),
+        CURATOR,
+    );
+    assert_eq!(done["committed"].as_array().unwrap().len(), 1, "{done}");
+    assert_eq!(done["resort"]["state"], "done", "{done}");
+    let row = &server.ok("GET", "/api/review/proposals", None, CURATOR)["proposals"][0];
+    assert_eq!(row["commit"]["stacks"], 0, "{row}");
+    assert_eq!(row["below"]["stacks"], 2, "{row}");
+
+    // the rest as the caller's campaign: what is not the caller's is refused
+    for (body, says) in [
+        (
+            json!({"model": "bp-head@1", "axis": "body_part", "hold_back": 0.5}),
+            "hold_back is not the caller's",
+        ),
+        (json!({"axis": "body_part"}), "model:"),
+        (json!({"model": "bp-head@1"}), "axis:"),
+    ] {
+        let (status, doc) = server.call(
+            "POST",
+            "/api/review/proposals/campaign",
+            Some(body.clone()),
+            CURATOR,
+        );
+        assert_eq!(status, 400, "{body}: {doc}");
+        assert!(doc.to_string().contains(says), "{body}: {doc}");
+    }
+    let (status, doc) = server.call(
+        "POST",
+        "/api/review/proposals/campaign",
+        Some(json!({"model": "no-such@1", "axis": "body_part"})),
+        CURATOR,
+    );
+    assert_eq!(status, 404, "{doc}");
+    // a rater may not make it: it closes into decisions in force
+    let (status, doc) = server.call(
+        "POST",
+        "/api/review/proposals/campaign",
+        Some(json!({"model": "bp-head@1", "axis": "body_part"})),
+        ANNA,
+    );
+    assert_eq!(status, 403, "{doc}");
+    let made = server.ok(
+        "POST",
+        "/api/review/proposals/campaign",
+        Some(json!({"model": "bp-head@1", "axis": "body_part"})),
+        CURATOR,
+    );
+    assert_eq!(
+        made["campaign"]["name"], "bp-head-body_part-unsure",
+        "{made}"
+    );
+    assert_eq!(made["adopted"], 2, "{made}");
+    assert_eq!(made["suggestions"]["suggestions"], 2, "{made}");
+    let id = made["campaign"]["id"].as_i64().unwrap();
+    let c = server.ok("GET", &format!("/api/campaigns/{id}"), None, CURATOR);
+    assert_eq!(c["question"]["kind"], "axes", "{c}");
+    assert_eq!(c["question"]["axes"], json!(["body_part"]), "{c}");
+    assert_eq!(c["rater_policy"]["raters"], json!(["cleo@lab"]), "{c}");
+    assert_eq!(c["hold_back"], 0.0, "{c}");
+    assert_eq!(c["suggest"], "imported", "{c}");
+    assert_eq!(c["closes_into"], "decision", "{c}");
+    assert_eq!(c["source"]["proposals"]["model"], model_id, "{c}");
+    // the model's answer is what each scan suggests, authored by the model
+    let told = server.ok(
+        "GET",
+        &format!("/api/campaigns/{id}/suggestions?all=1"),
+        None,
+        CURATOR,
+    );
+    assert!(told.to_string().contains("bp-head@1"), "{told}");
+    let row = &server.ok("GET", "/api/review/proposals", None, CURATOR)["proposals"][0];
+    assert_eq!(row["below"]["stacks"], 0, "{row}");
+    assert_eq!(row["asked"]["stacks"], 2, "{row}");
+    assert_eq!(
+        row["campaigns"],
+        json!([{"id": id, "name": "bp-head-body_part-unsure"}]),
+        "{row}"
+    );
+    // nothing is left to make a second of
+    let (status, doc) = server.call(
+        "POST",
+        "/api/review/proposals/campaign",
+        Some(json!({"model": "bp-head@1", "axis": "body_part"})),
+        CURATOR,
+    );
+    assert_eq!(status, 409, "{doc}");
+    assert!(
+        doc.to_string().contains("waits below its threshold"),
+        "{doc}"
+    );
+    drop(server);
+
+    // the keyboard says the same
+    let out = nils()
+        .arg("--registry")
+        .arg(home.path())
+        .args(["review", "proposals", "--json"])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let doc: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(doc["proposals"][0]["asked"]["stacks"], 2, "{doc}");
+    let out = nils()
+        .arg("--registry")
+        .arg(home.path())
+        .args([
+            "review",
+            "proposals-campaign",
+            "--model",
+            "bp-head@1",
+            "--axis",
+            "body_part",
+        ])
+        .args(["--pack-dir", packs().to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("waits below its threshold"),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}

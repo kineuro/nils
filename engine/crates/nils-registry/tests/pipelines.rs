@@ -2102,7 +2102,10 @@ fn the_proposals_per_model_and_axis_commit_and_the_rest_becomes_a_campaign() {
                 ("kind", Param::from("body_part:low_confidence")),
                 ("scope", Param::from("stack")),
                 ("ref", Param::from(json!({"stack_id": ids[2]}).to_string())),
-                ("evidence", Param::from(json!({"axis": "body_part"}).to_string())),
+                (
+                    "evidence",
+                    Param::from(json!({"axis": "body_part"}).to_string()),
+                ),
                 ("status", Param::from("open")),
             ],
         );

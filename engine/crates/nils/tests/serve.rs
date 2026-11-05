@@ -4953,6 +4953,7 @@ fn every_door_needs_its_grant_and_a_refusal_names_it() {
         ("review-see", "review:see"),
         ("review-work", "review:work"),
         ("both-work", "review:work,data:work"),
+        ("campaign-review", "campaigns:work,review:work"),
         ("release-see", "release:see"),
         ("release-work", "release:work"),
         ("pipelines-see", "pipelines:see"),
@@ -5076,6 +5077,25 @@ fn every_door_needs_its_grant_and_a_refusal_names_it() {
             "review-work",
             "review-see",
             "review:work",
+        ),
+        // UX round 1: what models proposed, per model and axis, is read by
+        // a reviewer; a campaign of the rest closes into decisions in force,
+        // so it is a campaign's work and a reviewer's
+        (
+            "GET",
+            "/api/review/proposals",
+            "",
+            "review-see",
+            "data-see",
+            "review:see",
+        ),
+        (
+            "POST",
+            "/api/review/proposals/campaign",
+            "{}",
+            "campaign-review",
+            "review-work",
+            "campaigns:work",
         ),
         // record 56: rehearsing a rule change is the work of a reviewer
         // or of a pipeline's operator
