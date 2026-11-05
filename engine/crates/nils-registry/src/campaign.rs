@@ -1257,6 +1257,59 @@ pub struct New<'a> {
 /// Record 48 R1: the least share of a batch held back to be read alone.
 pub const HOLD_BACK_MIN: f64 = 0.1;
 
+/// Whether a hold-back share may stand on a campaign of this purpose
+/// (2026-11-05): from [`HOLD_BACK_MIN`] to one always; none at all (0)
+/// only where the purpose is none or `decide`, since the share is the
+/// guard a study that trains, measures, audits or verifies keeps against
+/// a click-through, and a curation pass of one's own needs none.
+pub fn hold_back_allowed(share: f64, purpose: &str) -> bool {
+    if (HOLD_BACK_MIN..=1.0).contains(&share) {
+        return true;
+    }
+    share == 0.0 && matches!(purpose, "" | "decide")
+}
+
+/// Set an open campaign's hold-back share (2026-11-05, `nils campaign
+/// hold-back`): the share from now on, under [`hold_back_allowed`] for the
+/// campaign's purpose; where it becomes none, the items held back and
+/// still open go back to the batches and the gallery. How many went back.
+pub fn set_hold_back(registry: &mut Registry, campaign: i64, share: f64) -> Result<usize, Error> {
+    let store = registry.store();
+    let purpose = crate::blind::purpose(store, campaign)?;
+    if !hold_back_allowed(share, &purpose) {
+        return Err(invalid(format!(
+            "hold_back is the share of a batch read alone, from {HOLD_BACK_MIN} to 1{}",
+            if matches!(purpose.as_str(), "" | "decide") {
+                ", or 0 for none"
+            } else {
+                "; a campaign that trains or measures keeps at least the floor"
+            }
+        )));
+    }
+    let d = store.dialect();
+    store.execute(
+        &format!(
+            "UPDATE {} SET hold_back = {} WHERE id = {}",
+            store.qualified("campaign"),
+            d.param(1, Type::Double),
+            d.param(2, Type::Int)
+        ),
+        &[Param::Double(share), Param::from(campaign)],
+    )?;
+    if share > 0.0 {
+        return Ok(0);
+    }
+    let freed = store.execute(
+        &format!(
+            "UPDATE {} SET held_back = 0 WHERE campaign_id = {} AND state = 'open' AND held_back = 1",
+            store.qualified("campaign_item"),
+            d.param(1, Type::Int)
+        ),
+        &[Param::from(campaign)],
+    )?;
+    Ok(freed as usize)
+}
+
 /// What a campaign shows its raters beside each item as the answer
 /// suggested, said once when it is made and never inferred. A read
 /// registered as made without suggestions is one made without them: with
@@ -1361,6 +1414,20 @@ impl Campaign {
 
     pub fn raters(&self) -> Vec<String> {
         self.listed("raters")
+    }
+
+    /// The SQL that keeps an item a rater once held away from them again:
+    /// every assignment of theirs, however it ended, as a study's rater
+    /// reads an item once; where the campaign names this rater alone, only
+    /// the ones they hold, answered or refused, so an expired or returned
+    /// lease is theirs to take again (2026-11-05).
+    pub fn once_only_clause(&self, principal: &str) -> &'static str {
+        let raters = self.raters();
+        if raters.len() == 1 && raters[0] == principal {
+            " AND a.state NOT IN ('expired', 'released')"
+        } else {
+            ""
+        }
     }
 
     pub fn adjudicators(&self) -> Vec<String> {
@@ -1672,9 +1739,12 @@ pub fn create(registry: &mut Registry, n: &New<'_>) -> Result<Campaign, Error> {
         }
     }
     let hold_back = n.hold_back.unwrap_or(HOLD_BACK_MIN);
-    if !(HOLD_BACK_MIN..=1.0).contains(&hold_back) {
+    // 2026-11-05 (Nima: the hold-back is a guard for a study, not for a
+    // curation pass of one's own): none at all is allowed where no study
+    // purpose is set; a share between none and the floor never is
+    if !hold_back_allowed(hold_back, "") {
         return Err(invalid(format!(
-            "hold_back is the share of a batch read alone, from {HOLD_BACK_MIN} to 1"
+            "hold_back is the share of a batch read alone, from {HOLD_BACK_MIN} to 1, or 0 for none on a campaign that trains or measures nothing"
         )));
     }
     let grain = match (&n.items, &question) {
@@ -2523,12 +2593,18 @@ pub fn open_for(
     let d = store.dialect();
     let a = store.qualified("campaign_assignment");
     // a lease past its end holds its item for no one, as a claim finds it
+    // never an item the rater held, however it ended (a study's rater reads
+    // an item once); but where the campaign names this rater alone, one
+    // whose lease ran out, or was given back, is theirs to take again
+    // (2026-11-05: two items of a curation campaign of 4,838 sat open and
+    // unreachable behind the one rater's expired leases)
+    let back = campaign.once_only_clause(principal);
     let sql = format!(
         "SELECT {} FROM {} i WHERE i.campaign_id = {} AND i.state = 'open' AND i.round = 1 \
          AND (i.held_back IS NULL OR i.held_back = 0) \
          AND (SELECT COUNT(*) FROM {a} a WHERE a.item_id = i.id AND a.role = 'rater' \
               AND (a.state = 'submitted' OR (a.state = 'leased' AND a.lease_until >= {}))) < COALESCE(i.raters, {}) \
-         AND NOT EXISTS (SELECT 1 FROM {a} a WHERE a.item_id = i.id AND a.principal = {}) \
+         AND NOT EXISTS (SELECT 1 FROM {a} a WHERE a.item_id = i.id AND a.principal = {}{back}) \
          ORDER BY i.position",
         select_list(store, "campaign_item", &ITEM_COLUMNS, Some("i")),
         store.qualified("campaign_item"),
@@ -2561,12 +2637,13 @@ pub fn held_back_open(
 ) -> Result<usize, Error> {
     let d = store.dialect();
     let a = store.qualified("campaign_assignment");
+    let back = campaign.once_only_clause(principal);
     let sql = format!(
         "SELECT COUNT(*) FROM {} i WHERE i.campaign_id = {} AND i.state = 'open' AND i.round = 1 \
          AND i.held_back = 1 \
          AND (SELECT COUNT(*) FROM {a} a WHERE a.item_id = i.id AND a.role = 'rater' \
               AND (a.state = 'submitted' OR (a.state = 'leased' AND a.lease_until >= {}))) < COALESCE(i.raters, {}) \
-         AND NOT EXISTS (SELECT 1 FROM {a} a WHERE a.item_id = i.id AND a.principal = {})",
+         AND NOT EXISTS (SELECT 1 FROM {a} a WHERE a.item_id = i.id AND a.principal = {}{back})",
         store.qualified("campaign_item"),
         d.param(1, Type::Int),
         d.param(2, Type::Timestamp),
@@ -3292,11 +3369,12 @@ fn rater_order(
     let d = store.dialect();
     let a = store.qualified("campaign_assignment");
     let i = store.qualified("campaign_item");
+    let back = c.once_only_clause(principal);
     let sql = format!(
         "SELECT i.id, i.position, i.stack_id, i.held_back FROM {i} i WHERE i.campaign_id = {} AND i.state = 'open' AND i.round = 1 \
          AND (SELECT COUNT(*) FROM {a} a WHERE a.item_id = i.id AND a.role = 'rater' \
               AND a.state IN ('leased', 'submitted')) < COALESCE(i.raters, {}) \
-         AND NOT EXISTS (SELECT 1 FROM {a} a WHERE a.item_id = i.id AND a.principal = {}) \
+         AND NOT EXISTS (SELECT 1 FROM {a} a WHERE a.item_id = i.id AND a.principal = {}{back}) \
          ORDER BY i.position{}",
         d.param(1, Type::Int),
         d.param(2, Type::Int),

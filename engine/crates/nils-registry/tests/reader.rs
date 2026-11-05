@@ -897,8 +897,15 @@ fn a_campaign_holds_back_what_its_maker_set_and_no_less_than_a_tenth() {
         let q = body_part();
         let adj = json!({"when": "never"});
         let mut n = new("low", &q, &adj, Items::Stacks(ids.clone()), 1);
-        n.hold_back = Some(0.0);
+        // 2026-11-05: none at all is allowed on a campaign that trains or
+        // measures nothing; a share under the floor never is
+        n.hold_back = Some(0.05);
         assert!(campaign::create(reg, &n).is_err(), "{name}");
+        n.hold_back = Some(0.0);
+        n.name = "none";
+        let none = campaign::create(reg, &n).unwrap();
+        assert_eq!(none.hold_back, 0.0, "{name}");
+        n.name = "low";
         n.hold_back = Some(0.25);
         let c = campaign::create(reg, &n).unwrap();
         assert_eq!(c.hold_back, 0.25, "{name}");

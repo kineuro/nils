@@ -423,6 +423,27 @@ pub fn set_purpose(store: &mut Store, campaign: i64, purpose: &str) -> Result<()
             campaign,
         )
         .map_err(|e| e.to_string())?;
+    // 2026-11-05: a study keeps the hold-back floor; a campaign made with
+    // none takes the floor as it becomes one
+    if !matches!(purpose, "decide") {
+        let d = store.dialect();
+        store
+            .execute(
+                &format!(
+                    "UPDATE {} SET hold_back = {} WHERE id = {} AND hold_back < {}",
+                    store.qualified("campaign"),
+                    d.param(1, Type::Double),
+                    d.param(2, Type::Int),
+                    d.param(3, Type::Double)
+                ),
+                &[
+                    Param::Double(crate::campaign::HOLD_BACK_MIN),
+                    Param::from(campaign),
+                    Param::Double(crate::campaign::HOLD_BACK_MIN),
+                ],
+            )
+            .map_err(|e| e.to_string())?;
+    }
     Ok(())
 }
 

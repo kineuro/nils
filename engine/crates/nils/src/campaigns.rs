@@ -1279,6 +1279,15 @@ pub(crate) fn route(
                 ) {
                     doc["contrast_label"] = label;
                 }
+                // 2026-11-05: in force means every page reads it, so the
+                // scans the close decided are re-sorted at once, as a
+                // commit's are
+                doc["resort"] = crate::review_questions::resort_committed(
+                    registry,
+                    doors.pack_dir.as_deref(),
+                    principal,
+                    &closed.decisions,
+                );
                 Ok(Reply::ok(doc))
             }
             ["api", "campaigns", which, "export"] if post => {
@@ -5199,6 +5208,19 @@ pub(crate) enum CampaignCommand {
         json: bool,
     },
     /// Move an open axes campaign to fewer asked axes, the rest derived
+    /// Set an open campaign's hold-back share (2026-11-05): from 0.1 to 1,
+    /// or 0 for none on a campaign that trains or measures nothing, so a
+    /// curation pass of one's own accepts a batch or a gallery whole; where
+    /// it becomes none, the items held back and still open go back to the
+    /// batches and the gallery
+    HoldBack {
+        /// The campaign, by name or id
+        campaign: String,
+        /// The share, 0.1 to 1, or 0 for none
+        share: f64,
+        #[arg(long)]
+        json: bool,
+    },
     /// from each answer through the pack's rules (record 48). Its items and
     /// every answer are kept; an answer given before is read on the axes
     /// asked now and derives the rest
@@ -5317,7 +5339,8 @@ pub(crate) struct CreateArgs {
     #[arg(long, default_value_t = 3600, value_name = "SECONDS")]
     lease_seconds: i64,
     /// The share of each batch accepted in one move that is held back to
-    /// be read alone, from 0.1 to 1 (record 48)
+    /// be read alone, from 0.1 to 1 (record 48), or 0 for none on a
+    /// campaign that trains or measures nothing (2026-11-05)
     #[arg(long, value_name = "SHARE")]
     hold_back: Option<f64>,
     /// What the reader shows beside each item as the answer suggested:
@@ -6038,8 +6061,9 @@ pub(crate) fn campaign_command(home: &Home, cmd: CampaignCommand) -> Result<(), 
             let mut registry = crate::open(home)?;
             let c = campaign::find(registry.store(), &which).map_err(cerr)?;
             let principal = who();
-            let pack = crate::pack_dir(home, pack_dir)
-                .ok()
+            let dir = crate::pack_dir(home, pack_dir).ok();
+            let pack = dir
+                .as_ref()
                 .and_then(|d| nils_pack::load(&d.join(&pack), None).ok());
             let pack_for_label = pack.clone();
             let picks = pick_writer(pack);
@@ -6057,6 +6081,17 @@ pub(crate) fn campaign_command(home: &Home, cmd: CampaignCommand) -> Result<(), 
                 &now,
             )
             .map_err(cerr)?;
+            // 2026-11-05: the scans the close decided are re-sorted at once,
+            // so every page reads the decisions in force
+            let resort = crate::review_questions::resort_committed(
+                &mut registry,
+                dir.as_deref(),
+                &principal,
+                &closed.decisions,
+            );
+            if !json {
+                println!("re-sort: {}", resort["words"].as_str().unwrap_or("not run"));
+            }
             // record 55 F5: a settled read of post-contrast is a T1 anchor
             let label = crate::contrast::after_decisions(
                 registry.store(),
@@ -6065,6 +6100,7 @@ pub(crate) fn campaign_command(home: &Home, cmd: CampaignCommand) -> Result<(), 
             );
             if json {
                 let mut doc = closed.as_json();
+                doc["resort"] = resort.clone();
                 if let Some(label) = label {
                     doc["contrast_label"] = label;
                 }
@@ -6098,6 +6134,39 @@ pub(crate) fn campaign_command(home: &Home, cmd: CampaignCommand) -> Result<(), 
                 println!("  {n} planted value(s) the reader accepted left out of the decisions");
             }
             println!("  agreement {}", closed.agreement);
+            Ok(())
+        }
+        CampaignCommand::HoldBack {
+            campaign: which,
+            share,
+            json,
+        } => {
+            let mut registry = crate::open(home)?;
+            let c = campaign::find(registry.store(), &which).map_err(cerr)?;
+            let freed = campaign::set_hold_back(&mut registry, c.id, share).map_err(cerr)?;
+            if json {
+                println!(
+                    "{}",
+                    serde_json::json!({"campaign": c.id, "name": c.name, "hold_back": share, "freed": freed})
+                );
+            } else {
+                println!(
+                    "campaign {} holds back {} of each batch{}",
+                    c.name,
+                    if share == 0.0 {
+                        "none".to_string()
+                    } else {
+                        format!("{share}")
+                    },
+                    if freed > 0 {
+                        format!(
+                            "; {freed} item(s) held back went back to the batches and the gallery"
+                        )
+                    } else {
+                        String::new()
+                    }
+                );
+            }
             Ok(())
         }
         CampaignCommand::Requestion {

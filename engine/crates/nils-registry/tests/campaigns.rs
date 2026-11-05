@@ -258,6 +258,49 @@ fn count(reg: &mut Registry, t: &str, filter: &str) -> i64 {
 
 /// S5: two raters on each of two items, one lease that runs out and returns
 /// its item to the pool, and no rater given the same item twice.
+/// 2026-11-05: where a campaign names one rater alone, an item whose
+/// lease ran out, or was given back, is that rater's to take again; two
+/// items of a curation campaign sat open and unreachable behind the one
+/// rater's expired leases. A study's rater still reads an item once.
+#[test]
+fn the_only_rater_takes_an_expired_lease_again() {
+    for mut l in labs() {
+        let name = l.name;
+        let reg = &mut l.registry;
+        let ids = stacks(reg, 1);
+        let q = body_part();
+        let adj = json!({"when": "never"});
+        let mut n = new("alone", &q, &adj, Items::Stacks(ids.clone()), 1, "decision");
+        n.raters = vec!["anna@lab".to_string()];
+        n.lease_seconds = 600;
+        let c = campaign::create(reg, &n).unwrap();
+        let a1 = campaign::claim(reg, c.id, "anna@lab", Role::Rater, &at(0))
+            .unwrap()
+            .unwrap();
+        // the lease ran out: the same item comes back to her
+        let a2 = campaign::claim(reg, c.id, "anna@lab", Role::Rater, &at(13))
+            .unwrap()
+            .unwrap();
+        assert_eq!(a2.item.id, a1.item.id, "{name}");
+        assert_ne!(a2.assignment.id, a1.assignment.id, "{name}");
+        // given back unanswered, it comes back too
+        campaign::release(reg, a2.assignment.id, "anna@lab", &at(14)).unwrap();
+        let a3 = campaign::claim(reg, c.id, "anna@lab", Role::Rater, &at(15))
+            .unwrap()
+            .unwrap();
+        assert_eq!(a3.item.id, a1.item.id, "{name}");
+        let done =
+            campaign::answer(reg, &give(a3.assignment.id, "anna@lab", "brain"), &at(16)).unwrap();
+        assert_eq!(done.state, "agreed", "{name}");
+        // answered, it is hers no more: the next claim is another item or none
+        let again = campaign::claim(reg, c.id, "anna@lab", Role::Rater, &at(17)).unwrap();
+        assert!(
+            again.as_ref().is_none_or(|x| x.item.id != a1.item.id),
+            "{name}"
+        );
+    }
+}
+
 #[test]
 fn two_raters_share_the_items_and_an_expired_lease_returns_one() {
     for mut l in labs() {
