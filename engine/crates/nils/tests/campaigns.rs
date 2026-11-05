@@ -2202,3 +2202,159 @@ fn a_campaign_s_results_are_its_maker_s_and_blind_to_its_raters_while_open() {
     assert!(!r.to_string().contains("bo@lab"), "{r}");
     assert!(!r.to_string().contains("judge@lab"), "{r}");
 }
+
+/// 2026-11-05, a campaign of 4,838 items read alone on production: the
+/// close runs as a job a page follows (202, then the campaign closed and
+/// the job's result), a close of the closed campaign is refused and starts
+/// no job; a lease that ran out needs no release, at the door or the
+/// keyboard, which say it is free already; and the maker sets none of a
+/// batch aside, where the campaign's purpose allows it.
+#[test]
+fn a_close_runs_as_a_job_and_an_ended_lease_needs_no_release() {
+    let home = registry();
+    let server = Server::start(&home);
+    server.ok(
+        "PUT",
+        "/api/ask/selections/every-stack",
+        Some(json!({"document": {
+            "ast_version": 1,
+            "sets": {"every": {"grain": "stack"}},
+            "out": {"set": "every", "level": "record"},
+        }})),
+        CURATOR,
+    );
+    let make = |name: &str, lease: i64, purpose: &str| {
+        server.ok(
+            "POST",
+            "/api/campaigns",
+            Some(json!({
+                "name": name,
+                "question": {"kind": "axis", "axis": "body_part"},
+                "source": {"selection": "every-stack@1"},
+                "raters_per_item": 1,
+                "raters": ["anna@lab"],
+                "adjudication": {"when": "never"},
+                "closes_into": "decision",
+                "lease_seconds": lease,
+                "purpose": purpose,
+            })),
+            CURATOR,
+        )
+    };
+
+    // a lease of a second runs out; the sole rater's next claim writes it
+    // expired, and a release of it says the item is free already
+    make("leases", 1, "decide");
+    let first = server.ok("POST", "/api/campaigns/leases/claim", Some(json!({})), ANNA);
+    let held = first["assignment"]["id"].as_i64().unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(2200));
+    server.ok("POST", "/api/campaigns/leases/claim", Some(json!({})), ANNA);
+    let shown = server.ok("GET", "/api/campaigns/leases", None, CURATOR);
+    let a = shown["assignments"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|a| a["id"] == held)
+        .unwrap();
+    assert_eq!(a["state"], "expired", "{shown}");
+    let r = server.ok(
+        "POST",
+        &format!("/api/campaigns/leases/assignments/{held}/release"),
+        Some(json!({})),
+        ANNA,
+    );
+    assert_eq!(r["state"], "expired", "{r}");
+    assert!(r["words"].as_str().unwrap().contains("free already"), "{r}");
+    let said = cli(
+        &home,
+        "cleo@lab",
+        &["campaign", "release", &held.to_string()],
+    );
+    assert!(said.contains("free already"), "{said}");
+
+    // the maker sets none aside on a campaign that decides; a rater may not,
+    // and a share under the floor is refused
+    let (status, doc) = server.call(
+        "POST",
+        "/api/campaigns/leases/hold-back",
+        Some(json!({"share": 0})),
+        ANNA,
+    );
+    assert_eq!(status, 403, "{doc}");
+    let (status, doc) = server.call(
+        "POST",
+        "/api/campaigns/leases/hold-back",
+        Some(json!({"share": 0.05})),
+        CURATOR,
+    );
+    assert_eq!(status, 400, "{doc}");
+    assert_eq!(shown["hold_back_none"], true, "{shown}");
+    let done = server.ok(
+        "POST",
+        "/api/campaigns/leases/hold-back",
+        Some(json!({"share": 0})),
+        CURATOR,
+    );
+    assert_eq!(done["hold_back"], 0.0, "{done}");
+    let now = server.ok("GET", "/api/campaigns/leases", None, CURATOR);
+    assert_eq!(now["hold_back"], 0.0, "{now}");
+    // a campaign that trains keeps its floor
+    make("training", 3600, "train");
+    let train = server.ok("GET", "/api/campaigns/training", None, CURATOR);
+    assert_eq!(train["hold_back_none"], false, "{train}");
+    let (status, doc) = server.call(
+        "POST",
+        "/api/campaigns/training/hold-back",
+        Some(json!({"share": 0})),
+        CURATOR,
+    );
+    assert_eq!(status, 400, "{doc}");
+
+    // the close as a job: every item agreed, the close answers at once, and
+    // the campaign is then closed with the job's result beside it
+    make("closing", 3600, "decide");
+    let open = server.ok("GET", "/api/campaigns/closing", None, CURATOR);
+    assert!(open["close_job"].is_null(), "{open}");
+    let items = open["items"].as_array().unwrap().len();
+    for _ in 0..items {
+        rate(&server, "closing", ANNA, json!({"value": "brain"}));
+    }
+    let (status, started) = server.call(
+        "POST",
+        "/api/campaigns/closing/close",
+        Some(json!({"background": true})),
+        CURATOR,
+    );
+    assert_eq!(status, 202, "{started}");
+    let job = started["job"].as_i64().unwrap();
+    let mut closed = Value::Null;
+    for _ in 0..300 {
+        let c = server.ok("GET", "/api/campaigns/closing", None, CURATOR);
+        if c["status"] == "closed" && c["close_job"]["state"] == "done" {
+            closed = c;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    assert_eq!(closed["close_job"]["id"], job, "{closed}");
+    assert_eq!(closed["close_job"]["running"], false, "{closed}");
+    assert_eq!(closed["close_job"]["by"], "cleo@lab", "{closed}");
+    assert_eq!(
+        closed["close_job"]["result"]["decisions"]
+            .as_array()
+            .unwrap()
+            .len(),
+        items,
+        "{closed}"
+    );
+    // a second close is refused, and starts no job
+    let (status, doc) = server.call(
+        "POST",
+        "/api/campaigns/closing/close",
+        Some(json!({"background": true})),
+        CURATOR,
+    );
+    assert_eq!(status, 409, "{doc}");
+    let after = server.ok("GET", "/api/campaigns/closing", None, CURATOR);
+    assert_eq!(after["close_job"]["id"], job, "{after}");
+}

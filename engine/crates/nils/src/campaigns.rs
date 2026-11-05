@@ -63,6 +63,9 @@ pub(crate) const DOORS: &[&str] = &[
     "GET /api/campaigns/{id}/mine",
     "POST /api/campaigns/{id}/answers/{answer}/amend",
     "POST /api/campaigns/{id}/raters",
+    // 2026-11-05: the share of a batch read one by one, as `nils campaign
+    // hold-back` sets it
+    "POST /api/campaigns/{id}/hold-back",
     "GET /api/campaigns/{id}/ab",
     "GET /api/campaigns/{id}/ab/decisions",
     "GET /api/campaigns/{id}/items/{item}/ab",
@@ -133,7 +136,9 @@ pub(crate) fn door(method: &str, segs: &[&str]) -> Option<(Need, Detail)> {
         // own answer; the raters of an open campaign are its maker's to
         // change, or a reviewer's, which the door checks beside the grant
         ("POST", ["api", "campaigns", _, "answers", _, "amend"])
-        | ("POST", ["api", "campaigns", _, "raters"]) => (Need::One("campaigns:work"), Plain),
+        | ("POST", ["api", "campaigns", _, "raters" | "hold-back"]) => {
+            (Need::One("campaigns:work"), Plain)
+        }
         // record 50 R3: suggestions from outside are the campaign's maker's
         // to bring, or a reviewer's
         ("POST", ["api", "campaigns", _, "suggestions"]) => (Need::One("campaigns:work"), Plain),
@@ -489,6 +494,15 @@ pub(crate) const POLICY: &[(&str, bool, bool, &str, &str, &str, &str)] = &[
         "Changed a campaign's raters",
     ),
     (
+        "POST /api/campaigns/{id}/hold-back",
+        true,
+        true,
+        "free",
+        "one campaign",
+        "Setting how much of a batch is read one by one",
+        "Set how much of a batch is read one by one",
+    ),
+    (
         "GET /api/campaigns/{id}/ab",
         false,
         false,
@@ -774,7 +788,9 @@ pub(crate) fn route(
                     }
                 }
                 if !sees_all(registry.store(), caller, principal, &c)? {
-                    blind_view(&mut v, principal);
+                    // 2026-11-05: the maker reads who holds which open item
+                    // and until when, never an answer
+                    blind_view(&mut v, principal, c.owner == principal);
                 }
                 Ok(Reply::ok(v))
             }
@@ -1206,6 +1222,35 @@ pub(crate) fn route(
                     .map_err(campaign_err)?;
                 Ok(Reply::ok(done.as_json()))
             }
+            // 2026-11-05: the share of a batch read one by one, by its
+            // maker or a reviewer, as `nils campaign hold-back` sets it;
+            // none only where the campaign's purpose allows it
+            ["api", "campaigns", which, "hold-back"] if post => {
+                let doc = json_body(body)?;
+                let c = campaign::find(registry.store(), which).map_err(campaign_err)?;
+                if c.owner != principal && !caller.access.holds("review:work") {
+                    return Err(Reply::error(
+                        403,
+                        format!(
+                            "how much of a batch campaign {} reads one by one is its maker's to change, or a holder of review:work's",
+                            c.name
+                        ),
+                    ));
+                }
+                if c.status != "open" {
+                    return Err(Reply::error(
+                        409,
+                        format!("campaign {} is {}", c.name, c.status),
+                    ));
+                }
+                let share = doc["share"].as_f64().ok_or_else(|| {
+                    Reply::error(400, "share: the share of a batch read one by one, 0 to 1")
+                })?;
+                let freed = campaign::set_hold_back(registry, c.id, share).map_err(campaign_err)?;
+                Ok(Reply::ok(json!({
+                    "campaign": c.id, "name": c.name, "hold_back": share, "freed": freed,
+                })))
+            }
             // record 45: the rating workspace's heartbeat
             ["api", "campaigns", which, "assignments", a, "renew"] if post => {
                 let c = campaign::find(registry.store(), which).map_err(campaign_err)?;
@@ -1220,7 +1265,7 @@ pub(crate) fn route(
                 belongs(registry.store(), c.id, "campaign_assignment", a)?;
                 // the campaign's owner and a holder of review:work give
                 // back another's claim, audited with its holder
-                let done = campaign::release_as(
+                let (done, free) = campaign::release_said(
                     registry,
                     a,
                     principal,
@@ -1228,7 +1273,11 @@ pub(crate) fn route(
                     &now,
                 )
                 .map_err(campaign_err)?;
-                Ok(Reply::ok(done.as_json()))
+                // 2026-11-05: a lease that ran out needs no release, and
+                // the answer says the item is free already
+                let mut v = done.as_json();
+                v["words"] = json!(released_words(&done, free));
+                Ok(Reply::ok(v))
             }
             ["api", "campaigns", which, "items", item, "metric"] if post => {
                 let doc = json_body(body)?;
@@ -1246,49 +1295,72 @@ pub(crate) fn route(
                 })))
             }
             ["api", "campaigns", which, "close"] if post => {
+                let doc = if body.trim().is_empty() {
+                    json!({})
+                } else {
+                    json_body(body)?
+                };
+                let background = match &doc["background"] {
+                    Value::Null => false,
+                    Value::Bool(b) => *b,
+                    _ => return Err(Reply::error(400, "background: true or false")),
+                };
                 let c = campaign::find(registry.store(), which).map_err(campaign_err)?;
-                let pack = doors
-                    .pack_dir
-                    .as_ref()
-                    .and_then(|dir| nils_pack::load(&dir.join(&doors.ask_pack), None).ok());
-                let picks = pick_writer(pack);
                 let acting = crate::serve::acting_model(registry, caller)?.map(|m| m.id);
-                let closed = campaign::close(
-                    registry,
-                    &Close {
-                        campaign: c.id,
-                        who: principal,
-                        author_kind: kind_of(caller),
-                        model: acting,
-                        picks: Some(&picks),
-                        sealed: Some(&crate::checks::sealed_results),
+                let run = CloseRun {
+                    campaign: c.id,
+                    principal: principal.to_string(),
+                    author_kind: match kind_of(caller) {
+                        "agent" => "agent",
+                        "model" => "model",
+                        _ => "person",
                     },
-                    &now,
-                )
-                .map_err(campaign_err)?;
-                let mut doc = closed.as_json();
-                // record 55 F5: a settled read of post-contrast is a T1 anchor
-                let pack = doors
-                    .pack_dir
-                    .as_ref()
-                    .and_then(|dir| nils_pack::load(&dir.join(&doors.ask_pack), None).ok());
-                if let Some(label) = crate::contrast::after_decisions(
-                    registry.store(),
-                    pack.as_ref(),
-                    &closed.decisions,
-                ) {
-                    doc["contrast_label"] = label;
+                    model: acting,
+                    pack_dir: doors.pack_dir.clone(),
+                    pack: doors.ask_pack.clone(),
+                };
+                // 2026-11-05: a close runs as a job, one per campaign at a
+                // time, so a page follows it and a second close is refused
+                campaign::may_close(registry.store(), &c, run.author_kind).map_err(campaign_err)?;
+                let job =
+                    campaign::claim_close(registry.store(), &c, principal).map_err(campaign_err)?;
+                close_command_line(registry.store(), job, c.id);
+                if !background {
+                    let (_, doc) =
+                        guarded_close(registry, &run, job, &now).map_err(campaign_err)?;
+                    return Ok(Reply::ok(doc));
                 }
-                // 2026-11-05: in force means every page reads it, so the
-                // scans the close decided are re-sorted at once, as a
-                // commit's are
-                doc["resort"] = crate::review_questions::resort_committed(
-                    registry,
-                    doors.pack_dir.as_deref(),
-                    principal,
-                    &closed.decisions,
-                );
-                Ok(Reply::ok(doc))
+                let home = doors.home.clone();
+                let spawned = std::thread::Builder::new()
+                    .name("nils-campaign-close".into())
+                    .spawn(move || match home.open() {
+                        Ok(mut registry) => {
+                            let now = nils_registry::time::now_iso();
+                            let _ = guarded_close(&mut registry, &run, job, &now);
+                        }
+                        Err(e) => {
+                            if let Ok(mut registry) = home.open() {
+                                let _ = nils_registry::job::finish(
+                                    registry.store(),
+                                    job,
+                                    nils_registry::job::State::Failed,
+                                    Some(&e.to_string()),
+                                );
+                            }
+                        }
+                    });
+                if let Err(e) = spawned {
+                    let _ = nils_registry::job::finish(
+                        registry.store(),
+                        job,
+                        nils_registry::job::State::Failed,
+                        Some(&e.to_string()),
+                    );
+                    return Err(Reply::error(503, format!("the close could not start: {e}")));
+                }
+                Ok(Reply::accepted(json!({
+                    "job": job, "campaign": c.id, "state": "running",
+                })))
             }
             ["api", "campaigns", which, "export"] if post => {
                 let doc = json_body(body)?;
@@ -2889,8 +2961,10 @@ pub(crate) fn rates_in(caller: &Caller, c: &campaign::Campaign) -> bool {
 /// Record 48: a campaign as a caller reads it who does not read every
 /// answer: an item another person has been given keeps its state and loses
 /// its outcome, agreement and metric, which are that person's; only the
-/// caller's own assignments are listed; the open agreement is left out.
-fn blind_view(v: &mut Value, principal: &str) {
+/// caller's own assignments are listed, or with `leases` (the campaign's
+/// maker, 2026-11-05) every one, which says who holds an item and until
+/// when and never an answer; the open agreement is left out.
+fn blind_view(v: &mut Value, principal: &str, leases: bool) {
     let mut others = std::collections::BTreeSet::new();
     if let Some(list) = v["assignments"].as_array_mut() {
         for a in list.iter() {
@@ -2900,7 +2974,9 @@ fn blind_view(v: &mut Value, principal: &str) {
                 others.insert(item);
             }
         }
-        list.retain(|a| a["principal"].as_str() == Some(principal));
+        if !leases {
+            list.retain(|a| a["principal"].as_str() == Some(principal));
+        }
     }
     for it in v["items"].as_array_mut().into_iter().flatten() {
         if it["id"].as_i64().is_some_and(|id| others.contains(&id))
@@ -3360,7 +3436,15 @@ pub(crate) fn axes_value(question: &Value, value: &mut Value) {
 pub(crate) fn shown(store: &mut Store, c: &campaign::Campaign) -> Result<Value, Reply> {
     let mut v = c.as_json();
     // record 55 D6 and D7: what its answers are for
-    v["purpose"] = json!(nils_registry::blind::purpose(store, c.id)?);
+    let purpose = nils_registry::blind::purpose(store, c.id)?;
+    // 2026-11-05: whether its maker may set the share a batch holds back to
+    // none, which a curation pass of one's own may and a study may not
+    v["hold_back_none"] = json!(campaign::hold_back_allowed(0.0, &purpose));
+    v["purpose"] = json!(purpose);
+    // 2026-11-05: the close it runs or ran as a job, which a page follows
+    v["close_job"] = campaign::close_job(store, c.id)
+        .map_err(campaign_err)?
+        .map_or(Value::Null, |j| campaign::close_job_json(&j));
     // record 58 P1 (Wave 7b spec §12.7): how a verify campaign plants, the
     // share, the count and whether the list is opened; the seed and the
     // list once it is. Null on any other campaign.
@@ -5207,7 +5291,6 @@ pub(crate) enum CampaignCommand {
         #[arg(long)]
         json: bool,
     },
-    /// Move an open axes campaign to fewer asked axes, the rest derived
     /// Set an open campaign's hold-back share (2026-11-05): from 0.1 to 1,
     /// or 0 for none on a campaign that trains or measures nothing, so a
     /// curation pass of one's own accepts a batch or a gallery whole; where
@@ -5221,6 +5304,7 @@ pub(crate) enum CampaignCommand {
         #[arg(long)]
         json: bool,
     },
+    /// Move an open axes campaign to fewer asked axes, the rest derived
     /// from each answer through the pack's rules (record 48). Its items and
     /// every answer are kept; an answer given before is read on the axes
     /// asked now and derives the rest
@@ -5574,6 +5658,150 @@ fn require_export(registry: &mut Registry, dir: &Path) -> Result<(), Exit> {
     crate::places::require(registry.store(), nils_registry::place::Role::Export, dir)
         .map(|_| ())
         .map_err(|r| fail(r.message))
+}
+
+/// What a release did, in words (2026-11-05): an assignment whose lease
+/// ran out, or that was given back before, needs no release, and is said
+/// to be free already rather than refused.
+fn released_words(a: &campaign::Assignment, free: bool) -> String {
+    let id = a.id;
+    match (a.state.as_str(), free) {
+        ("expired", true) => format!(
+            "assignment {id} is free already: its lease ran out{}, so there is nothing to give back",
+            a.lease_until
+                .as_deref()
+                .map(|u| format!(" at {u}"))
+                .unwrap_or_default()
+        ),
+        ("expired", false) => {
+            format!("assignment {id}'s lease had run out; it is ended, and its item is free")
+        }
+        ("released", true) => format!(
+            "assignment {id} is free already: it was given back{}",
+            a.ended_at
+                .as_deref()
+                .map(|u| format!(" at {u}"))
+                .unwrap_or_default()
+        ),
+        ("released", false) => format!("gave back assignment {id}"),
+        (other, _) => format!("assignment {id} is {other}"),
+    }
+}
+
+/// What a close is asked to do, door or keyboard, owned so that a door's
+/// close runs on a thread of its own (2026-11-05).
+struct CloseRun {
+    campaign: i64,
+    principal: String,
+    author_kind: &'static str,
+    model: Option<i64>,
+    pack_dir: Option<PathBuf>,
+    pack: String,
+}
+
+/// Run a close claimed as `job`: the close itself, the T1 anchor a settled
+/// read of post-contrast makes (record 55 F5) and the re-sort of the scans
+/// it decided; what it wrote is the job's result, and a close that fails
+/// fails its job with why. Answers the close and its document.
+fn run_close(
+    registry: &mut Registry,
+    run: &CloseRun,
+    job: i64,
+    now: &str,
+) -> Result<(campaign::Closed, Value), campaign::Error> {
+    let pack = run
+        .pack_dir
+        .as_ref()
+        .and_then(|dir| nils_pack::load(&dir.join(&run.pack), None).ok());
+    let for_label = pack.clone();
+    let picks = pick_writer(pack);
+    let closed = campaign::close(
+        registry,
+        &Close {
+            campaign: run.campaign,
+            who: &run.principal,
+            author_kind: run.author_kind,
+            model: run.model,
+            picks: Some(&picks),
+            sealed: Some(&crate::checks::sealed_results),
+        },
+        now,
+    );
+    let closed = match closed {
+        Ok(c) => c,
+        Err(e) => {
+            let _ = nils_registry::job::finish(
+                registry.store(),
+                job,
+                nils_registry::job::State::Failed,
+                Some(&e.to_string()),
+            );
+            return Err(e);
+        }
+    };
+    let mut doc = closed.as_json();
+    if let Some(label) =
+        crate::contrast::after_decisions(registry.store(), for_label.as_ref(), &closed.decisions)
+    {
+        doc["contrast_label"] = label;
+    }
+    // 2026-11-05: in force means every page reads it, so the scans the
+    // close decided are re-sorted at once, as a commit's are
+    doc["resort"] = crate::review_questions::resort_committed(
+        registry,
+        run.pack_dir.as_deref(),
+        &run.principal,
+        &closed.decisions,
+    );
+    let _ = nils_registry::job::set_result(registry.store(), job, &doc);
+    let _ =
+        nils_registry::job::finish(registry.store(), job, nils_registry::job::State::Done, None);
+    Ok((closed, doc))
+}
+
+/// [`run_close`], with its job failed rather than left running where the
+/// close panics: a door's close runs inside the server, whose process
+/// lives on, and a job left running there would refuse every later close
+/// of the campaign until the engine restarts.
+fn guarded_close(
+    registry: &mut Registry,
+    run: &CloseRun,
+    job: i64,
+    now: &str,
+) -> Result<(campaign::Closed, Value), campaign::Error> {
+    let done = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        run_close(registry, run, job, now)
+    }));
+    match done {
+        Ok(out) => out,
+        Err(_) => {
+            let why = "the close stopped on an internal error; run it again";
+            let _ = nils_registry::job::finish(
+                registry.store(),
+                job,
+                nils_registry::job::State::Failed,
+                Some(why),
+            );
+            Err(campaign::Error::Refused(why.to_string()))
+        }
+    }
+}
+
+/// A close a door claimed runs inside the server, whose own command line
+/// is not the close's: the job keeps the close's, so `nils jobs resume`
+/// runs the close again and a card reads what it is.
+fn close_command_line(store: &mut Store, job: i64, campaign: i64) {
+    let own: Vec<String> = std::env::args().collect();
+    let mut argv: Vec<String> = own.iter().take(1).cloned().collect();
+    match own.get(1).map(String::as_str) {
+        Some("--registry") if own.len() > 2 => argv.extend(own[1..3].iter().cloned()),
+        Some(w) if w.starts_with("--registry=") => argv.push(w.to_string()),
+        _ => {}
+    }
+    let words: Vec<String> = vec!["campaign".into(), "close".into(), campaign.to_string()];
+    argv.extend(words.iter().cloned());
+    let _ = nils_registry::job::set_arg(store, job, "argv", json!(argv));
+    let _ = nils_registry::job::set_arg(store, job, "queued", json!(words));
 }
 
 /// Record 42 S3's person-pick writer, through which a pick campaign closes:
@@ -6036,13 +6264,9 @@ pub(crate) fn campaign_command(home: &Home, cmd: CampaignCommand) -> Result<(), 
             let mut registry = crate::open(home)?;
             // the operator at the keyboard holds the registry itself, so
             // gives back any claim; the audit names the holder
-            let a = campaign::release_as(&mut registry, assignment, &who(), true, &now)
+            let (a, free) = campaign::release_said(&mut registry, assignment, &who(), true, &now)
                 .map_err(cerr)?;
-            if a.state == "expired" {
-                println!("assignment {assignment}'s lease had run out; it is ended as expired");
-            } else {
-                println!("gave back assignment {assignment}");
-            }
+            println!("{}", released_words(&a, free));
             Ok(())
         }
         CampaignCommand::Metric { item, name, value } => {
@@ -6061,52 +6285,28 @@ pub(crate) fn campaign_command(home: &Home, cmd: CampaignCommand) -> Result<(), 
             let mut registry = crate::open(home)?;
             let c = campaign::find(registry.store(), &which).map_err(cerr)?;
             let principal = who();
-            let dir = crate::pack_dir(home, pack_dir).ok();
-            let pack = dir
-                .as_ref()
-                .and_then(|d| nils_pack::load(&d.join(&pack), None).ok());
-            let pack_for_label = pack.clone();
-            let picks = pick_writer(pack);
             let (author_kind, model) = keyboard_author(&mut registry)?;
-            let closed = campaign::close(
-                &mut registry,
-                &Close {
-                    campaign: c.id,
-                    who: &principal,
-                    author_kind,
-                    model,
-                    picks: Some(&picks),
-                    sealed: Some(&crate::checks::sealed_results),
-                },
-                &now,
-            )
-            .map_err(cerr)?;
-            // 2026-11-05: the scans the close decided are re-sorted at once,
-            // so every page reads the decisions in force
-            let resort = crate::review_questions::resort_committed(
-                &mut registry,
-                dir.as_deref(),
-                &principal,
-                &closed.decisions,
-            );
-            if !json {
-                println!("re-sort: {}", resort["words"].as_str().unwrap_or("not run"));
-            }
-            // record 55 F5: a settled read of post-contrast is a T1 anchor
-            let label = crate::contrast::after_decisions(
-                registry.store(),
-                pack_for_label.as_ref(),
-                &closed.decisions,
-            );
+            let run = CloseRun {
+                campaign: c.id,
+                principal: principal.clone(),
+                author_kind,
+                model,
+                pack_dir: crate::pack_dir(home, pack_dir).ok(),
+                pack,
+            };
+            // 2026-11-05: the close runs as a job, as a door's does, so a
+            // second close of the same campaign is refused while it runs
+            campaign::may_close(registry.store(), &c, author_kind).map_err(cerr)?;
+            let job = campaign::claim_close(registry.store(), &c, &principal).map_err(cerr)?;
+            let (closed, doc) = guarded_close(&mut registry, &run, job, &now).map_err(cerr)?;
             if json {
-                let mut doc = closed.as_json();
-                doc["resort"] = resort.clone();
-                if let Some(label) = label {
-                    doc["contrast_label"] = label;
-                }
                 print(&doc);
                 return Ok(());
             }
+            println!(
+                "re-sort: {}",
+                doc["resort"]["words"].as_str().unwrap_or("not run")
+            );
             println!(
                 "closed campaign {}: {} item(s) resolved, {} left; {} decision(s){}, {} pick(s)",
                 c.name,

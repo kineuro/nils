@@ -3504,9 +3504,10 @@ fn a_release_of_an_ended_lease_says_it_is_free_and_an_adjudicator_gives_back() {
             .unwrap();
         campaign::expire(reg, &at(20)).unwrap();
         for who in ["anna@lab", "bo@lab"] {
-            let r = campaign::release(reg, a.assignment.id, who, &at(21)).unwrap();
+            let (r, free) =
+                campaign::release_said(reg, a.assignment.id, who, false, &at(21)).unwrap();
             assert_eq!(r.state, "expired", "{name}: {who}");
-            assert!(campaign::already_free(&r), "{name}");
+            assert!(free && campaign::already_free(&r), "{name}");
         }
         // nothing was audited for a release that had nothing to do
         assert_eq!(
@@ -3519,9 +3520,13 @@ fn a_release_of_an_ended_lease_says_it_is_free_and_an_adjudicator_gives_back() {
         let b = campaign::claim(reg, c.id, "bo@lab", Role::Rater, &at(22))
             .unwrap()
             .unwrap();
-        campaign::release(reg, b.assignment.id, "bo@lab", &at(23)).unwrap();
-        let again = campaign::release(reg, b.assignment.id, "bo@lab", &at(24)).unwrap();
+        let (_, free) =
+            campaign::release_said(reg, b.assignment.id, "bo@lab", false, &at(23)).unwrap();
+        assert!(!free, "{name}");
+        let (again, free) =
+            campaign::release_said(reg, b.assignment.id, "bo@lab", false, &at(24)).unwrap();
         assert_eq!(again.state, "released", "{name}");
+        assert!(free, "{name}");
 
         // an answered one is refused, and says why
         let d = campaign::claim(reg, c.id, "dan@lab", Role::Rater, &at(25))

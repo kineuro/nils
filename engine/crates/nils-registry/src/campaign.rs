@@ -3828,11 +3828,24 @@ pub fn release_as(
     oversees: bool,
     now: &str,
 ) -> Result<Assignment, Error> {
+    release_said(registry, assignment_id, principal, oversees, now).map(|(a, _)| a)
+}
+
+/// [`release_as`], answering beside the assignment whether it was free
+/// already ([`already_free`]), so the words can say there was nothing to
+/// give back.
+pub fn release_said(
+    registry: &mut Registry,
+    assignment_id: i64,
+    principal: &str,
+    oversees: bool,
+    now: &str,
+) -> Result<(Assignment, bool), Error> {
     let store = registry.store();
     let a = assignment(store, assignment_id)?
         .ok_or_else(|| Error::NotFound(format!("no assignment {assignment_id}")))?;
     if already_free(&a) {
-        return Ok(a);
+        return Ok((a, true));
     }
     let expired = ran_out(&a, now);
     let own = a.principal.as_deref() == Some(principal);
@@ -3898,8 +3911,9 @@ pub fn release_as(
             details: Some(details),
         },
     )?;
-    assignment(registry.store(), assignment_id)?
-        .ok_or_else(|| Error::NotFound(format!("no assignment {assignment_id}")))
+    let a = assignment(registry.store(), assignment_id)?
+        .ok_or_else(|| Error::NotFound(format!("no assignment {assignment_id}")))?;
+    Ok((a, false))
 }
 
 // ------------------------------------------------------------ the answers

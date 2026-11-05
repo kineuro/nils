@@ -4,13 +4,23 @@ All notable changes to NILS v1 are recorded here. The format follows [Keep a Cha
 
 ## [Unreleased]
 
+### Added
+
+- A campaign's close runs as a job, one close of a campaign at a time: a second close while one runs is refused with 409 saying it is closing now, and a close that died is run again. `POST /api/campaigns/{id}/close` with `background: true` answers 202 with the job and the close runs inside the engine; `GET /api/campaigns/{id}` shows `close_job` (its state, whether it runs now, who started it, and once done what it wrote). A close of 4,838 items ran some 40 s while a page offered to close it again.
+- `POST /api/campaigns/{id}/hold-back` sets how much of each batch is read one by one, as `nils campaign hold-back` does, for the campaign's maker or a holder of review:work; `GET /api/campaigns/{id}` says in `hold_back_none` whether the campaign's purpose allows none.
+
 ### Fixed
 
 - Closing a campaign into decisions re-sorts the scans it decided at once, as committing a decision does, so every page reads them (`resort` in the door's reply and on the command line); a campaign of 4,838 closed and 1,191 of its stacks kept the sort's old value until a sort by hand.
 - Where a campaign names one rater alone, an item whose lease ran out, or was given back, is that rater's to take again: the claim, the batches and the gallery left out every item a rater had ever held, so two items of a curation campaign of 4,838 sat open and unreachable behind the one rater's expired leases. A study's rater still reads an item once, as before.
 
+- Releasing an assignment whose lease ran out, or that was given back, answers that it is free already (exit 0 at the keyboard, 200 with `words` at the door) instead of refusing it as not leased; nothing is written or audited.
+- A campaign's pace leaves breaks out of the reading time: an answer whose claim stayed open over five minutes (`pause_seconds`) is counted as `paused` and left out of the median and the ninetieth percentile, where a lease left open had read as 1,694 s.
+- `nils campaign hold-back` and `nils campaign requestion` each show their own help again.
+
 ### Changed
 
+- The campaign's maker reads who holds each open item and until when, without reading any answer, and the adjudicators a campaign names may give back a rater's live claim as its maker may.
 - A campaign that trains or measures nothing may hold back none of a batch: `--hold-back 0` at creation, and `nils campaign hold-back <campaign> 0` on an open one, which sends the items held back and still open back to the batches and the gallery. The hold-back is the guard a study keeps against a click-through, and a curation pass of one's own was paying for it: 530 of 4,838 items of such a campaign waited to be read one by one. A study's floor of a tenth stands, and a campaign given a study purpose takes the floor.
 
 ## [1.0.0-beta.9] - 2026-11-05
