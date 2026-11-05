@@ -491,6 +491,31 @@ def test_the_overlap_gives_the_sequential_answers_in_the_same_batches(world, tmp
     assert got["on"][1:] == got["off"][1:]
 
 
+def test_both_paths_say_how_far_they_are(world, tmp_path, monkeypatch, stand_in):
+    """2026-11-05: the stacks with a final outcome, of the stacks given, as
+    the engine reads it while the run works, on the sequential path and the
+    overlapped one; the last count is every stack."""
+    inp = inputs(world, tmp_path / "inputs", deferral="mixed")
+    for mode in ("off", "on"):
+        said = tmp_path / mode / ".nils-progress.json"
+        said.parent.mkdir(parents=True)
+        monkeypatch.setenv("NILS_PROGRESS", str(said))
+        code, r = run(world, inp, tmp_path / mode / "out", "--overlap", mode)
+        assert code == 0, r.get("error")
+        n = len(r["units"])
+        assert json.loads(said.read_text()) == {"done": n, "of": n, "what": "stacks"}, mode
+
+
+def test_the_score_tells_how_many_stacks_are_final_as_they_come(world, tmp_path):
+    inp = inputs(world, tmp_path, deferral="mixed")
+    model = fusion.load(inp["inputs"])
+    cas = cascade.load(inp["inputs"], model)
+    seen: list = []
+    outs = cascade.score(model, cas, inp["inputs"], stacks(world), workers=1, student_factory=cd.stand_in_student, progress=seen.append)
+    assert seen == sorted(seen) and len(seen) > 2
+    assert seen[0] < len(outs) and seen[-1] == len(outs)
+
+
 def test_d3_decides_at_its_threshold(world, tmp_path):
     inp = inputs(world, tmp_path, deferral="mixed")
     model = fusion.load(inp["inputs"])

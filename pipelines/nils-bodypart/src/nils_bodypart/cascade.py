@@ -380,7 +380,7 @@ def _stage1_fns(model, cas, out: dict, rest: list, deferred_to: list, net, stude
 def score(model: fusion.Model, cas: Cascade, inputs: Path, stacks: list, *, workers: int = 1, device: str = "cpu", chunk: int = 4,
           depth: int = 1, student_batch: int = 64, fill: bool = False, keep_inputs: bool = False, student_factory=None,
           stats: dict | None = None, gpu_workers: int = 2, context: list | None = None, student_device: str | None = None,
-          student_threads: int = STUDENT_THREADS, overlap: bool = False, cache=None) -> list[Outcome]:
+          student_threads: int = STUDENT_THREADS, overlap: bool = False, cache=None, progress=None) -> list[Outcome]:
     """Every stack's outcome, in the manifest's order.
 
     First the reasons that need no read: a stack sealed now (``sealed``),
@@ -399,15 +399,30 @@ def score(model: fusion.Model, cas: Cascade, inputs: Path, stacks: list, *, work
     slices and climbs the planes stages of each stack the moment stage 1
     defers it, while the student scores the next batch and a second thread
     runs the head, the calibration and D3: the same batches, functions and
-    inputs, so the same answers, in another order of work."""
+    inputs, so the same answers, in another order of work.
+
+    ``progress``, where given, is told how many stacks have a final
+    outcome as they come (2026-11-05: the engine shows it while the run
+    works)."""
     from . import fewslice, scoring
 
     stats = stats if stats is not None else {}
     if overlap and workers > 1 and cache is None:
+        finals = [0]
+
+        def counted(_o) -> None:
+            finals[0] += 1
+            progress(finals[0])
+
         return score_stream(model, cas, inputs, [("stack", st) for st in stacks] + [("context", c) for c in context or []], workers=workers,
                             device=device, chunk=chunk, depth=depth, student_batch=student_batch, fill=fill, keep_inputs=keep_inputs,
                             student_factory=student_factory, stats=stats, gpu_workers=gpu_workers, student_device=student_device,
-                            student_threads=student_threads)
+                            student_threads=student_threads, on_final=None if progress is None else counted)
+
+    def say() -> None:
+        # final: every outcome that waits on no later stage
+        if progress is not None:
+            progress(len(out) - len(rest))
     rows = {st.stack_id: fewslice.row_of(st) for st in stacks}
     fewslice.session_tops(list(rows.values()) + [fewslice.row_of(c) for c in context or [] if c.stack_id not in rows])
     out: dict[int, Outcome] = {}
@@ -424,6 +439,7 @@ def score(model: fusion.Model, cas: Cascade, inputs: Path, stacks: list, *, work
         index, sgeo = fewslice.slot0_geo(g, choice)
         cands.append((st, g, reg, index, sgeo))
     stats.update(stage1_candidates=len(cands), straight_to_planes=len(rest), context_stacks=len(context or []))
+    say()
 
     # stage 1: the slot-0 slices, the student, the head, D3. Streamed: the
     # slices are read a block at a time and the student is given them in
@@ -444,6 +460,7 @@ def score(model: fusion.Model, cas: Cascade, inputs: Path, stacks: list, *, work
 
     def stage1(take: list) -> None:
         decide(take, predict(take))
+        say()
 
     unreadable = 0
     block = batch * max(1, STAGE1_BLOCK // batch)  # slices read at a time, whole batches
@@ -482,6 +499,8 @@ def score(model: fusion.Model, cas: Cascade, inputs: Path, stacks: list, *, work
     order = {st.stack_id: i for i, st in enumerate(stacks)}
     rest.sort(key=lambda st: order[st.stack_id])
     ladder = {"stages": [(cas.b24, cas.m3), ("touched", None)], "thresholds": cas.thresholds, "fill": fill, "planes": keep_inputs or fill}
+    # what stage 1 left to the planes, as each is answered
+    final = len(out) - len(rest)
     if cache is not None:
         # the planes the cache holds answer without a read (A17b)
         to_read = []
@@ -491,11 +510,17 @@ def score(model: fusion.Model, cas: Cascade, inputs: Path, stacks: list, *, work
                 to_read.append(st)
             else:
                 _planes_answer(out, st, r, None)
+                final += 1
         stats["planes_from_cache"] = len(rest) - len(to_read)
         rest = to_read
+        if progress is not None:
+            progress(final)
     for st, r, why in scoring.score(model, inputs, rest, workers=workers, device=device, chunk=chunk, depth=depth, ladder=ladder, stats=stats,
                                     gpu_workers=gpu_workers):
         _planes_answer(out, st, r, why)
+        final += 1
+        if progress is not None:
+            progress(final)
     _fill(model, cas, inputs, out, order, fill, workers=workers, device=device, chunk=chunk, depth=depth, gpu_workers=gpu_workers, cache=cache)
     return [out[st.stack_id] for st in stacks]
 

@@ -128,6 +128,29 @@ def test_a_confident_fusion_answers_and_proposes(tmp_path):
     assert res["metrics"]["deferred"] == [6]
 
 
+def test_the_cascade_says_how_far_it_is(tmp_path, monkeypatch):
+    """2026-11-05: the stacks with a table, of the stacks given, where the
+    engine names the file, as it reads it while the run works; the last
+    count is every stack."""
+    said = tmp_path / ".nils-progress.json"
+    monkeypatch.setenv("NILS_PROGRESS", str(said))
+    seen: list = []
+    from nils_postcontrast import progress
+
+    real = progress.Progress.set
+
+    def spy(self, done, force=False):
+        seen.append(done)
+        real(self, done, force)
+
+    monkeypatch.setattr(progress.Progress, "set", spy)
+    rc, _ = run(tmp_path, 9.0)
+    assert rc == 0
+    assert json.loads(said.read_text()) == {"done": 7, "of": 7, "what": "stacks"}
+    # told as the stacks come: the ones read without the student first
+    assert seen == sorted(seen) and seen[0] < 7 and seen[-1] == 7
+
+
 def test_an_unsure_fusion_defers(tmp_path):
     rc, out = run(tmp_path, 0.5)  # probability 0.62: between the thresholds, never accepted
     T = tables(out)
