@@ -141,7 +141,21 @@ struct Home {
 
 impl Home {
     fn run(&self, args: &[&str], stdin: Option<&str>) -> (bool, String, String) {
-        let mut child = nils()
+        self.run_on(args, stdin, None)
+    }
+
+    /// `nils` on a search path of its own, where one is given.
+    fn run_on(
+        &self,
+        args: &[&str],
+        stdin: Option<&str>,
+        path: Option<&OsStr>,
+    ) -> (bool, String, String) {
+        let mut cmd = nils();
+        if let Some(path) = path {
+            cmd.env("PATH", path);
+        }
+        let mut child = cmd
             .arg("--registry")
             .arg(self.dir.path())
             .args(args)
@@ -181,6 +195,13 @@ impl Home {
 
     fn json(&self, args: &[&str]) -> Value {
         let out = self.ok(args);
+        serde_json::from_str(&out).unwrap_or_else(|e| panic!("{e}: {out}"))
+    }
+
+    /// `nils ... ` on a search path of its own, its output as JSON.
+    fn json_on(&self, args: &[&str], path: &OsStr) -> Value {
+        let (good, out, err) = self.run_on(args, None, Some(path));
+        assert!(good, "nils {args:?} failed: {err}\n{out}");
         serde_json::from_str(&out).unwrap_or_else(|e| panic!("{e}: {out}"))
     }
 
@@ -300,6 +321,16 @@ impl Served {
             "POST",
             &format!("/api/{scope}/steps/{step}/run"),
             None,
+            token,
+        )
+    }
+
+    /// A step's run over some of its scans (2026-11-05): `{"scans": over}`.
+    fn run_over(&self, scope: &str, step: &str, over: Value, token: &str) -> (u16, Value) {
+        self.call(
+            "POST",
+            &format!("/api/{scope}/steps/{step}/run"),
+            Some(json!({"scans": over})),
             token,
         )
     }
@@ -641,6 +672,29 @@ fn round(pg: Option<(String, String)>) {
     assert_eq!(bp["state"], "waiting", "{s}");
     assert_eq!(bp["served"], true, "{s}");
     assert!(bp["refusal"].is_null(), "{s}");
+    // 2026-11-05: what a run would go over, before it starts: every scan, or
+    // the ones without a body part, each with the parts it would take
+    assert_eq!(bp["runs"]["all"], json!({"scans": 3, "parts": 1}), "{s}");
+    assert_eq!(
+        bp["runs"]["without"],
+        json!({"scans": 3, "parts": 1}),
+        "{s}"
+    );
+    assert_eq!(bp["hint"]["scans"], 3, "{s}");
+    // which scans is all or without, and without is a model step's
+    let (status, doc) = server.run_over("datasets/ds", "body_part", json!("some"), OPS);
+    assert_eq!(status, 400, "{doc}");
+    let (status, doc) = server.run_over("datasets/ds", "body_part", json!(3), OPS);
+    assert_eq!(status, 400, "{doc}");
+    let (status, doc) = server.run_over("datasets/ds", "sorted", json!("without"), OPS);
+    assert_eq!(status, 400, "{doc}");
+    assert!(
+        doc["error"]
+            .as_str()
+            .unwrap()
+            .contains("body_part and post_contrast"),
+        "{doc}"
+    );
     // a dataset with no scans: served, and nothing to run it over
     let e = server.summary("/api/datasets/empty/summary", READS);
     assert_eq!(
@@ -775,12 +829,118 @@ fn round(pg: Option<(String, String)>) {
     );
     let none = server.get("/api/jobs?dataset=empty&all=1", OPS);
     assert_eq!(none["count"], 0, "{none}");
+    // one scan told its body part by the rules: two without one
+    let told = {
+        let mut store = home.store();
+        let stack = store.qualified("stack");
+        let axis = store.qualified("classification_axis");
+        let first = store
+            .query(&format!("SELECT MIN(id) FROM {stack}"), &[])
+            .unwrap()[0]
+            .int(0)
+            .unwrap();
+        store
+            .execute(
+                &format!(
+                    "INSERT INTO {axis} (stack_id, axis, value, confidence, tier) \
+                     VALUES ({first}, 'body_part', 'brain', 1.0, 'rule')"
+                ),
+                &[],
+            )
+            .unwrap();
+        first
+    };
     // dropped from the queue, the step waits again
     let (status, dropped) = server.call("POST", &format!("/api/jobs/{job}/cancel"), None, OPS);
     assert_eq!(status, 200, "{dropped}");
     let s = server.summary("/api/datasets/ds/summary", READS);
     assert_eq!(step(&s, "body_part")["state"], "waiting", "{s}");
     assert!(step(&s, "body_part")["refusal"].is_null(), "{s}");
+    assert_eq!(step(&s, "body_part")["runs"]["without"]["scans"], 2, "{s}");
+    assert_eq!(step(&s, "body_part")["runs"]["all"]["scans"], 3, "{s}");
+    // 2026-11-05: a run over the two without a body part alone
+    let (status, only) = server.run_over("datasets/ds", "body_part", json!("without"), OPS);
+    assert_eq!(status, 202, "{only}");
+    assert_eq!(only["scans"], 2, "{only}");
+    assert_eq!(only["over"], "without", "{only}");
+    assert_eq!(only["parts"], 1, "{only}");
+    let only_job = only["job"].as_i64().unwrap();
+    {
+        let mut store = home.store();
+        let member = store.qualified("handle_member");
+        let handle = only["handle"].as_i64().unwrap();
+        let held = store
+            .query(
+                &format!("SELECT COUNT(*) FROM {member} WHERE handle_id = {handle}"),
+                &[],
+            )
+            .unwrap()[0]
+            .int(0)
+            .unwrap();
+        assert_eq!(held, 2, "the scans without a body part, and no other");
+    }
+    let queued = server.get(&format!("/api/jobs/{only_job}"), OPS);
+    assert_eq!(queued["args"]["over"], "without", "{queued}");
+    assert_eq!(queued["args"]["step"], "body_part", "{queued}");
+    let (status, dropped) = server.call("POST", &format!("/api/jobs/{only_job}/cancel"), None, OPS);
+    assert_eq!(status, 200, "{dropped}");
+    // the same at the command line: `nils step run`, as the door queues it
+    let cli = home.json_on(
+        &[
+            "step",
+            "run",
+            "@ds",
+            "body_part",
+            "--scans",
+            "without",
+            "--pack-dir",
+            &packs(),
+        ],
+        &path,
+    );
+    assert_eq!(cli["scans"], 2, "{cli}");
+    assert_eq!(cli["over"], "without", "{cli}");
+    assert_eq!(cli["for"], "dataset:ds", "{cli}");
+    assert_eq!(cli["command"][0], "run", "{cli}");
+    let cli_job = cli["job"].as_i64().unwrap();
+    let (status, dropped) = server.call("POST", &format!("/api/jobs/{cli_job}/cancel"), None, OPS);
+    assert_eq!(status, 200, "{dropped}");
+    let cohort = home.json_on(
+        &[
+            "step",
+            "run",
+            "cohort:fed",
+            "body_part",
+            "--pack-dir",
+            &packs(),
+        ],
+        &path,
+    );
+    assert_eq!(cohort["scans"], 3, "{cohort}");
+    assert_eq!(cohort["over"], "all", "{cohort}");
+    let cohort_cli = cohort["job"].as_i64().unwrap();
+    let (status, dropped) =
+        server.call("POST", &format!("/api/jobs/{cohort_cli}/cancel"), None, OPS);
+    assert_eq!(status, 200, "{dropped}");
+    for bad in [
+        vec!["step", "run", "ds", "body_part"],
+        vec!["step", "run", "@ds", "body_part", "--scans", "some"],
+        vec!["step", "run", "@ds", "system1", "--scans", "without"],
+    ] {
+        let (good, _, err) = home.run_on(&bad, None, Some(&path));
+        assert!(!good, "{bad:?} should be refused");
+        assert!(!err.is_empty(), "{bad:?} says why");
+    }
+    {
+        let mut store = home.store();
+        let axis = store.qualified("classification_axis");
+        store
+            .execute(
+                &format!("DELETE FROM {axis} WHERE stack_id = {told} AND tier = 'rule' AND axis = 'body_part'"),
+                &[],
+            )
+            .unwrap();
+    }
     let (status, again) = server.run("datasets/ds", "body_part", OPS);
     assert_eq!(status, 202, "{again}");
     let job = again["job"].as_i64().unwrap();
@@ -805,6 +965,13 @@ fn round(pg: Option<(String, String)>) {
     assert!(bp["progress"].is_null(), "{s}");
     assert!(bp["finished_at"].is_string(), "{s}");
     assert!(bp["refusal"].is_null(), "it may run again: {s}");
+    // every scan has its body part now: none without, and a run over them
+    // alone is refused, saying so
+    assert_eq!(bp["runs"]["without"]["scans"], 0, "{s}");
+    assert_eq!(bp["runs"]["without"]["parts"], 0, "{s}");
+    let (status, doc) = server.run_over("datasets/ds", "body_part", json!("without"), OPS);
+    assert_eq!(status, 409, "{doc}");
+    assert_eq!(doc["reason"], "none_without", "{doc}");
     let runs = std::fs::read_to_string(&args_log).unwrap();
     assert_eq!(runs.lines().count(), 1, "{runs}");
     assert!(runs.contains("\"--network\", \"none\""), "{runs}");

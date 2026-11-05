@@ -181,6 +181,13 @@ enum Command {
     /// Score a batch's new stacks with System 1: the last step of a
     /// bring-in (record 55 E5); body part or post-contrast with --step
     Score(score::ScoreArgs),
+    /// A dataset's or a cohort's steps, as their Run on its card runs them:
+    /// the sort, body part, post-contrast or System 1 over all its scans,
+    /// or body part or post-contrast over those without its answer
+    Step {
+        #[command(subcommand)]
+        command: operations::StepCommand,
+    },
     /// The slice cache: what it keeps, and the versions no model reads any
     /// more (record 55 E5)
     Cache {
@@ -2464,6 +2471,7 @@ fn main() -> ExitCode {
         Command::Pseudonymize(args) => pseudonymize(&home, args),
         Command::BringIn(args) => bring_in(&home, args),
         Command::Score(args) => score::command(&home, args),
+        Command::Step { command } => operations::command(&home, command),
         Command::Cache { command } => match command {
             CacheCommand::Show { json } => slice_cache::command(&home, false, json),
             CacheCommand::Prune { json } => slice_cache::command(&home, true, json),

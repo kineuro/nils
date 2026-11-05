@@ -3187,6 +3187,7 @@ fn routed(
             kind,
             &decoded(segs[2]),
             &decoded(step),
+            body,
         ),
         ["api", "places"] if get => {
             // Wave 5 §12.5: every place with its role, guarantees, probe and
