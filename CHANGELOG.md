@@ -6,6 +6,7 @@ All notable changes to NILS v1 are recorded here. The format follows [Keep a Cha
 
 ### Fixed
 
+- Closing a campaign into decisions re-sorts the scans it decided at once, as committing a decision does, so every page reads them (`resort` in the door's reply and on the command line); a campaign of 4,838 closed and 1,191 of its stacks kept the sort's old value until a sort by hand.
 - An item whose lease ran out, or was given back, is the rater's to take again: the claim, the batches and the gallery left out every item a rater had ever held, so two items of a campaign of 4,838 sat open and unreachable behind expired leases. An item the rater holds, answered or refused stays out, as before.
 
 ### Changed

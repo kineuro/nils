@@ -1279,6 +1279,15 @@ pub(crate) fn route(
                 ) {
                     doc["contrast_label"] = label;
                 }
+                // 2026-11-05: in force means every page reads it, so the
+                // scans the close decided are re-sorted at once, as a
+                // commit's are
+                doc["resort"] = crate::review_questions::resort_committed(
+                    registry,
+                    doors.pack_dir.as_deref(),
+                    principal,
+                    &closed.decisions,
+                );
                 Ok(Reply::ok(doc))
             }
             ["api", "campaigns", which, "export"] if post => {
@@ -6052,8 +6061,9 @@ pub(crate) fn campaign_command(home: &Home, cmd: CampaignCommand) -> Result<(), 
             let mut registry = crate::open(home)?;
             let c = campaign::find(registry.store(), &which).map_err(cerr)?;
             let principal = who();
-            let pack = crate::pack_dir(home, pack_dir)
-                .ok()
+            let dir = crate::pack_dir(home, pack_dir).ok();
+            let pack = dir
+                .as_ref()
                 .and_then(|d| nils_pack::load(&d.join(&pack), None).ok());
             let pack_for_label = pack.clone();
             let picks = pick_writer(pack);
@@ -6071,6 +6081,17 @@ pub(crate) fn campaign_command(home: &Home, cmd: CampaignCommand) -> Result<(), 
                 &now,
             )
             .map_err(cerr)?;
+            // 2026-11-05: the scans the close decided are re-sorted at once,
+            // so every page reads the decisions in force
+            let resort = crate::review_questions::resort_committed(
+                &mut registry,
+                dir.as_deref(),
+                &principal,
+                &closed.decisions,
+            );
+            if !json {
+                println!("re-sort: {}", resort["words"].as_str().unwrap_or("not run"));
+            }
             // record 55 F5: a settled read of post-contrast is a T1 anchor
             let label = crate::contrast::after_decisions(
                 registry.store(),
@@ -6079,6 +6100,7 @@ pub(crate) fn campaign_command(home: &Home, cmd: CampaignCommand) -> Result<(), 
             );
             if json {
                 let mut doc = closed.as_json();
+                doc["resort"] = resort.clone();
                 if let Some(label) = label {
                     doc["contrast_label"] = label;
                 }
