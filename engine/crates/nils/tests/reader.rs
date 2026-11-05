@@ -452,6 +452,18 @@ fn the_reader_reads_batches_orders_and_times_and_a_certificate_unseals() {
         CURATOR,
     );
     assert_eq!(status, 400);
+    // 2026-11-05: none at all is allowed on a campaign that trains or
+    // measures nothing (a curation pass of one's own)
+    let (status, none) = server.call(
+        "POST",
+        "/api/campaigns",
+        Some(
+            json!({"name": "curation", "question": {"kind": "axis", "axis": "base"},
+            "source": {"selection": "every-stack@1"}, "hold_back": 0}),
+        ),
+        CURATOR,
+    );
+    assert!(status < 300, "{none}");
     // naming one item of the batch still holds back the share of the whole
     let one = pair["sample"][0].as_i64().unwrap();
     let accepted = server.ok(
@@ -535,6 +547,19 @@ fn the_reader_reads_batches_orders_and_times_and_a_certificate_unseals() {
         BO,
     );
     assert_eq!(status, 409);
+
+    // 2026-11-05: the share may be set to none on an open campaign, which
+    // sends the items held back and still open back to the batches
+    let (ok, stdout, err) = cli(&home, "op@lab", &["campaign", "hold-back", "bases", "0"]);
+    assert!(ok, "{err}");
+    assert!(
+        stdout.contains("holds back none") && stdout.contains("went back"),
+        "{stdout}"
+    );
+    let (ok, _, err) = cli(&home, "op@lab", &["campaign", "hold-back", "bases", "0.05"]);
+    assert!(!ok, "{err}");
+    let (ok, _, err) = cli(&home, "op@lab", &["campaign", "hold-back", "bases", "0.1"]);
+    assert!(ok, "{err}");
 
     // ------------------------------------------------ order and time
     let (status, _) = server.call(

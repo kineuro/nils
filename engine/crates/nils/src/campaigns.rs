@@ -5199,6 +5199,19 @@ pub(crate) enum CampaignCommand {
         json: bool,
     },
     /// Move an open axes campaign to fewer asked axes, the rest derived
+    /// Set an open campaign's hold-back share (2026-11-05): from 0.1 to 1,
+    /// or 0 for none on a campaign that trains or measures nothing, so a
+    /// curation pass of one's own accepts a batch or a gallery whole; where
+    /// it becomes none, the items held back and still open go back to the
+    /// batches and the gallery
+    HoldBack {
+        /// The campaign, by name or id
+        campaign: String,
+        /// The share, 0.1 to 1, or 0 for none
+        share: f64,
+        #[arg(long)]
+        json: bool,
+    },
     /// from each answer through the pack's rules (record 48). Its items and
     /// every answer are kept; an answer given before is read on the axes
     /// asked now and derives the rest
@@ -5317,7 +5330,8 @@ pub(crate) struct CreateArgs {
     #[arg(long, default_value_t = 3600, value_name = "SECONDS")]
     lease_seconds: i64,
     /// The share of each batch accepted in one move that is held back to
-    /// be read alone, from 0.1 to 1 (record 48)
+    /// be read alone, from 0.1 to 1 (record 48), or 0 for none on a
+    /// campaign that trains or measures nothing (2026-11-05)
     #[arg(long, value_name = "SHARE")]
     hold_back: Option<f64>,
     /// What the reader shows beside each item as the answer suggested:
@@ -6098,6 +6112,39 @@ pub(crate) fn campaign_command(home: &Home, cmd: CampaignCommand) -> Result<(), 
                 println!("  {n} planted value(s) the reader accepted left out of the decisions");
             }
             println!("  agreement {}", closed.agreement);
+            Ok(())
+        }
+        CampaignCommand::HoldBack {
+            campaign: which,
+            share,
+            json,
+        } => {
+            let mut registry = crate::open(home)?;
+            let c = campaign::find(registry.store(), &which).map_err(cerr)?;
+            let freed = campaign::set_hold_back(&mut registry, c.id, share).map_err(cerr)?;
+            if json {
+                println!(
+                    "{}",
+                    serde_json::json!({"campaign": c.id, "name": c.name, "hold_back": share, "freed": freed})
+                );
+            } else {
+                println!(
+                    "campaign {} holds back {} of each batch{}",
+                    c.name,
+                    if share == 0.0 {
+                        "none".to_string()
+                    } else {
+                        format!("{share}")
+                    },
+                    if freed > 0 {
+                        format!(
+                            "; {freed} item(s) held back went back to the batches and the gallery"
+                        )
+                    } else {
+                        String::new()
+                    }
+                );
+            }
             Ok(())
         }
         CampaignCommand::Requestion {

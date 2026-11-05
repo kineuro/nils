@@ -4,6 +4,10 @@ All notable changes to NILS v1 are recorded here. The format follows [Keep a Cha
 
 ## [Unreleased]
 
+### Changed
+
+- A campaign that trains or measures nothing may hold back none of a batch: `--hold-back 0` at creation, and `nils campaign hold-back <campaign> 0` on an open one, which sends the items held back and still open back to the batches and the gallery. The hold-back is the guard a study keeps against a click-through, and a curation pass of one's own was paying for it: 530 of 4,838 items of such a campaign waited to be read one by one. A study's floor of a tenth stands, and a campaign given a study purpose takes the floor.
+
 ## [1.0.0-beta.9] - 2026-11-05
 
 The ninth beta is the day's work on the Data page and the reviewer's desk, measured on production. A pipeline declares the memory it takes for each core it is given, and the engine sizes a unit to the cores it takes, so one descriptor fits a laptop and a large server (the body-part pass declares 4 GB and half a GB a worker, after a run was killed at a 16 GB cap). Committing a decision re-sorts the scans it reaches, so every page reads the value in force. A batch of like stacks may be accepted as another value than the one suggested. The sort runs from a dataset's and a cohort's card. The kept counts name the engine that kept them, a cohort's sorted step counts its stacks outside the rules, and the 3D views are counted on a few threads. Kvasir 1.0.0-alpha.12, the assistant 1.0.0-alpha.32 and the MRI pack 1.4.0 ship unchanged.

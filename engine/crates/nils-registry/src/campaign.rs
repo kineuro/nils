@@ -1257,6 +1257,59 @@ pub struct New<'a> {
 /// Record 48 R1: the least share of a batch held back to be read alone.
 pub const HOLD_BACK_MIN: f64 = 0.1;
 
+/// Whether a hold-back share may stand on a campaign of this purpose
+/// (2026-11-05): from [`HOLD_BACK_MIN`] to one always; none at all (0)
+/// only where the purpose is none or `decide`, since the share is the
+/// guard a study that trains, measures, audits or verifies keeps against
+/// a click-through, and a curation pass of one's own needs none.
+pub fn hold_back_allowed(share: f64, purpose: &str) -> bool {
+    if (HOLD_BACK_MIN..=1.0).contains(&share) {
+        return true;
+    }
+    share == 0.0 && matches!(purpose, "" | "decide")
+}
+
+/// Set an open campaign's hold-back share (2026-11-05, `nils campaign
+/// hold-back`): the share from now on, under [`hold_back_allowed`] for the
+/// campaign's purpose; where it becomes none, the items held back and
+/// still open go back to the batches and the gallery. How many went back.
+pub fn set_hold_back(registry: &mut Registry, campaign: i64, share: f64) -> Result<usize, Error> {
+    let store = registry.store();
+    let purpose = crate::blind::purpose(store, campaign)?;
+    if !hold_back_allowed(share, &purpose) {
+        return Err(invalid(format!(
+            "hold_back is the share of a batch read alone, from {HOLD_BACK_MIN} to 1{}",
+            if matches!(purpose.as_str(), "" | "decide") {
+                ", or 0 for none"
+            } else {
+                "; a campaign that trains or measures keeps at least the floor"
+            }
+        )));
+    }
+    let d = store.dialect();
+    store.execute(
+        &format!(
+            "UPDATE {} SET hold_back = {} WHERE id = {}",
+            store.qualified("campaign"),
+            d.param(1, Type::Double),
+            d.param(2, Type::Int)
+        ),
+        &[Param::Double(share), Param::from(campaign)],
+    )?;
+    if share > 0.0 {
+        return Ok(0);
+    }
+    let freed = store.execute(
+        &format!(
+            "UPDATE {} SET held_back = 0 WHERE campaign_id = {} AND state = 'open' AND held_back = 1",
+            store.qualified("campaign_item"),
+            d.param(1, Type::Int)
+        ),
+        &[Param::from(campaign)],
+    )?;
+    Ok(freed as usize)
+}
+
 /// What a campaign shows its raters beside each item as the answer
 /// suggested, said once when it is made and never inferred. A read
 /// registered as made without suggestions is one made without them: with
@@ -1672,9 +1725,12 @@ pub fn create(registry: &mut Registry, n: &New<'_>) -> Result<Campaign, Error> {
         }
     }
     let hold_back = n.hold_back.unwrap_or(HOLD_BACK_MIN);
-    if !(HOLD_BACK_MIN..=1.0).contains(&hold_back) {
+    // 2026-11-05 (Nima: the hold-back is a guard for a study, not for a
+    // curation pass of one's own): none at all is allowed where no study
+    // purpose is set; a share between none and the floor never is
+    if !hold_back_allowed(hold_back, "") {
         return Err(invalid(format!(
-            "hold_back is the share of a batch read alone, from {HOLD_BACK_MIN} to 1"
+            "hold_back is the share of a batch read alone, from {HOLD_BACK_MIN} to 1, or 0 for none on a campaign that trains or measures nothing"
         )));
     }
     let grain = match (&n.items, &question) {
