@@ -52,7 +52,7 @@
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::Path;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
@@ -943,7 +943,7 @@ fn by_axis(
 /// the same few threads: a site with 495,000 view folders looked at them
 /// one after another for seven minutes on the first count after this
 /// change shipped.
-fn made(working: &Path, stacks: &[i64]) -> (i64, i64) {
+fn made(working: &Path, stacks: &[i64], looked: &AtomicI64) -> (i64, i64) {
     if stacks.is_empty() {
         return (0, 0);
     }
@@ -986,6 +986,8 @@ fn made(working: &Path, stacks: &[i64]) -> (i64, i64) {
                             continue;
                         };
                         for entry in entries.flatten() {
+                            // how far the walk is, for a summary asked meanwhile
+                            looked.fetch_add(1, Ordering::Relaxed);
                             let name = entry.file_name();
                             if let Some((stack, false)) =
                                 crate::preview::stack_of(&name.to_string_lossy())
@@ -1005,7 +1007,10 @@ fn made(working: &Path, stacks: &[i64]) -> (i64, i64) {
             .map(|part| {
                 s.spawn(move || {
                     part.iter()
-                        .filter(|view| view.join("manifest.json").is_file())
+                        .filter(|view| {
+                            looked.fetch_add(1, Ordering::Relaxed);
+                            view.join("manifest.json").is_file()
+                        })
                         .count() as i64
                 })
             })
@@ -1319,13 +1324,15 @@ struct Sorted {
 /// part takes a second or more, and they read different tables, so the
 /// sorts' counts and the operations' are read beside the files' on
 /// connections of their own, and the pictures are looked for on threads of
-/// their own meanwhile (2026-10-17).
-pub(crate) fn counts(
+/// their own meanwhile (2026-10-17); and it says how far it has got in
+/// `progress` as it goes (2026-11-05).
+fn counts(
     registry: &mut Registry,
     dataset: &Place,
     ids: &[i64],
     hide: bool,
     working: Option<&Path>,
+    progress: &Progress,
 ) -> Result<Counts, Reply> {
     #[cfg(test)]
     tests::hold(&dataset.path);
@@ -1399,7 +1406,9 @@ pub(crate) fn counts(
                         tests::looked(&dataset.path);
                         let looked =
                             crate::preview::dataset_stacks(store, dataset).map_err(failed)?;
-                        Some((key, scope.spawn(move || made(w, &looked))))
+                        progress.walking.store(true, Ordering::Relaxed);
+                        let seen = &progress.looked;
+                        Some((key, scope.spawn(move || made(w, &looked, seen))))
                     }
                 }
             }
@@ -1581,6 +1590,69 @@ fn sorted(store: &mut Store, sources: &str, hide: bool, stacks: i64) -> Result<S
 const KEEP: Duration = Duration::from_secs(600);
 const KEEP_BUSY: Duration = Duration::from_secs(60);
 
+/// How far a reading of a dataset's counts has got (2026-11-05): when it
+/// began, the working place its pictures and 3D views are looked for under,
+/// whether that walk has begun and how many files and folders it has looked
+/// at so far. A summary asked while the counts are read says it
+/// ("Counting files in results: 412,000 so far"); production's first count
+/// after a start looked at 912,000 files on a share for 25 minutes while
+/// the page said only that it was reading.
+struct Progress {
+    since: String,
+    place: Option<String>,
+    walking: std::sync::atomic::AtomicBool,
+    looked: AtomicI64,
+}
+
+impl Progress {
+    fn new(place: Option<String>) -> Progress {
+        Progress {
+            since: nils_registry::time::now_iso(),
+            place,
+            walking: Default::default(),
+            looked: AtomicI64::new(0),
+        }
+    }
+
+    /// As a summary says it: what is counted (the scans and files the
+    /// registry holds, then the files of the walk), where, how many so far
+    /// and since when.
+    fn doc(&self) -> Value {
+        if self.walking.load(Ordering::Relaxed) {
+            json!({
+                "what": "files",
+                "place": self.place,
+                "done": self.looked.load(Ordering::Relaxed),
+                "since": self.since,
+            })
+        } else {
+            json!({"what": "scans", "place": null, "done": null, "since": self.since})
+        }
+    }
+}
+
+/// The readings of datasets' counts under way, by dataset, and how far each
+/// has got.
+static PROGRESS: LazyLock<Mutex<HashMap<Key, Arc<Progress>>>> = LazyLock::new(Default::default);
+
+/// How far the reading of a dataset's counts under way has got, as a
+/// summary says it; none where none runs.
+fn progress_of(key: &Key) -> Option<Value> {
+    let held = PROGRESS.lock().unwrap_or_else(|e| e.into_inner());
+    held.get(key).map(|p| p.doc())
+}
+
+/// A reading's progress, said while it runs and let go when it ends,
+/// whatever becomes of it.
+struct Watched(Key);
+
+impl Drop for Watched {
+    fn drop(&mut self) {
+        let mut held = PROGRESS.lock().unwrap_or_else(|e| e.into_inner());
+        held.remove(&self.0);
+    }
+}
+
 /// A dataset's counts as kept: under the stamp they were read under, when
 /// they were read (`as_of`, which the document says), how long they are
 /// kept, and whether a door wrote since (`stale`: answered still, and read
@@ -1597,7 +1669,9 @@ struct Kept {
 /// A dataset's counts as answered: the counts, when they were read, and
 /// whether they are being read again now.
 pub(crate) struct Answer {
-    pub(crate) counts: Arc<Counts>,
+    /// None while the first reading of a dataset with none kept runs, for
+    /// a caller who does not wait for it (2026-11-05).
+    pub(crate) counts: Option<Arc<Counts>>,
     pub(crate) as_of: String,
     pub(crate) counting: bool,
 }
@@ -1762,13 +1836,24 @@ struct Asked {
 fn read_and_keep(registry: &mut Registry, asked: &Asked) -> Result<Answer, Reply> {
     let as_of = nils_registry::time::now_iso();
     let forgotten = FORGOTTEN.load(Ordering::SeqCst);
+    // how far it gets, for the requests that ask meanwhile
+    let progress = Arc::new(Progress::new(
+        asked.working.as_ref().map(|w| w.name.clone()),
+    ));
+    PROGRESS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(asked.key.clone(), Arc::clone(&progress));
+    let watched = Watched(asked.key.clone());
     let counts = Arc::new(counts(
         registry,
         &asked.dataset,
         &asked.ids,
         asked.hide,
         asked.working.as_ref().map(|w| Path::new(&w.path)),
+        &progress,
     )?);
+    drop(watched);
     let (slots, _) = &*KEPT;
     {
         let mut held = slots.lock().unwrap_or_else(|e| e.into_inner());
@@ -1783,7 +1868,7 @@ fn read_and_keep(registry: &mut Registry, asked: &Asked) -> Result<Answer, Reply
     }
     stored_write(registry.store(), asked, &as_of, &counts);
     Ok(Answer {
-        counts,
+        counts: Some(counts),
         as_of,
         counting: false,
     })
@@ -1980,13 +2065,16 @@ fn read_apart(home: nils_registry::Home, asked: Asked, reading: Reading) {
 /// is started where what they were read under moved, a door wrote since or
 /// their keep ran out, and none while one runs. Only a dataset with no kept
 /// counts at all waits for its first reading, and the requests at once
-/// with it wait for the same one.
+/// with it wait for the same one; unless the caller does not `wait`
+/// (2026-11-05): then that first reading runs apart too, and the answer has
+/// no counts until it is over (the desk says how far it has got).
 fn kept(
     registry: &mut Registry,
     dataset: &Place,
     ids: &[i64],
     hide: bool,
     working: Option<&Place>,
+    wait: bool,
 ) -> Result<Answer, Reply> {
     let (stamp, busy) = stamp(registry.store(), dataset, ids, working).map_err(failed)?;
     let key: Key = (dataset.path.clone(), dataset.id, hide);
@@ -2026,7 +2114,7 @@ fn kept(
         }
         if let Some(k) = &slot.kept {
             let answer = Answer {
-                counts: Arc::clone(&k.counts),
+                counts: Some(Arc::clone(&k.counts)),
                 as_of: k.as_of.clone(),
                 counting: true,
             };
@@ -2044,6 +2132,23 @@ fn kept(
             drop(held);
             read_apart(registry.home().clone(), asked(), Reading(key.clone()));
             return Ok(answer);
+        }
+        // none kept: a caller who does not wait is answered at once, the
+        // first reading running apart (2026-11-05)
+        if !wait {
+            let pending = Answer {
+                counts: None,
+                as_of: String::new(),
+                counting: true,
+            };
+            if slot.reading {
+                return Ok(pending);
+            }
+            slot.reading = true;
+            slot.reads += 1;
+            drop(held);
+            read_apart(registry.home().clone(), asked(), Reading(key.clone()));
+            return Ok(pending);
         }
         if !slot.reading {
             slot.reading = true;
@@ -2137,10 +2242,16 @@ fn reads_of(dataset: &Place, hide: bool) -> usize {
 /// answered at once and read again apart when something did, with when
 /// they were read (`counts_as_of`) and whether they are being read again
 /// (`counting`); the jobs, the steps' states and their progress read now.
+///
+/// Answered at once where `at_once` (`?at_once=1`, the desk since
+/// 2026-11-05) even for a dataset whose counts were never read: then with
+/// no counts (`counted` false), saying how far their first reading has got
+/// (`count`), never holding a page on a walk of a share.
 pub(crate) fn document(
     registry: &mut Registry,
     access: &Access,
     dataset: &Place,
+    at_once: bool,
 ) -> Result<Value, Reply> {
     // what a run of body part or post-contrast would be here, or why a door
     // would refuse it
@@ -2161,14 +2272,29 @@ pub(crate) fn document(
     // what the registry holds of it, kept while nothing it read moved: a
     // stack of a sample sealed now is never counted by kind or region for a
     // caller who does not read sealed stacks (record 48)
-    let answer = kept(
-        registry,
-        dataset,
-        &ids,
-        !crate::sealed::reads(access),
-        working.as_ref(),
-    )?;
-    let c = Arc::clone(&answer.counts);
+    let hide = !crate::sealed::reads(access);
+    let answer = kept(registry, dataset, &ids, hide, working.as_ref(), !at_once)?;
+    // how far a reading under way has got, while one runs
+    let progress = if answer.counting {
+        progress_of(&(dataset.path.clone(), dataset.id, hide))
+    } else {
+        None
+    };
+    let Some(c) = answer.counts.as_ref().map(Arc::clone) else {
+        // the first reading runs: what is known without it, and how far it is
+        return Ok(json!({
+            "dataset": dataset.name,
+            "dataset_id": dataset.id,
+            "detail": access.detail.name(),
+            "state": state,
+            "added_at": dataset.created_at,
+            "pictures_place": working.map(|w| w.name),
+            "counted": false,
+            "counts_as_of": null,
+            "counting": true,
+            "count": progress.unwrap_or_else(|| json!({"what": "scans", "place": null, "done": null, "since": null})),
+        }));
+    };
     let store = registry.store();
     let jobs = jobs_sorted(store, dataset, WINDOW, Some(&c.sorts)).map_err(failed)?;
     let newest_of = |kinds: &[&str]| jobs.iter().find(|j| kinds.contains(&j.kind.as_str()));
@@ -2463,6 +2589,10 @@ pub(crate) fn document(
         // (2026-10-31): the kept ones answer at once while a reading runs
         "counts_as_of": answer.as_of,
         "counting": answer.counting,
+        // 2026-11-05: the counts are there, and how far the reading under
+        // way has got, while one runs
+        "counted": true,
+        "count": progress,
         "steps": steps,
     }))
 }
@@ -3400,13 +3530,26 @@ mod tests {
                 std::fs::write(view.join("manifest.json"), b"{}").unwrap();
             }
         }
-        assert_eq!(super::made(&work, &[1, 2, 1001, 4]), (2, 1));
-        assert_eq!(super::made(&work, &[]), (0, 0));
-        assert_eq!(super::made(&dir.path().join("nowhere"), &[1]), (0, 0));
+        // 2026-11-05: and it says how far it got as it goes, one a file of
+        // the pictures' folders and one a view folder of the dataset's
+        let looked = std::sync::atomic::AtomicI64::new(0);
+        assert_eq!(super::made(&work, &[1, 2, 1001, 4], &looked), (2, 1));
+        let seen = looked.load(std::sync::atomic::Ordering::Relaxed);
+        assert!(seen >= 5, "the files and folders looked at: {seen}");
+        assert_eq!(super::made(&work, &[], &looked), (0, 0));
+        assert_eq!(
+            super::made(&dir.path().join("nowhere"), &[1], &looked),
+            (0, 0)
+        );
     }
 
     fn summary(registry: &mut Registry, dataset: &Place) -> Value {
-        match super::document(registry, &crate::grants::Access::everything(), dataset) {
+        match super::document(
+            registry,
+            &crate::grants::Access::everything(),
+            dataset,
+            false,
+        ) {
             Ok(doc) => doc,
             Err(r) => panic!("{} {}", r.status, r.body),
         }
@@ -3576,6 +3719,8 @@ mod tests {
         let m = d.as_object_mut().unwrap();
         m.remove("counts_as_of");
         m.remove("counting");
+        // how far a reading under way has got, while one runs
+        m.remove("count");
         d
     }
 
@@ -3624,6 +3769,76 @@ mod tests {
     /// no kept counts waits; and an act of a person in the audit, a worker's
     /// row or its heartbeat moves nothing, where until then a person's act
     /// read the counts again.
+    /// 2026-11-05: production's Data page said "Reading where it is" and
+    /// nothing else for 25 minutes while a first count looked at 912,000
+    /// files on a share. Asked at once, a dataset with no counts kept is
+    /// answered without them while their first reading runs apart, saying
+    /// what it counts and since when; asked again meanwhile, the same
+    /// reading; once it is over, the counts, as a summary that waits has them.
+    #[test]
+    fn a_summary_asked_at_once_never_waits_for_a_first_count_and_says_how_far_it_got() {
+        let _one_at_a_time = KEPT_TESTS.lock().unwrap_or_else(|e| e.into_inner());
+        let mut m = made_up("summary-at-once");
+        let hide = true;
+        let at_once = |m: &mut MadeUp| {
+            super::document(
+                &mut m.registry,
+                &crate::grants::Access::everything(),
+                &m.dataset,
+                true,
+            )
+            .unwrap_or_else(|r| panic!("{}", r.body))
+        };
+        *HOLD.lock().unwrap() = Some((
+            m.dataset.path.clone(),
+            std::time::Duration::from_millis(1500),
+        ));
+        let began = std::time::Instant::now();
+        let pending = at_once(&mut m);
+        assert!(
+            began.elapsed() < std::time::Duration::from_millis(1200),
+            "answered at once: {:?}",
+            began.elapsed()
+        );
+        assert_eq!(pending["counted"], false, "{pending}");
+        assert_eq!(pending["counting"], true, "{pending}");
+        assert_eq!(pending["dataset"], m.dataset.name, "{pending}");
+        assert_eq!(pending["pictures_place"], "work", "{pending}");
+        assert!(pending.get("steps").is_none(), "no counts yet: {pending}");
+        assert!(pending.get("scans").is_none(), "no counts yet: {pending}");
+        // what it counts: the registry's scans first, the walk of the
+        // pictures' files under the working place after
+        let what = pending["count"]["what"].as_str().unwrap();
+        assert!(what == "scans" || what == "files", "{pending}");
+        // the reading apart has begun, and is held in the registry's part
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        let again = at_once(&mut m);
+        assert_eq!(again["counted"], false, "{again}");
+        assert_eq!(
+            again["count"]["what"], "scans",
+            "held in the registry's part: {again}"
+        );
+        assert!(
+            again["count"]["since"].as_str().unwrap().starts_with("20"),
+            "{again}"
+        );
+        assert_eq!(super::reads_of(&m.dataset, hide), 1, "one reading");
+        super::settled(&m.dataset, hide);
+        *HOLD.lock().unwrap() = None;
+        let done = at_once(&mut m);
+        assert_eq!(done["counted"], true, "{done}");
+        assert_eq!(done["counting"], false, "{done}");
+        assert!(done["count"].is_null(), "{done}");
+        assert_eq!(super::reads_of(&m.dataset, hide), 1, "kept");
+        assert_eq!(
+            counted_of(&done),
+            counted_of(&summary(&mut m.registry, &m.dataset))
+        );
+        assert!(done["scans"].as_i64().unwrap() > 3, "{done}");
+        // a reading's progress is let go once it is over
+        assert!(super::progress_of(&(m.dataset.path.clone(), m.dataset.id, hide)).is_none());
+    }
+
     #[test]
     fn a_summary_answers_its_kept_counts_at_once_and_reads_them_again_apart_when_what_they_count_moves()
      {

@@ -3159,10 +3159,15 @@ fn routed(
             // Wave 7a, the Data page (2026-10-09): what a dataset holds and
             // where it is, step by step, in counts
             let dataset = crate::scans::dataset_named(registry, &decoded(segs[2]))?;
+            // 2026-11-05: `?at_once=1` never waits for a first count
+            let at_once = query
+                .get("at_once")
+                .is_some_and(|v| v == "1" || v == "true");
             Ok(Reply::ok(crate::dataset_summary::document(
                 registry,
                 &caller.access,
                 &dataset,
+                at_once,
             )?))
         }
         // 2026-10-10: the body-part or post-contrast step of a dataset or a
