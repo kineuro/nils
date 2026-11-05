@@ -1434,9 +1434,12 @@ pub(crate) fn of_cohort(
         .count(store, &holds)?
         .scans;
     let passes = crate::certainty::passes(store, &holds)?;
+    // a stack outside the rules (a CT stack under the MRI pack) is never
+    // sorted and never waits for it (2026-11-05)
+    let (outside, outside_by) = crate::certainty::outside(store, &holds)?;
     let mut out = vec![json!({
         "step": "sorted",
-        "state": if scans > 0 && sorted >= scans { "done" } else { "waiting" },
+        "state": if scans > 0 && sorted + outside >= scans { "done" } else { "waiting" },
         "job": null,
         "started_at": null,
         "finished_at": null,
@@ -1445,7 +1448,9 @@ pub(crate) fn of_cohort(
         "of": scans,
         "look": look,
         "passes": passes,
-        "unsorted": (scans - sorted).max(0),
+        "unsorted": (scans - sorted - outside).max(0),
+        "outside": outside,
+        "outside_by": outside_by,
     })];
     out.extend(steps(
         store,
