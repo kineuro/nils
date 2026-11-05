@@ -937,7 +937,12 @@ fn by_axis(
 /// place on a share took 14 ms under load, and the two looks a stack of a
 /// dataset of 456,000 scans held the first summary after a start of the
 /// engine for over half an hour; its thousand preview folders list in a
-/// second or two on a few threads, and the 3D views' folder once.
+/// second or two on a few threads. A 3D view is a folder a stack, whole
+/// once its manifest is written, so the views' folder is listed once and
+/// the manifests of the folders that are the dataset's are looked at on
+/// the same few threads: a site with 495,000 view folders looked at them
+/// one after another for seven minutes on the first count after this
+/// change shipped.
 fn made(working: &Path, stacks: &[i64]) -> (i64, i64) {
     if stacks.is_empty() {
         return (0, 0);
@@ -950,14 +955,29 @@ fn made(working: &Path, stacks: &[i64]) -> (i64, i64) {
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect();
+    // the view folders that are the stacks'
+    let views: Vec<_> = std::fs::read_dir(crate::pyramid::root(working))
+        .map(|entries| {
+            entries
+                .flatten()
+                .filter(|entry| {
+                    entry
+                        .file_name()
+                        .to_string_lossy()
+                        .parse::<i64>()
+                        .is_ok_and(|stack| wanted.contains(&stack))
+                })
+                .map(|entry| entry.path())
+                .collect()
+        })
+        .unwrap_or_default();
     let threads = std::thread::available_parallelism()
         .map_or(4, |n| n.get())
         .clamp(1, 8);
-    let chunk = folders.len().div_ceil(threads).max(1);
-    let (wanted, folders) = (&wanted, &folders);
-    let pictures = std::thread::scope(|s| {
-        let handles: Vec<_> = folders
-            .chunks(chunk)
+    let (wanted, folders, views) = (&wanted, &folders, &views);
+    std::thread::scope(|s| {
+        let pictures: Vec<_> = folders
+            .chunks(folders.len().div_ceil(threads).max(1))
             .map(|part| {
                 s.spawn(move || {
                     let mut pictures = 0;
@@ -980,21 +1000,21 @@ fn made(working: &Path, stacks: &[i64]) -> (i64, i64) {
                 })
             })
             .collect();
-        handles.into_iter().map(|h| h.join().unwrap_or(0)).sum()
-    });
-    // a 3D view is a folder a stack, whole once its manifest is written
-    let mut views = 0;
-    if let Ok(entries) = std::fs::read_dir(crate::pyramid::root(working)) {
-        for entry in entries.flatten() {
-            let Ok(stack) = entry.file_name().to_string_lossy().parse::<i64>() else {
-                continue;
-            };
-            if wanted.contains(&stack) && entry.path().join("manifest.json").is_file() {
-                views += 1;
-            }
-        }
-    }
-    (pictures, views)
+        let whole: Vec<_> = views
+            .chunks(views.len().div_ceil(threads).max(1))
+            .map(|part| {
+                s.spawn(move || {
+                    part.iter()
+                        .filter(|view| view.join("manifest.json").is_file())
+                        .count() as i64
+                })
+            })
+            .collect();
+        let sum = |handles: Vec<std::thread::ScopedJoinHandle<'_, i64>>| -> i64 {
+            handles.into_iter().map(|h| h.join().unwrap_or(0)).sum()
+        };
+        (sum(pictures), sum(whole))
+    })
 }
 
 /// The kinds of the jobs that make pictures and 3D views.
