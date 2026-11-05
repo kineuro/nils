@@ -4,6 +4,10 @@ All notable changes to NILS v1 are recorded here. The format follows [Keep a Cha
 
 ## [Unreleased]
 
+### Changed
+
+- `bodypart-infer-fusion` declares 48 GB of memory, not 16: a run of 18,932 stacks on a card with 48 workers was killed at the 16 GB cap with 16.9 GB of anonymous memory in its 51 processes, about 330 MB a worker, so 64 workers are 21 GB. The changed descriptor ships with the release's pipeline descriptors and an install takes it as the pipeline's next version.
+
 ### Fixed
 
 - A cohort's sorted step counts its stacks outside the rules as the dataset's does: `outside` and `outside_by` beside `unsorted`, and the step done once every scan the rules judge is judged; a cohort of 456,000 MR scans with 31 CT scans kept reading "31 not sorted".
