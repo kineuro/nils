@@ -280,6 +280,42 @@ pub fn import(registry: &mut Registry, im: &Import<'_>, now: &str) -> Result<Imp
             c.suggest.name()
         )));
     }
+    let (out, ready) = prepare(registry.store(), &c, im)?;
+    if im.dry_run || ready.is_empty() {
+        return Ok(out);
+    }
+    let store = registry.store();
+    store.begin()?;
+    if let Err(e) = write_ready(store, c.id, &ready, im, now) {
+        store.rollback().ok();
+        return Err(e);
+    }
+    store.commit()?;
+    audit_import(registry, &c, im, &out)?;
+    Ok(out)
+}
+
+/// [`import`] inside a transaction the caller holds, into a campaign it
+/// has just written (made to suggest imported), with no audit row: the
+/// caller records [`audit_import`] once its transaction is committed.
+pub(crate) fn import_within(
+    store: &mut Store,
+    c: &campaign::Campaign,
+    im: &Import<'_>,
+    now: &str,
+) -> Result<Imported, Error> {
+    let (out, ready) = prepare(store, c, im)?;
+    if !im.dry_run && !ready.is_empty() {
+        write_ready(store, c.id, &ready, im, now)?;
+    }
+    Ok(out)
+}
+
+/// The suggestions an import would write, by item and author, and their
+/// counts.
+type Prepared = (Imported, BTreeMap<(i64, String), Ready>);
+
+fn prepare(store: &mut Store, c: &campaign::Campaign, im: &Import<'_>) -> Result<Prepared, Error> {
     let question = c.question()?;
     if !matches!(question, Question::Axis { .. } | Question::Axes { .. }) {
         return Err(invalid(format!(
@@ -306,7 +342,6 @@ pub fn import(registry: &mut Registry, im: &Import<'_>, now: &str) -> Result<Imp
             .unwrap_or_default(),
         _ => BTreeSet::new(),
     };
-    let store = registry.store();
     let items = campaign::items(store, c.id)?;
     let mut by_stack: BTreeMap<i64, Vec<i64>> = BTreeMap::new();
     let mut stack_of: BTreeMap<i64, Option<i64>> = BTreeMap::new();
@@ -429,69 +464,79 @@ pub fn import(registry: &mut Registry, im: &Import<'_>, now: &str) -> Result<Imp
             out.replaced += 1;
         }
     }
-    if im.dry_run || ready.is_empty() {
-        return Ok(out);
-    }
+    Ok((out, ready))
+}
+
+/// Write the prepared suggestions, each replacing its author's earlier one
+/// for the item, inside the caller's transaction.
+fn write_ready(
+    store: &mut Store,
+    campaign: i64,
+    ready: &BTreeMap<(i64, String), Ready>,
+    im: &Import<'_>,
+    now: &str,
+) -> Result<(), Error> {
     let d = store.dialect();
-    store.begin()?;
-    let written = (|| -> Result<(), Error> {
-        for chunk in ready.values().collect::<Vec<_>>().chunks(200) {
-            for r in chunk {
-                store.execute(
-                    &format!(
-                        "DELETE FROM {} WHERE item_id = {} AND author = {}",
-                        store.qualified("campaign_suggestion"),
-                        d.param(1, Type::Int),
-                        d.param(2, Type::Text)
-                    ),
-                    &[Param::Int(r.item), Param::from(r.author.as_str())],
-                )?;
-            }
-            let rows: Vec<Vec<Param>> = chunk
-                .iter()
-                .map(|r| {
-                    vec![
-                        Param::Int(c.id),
-                        Param::Int(r.item),
-                        r.stack.map_or(Param::Null, Param::Int),
-                        Param::from(r.value.as_str()),
-                        Param::from(r.author.as_str()),
-                        r.confidences
-                            .as_ref()
-                            .map_or(Param::Null, |m| Param::from(json!(m).to_string())),
-                        r.confidence.map_or(Param::Null, Param::Double),
-                        im.source.map_or(Param::Null, Param::from),
-                        Param::from(im.who),
-                        Param::from(now),
-                    ]
-                })
-                .collect();
-            store.insert(
-                &Insert::new(
-                    table("campaign_suggestion"),
-                    &[
-                        "campaign_id",
-                        "item_id",
-                        "stack_id",
-                        "value",
-                        "author",
-                        "confidences",
-                        "confidence",
-                        "source",
-                        "imported_by",
-                        "imported_at",
-                    ],
+    for chunk in ready.values().collect::<Vec<_>>().chunks(200) {
+        for r in chunk {
+            store.execute(
+                &format!(
+                    "DELETE FROM {} WHERE item_id = {} AND author = {}",
+                    store.qualified("campaign_suggestion"),
+                    d.param(1, Type::Int),
+                    d.param(2, Type::Text)
                 ),
-                &rows,
+                &[Param::Int(r.item), Param::from(r.author.as_str())],
             )?;
         }
-        Ok(())
-    })();
-    if let Err(e) = written {
-        store.rollback().ok();
-        return Err(e);
+        let rows: Vec<Vec<Param>> = chunk
+            .iter()
+            .map(|r| {
+                vec![
+                    Param::Int(campaign),
+                    Param::Int(r.item),
+                    r.stack.map_or(Param::Null, Param::Int),
+                    Param::from(r.value.as_str()),
+                    Param::from(r.author.as_str()),
+                    r.confidences
+                        .as_ref()
+                        .map_or(Param::Null, |m| Param::from(json!(m).to_string())),
+                    r.confidence.map_or(Param::Null, Param::Double),
+                    im.source.map_or(Param::Null, Param::from),
+                    Param::from(im.who),
+                    Param::from(now),
+                ]
+            })
+            .collect();
+        store.insert(
+            &Insert::new(
+                table("campaign_suggestion"),
+                &[
+                    "campaign_id",
+                    "item_id",
+                    "stack_id",
+                    "value",
+                    "author",
+                    "confidences",
+                    "confidence",
+                    "source",
+                    "imported_by",
+                    "imported_at",
+                ],
+            ),
+            &rows,
+        )?;
     }
-    store.commit()?;
+    Ok(())
+}
+
+/// The audit row of an import, once its transaction is committed.
+pub(crate) fn audit_import(
+    registry: &mut Registry,
+    c: &campaign::Campaign,
+    im: &Import<'_>,
+    out: &Imported,
+) -> Result<(), Error> {
     audit::record(
         registry,
         &Entry {
@@ -507,7 +552,7 @@ pub fn import(registry: &mut Registry, im: &Import<'_>, now: &str) -> Result<Imp
             })),
         },
     )?;
-    Ok(out)
+    Ok(())
 }
 
 /// A suggestion as kept.

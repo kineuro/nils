@@ -1260,6 +1260,517 @@ fn supersede(
     Ok((items, decisions, carried))
 }
 
+// ------------------------------------- per model and axis (UX round 1)
+
+/// A count of a model's review groups and the scans they hold.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Part {
+    pub groups: i64,
+    pub stacks: i64,
+}
+
+impl Part {
+    fn add(&mut self, stacks: i64) {
+        self.groups += 1;
+        self.stacks += stacks;
+    }
+
+    pub fn as_json(self) -> Value {
+        json!({"groups": self.groups, "stacks": self.stacks})
+    }
+}
+
+/// One model's proposals on one axis that still wait, as Review's
+/// Proposals page acts on them (UX round 1, 2026-11-05: "accept all that
+/// are above threshold and make the rest a campaign"): what a commit by the
+/// model and the axis puts in force, and what a campaign of the rest asks.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Standing {
+    pub model: Model,
+    pub axis: String,
+    /// The thresholds its runs staged at, lowest first.
+    pub thresholds: Vec<f64>,
+    /// At or above the threshold, staged as the model's decisions.
+    pub staged: Part,
+    /// Of those, the ones on a stack an open campaign asks the axis of: a
+    /// commit leaves them staged until that campaign closes (record 51 R3).
+    pub held: Part,
+    /// Of the staged decisions, the ones staged before the registry moved
+    /// on, which a commit names as such (`anyway`).
+    pub drifted: i64,
+    /// Below the threshold and asked by no open campaign: the scans not
+    /// decided yet, which a campaign of the rest asks.
+    pub below: Part,
+    /// Below the threshold and asked by an open campaign already.
+    pub asked: Part,
+    /// The open campaigns that ask them, by id and name.
+    pub campaigns: Vec<(i64, String)>,
+    /// The runs the proposals came from.
+    pub runs: Vec<i64>,
+    /// A campaign name no campaign has yet, for a campaign of the rest.
+    pub name: String,
+}
+
+impl Standing {
+    /// What a commit by the model and the axis takes: the staged part no
+    /// open campaign holds.
+    pub fn commits(&self) -> Part {
+        Part {
+            groups: self.staged.groups - self.held.groups,
+            stacks: self.staged.stacks - self.held.stacks,
+        }
+    }
+
+    pub fn as_json(&self) -> Value {
+        json!({
+            "model": self.model.named(),
+            "label": self.model.label(),
+            "axis": self.axis,
+            "threshold": self.thresholds.first(),
+            "thresholds": self.thresholds,
+            "staged": self.staged.as_json(),
+            "held": self.held.as_json(),
+            "commit": self.commits().as_json(),
+            "drifted": self.drifted,
+            "below": self.below.as_json(),
+            "asked": self.asked.as_json(),
+            "campaigns": self.campaigns.iter().map(|(id, name)| json!({"id": id, "name": name})).collect::<Vec<_>>(),
+            "runs": self.runs,
+            "name": self.name,
+        })
+    }
+}
+
+/// Ids as a list inside `IN (...)`: integers only.
+fn in_list(ids: &[i64]) -> String {
+    ids.iter()
+        .map(i64::to_string)
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// A model's `<axis>:model` item that still waits, as read.
+struct Waiting {
+    id: i64,
+    staged: bool,
+    decision: Option<i64>,
+    model: i64,
+    axis: String,
+    threshold: Option<f64>,
+    run: Option<i64>,
+    evidence: Value,
+}
+
+/// The `<axis>:model` items open or staged, of one axis when named.
+fn waiting(store: &mut Store, axis: Option<&str>) -> Result<Vec<Waiting>, StoreError> {
+    let t = table("review_item");
+    let d = store.dialect();
+    let mut params = Vec::new();
+    let kind = match axis {
+        Some(a) => {
+            params.push(Param::from(format!("{a}:model")));
+            format!("kind = {}", d.param(1, Type::Text))
+        }
+        None => "kind LIKE '%:model'".to_string(),
+    };
+    let sql = format!(
+        "SELECT id, status, decision_id, {} FROM {} WHERE status IN ('open', 'staged') \
+         AND scope IN ('stack', 'group') AND {kind} ORDER BY id",
+        d.text_of(t.column("evidence").expect("evidence")),
+        store.qualified("review_item"),
+    );
+    let mut out = Vec::new();
+    for r in store.query(&sql, &params)? {
+        let evidence: Value = r
+            .opt_text(3)?
+            .and_then(|t| serde_json::from_str(t).ok())
+            .unwrap_or(Value::Null);
+        let (Some(model), Some(axis)) =
+            (evidence["model"]["id"].as_i64(), evidence["axis"].as_str())
+        else {
+            continue;
+        };
+        out.push(Waiting {
+            id: r.int(0)?,
+            staged: r.text(1)? == "staged",
+            decision: r.opt_int(2)?,
+            model,
+            axis: axis.to_string(),
+            threshold: evidence["threshold"].as_f64(),
+            run: evidence["run_id"].as_i64(),
+            evidence,
+        });
+    }
+    Ok(out)
+}
+
+/// Each item's members: (every one, the ones not decided yet).
+fn member_counts(store: &mut Store, ids: &[i64]) -> Result<BTreeMap<i64, (i64, i64)>, StoreError> {
+    let mut out = BTreeMap::new();
+    for chunk in ids.chunks(500) {
+        let sql = format!(
+            "SELECT item_id, COUNT(*), SUM(CASE WHEN decided_at IS NULL THEN 1 ELSE 0 END) \
+             FROM {} WHERE item_id IN ({}) GROUP BY item_id",
+            store.qualified("review_member"),
+            in_list(chunk)
+        );
+        for r in store.query(&sql, &[])? {
+            out.insert(r.int(0)?, (r.int(1)?, r.opt_int(2)?.unwrap_or(0)));
+        }
+    }
+    Ok(out)
+}
+
+/// A campaign name for a model's proposals on an axis that no campaign has.
+fn free_name(store: &mut Store, model: &Model, axis: &str) -> Result<String, Error> {
+    let word: String = format!("{}-{axis}-unsure", model.name)
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || "-_.".contains(c) {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    let mut name = word.clone();
+    let mut n = 1;
+    while crate::campaign::by_name(store, &name)
+        .map_err(|e| Error::Refused(e.to_string()))?
+        .is_some()
+    {
+        n += 1;
+        name = format!("{word}-{n}");
+    }
+    Ok(name)
+}
+
+/// Every model's proposals that still wait, per model and axis, the most
+/// scans first (UX round 1): counts only, never a stack.
+pub fn standing(registry: &mut Registry) -> Result<Vec<Standing>, Error> {
+    let epoch = registry.meta().epoch;
+    let store = registry.store();
+    let items = waiting(store, None)?;
+    if items.is_empty() {
+        return Ok(Vec::new());
+    }
+    let ids: Vec<i64> = items.iter().map(|w| w.id).collect();
+    let members = member_counts(store, &ids)?;
+    let asked_by = crate::campaign::held_review_items(store).map_err(|e| match e {
+        crate::campaign::Error::Store(s) => Error::Store(s),
+        other => Error::Refused(other.to_string()),
+    })?;
+    let decisions: Vec<i64> = items
+        .iter()
+        .filter(|w| w.staged)
+        .filter_map(|w| w.decision)
+        .collect();
+    let held = review::held_decisions(store, &decisions)?;
+    let mut staged_at: BTreeMap<i64, Option<i64>> = BTreeMap::new();
+    for chunk in decisions.chunks(500) {
+        let sql = format!(
+            "SELECT id, epoch_staged FROM {} WHERE id IN ({}) AND committed_at IS NULL AND withdrawn_at IS NULL",
+            store.qualified("decision"),
+            in_list(chunk)
+        );
+        for r in store.query(&sql, &[])? {
+            staged_at.insert(r.int(0)?, r.opt_int(1)?);
+        }
+    }
+    let mut by: BTreeMap<(i64, String), Standing> = BTreeMap::new();
+    let mut thresholds: BTreeMap<(i64, String), BTreeSet<String>> = BTreeMap::new();
+    let mut runs: BTreeMap<(i64, String), BTreeSet<i64>> = BTreeMap::new();
+    let mut campaigns: BTreeMap<(i64, String), BTreeSet<String>> = BTreeMap::new();
+    for w in &items {
+        let key = (w.model, w.axis.clone());
+        if !by.contains_key(&key) {
+            let Some(model) = model::get(store, w.model)? else {
+                continue;
+            };
+            by.insert(
+                key.clone(),
+                Standing {
+                    model,
+                    axis: w.axis.clone(),
+                    thresholds: Vec::new(),
+                    staged: Part::default(),
+                    held: Part::default(),
+                    drifted: 0,
+                    below: Part::default(),
+                    asked: Part::default(),
+                    campaigns: Vec::new(),
+                    runs: Vec::new(),
+                    name: String::new(),
+                },
+            );
+        }
+        let s = by.get_mut(&key).expect("inserted above");
+        if let Some(t) = w.threshold {
+            thresholds
+                .entry(key.clone())
+                .or_default()
+                .insert(format!("{t:.6}"));
+        }
+        if let Some(r) = w.run {
+            runs.entry(key.clone()).or_default().insert(r);
+        }
+        let (all, open) = members.get(&w.id).copied().unwrap_or((0, 0));
+        if w.staged {
+            // a staged decision that is no longer staged waits for nothing
+            let Some(d) = w.decision.filter(|d| staged_at.contains_key(d)) else {
+                continue;
+            };
+            s.staged.add(all);
+            if held.contains_key(&d) {
+                s.held.add(all);
+            }
+            if staged_at[&d].is_some_and(|e| e != epoch) {
+                s.drifted += 1;
+            }
+        } else if open > 0 {
+            match asked_by.get(&w.id) {
+                Some(c) => {
+                    s.asked.add(open);
+                    campaigns.entry(key).or_default().insert(c.clone());
+                }
+                None => s.below.add(open),
+            }
+        }
+    }
+    let mut out: Vec<Standing> = Vec::new();
+    for (key, mut s) in by {
+        s.thresholds = thresholds
+            .remove(&key)
+            .unwrap_or_default()
+            .iter()
+            .filter_map(|t| t.parse::<f64>().ok())
+            .collect();
+        s.thresholds.sort_by(f64::total_cmp);
+        s.runs = runs.remove(&key).unwrap_or_default().into_iter().collect();
+        if s.staged.groups + s.below.groups + s.asked.groups == 0 {
+            continue;
+        }
+        for name in campaigns.remove(&key).unwrap_or_default() {
+            let id = crate::campaign::by_name(registry.store(), &name)
+                .map_err(|e| Error::Refused(e.to_string()))?
+                .map_or(0, |c| c.id);
+            s.campaigns.push((id, name));
+        }
+        s.name = free_name(registry.store(), &s.model, &s.axis)?;
+        out.push(s);
+    }
+    out.sort_by(|a, b| {
+        (b.staged.stacks + b.below.stacks + b.asked.stacks)
+            .cmp(&(a.staged.stacks + a.below.stacks + a.asked.stacks))
+            .then_with(|| a.axis.cmp(&b.axis))
+            .then_with(|| a.model.id.cmp(&b.model.id))
+    });
+    Ok(out)
+}
+
+/// A campaign of what one model proposed on one axis below its threshold
+/// (UX round 1, 2026-11-05): the person who makes it its one rater, held
+/// back none, the model's answer suggested on every item, closing into
+/// decisions in force.
+#[derive(Debug, Clone)]
+pub struct RestCampaign<'a> {
+    /// The model: its id, its digest or `name@version`.
+    pub model: &'a str,
+    pub axis: &'a str,
+    /// What it is called; a free name made from the model and the axis
+    /// when none is given.
+    pub name: Option<&'a str>,
+    /// Who makes it, and its one rater.
+    pub owner: &'a str,
+    /// The question, made by the caller with its pack: the axis alone.
+    pub question: &'a Value,
+    pub pack_version: Option<&'a str>,
+    /// Every name a value goes by, in lower case, to its identity.
+    pub names: &'a BTreeMap<String, String>,
+}
+
+/// What a campaign of the rest made.
+#[derive(Debug, Clone)]
+pub struct MadeRest {
+    pub campaign: crate::campaign::Campaign,
+    /// The review items it adopted.
+    pub adopted: Vec<i64>,
+    /// The suggestions written, the model's answers.
+    pub suggestions: crate::suggestion::Imported,
+}
+
+impl MadeRest {
+    pub fn as_json(&self) -> Value {
+        json!({
+            "campaign": {"id": self.campaign.id, "name": self.campaign.name},
+            "adopted": self.adopted.len(),
+            "suggestions": self.suggestions.as_json(),
+        })
+    }
+}
+
+/// Make the campaign of the rest, with the model's answer suggested on
+/// each item, in one transaction: the campaign, its items and their
+/// suggestions are written together or not at all. The items are the
+/// model's open `<axis>:model` items no open campaign asks, a scan for each
+/// member not decided yet. Each suggestion is the model's value for the
+/// scan with its probability of every class, authored by the model
+/// (`name@version`), so a gallery groups like scans by it. Refused when no
+/// such item waits.
+pub fn campaign_of_rest(
+    registry: &mut Registry,
+    r: &RestCampaign<'_>,
+) -> Result<MadeRest, crate::campaign::Error> {
+    use crate::campaign::{self as c, Error as CErr};
+    let m = model::resolve(registry.store(), r.model)?
+        .ok_or_else(|| CErr::NotFound(format!("no registered model answers to {}", r.model)))?;
+    let store = registry.store();
+    let asked_by = c::held_review_items(store)?;
+    let items: Vec<Waiting> = waiting(store, Some(r.axis))?
+        .into_iter()
+        .filter(|w| !w.staged && w.model == m.id && !asked_by.contains_key(&w.id))
+        .collect();
+    if items.is_empty() {
+        return Err(CErr::Refused(format!(
+            "nothing {} proposed on {} waits below its threshold outside a campaign",
+            m.label(),
+            r.axis
+        )));
+    }
+    let adopted: Vec<i64> = items.iter().map(|w| w.id).collect();
+    // each scan's own answer: the member's value and probabilities
+    let t = table("review_member");
+    let d = store.dialect();
+    let value_of: BTreeMap<i64, String> = items
+        .iter()
+        .filter_map(|w| w.evidence["value"].as_str().map(|v| (w.id, v.to_string())))
+        .collect();
+    let mut rows: Vec<crate::suggestion::Given> = Vec::new();
+    for chunk in adopted.chunks(500) {
+        let sql = format!(
+            "SELECT item_id, stack_id, {} FROM {} WHERE item_id IN ({}) AND decided_at IS NULL ORDER BY item_id, stack_id",
+            d.text_of(t.column("evidence").expect("evidence")),
+            store.qualified("review_member"),
+            in_list(chunk)
+        );
+        for row in store.query(&sql, &[])? {
+            let ev: Value = row
+                .opt_text(2)?
+                .and_then(|t| serde_json::from_str(t).ok())
+                .unwrap_or(Value::Null);
+            let confidences: BTreeMap<String, f64> = ev["probabilities"]
+                .as_object()
+                .map(|o| {
+                    o.iter()
+                        .filter_map(|(k, v)| v.as_f64().map(|p| (k.clone(), p)))
+                        .collect()
+                })
+                .unwrap_or_default();
+            let item = row.int(0)?;
+            let value = ev["value"]
+                .as_str()
+                .map(str::to_string)
+                .or_else(|| value_of.get(&item).cloned());
+            rows.push(crate::suggestion::Given {
+                stack: Some(row.int(1)?),
+                value,
+                confidences,
+                ..Default::default()
+            });
+        }
+    }
+    let name = match r.name.map(str::trim).filter(|n| !n.is_empty()) {
+        Some(n) => n.to_string(),
+        None => free_name(store, &m, r.axis).map_err(|e| CErr::Refused(e.to_string()))?,
+    };
+    // an author is a word; a model's name that is not one is said by its id
+    let label = m.label();
+    let author = if !label.is_empty()
+        && label.len() <= 100
+        && label
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || "._:@/+-".contains(ch))
+    {
+        label.clone()
+    } else {
+        format!("model:{}", m.id)
+    };
+    let runs: BTreeSet<i64> = items.iter().filter_map(|w| w.run).collect();
+    let thresholds: Vec<f64> =
+        items
+            .iter()
+            .filter_map(|w| w.threshold)
+            .fold(Vec::new(), |mut v, t| {
+                if !v.contains(&t) {
+                    v.push(t);
+                }
+                v
+            });
+    let source_words = format!(
+        "{label}'s proposals on {} below its threshold, run(s) {}",
+        r.axis,
+        runs.iter()
+            .map(i64::to_string)
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+    let adjudication = json!({"when": "never", "metric": "exact"});
+    let new = c::New {
+        name: &name,
+        owner: r.owner,
+        question: r.question,
+        source: json!({"proposals": {
+            "model": m.id, "label": label, "axis": r.axis, "items": adopted,
+            "runs": runs, "thresholds": thresholds,
+        }}),
+        items: c::Items::Review(adopted.clone()),
+        handle_id: None,
+        content_hash: None,
+        pack_version: r.pack_version,
+        raters_per_item: 1,
+        raters: vec![r.owner.to_string()],
+        adjudicators: Vec::new(),
+        adjudication: &adjudication,
+        closes_into: "decision",
+        lease_seconds: 3600,
+        inputs: BTreeMap::new(),
+        hold_back: Some(0.0),
+        suggest: Some(c::Suggest::Imported),
+        hide_header: false,
+    };
+    let now = now_iso();
+    let import = crate::suggestion::Import {
+        campaign: 0,
+        rows: &rows,
+        author: Some(&author),
+        source: Some(&source_words),
+        who: r.owner,
+        names: r.names,
+        dry_run: false,
+    };
+    let mut imported = None;
+    let made = c::create_with(registry, &new, |store, id| {
+        let made = c::get(store, id)?.ok_or_else(|| CErr::NotFound(format!("no campaign {id}")))?;
+        let im = crate::suggestion::Import {
+            campaign: id,
+            ..import.clone()
+        };
+        imported = Some(crate::suggestion::import_within(store, &made, &im, &now)?);
+        Ok(())
+    })?;
+    let suggestions = imported.unwrap_or_default();
+    let im = crate::suggestion::Import {
+        campaign: made.id,
+        ..import
+    };
+    crate::suggestion::audit_import(registry, &made, &im, &suggestions)?;
+    Ok(MadeRest {
+        campaign: made,
+        adopted,
+        suggestions,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

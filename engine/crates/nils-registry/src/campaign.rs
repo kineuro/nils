@@ -1675,6 +1675,18 @@ pub fn review_items(store: &mut Store, q: &ReviewQuery) -> Result<Vec<i64>, Erro
 /// Create a campaign: its row, one item per key, each backed by a review
 /// item, in one transaction; then the audit row.
 pub fn create(registry: &mut Registry, n: &New<'_>) -> Result<Campaign, Error> {
+    create_with(registry, n, |_, _| Ok(()))
+}
+
+/// [`create`], and `then` inside the same transaction once the campaign and
+/// its items are written, given the store and the campaign's id: what it
+/// writes is kept with the campaign, or nothing is (UX round 1, 2026-11-05:
+/// a campaign of a model's proposals is made with their suggestions).
+pub fn create_with(
+    registry: &mut Registry,
+    n: &New<'_>,
+    then: impl FnOnce(&mut Store, i64) -> Result<(), Error>,
+) -> Result<Campaign, Error> {
     let name = n.name.trim();
     if name.is_empty() || name.parse::<i64>().is_ok() {
         return Err(invalid("a campaign's name is a word, not a number"));
@@ -2251,6 +2263,7 @@ pub fn create(registry: &mut Registry, n: &New<'_>) -> Result<Campaign, Error> {
         if let Items::Checks(list) = &n.items {
             crate::check::write_panels(store, id, list)?;
         }
+        then(store, id)?;
         Ok((id, rows.len()))
     })();
     let (id, items) = match written {
@@ -2372,7 +2385,7 @@ pub fn held_pairs(store: &mut Store) -> Result<BTreeMap<(i64, String), String>, 
 /// The review items the open campaigns ask, each with the asking
 /// campaign's name: the ones its items stand on, and those its axes items
 /// answer (`asks`, record 45).
-fn held_review_items(store: &mut Store) -> Result<BTreeMap<i64, String>, Error> {
+pub(crate) fn held_review_items(store: &mut Store) -> Result<BTreeMap<i64, String>, Error> {
     let sql = format!(
         "SELECT i.review_item_id, c.name FROM {} i JOIN {} c ON c.id = i.campaign_id \
          WHERE c.status IN ('open', 'closing') ORDER BY c.id, i.review_item_id",
