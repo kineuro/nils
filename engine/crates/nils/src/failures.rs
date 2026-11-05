@@ -57,17 +57,26 @@ pub(crate) fn of_unit(outcome: &Value) -> Value {
 }
 
 /// The failures of a run's units, counted by their cause, the most first:
-/// `[{kind, cause, units}]`.
+/// `[{kind, cause, units}]`; memory with the largest cap a container was
+/// killed at, where one was (`cap_gb`, 2026-11-05).
 pub(crate) fn by_cause<'a>(outcomes: impl Iterator<Item = &'a Value>) -> Value {
-    let mut counts: Vec<(Cause, usize)> = Vec::new();
+    let mut counts: Vec<(Cause, usize, Option<f64>)> = Vec::new();
     for o in outcomes {
         if !FAILED.contains(&o["status"].as_str().unwrap_or("failed")) {
             continue;
         }
-        let cause = failure::recorded(&of_unit(o)).unwrap_or(Cause::Pipeline);
-        match counts.iter_mut().find(|(c, _)| *c == cause) {
-            Some((_, n)) => *n += 1,
-            None => counts.push((cause, 1)),
+        let f = of_unit(o);
+        let cause = failure::recorded(&f).unwrap_or(Cause::Pipeline);
+        let cap = failure::cap_of(&f);
+        match counts.iter_mut().find(|(c, _, _)| *c == cause) {
+            Some((_, n, held)) => {
+                *n += 1;
+                *held = match (*held, cap) {
+                    (Some(a), Some(b)) => Some(a.max(b)),
+                    (a, b) => a.or(b),
+                };
+            }
+            None => counts.push((cause, 1, cap)),
         }
     }
     // the most first; of as many, a known cause before the pipeline's own
@@ -79,7 +88,13 @@ pub(crate) fn by_cause<'a>(outcomes: impl Iterator<Item = &'a Value>) -> Value {
     json!(
         counts
             .iter()
-            .map(|(c, n)| json!({"kind": c.kind().name(), "cause": c.name(), "units": n}))
+            .map(|(c, n, cap)| {
+                let mut v = json!({"kind": c.kind().name(), "cause": c.name(), "units": n});
+                if let Some(gb) = cap {
+                    v["cap_gb"] = json!(gb);
+                }
+                v
+            })
             .collect::<Vec<_>>()
     )
 }
@@ -90,10 +105,17 @@ pub(crate) fn by_cause<'a>(outcomes: impl Iterator<Item = &'a Value>) -> Value {
 /// is known. One unit's cause never names a run most of whose units
 /// failed on their own.
 pub(crate) fn of_run(error: &str, exit_code: Option<i64>, summary: &Value) -> Value {
-    let known = summary["failures_by_cause"]
+    let first = summary["failures_by_cause"]
         .as_array()
         .and_then(|a| a.first())
-        .and_then(|f| f["cause"].as_str())
+        .cloned()
+        .unwrap_or(Value::Null);
+    // 2026-11-05: units killed at their memory cap name the cap's size
+    if let Some(gb) = failure::cap_of(&first) {
+        return failure::memory_cap_doc_gb(gb);
+    }
+    let known = first["cause"]
+        .as_str()
         .and_then(Cause::parse)
         .filter(|c| c.kind() != Kind::Pipeline);
     known
@@ -233,6 +255,31 @@ mod tests {
         let doc = json!({"status": "failed", "error": "the release of the input failed: dcm2niix is not runnable (No such file or directory (os error 2))", "failure": null});
         assert_eq!(of_run_doc(&doc)["cause"], "dcm2niix");
         assert!(of_run_doc(&json!({"status": "done"})).is_null());
+    }
+
+    /// 2026-11-05: a run whose units were killed at their memory cap says
+    /// the cap's size, as its units do.
+    #[test]
+    fn a_run_killed_at_its_memory_cap_says_the_cap() {
+        let outcomes = [
+            json!({"status": "failed", "failure": failure::memory_cap_doc(16 * 1024)}),
+            json!({"status": "failed", "failure": failure::memory_cap_doc(8 * 1024)}),
+        ];
+        let counted = by_cause(outcomes.iter());
+        assert_eq!(
+            counted,
+            json!([{"kind": "resource", "cause": "memory", "units": 2, "cap_gb": 16.0}])
+        );
+        let f = of_run(
+            "the container exited 137",
+            Some(137),
+            &json!({ "failures_by_cause": counted }),
+        );
+        assert_eq!(f["said"], "killed at its memory cap of 16 GB");
+        assert_eq!(f["cap_gb"], 16.0);
+        // and a job of that run, as its result recorded it
+        let job = json!({"kind": "pipeline", "state": "failed", "error": "x", "result": {"run": 4, "failure": f}});
+        assert_eq!(of_job(&job)["cap_gb"], 16.0);
     }
 
     #[test]

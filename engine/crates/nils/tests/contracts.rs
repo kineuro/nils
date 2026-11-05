@@ -328,7 +328,19 @@ fn the_job_contract_is_the_runner_s() {
     let job = json(&format!("job/v{v}/nils.job.schema.json"));
     let results = json(&format!("job/v{v}/results.schema.json"));
     let stacks = json(&format!("job/v{v}/stacks.schema.json"));
-    for doc in [&job, &results, &stacks] {
+    // 2026-11-05: where a unit says how far it is, as the runner reads it
+    let progress = json(&format!("job/v{v}/progress.schema.json"));
+    assert_eq!(
+        progress["x-nils-file"],
+        nils_pipeline::progress::CONTAINER_PATH
+    );
+    assert_eq!(progress["x-nils-env"], nils_pipeline::progress::ENV);
+    assert_eq!(
+        format!("/output/{}", nils_pipeline::progress::FILE),
+        nils_pipeline::progress::CONTAINER_PATH
+    );
+    assert_eq!(strings(&progress["required"]), ["done"]);
+    for doc in [&job, &results, &stacks, &progress] {
         assert_eq!(
             doc["$schema"],
             "https://json-schema.org/draft/2020-12/schema"

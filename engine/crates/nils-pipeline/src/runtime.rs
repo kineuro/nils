@@ -1001,6 +1001,12 @@ impl Runtime for Script {
             }
         }
         for (k, v) in &inv.env {
+            // the progress file, as the output folder it is in is here
+            // (2026-11-05)
+            if k == crate::progress::ENV {
+                c.env(k, host(v));
+                continue;
+            }
             c.env(k, v);
         }
         c

@@ -421,6 +421,20 @@ The list is resolved when the run is made and frozen into a handle, as a selecti
 
 > **Warning:** a scope's newer rules replace the picks of the version before once their run finishes, so the pick table no longer holds the picks an older list was read under. The list itself, and what its handle records, are what a run over it reads, and what its input's release kept is what the run's readers read after it.
 
+## See how far a run is
+
+A run's job, its run's door (`GET /api/pipeline-runs/{id}`, `progress`) and a dataset's or a cohort's body-part and post-contrast steps say how far it is while it runs: `done` of `total` `what`, which part of a split run it is (`part` {at, of}) and since when its job runs (`since`). Where its units run together in one container that says how far it is, the count is that container's own, so a part of 20,000 stacks moves while it works; any other run counts its units over.
+
+A pipeline says how far a unit is by writing one small file, which is optional:
+
+```sh
+# inside the container: NILS_PROGRESS names /output/.nils-progress.json
+printf '{"done": %d, "of": %d, "what": "stacks"}' "$done" "$of" > "$NILS_PROGRESS.part"
+mv "$NILS_PROGRESS.part" "$NILS_PROGRESS"
+```
+
+Replace the file whole, as often as it suits the tool; the engine reads it at most every five seconds, one small read with no walk of the output folder, and removes it once the container ended, so it is never an output (`contracts/job/v1/progress.schema.json`). A unit that writes nothing is counted by its units over, with its time running. The body-part, post-contrast and System 1 images write it: the stacks answered of the stacks given.
+
 ## When a run fails
 
 A run that failed, and each unit that failed, says why beside its error, which is kept as it was written: `failure` {kind, cause, advice, fix}. `nils run`, `nils pipeline runs <run>` and `nils jobs show <job>` print it as a line; the doors answer it on the run, on each of `units_run`, and on the run's job. The kinds:
@@ -433,6 +447,8 @@ A run that failed, and each unit that failed, says why beside its error, which i
 | `pipeline` | `pipeline` | the pipeline's own error, and whatever else is not known: the error and the run's log say why |
 
 `advice` is one sentence of what to do, in the engine's own words, so it is shown at any detail; the error, a tool's own words, is not below detail quasi. `fix` is the install the engine offers itself, where it has one: for dcm2niix, `nils software install dcm2niix` (`nils tools install dcm2niix` is its alias for one release) and `POST /api/tools/dcm2niix/install`, an admin's (`install:work`); for a tool whose terms are not accepted (`licence`), `nils software accept <app>@<version>` and `POST /api/software/{app}/{version}/accept`. A run's summary counts its units' failures by cause (`failures_by_cause`), so a partial run says why its units failed. A run that failed before this was recorded is read from its error when it is shown.
+
+A container killed for memory while the runtime held it to a cap (podman or apptainer with the memory controller delegated, or docker) says the cap's size: `cap_gb` and `said`, `killed at its memory cap of 16 GB`, with advice for a cap: run it with fewer threads where its memory grows with them, or add a version of the pipeline that declares more memory. A dataset's or a cohort's body-part or post-contrast step that failed says the same, `failure` beside its `run`.
 
 ## dcm2niix
 

@@ -1122,6 +1122,48 @@ impl Attempts {
     }
 }
 
+/// A going run's progress on its step (2026-11-05): the units over of the
+/// units, as the unit rows count them, with the run's own last beat laid
+/// over them (`crate::pipelines::live_progress`: the count a person reads
+/// first, a container's own where it says, the part, since when). A beat
+/// whose count is not whole leaves the rows' count. None while the run has
+/// no units yet and no beat says anything.
+fn with_live(mut doc: Value, live: Value, has_units: bool) -> Option<Value> {
+    let Value::Object(live) = live else {
+        return has_units.then_some(doc);
+    };
+    for (k, v) in live {
+        // the lane's figures are the run page's, not a step's
+        if k == "lane" || (matches!(k.as_str(), "done" | "total") && !v.is_u64()) {
+            continue;
+        }
+        doc[k] = v;
+    }
+    Some(doc)
+}
+
+/// Why a failed step failed: the failure of the door's job that made no
+/// run, where the newest attempt was one, else the newest run's, as the
+/// jobs door and the run door say them (`{kind, cause, advice, fix}`, with
+/// a memory cap's `said` and `cap_gb`); the engine's own words, never a
+/// tool's, so they are shown at any detail. Null where neither is read.
+fn failure_of(store: &mut Store, at: &Attempts) -> Value {
+    if let Some(j) = at.unmade().filter(|j| j.state == "failed") {
+        return nils_registry::job::show(store, j.id)
+            .ok()
+            .flatten()
+            .map_or(Value::Null, |j| {
+                crate::failures::job_doc(&j)["failure"].clone()
+            });
+    }
+    at.runs
+        .first()
+        .filter(|r| r.status == "failed")
+        .and_then(|r| nils_registry::pipeline::run(store, r.id).ok().flatten())
+        .and_then(|r| serde_json::to_value(&r).ok())
+        .map_or(Value::Null, |doc| crate::failures::of_run_doc(&doc))
+}
+
 /// Why a step's run over a scope's scans is refused now, or none: a run
 /// of it over them is queued or runs, nothing here runs it, or there are
 /// no scans to run it over.
@@ -1373,10 +1415,20 @@ pub(crate) fn steps_counted(
                     &[],
                 )?;
                 let (total, over) = (rows[0].int(0)?, rows[0].int(1)?);
-                (total > 0).then(|| json!({"done": over, "total": total}))
+                // 2026-11-05: the run's own beat over the unit rows' count,
+                // so a unit that holds many stacks moves while it works
+                let live = crate::pipelines::live_progress(store, r.id, r.job, &r.status);
+                with_live(json!({"done": over, "total": total}), live, total > 0)
             }
             (None, Some(j)) => j.progress.clone(),
             (None, None) => None,
+        };
+        // 2026-11-05: a failed step says why, in the engine's words for its
+        // failure, beside the run (or the job, where none was made) it was
+        let failure = if state == "failed" {
+            failure_of(store, &at)
+        } else {
+            Value::Null
         };
         let refused = refusal(name, at.busy(), planned, scans);
         // what a run of it would go over, before it starts (2026-11-05): every
@@ -1401,6 +1453,7 @@ pub(crate) fn steps_counted(
             "started_at": started_at,
             "finished_at": finished_at,
             "progress": progress,
+            "failure": failure,
             "served": served,
             "answered": answered,
             "look": look,
@@ -2277,5 +2330,38 @@ mod tests {
             Some("no_scans")
         );
         assert_eq!(refusal("body_part", None, &plan, 3), None);
+    }
+
+    /// 2026-11-05: a going run's step reads its run's own beat over the unit
+    /// rows' count: a container's own count, its part and since when, never
+    /// the lane's figures, and the rows' count where the beat has none.
+    #[test]
+    fn a_step_s_progress_is_its_run_s_beat_over_its_rows() {
+        use serde_json::{Value, json};
+        let rows = json!({"done": 0, "total": 870});
+        let beat = json!({"run": 3, "phase": "run", "units": 870, "over": 0, "done": 312,
+            "total": 870, "what": "stacks", "part": {"at": 4, "of": 23},
+            "since": "2026-11-05T22:00:00Z", "lane": {"cores": 64}});
+        let p = super::with_live(rows.clone(), beat, true).unwrap();
+        assert_eq!((&p["done"], &p["total"]), (&json!(312), &json!(870)));
+        assert_eq!(p["part"], json!({"at": 4, "of": 23}));
+        assert!(p.get("lane").is_none(), "{p}");
+        // a beat as the input is prepared says its phase and keeps the rows' count
+        let p = super::with_live(
+            rows.clone(),
+            json!({"run": 3, "phase": "materialise", "done": null}),
+            true,
+        )
+        .unwrap();
+        assert_eq!(
+            (&p["done"], &p["phase"]),
+            (&json!(0), &json!("materialise"))
+        );
+        // no beat: the rows' count where there are rows, else nothing
+        assert_eq!(
+            super::with_live(rows.clone(), Value::Null, true),
+            Some(rows.clone())
+        );
+        assert_eq!(super::with_live(rows, Value::Null, false), None);
     }
 }

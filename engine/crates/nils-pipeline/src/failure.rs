@@ -266,6 +266,58 @@ impl Cause {
     }
 }
 
+/// What to do where a container the runtime held to a memory cap was
+/// killed for memory (2026-11-05): the cap is what the pipeline declares
+/// for a unit of the cores it took, so the unit wanted more than that.
+pub const MEMORY_CAP_ADVICE: &str = "a container was killed at its memory cap, the memory its \
+     pipeline declares for a unit of the cores it took: run it with fewer threads where its \
+     memory grows with them, or add a version of the pipeline that declares more memory (nils \
+     pipeline add) within what the lane holds (nils pipeline lane --memory-gb)";
+
+/// A memory cap in GB as a person reads it: whole where it is, else to
+/// one decimal.
+pub fn gb_of_mib(mib: u64) -> f64 {
+    (mib as f64 / 1024.0 * 10.0).round() / 10.0
+}
+
+/// The failure of a container killed for memory while the runtime held it
+/// to `cap_mib` (2026-11-05: a run said "failed" while its unit had been
+/// killed at a 16 GB cap): the memory failure with the cap's size
+/// (`cap_gb`), the engine's words of what happened (`said`) and what to do
+/// about a cap.
+pub fn memory_cap_doc(cap_mib: u64) -> Value {
+    let gb = gb_of_mib(cap_mib);
+    let mut v = Cause::Memory.doc();
+    v["cap_gb"] = json!(gb);
+    v["said"] = json!(format!(
+        "killed at its memory cap of {} GB",
+        number_words(gb)
+    ));
+    v["advice"] = json!(MEMORY_CAP_ADVICE);
+    v
+}
+
+/// A number of GB in words: `16`, `16.5`.
+fn number_words(gb: f64) -> String {
+    if gb.fract() == 0.0 {
+        format!("{gb:.0}")
+    } else {
+        format!("{gb:.1}")
+    }
+}
+
+/// A recorded memory failure's cap, where it says one.
+pub fn cap_of(doc: &Value) -> Option<f64> {
+    (doc["cause"] == Cause::Memory.name())
+        .then(|| doc["cap_gb"].as_f64())
+        .flatten()
+}
+
+/// [`memory_cap_doc`] from a cap in GB, as a run's summary keeps it.
+pub fn memory_cap_doc_gb(cap_gb: f64) -> Value {
+    memory_cap_doc((cap_gb * 1024.0).round() as u64)
+}
+
 /// The door that installs dcm2niix, and the command line's. The converter
 /// is one package of the software place (record 57 P5): the command is
 /// `nils software install dcm2niix`, and `nils tools install dcm2niix`
@@ -795,5 +847,25 @@ mod tests {
         assert_eq!(tail("ab", 3), "ab");
         // never inside a character
         assert_eq!(tail("aé", 1), "");
+    }
+
+    /// 2026-11-05: a container killed at its cap says the cap's size.
+    #[test]
+    fn a_container_killed_at_its_cap_says_the_cap() {
+        let v = memory_cap_doc(16 * 1024);
+        assert_eq!(v["cause"], "memory");
+        assert_eq!(v["kind"], "resource");
+        assert_eq!(v["cap_gb"], 16.0);
+        assert_eq!(v["said"], "killed at its memory cap of 16 GB");
+        assert_eq!(v["advice"], MEMORY_CAP_ADVICE);
+        assert_eq!(cap_of(&v), Some(16.0));
+        assert_eq!(
+            memory_cap_doc(16_896)["said"],
+            "killed at its memory cap of 16.5 GB"
+        );
+        assert_eq!(memory_cap_doc_gb(16.5)["cap_gb"], 16.5);
+        // a memory failure with no cap, or another cause, has none
+        assert_eq!(cap_of(&Cause::Memory.doc()), None);
+        assert_eq!(cap_of(&Cause::Disk.doc()), None);
     }
 }

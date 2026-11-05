@@ -57,13 +57,16 @@ a = sys.argv[1:]
 if not a or a[0] == "--version":
     print("podman version 9.9.9-test"); sys.exit(0)
 if a[0] == "info":
+    if "CgroupControllers" in a[-1] and os.environ.get("FAKE_PODMAN_CGROUPS"):
+        print(os.environ["FAKE_PODMAN_CGROUPS"]); sys.exit(0)
     print("/fake/containers/storage" if "GraphRoot" in a[-1] else "true"); sys.exit(0)
 if a[0] != "run":
     sys.exit(0)
 with open(os.environ["FAKE_PODMAN_ARGS"], "a") as log:
     log.write(json.dumps(a) + "\n")
 if os.environ.get("FAKE_PODMAN_EXIT"):
-    print("Error: the image is not known here", file=sys.stderr)
+    if os.environ["FAKE_PODMAN_EXIT"] != "137":
+        print("Error: the image is not known here", file=sys.stderr)
     sys.exit(int(os.environ["FAKE_PODMAN_EXIT"]))
 mounts, env, i = {}, {}, 1
 while i < len(a):
@@ -100,15 +103,24 @@ container-image:
   image: "example.org/bodypart-stand-in@sha256:{}"
 command-line: |
   python3 -c '
-  import json, os, sys
+  import json, os, sys, time
   m = json.load(open(sys.argv[1])); out = sys.argv[2]
   man = json.load(open(sys.argv[3] + "/manifest.json"))
   ids = {{x["input"]: x["model_id"] for x in man["models"]}}
   assert list(ids) == ["encoder", "head", "coarse"], ids
   units, proposals = [], []
-  for s in m["stacks"]:
+  gate = os.environ.get("STAND_IN_GATE")
+  for i, s in enumerate(m["stacks"]):
       u = s["unit"]; d = os.path.join(out, u); os.makedirs(d, exist_ok=True)
       open(os.path.join(d, "answer.json"), "w").write(json.dumps({{"stack": s["stack_id"]}}))
+      if gate and i == 0:
+          if os.environ.get("STAND_IN_SAYS"):
+              p = os.environ["NILS_PROGRESS"]
+              open(p + ".part", "w").write(json.dumps({{"done": 1, "of": len(m["stacks"]), "what": "stacks"}}))
+              os.replace(p + ".part", p)
+          t = time.time()
+          while not os.path.exists(gate) and time.time() - t < 120:
+              time.sleep(0.1)
       units.append({{"unit_id": u, "status": "succeeded", "derivatives": [u + "/answer.json"]}})
       proposals.append({{"stack_id": s["stack_id"], "axis": "body_part", "value": "brain", "probabilities": {{"brain": 0.9, "spine": 0.1}}, "model_id": ids["head"]}})
       proposals.append({{"stack_id": s["stack_id"], "axis": "body_region", "value": "head", "probabilities": {{"head": 0.9, "spine": 0.1}}, "model_id": ids["coarse"]}})
@@ -333,6 +345,19 @@ impl Served {
             Some(json!({"scans": over})),
             token,
         )
+    }
+
+    /// A dataset's body-part step once `ready` says it is as wanted, a minute
+    /// at most.
+    fn step_once(&self, path: &str, ready: impl Fn(&Value) -> bool) -> Value {
+        for _ in 0..600 {
+            let bp = step(&self.summary(path, READS), "body_part");
+            if ready(&bp) {
+                return bp;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        panic!("{path}: the body-part step never got there");
     }
 
     /// A job once it is over, two minutes at most.
@@ -1012,6 +1037,93 @@ fn round(pg: Option<(String, String)>) {
     );
     drop(server);
 
+    // 2026-11-05: a run whose one container holds every scan says how far
+    // it is while it works, where the container says it of itself: on the
+    // step, at the jobs door and at the run door, with since when it runs
+    let gate = bin.path().join("gate");
+    let mut reporting = logged.to_vec();
+    reporting.push(("STAND_IN_GATE", gate.as_os_str()));
+    reporting.push(("STAND_IN_SAYS", OsStr::new("1")));
+    let server = Served::start(&home, &path, true, &reporting);
+    let (status, started) = server.run("datasets/ds", "body_part", OPS);
+    assert_eq!(status, 202, "{started}");
+    let job = started["job"].as_i64().unwrap();
+    let bp = server.step_once("/api/datasets/ds/summary", |bp| {
+        bp["progress"]["reported"]["done"] == 1
+    });
+    assert_eq!(bp["state"], "running", "{bp}");
+    let p = &bp["progress"];
+    assert_eq!(
+        (&p["done"], &p["total"], &p["what"], &p["together"]),
+        (&json!(1), &json!(3), &json!("stacks"), &json!(true)),
+        "a unit's own count, not 0 of 3: {bp}"
+    );
+    assert_eq!(
+        p["reported"],
+        json!({"done": 1, "of": 3, "what": "stacks", "units": 1}),
+        "{bp}"
+    );
+    assert_eq!(p["over"], 0, "{bp}");
+    assert!(p["since"].is_string(), "{bp}");
+    assert!(p["part"].is_null(), "one part: {bp}");
+    assert!(p.get("lane").is_none(), "{bp}");
+    let at_jobs = server.get(&format!("/api/jobs/{job}"), OPS);
+    assert_eq!(at_jobs["progress"]["done"], 1, "{at_jobs}");
+    assert_eq!(at_jobs["progress"]["total"], 3, "{at_jobs}");
+    let run = bp["run"].as_i64().unwrap();
+    let at_run = server.get(&format!("/api/pipeline-runs/{run}"), OPS);
+    assert_eq!(at_run["status"], "running", "{at_run}");
+    assert_eq!(at_run["progress"]["done"], 1, "{at_run}");
+    assert_eq!(at_run["progress"]["reported"]["units"], 1, "{at_run}");
+    assert!(at_run["progress"]["since"].is_string(), "{at_run}");
+    std::fs::write(&gate, b"").unwrap();
+    let ran = server.over(job);
+    assert_eq!(ran["state"], "done", "{ran}");
+    // what it said is gone with it, never an output
+    let at_run = server.get(&format!("/api/pipeline-runs/{run}"), OPS);
+    assert!(at_run["progress"].is_null(), "{at_run}");
+    let out = work
+        .path()
+        .join(at_run["output"].as_str().unwrap_or_default());
+    assert!(out.is_dir(), "{at_run}");
+    assert!(!out.join(".nils-progress.json").exists(), "{at_run}");
+    assert!(
+        !std::fs::read_dir(&out).unwrap().any(|e| e
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .contains("progress")),
+        "{at_run}"
+    );
+    let s = server.summary("/api/datasets/ds/summary", READS);
+    assert!(step(&s, "body_part")["progress"].is_null(), "{s}");
+    drop(server);
+    std::fs::remove_file(&gate).unwrap();
+
+    // a container that says nothing: its units done of its units, and since
+    // when it runs
+    let mut silent = logged.to_vec();
+    silent.push(("STAND_IN_GATE", gate.as_os_str()));
+    let server = Served::start(&home, &path, true, &silent);
+    let (status, started) = server.run("datasets/ds", "body_part", OPS);
+    assert_eq!(status, 202, "{started}");
+    let job = started["job"].as_i64().unwrap();
+    let bp = server.step_once("/api/datasets/ds/summary", |bp| {
+        bp["state"] == "running" && bp["progress"]["together"] == true
+    });
+    let p = &bp["progress"];
+    assert_eq!(
+        (&p["done"], &p["total"], &p["what"]),
+        (&json!(0), &json!(3), &json!("stacks")),
+        "{bp}"
+    );
+    assert!(p["reported"].is_null(), "{bp}");
+    assert!(p["since"].is_string(), "{bp}");
+    std::fs::write(&gate, b"").unwrap();
+    assert_eq!(server.over(job)["state"], "done");
+    drop(server);
+    std::fs::remove_file(&gate).unwrap();
+
     // a run whose container fails: the step says failed, and may run again
     let mut failing = logged.to_vec();
     failing.push(("FAKE_PODMAN_EXIT", OsStr::new("125")));
@@ -1027,6 +1139,57 @@ fn round(pg: Option<(String, String)>) {
     assert_eq!(bp["job"], failed_job, "{s}");
     assert!(bp["refusal"].is_null(), "{s}");
     assert_eq!(bp["answered"], 3, "what ran before stays: {s}");
+    // 2026-11-05: and why, in the engine's words, beside the run it was
+    // (the stand-in says the image is not known here, as podman does)
+    assert_eq!(bp["failure"]["kind"], "dependency", "{s}");
+    assert_eq!(bp["failure"]["cause"], "image", "{s}");
+    assert!(bp["failure"]["advice"].is_string(), "{s}");
+    let failed_run = bp["run"].as_i64().expect("the failed run");
+    let at_run = server.get(&format!("/api/pipeline-runs/{failed_run}"), OPS);
+    assert_eq!(at_run["status"], "failed", "{at_run}");
+    assert_eq!(at_run["job_id"], failed_job, "{at_run}");
+    drop(server);
+
+    // a container killed at the memory cap the runtime held it to says the
+    // cap's size, on its step and its run (2026-11-05: a run over a cohort
+    // said "failed" while its unit was killed at its 16 GB cap)
+    let mut capped = logged.to_vec();
+    capped.push(("FAKE_PODMAN_EXIT", OsStr::new("137")));
+    capped.push(("FAKE_PODMAN_CGROUPS", OsStr::new("[cpu memory pids]")));
+    let server = Served::start(&home, &path, true, &capped);
+    let (status, started) = server.run("datasets/ds", "body_part", OPS);
+    assert_eq!(status, 202, "{started}");
+    let ran = server.over(started["job"].as_i64().unwrap());
+    assert_eq!(ran["state"], "failed", "{ran}");
+    assert_eq!(ran["failure"]["cause"], "memory", "{ran}");
+    let s = server.summary("/api/datasets/ds/summary", READS);
+    let bp = step(&s, "body_part");
+    assert_eq!(bp["state"], "failed", "{s}");
+    assert_eq!(bp["failure"]["kind"], "resource", "{s}");
+    assert_eq!(bp["failure"]["cause"], "memory", "{s}");
+    let cap = bp["failure"]["cap_gb"].as_f64().expect("the cap");
+    assert!(cap > 0.0, "{s}");
+    assert!(
+        bp["failure"]["said"]
+            .as_str()
+            .is_some_and(|w| w.starts_with("killed at its memory cap of ") && w.ends_with(" GB")),
+        "{s}"
+    );
+    let at_run = server.get(
+        &format!("/api/pipeline-runs/{}", bp["run"].as_i64().unwrap()),
+        OPS,
+    );
+    assert_eq!(at_run["failure"]["cap_gb"], json!(cap), "{at_run}");
+    let units = at_run["units_run"].as_array().unwrap();
+    assert!(
+        units.iter().all(|u| u["failure"]["cap_gb"] == json!(cap)),
+        "{at_run}"
+    );
+    // the cohort's step, whose newest run over its scans that was, says it too
+    let fed = server.get("/api/cohorts/fed", READS);
+    let bp = step(&fed, "body_part");
+    assert_eq!(bp["state"], "failed", "{fed}");
+    assert_eq!(bp["failure"]["cap_gb"], json!(cap), "{fed}");
     drop(server);
 
     // record 55 E2: a cascade served, one model naming its parts: the

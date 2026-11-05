@@ -24,6 +24,8 @@
 //! - [`table`]: a table output read into rows of its declared columns
 //!   (record 49 A3).
 //! - [`failure`]: what a failure was, its kind and what to do (2026-10-12).
+//! - [`progress`]: how far a running unit is, as it may say of itself
+//!   (2026-11-05).
 //! - [`pack`]: the pipeline pack beside the descriptor (record 57, Wave 7b):
 //!   its needs, knobs, rules, checks and keys, the expression language and
 //!   the facts it reads (`contracts/pipeline-pack/v1`).
@@ -36,6 +38,7 @@ pub mod failure;
 pub mod files;
 pub mod lane;
 pub mod pack;
+pub mod progress;
 pub mod results;
 pub mod runtime;
 pub mod secrets;

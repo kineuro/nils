@@ -1195,6 +1195,8 @@ pub(crate) fn run_doc_at(store: &mut Store, r: &Run, quasi: bool) -> Result<Valu
         *by_state.entry(u.state.clone()).or_default() += 1;
     }
     doc["unit_states"] = json!(by_state);
+    // 2026-11-05: how far it is while it runs, a unit's own count included
+    doc["progress"] = live_progress(store, r.id, r.job_id, &r.status);
     // record 55 (rulings of 2026-10-12, item 6): a run over a dataset's or a
     // cohort's main scans says which, and under which rules they were read
     doc["main"] = r
@@ -1283,6 +1285,30 @@ pub(crate) fn run_doc_at(store: &mut Store, r: &Run, quasi: bool) -> Result<Valu
         doc["made"] = crate::made::of_units(&units);
     }
     Ok(doc)
+}
+
+/// How far a running run is (2026-11-05), as its job's last beat said it
+/// (`how_far`): the units over and in flight, the count a person reads
+/// first (`done` of `total` `what`, a container's own where its units run
+/// together in it and it says), what the running containers said of
+/// themselves (`reported`), which part of a split run it is (`part`), and
+/// since when its job runs (`since`, every part's). One read of the job's
+/// row, never of a file. Null for a run that does not run now, or whose
+/// job's last beat was of another part.
+pub(crate) fn live_progress(store: &mut Store, run: i64, job: Option<i64>, status: &str) -> Value {
+    if status != "running" {
+        return Value::Null;
+    }
+    let Some(Ok(Some(j))) = job.map(|j| job::show(store, j)) else {
+        return Value::Null;
+    };
+    match j.progress {
+        Some(mut p) if !j.state.is_over() && p["run"] == run => {
+            p["since"] = json!(j.started_at);
+            p
+        }
+        _ => Value::Null,
+    }
 }
 
 /// The most runs one page of `GET /api/pipeline-runs` answers.
@@ -6231,6 +6257,7 @@ pub(crate) fn run_command(home: &Home, args: RunArgs) -> Result<(), Exit> {
                     used: &used,
                     resume: None,
                     verified: &verified,
+                    part: (count > 1).then_some((i + 1, count)),
                 },
             );
             conclude(
@@ -7152,6 +7179,11 @@ fn resume_command(home: &Home, args: &RunArgs, run_id: i64) -> Result<(), Exit> 
             used: &used,
             resume: Some(&r),
             verified: &Verified::default(),
+            part: split.as_ref().and_then(|p| {
+                let at = usize::try_from(p["part"].as_u64()?).ok()?;
+                let of = usize::try_from(p["of"].as_u64()?).ok()?;
+                (of > 1).then_some((at, of))
+            }),
         },
     );
     // the parts after it that no run holds yet go on once it ends, one
@@ -7624,6 +7656,9 @@ struct Execution<'a> {
     /// The models whose bytes were found to be the admitted ones, once for
     /// all the parts of a run command.
     verified: &'a Verified,
+    /// Which part of a split run this is, `(at, of)` counted from 1, so its
+    /// progress says so (2026-11-05); none for a run that is no part.
+    part: Option<(usize, usize)>,
 }
 
 /// The models whose files were hashed and found to be the bytes admitted.
@@ -7705,6 +7740,10 @@ struct Running {
     inv: Invocation,
     /// The cores and memory it holds of the lane.
     ask: lane::Ask,
+    /// What its container last said of how far it is (2026-11-05), and
+    /// when its progress file was last read.
+    reported: Option<nils_pipeline::progress::Reported>,
+    looked: Option<Instant>,
 }
 
 /// What every batch of a run shares.
@@ -8051,7 +8090,9 @@ fn execute_run(home: &Home, registry: &mut Registry, x: &Execution<'_>) -> Resul
     let _ = job::beat(
         registry.store(),
         x.job_id,
-        Some(&json!({"run": x.run_id, "phase": "materialise", "layout": d.layout.name()})),
+        Some(
+            &json!({"run": x.run_id, "phase": "materialise", "layout": d.layout.name(), "part": part_doc(x.part)}),
+        ),
     );
 
     let released_before = x.resume.and_then(|r| r.input_release_id);
@@ -8671,7 +8712,18 @@ fn execute_run(home: &Home, registry: &mut Registry, x: &Execution<'_>) -> Resul
             .and_then(|u| u.exit_code)
             .and_then(|c| i32::try_from(c).ok());
         let b = batch_of(units)?;
-        take_in(registry, x, &m, &b, code, None, &row_of, &mut taken_files)?;
+        nils_pipeline::progress::remove(&b.out);
+        take_in(
+            registry,
+            x,
+            &m,
+            &b,
+            code,
+            None,
+            None,
+            &row_of,
+            &mut taken_files,
+        )?;
     }
     let mut pending: std::collections::VecDeque<Batch> = Default::default();
     for units in group(&|s| s == "queued" || s == "running") {
@@ -8702,6 +8754,7 @@ fn execute_run(home: &Home, registry: &mut Registry, x: &Execution<'_>) -> Resul
                 if let Some(w) = &r.inv.workdir {
                     let _ = std::fs::remove_dir_all(w);
                 }
+                nils_pipeline::progress::remove(&r.batch.out);
                 let taken = take_in(
                     registry,
                     x,
@@ -8709,6 +8762,7 @@ fn execute_run(home: &Home, registry: &mut Registry, x: &Execution<'_>) -> Resul
                     &r.batch,
                     status.code(),
                     signal_of(&status),
+                    r.inv.memory_mib,
                     &row_of,
                     &mut taken_files,
                 );
@@ -8719,6 +8773,7 @@ fn execute_run(home: &Home, registry: &mut Registry, x: &Execution<'_>) -> Resul
             x.runtime.stop(&r.inv);
             let _ = runtime::kill(&mut r.child);
             let _ = r.child.wait();
+            nils_pipeline::progress::remove(&r.batch.out);
             // its /tmp held clinical-derived files: gone with the container
             if let Some(w) = &r.inv.workdir {
                 let _ = std::fs::remove_dir_all(w);
@@ -9159,6 +9214,8 @@ fn start_next(
         child,
         inv,
         ask,
+        reported: None,
+        looked: None,
     }))
 }
 
@@ -9336,7 +9393,9 @@ fn schedule(
             let in_flight: usize = running.iter().map(|r| r.batch.units.len()).sum();
             let queued: usize = pending.iter().map(|b| b.units.len()).sum::<usize>()
                 + checks.iter().map(|c| c.batch.units.len()).sum::<usize>();
-            let progress = json!({
+            // 2026-11-05: what the running containers say of how far they are
+            look_at_progress(running);
+            let mut progress = json!({
                 "run": x.run_id, "phase": "run", "units": total,
                 "over": total - in_flight - queued, "running": in_flight, "queued": queued,
                 "waiting": l.waiting,
@@ -9346,6 +9405,7 @@ fn schedule(
                     "run_cores": ledger.held_cores, "run_memory_mb": ledger.held_memory_mib,
                 },
             });
+            how_far(&mut progress, x, running);
             if let Ok(job::Asked::Cancel) = job::beat(registry.store(), x.job_id, Some(&progress)) {
                 return Ok(Scheduled::Cancelled);
             }
@@ -9361,6 +9421,8 @@ fn schedule(
                     if let Some(w) = &r.inv.workdir {
                         let _ = std::fs::remove_dir_all(w);
                     }
+                    // what it said of how far it was is no output of it
+                    nils_pipeline::progress::remove(&r.batch.out);
                     take_in(
                         registry,
                         x,
@@ -9368,6 +9430,7 @@ fn schedule(
                         &r.batch,
                         status.code(),
                         signal_of(&status),
+                        r.inv.memory_mib,
                         row_of,
                         taken_files,
                     )?;
@@ -9441,6 +9504,87 @@ fn schedule(
         }
         std::thread::sleep(Duration::from_millis(100));
     }
+}
+
+/// How often one container's progress file is read (2026-11-05), and the
+/// most read in one beat over all of a run's containers: each is one small
+/// read, on an output place that may be a slow network share.
+const PROGRESS_EVERY: Duration = Duration::from_secs(5);
+const PROGRESS_READS_A_BEAT: usize = 8;
+
+/// Read the progress files of the running containers whose turn it is:
+/// those not read for [`PROGRESS_EVERY`], the longest unread first, at most
+/// [`PROGRESS_READS_A_BEAT`] of them. A file that is not there, or not
+/// whole, leaves what the container said last.
+fn look_at_progress(running: &mut [Running]) {
+    let now = Instant::now();
+    let mut due: Vec<usize> = (0..running.len())
+        .filter(|i| {
+            running[*i]
+                .looked
+                .is_none_or(|t| now.duration_since(t) >= PROGRESS_EVERY)
+        })
+        .collect();
+    // never read first, then the longest unread
+    due.sort_by_key(|i| running[*i].looked);
+    for i in due.into_iter().take(PROGRESS_READS_A_BEAT) {
+        let r = &mut running[i];
+        r.looked = Some(now);
+        if let Some(said) = nils_pipeline::progress::read(&r.batch.out) {
+            r.reported = Some(said);
+        }
+    }
+}
+
+/// The plural word of a run's units: what its count is of.
+fn units_word(d: &Descriptor) -> &'static str {
+    match d.level {
+        Level::Stack => "stacks",
+        Level::Session => "sessions",
+        Level::Participant => "subjects",
+    }
+}
+
+/// A run's progress, as its job's beat carries it, made to say how far it
+/// is while a unit works (2026-11-05: a body-part run over a cohort stood at
+/// "0 of 20,000" for twenty minutes, since its one container held every
+/// stack of the part and progress counted finished units only):
+///
+/// - `reported`: what the running containers said of themselves, summed
+///   (`nils_pipeline::progress`), null where none said anything;
+/// - `done`, `total`, `what`: the count a person reads first. Where the
+///   units run together in one container that says how far it is, its own
+///   count after the units over before it; else the units over of all.
+/// - `together`: whether the units run in one container;
+/// - `part`: `{at, of}` where the run is one part of a split one.
+fn how_far(progress: &mut Value, x: &Execution<'_>, running: &[Running]) {
+    let d = x.descriptor;
+    let together = d.units == Units::Together;
+    let reported =
+        nils_pipeline::progress::Sum::of(running.iter().filter_map(|r| r.reported.as_ref()));
+    let total = progress["units"].as_u64().unwrap_or(0);
+    let over = progress["over"].as_u64().unwrap_or(0);
+    let in_flight = progress["running"].as_u64().unwrap_or(0);
+    let (done, of, what) = match &reported {
+        Some(s) if together && running.len() == 1 => (
+            over.saturating_add(s.done),
+            over.saturating_add(s.of.unwrap_or(in_flight)),
+            s.what.clone().unwrap_or_else(|| units_word(d).to_string()),
+        ),
+        _ => (over, total, units_word(d).to_string()),
+    };
+    progress["done"] = json!(done);
+    progress["total"] = json!(of);
+    progress["what"] = json!(what);
+    progress["together"] = json!(together);
+    progress["reported"] = reported.map_or(Value::Null, |s| s.doc());
+    progress["part"] = part_doc(x.part);
+}
+
+/// Which part of a split run a run is, as its progress says it: `{at, of}`,
+/// null for a run that is no part.
+fn part_doc(part: Option<(usize, usize)>) -> Value {
+    part.map_or(Value::Null, |(at, of)| json!({"at": at, "of": of}))
 }
 
 /// After review (finding 10): judge the units of a batch again as the
@@ -9915,6 +10059,12 @@ fn invocation_of(
         (
             "NILS_MEMORY_GB".into(),
             format!("{}", d.needs.memory_gb_for(cores)),
+        ),
+        // 2026-11-05: where the unit may say how far it is (the job
+        // contract's progress file), read while it runs
+        (
+            nils_pipeline::progress::ENV.into(),
+            nils_pipeline::progress::CONTAINER_PATH.into(),
         ),
     ];
     if on_card {
@@ -10530,6 +10680,8 @@ fn take_in(
     b: &Batch,
     code: Option<i32>,
     signal: Option<i32>,
+    // the memory the runtime held the container to, where it held it to any
+    cap_mib: Option<u64>,
     row_of: &BTreeMap<String, (i64, String)>,
     taken_files: &mut std::collections::BTreeSet<PathBuf>,
 ) -> Result<(), String> {
@@ -10648,6 +10800,13 @@ fn take_in(
         }
         if whole {
             crate::failures::mark_unit(&mut doc, exit_code, signal, log_tail.as_deref());
+            // 2026-11-05: killed for memory while held to a cap, it says the
+            // cap's size, never only that it failed
+            if let Some(cap) = cap_mib
+                && doc["failure"]["cause"] == nils_pipeline::failure::Cause::Memory.name()
+            {
+                doc["failure"] = nils_pipeline::failure::memory_cap_doc(cap);
+            }
         } else {
             crate::failures::mark_unit(&mut doc, None, None, None);
         }
