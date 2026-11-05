@@ -4,6 +4,10 @@ All notable changes to NILS v1 are recorded here. The format follows [Keep a Cha
 
 ## [Unreleased]
 
+## [1.0.0-beta.8] - 2026-11-05
+
+The eighth beta finishes what the seventh began on a large dataset: the 3D views are counted on a few threads, so a dataset's first count takes a minute rather than seven on a working place with half a million view folders, and a scan the rules never judge (a CT scan under the MRI pack) is counted outside the rules rather than as not sorted, so the sorted step is done once every scan the rules judge is judged. Kvasir 1.0.0-alpha.12, the assistant 1.0.0-alpha.32 and the MRI pack 1.4.0 ship unchanged.
+
 ### Fixed
 
 - The dataset summary looks at the 3D views' manifests on a few threads, as it lists the picture folders, instead of one after another: a working place with 495,000 view folders took seven minutes for the first count of a dataset after 1.0.0-beta.7.
