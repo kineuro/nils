@@ -4,6 +4,10 @@ All notable changes to NILS v1 are recorded here. The format follows [Keep a Cha
 
 ## [Unreleased]
 
+### Fixed
+
+- Committing a staged decision re-sorts the scans it reaches at once, as answering a question at the desk does: `POST /api/decisions/{id}/commit`, `POST /api/decisions/commit` and `nils review commit` (the reply's and the command's `resort`). Until now a committed decision was in force in the registry while the stack and session pages kept showing the sort's old value until the next sort; a site that committed a model's body-part proposals from the command line read spine beside a decision for brain-neck.
+
 ### Added
 
 - A batch of like stacks may be accepted as another value than the one suggested: `POST /api/campaigns/{id}/batches/{batch}/accept` takes `value` (a string for an axis question, an object by axis for an axes question), read as the answer door reads one; the answers carry the value given with the suggestion beside them, so the change counts, and the reply says both. Until now a batch could only take the suggestion, and a person who saw neck where the rules said spine had to hold every stack back and read them one by one.

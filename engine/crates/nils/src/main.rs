@@ -2920,6 +2920,28 @@ fn classify(home: &Home, args: ClassifyArgs) -> Result<(), Exit> {
 /// The stacks a classify's `--scope` words hold, their union (record 56
 /// §6.5): a site, a dataset, a scanner or a batch as the rehearsal reads
 /// them, or a frozen handle's stacks.
+/// After `nils review commit`: the scans the decisions reach are re-sorted
+/// at once, as after an answer at the desk (2026-11-05), so that every
+/// page reads the value in force; what happened is said on stdout.
+fn resort_after_commit(
+    registry: &mut Registry,
+    home: &nils_registry::Home,
+    pack_dir: Option<PathBuf>,
+    decisions: &[i64],
+) {
+    if decisions.is_empty() {
+        return;
+    }
+    let dir = crate::pack_dir(home, pack_dir).ok();
+    let resort = crate::review_questions::resort_committed(
+        registry,
+        dir.as_deref(),
+        "the command line",
+        decisions,
+    );
+    println!("re-sort: {}", resort["words"].as_str().unwrap_or("not run"));
+}
+
 fn classify_scope(
     registry: &mut Registry,
     modality: &str,
@@ -7406,7 +7428,7 @@ fn review_command(home: &Home, command: ReviewCommand) -> Result<(), Exit> {
                         campaign,
                         model,
                         names: crate::campaigns::value_names(
-                            crate::pack_dir(home, pack_dir)
+                            crate::pack_dir(home, pack_dir.clone())
                                 .ok()
                                 .and_then(|d| nils_pack::load(&d.join(&pack), None).ok())
                                 .as_ref(),
@@ -7452,6 +7474,7 @@ fn review_command(home: &Home, command: ReviewCommand) -> Result<(), Exit> {
                         )
                     }
                 );
+                resort_after_commit(&mut registry, home, pack_dir, &done.decisions);
                 return Ok(());
             }
             if id.is_none() && !all {
@@ -7479,6 +7502,7 @@ fn review_command(home: &Home, command: ReviewCommand) -> Result<(), Exit> {
                 done.decisions.len(),
                 done.items
             );
+            resort_after_commit(&mut registry, home, pack_dir, &done.decisions);
             Ok(())
         }
         ReviewCommand::Withdraw { id } => {

@@ -2630,10 +2630,18 @@ pub(crate) fn route(
                     nils_registry::review::Error::Refused(m) => Reply::error(409, m),
                     other => Reply::error(500, other.to_string()),
                 })?;
+                // 2026-11-05: in force means every page reads it, so the
+                // scans the decisions reach are re-sorted at once
+                let resort = crate::review_questions::resort_committed(
+                    registry,
+                    doors.pack_dir.as_deref(),
+                    principal,
+                    &done.decisions,
+                );
                 Ok(Reply::ok(json!({
                     "committed": done.decisions, "items": done.items, "left": done.left,
                     "split": done.split, "left_out_sealed": done.left_out_sealed,
-                    "left_held": done.left_held,
+                    "left_held": done.left_held, "resort": resort,
                 })))
             }
             _ => Err(Reply::error(

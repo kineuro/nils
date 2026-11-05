@@ -1247,6 +1247,30 @@ fn an_axes_campaign_at_the_door_is_held_to_the_pack_and_closes_axis_by_axis() {
         "{from}: {part}"
     );
     assert_eq!(part["left"], 12 - holding as i64, "{part}");
+    // 2026-11-05: in force means every page reads it: the commit re-sorted
+    // the scans the decisions reach, and each stack that held the old base
+    // now explains the committed one
+    assert_eq!(part["resort"]["state"], "done", "{part}");
+    assert_eq!(part["resort"]["sorted"], part["resort"]["stacks"], "{part}");
+    assert!(
+        part["resort"]["stacks"].as_u64().unwrap() >= holding as u64,
+        "{part}"
+    );
+    for s in 1..=4 {
+        let e = server.ok("GET", &format!("/api/explain/{s}"), None, CURATOR);
+        let base = e["axes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|a| a["axis"] == "base")
+            .and_then(|a| a["value"].as_str())
+            .map(str::to_string);
+        assert_ne!(
+            base.as_deref(),
+            Some(from.as_str()).filter(|f| *f != "T1w"),
+            "stack {s} still holds the old base: {e}"
+        );
+    }
 
     // R5: System 1's question, from its fixture, answered whole
     let example: Value = serde_json::from_str(
