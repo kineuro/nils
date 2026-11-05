@@ -213,7 +213,18 @@ pub struct Needs {
     /// (never above the parameter's maximum). Until the descriptor is
     /// [`Descriptor::sized_to`] a lane, `cores` holds 1.
     pub lane_cores: bool,
+    /// Of the lane's memory, sized: the base and so much a core for the
+    /// cores the unit holds ([`Needs::memory_gb_for`]).
     pub memory_gb: f64,
+    /// `memory-gb` as declared (2026-11-05): what a unit takes before its
+    /// workers, the base `memory_gb` is sized from.
+    pub memory_gb_base: f64,
+    /// `memory-gb-per-core` (2026-11-05): what a unit takes for each core
+    /// it is given, beside the base; 0 where it declares none. A pass that
+    /// runs a worker a core took about 330 MB a worker on one machine and
+    /// was killed at a cap declared for fewer workers; sized to the cores
+    /// it takes, the same descriptor fits a laptop and a large server.
+    pub memory_gb_per_core: f64,
     /// Of the card's memory, for a unit that takes the GPU.
     pub gpu_memory_gb: f64,
     /// The Number parameter that sets a unit's threads (`cores-input`,
@@ -223,6 +234,32 @@ pub struct Needs {
     /// plans within (`memory-input`): left out, it is `memory-gb`; above
     /// it, refused.
     pub memory_input: Option<String>,
+}
+
+impl Needs {
+    /// The memory a unit takes with `cores` cores (2026-11-05): the base
+    /// and so much a core; the base alone where it declares nothing a core.
+    pub fn memory_gb_for(&self, cores: u32) -> f64 {
+        self.memory_gb_base + self.memory_gb_per_core * f64::from(cores.max(1))
+    }
+
+    /// The cores a unit that asks the lane's takes within `free_mib` of the
+    /// lane's memory (2026-11-05): the `cores` it was given, or as many as
+    /// the memory holds at so much a core, at least one, so that a lane
+    /// short of memory runs fewer workers rather than a unit the runtime
+    /// kills. A unit that names its cores, or declares nothing a core,
+    /// takes what it was given.
+    pub fn cores_within_memory(&self, cores: u32, free_mib: u64) -> u32 {
+        if !self.lane_cores || self.memory_gb_per_core <= 0.0 {
+            return cores;
+        }
+        let free_gb = free_mib as f64 / 1024.0;
+        let holds = ((free_gb - self.memory_gb_base) / self.memory_gb_per_core).floor();
+        if holds < 1.0 {
+            return 1;
+        }
+        cores.min(holds.min(f64::from(u32::MAX)) as u32).max(1)
+    }
 }
 
 /// A secret input (`x-nils.secrets`, record 49 R3): a file the site keeps,
@@ -1202,10 +1239,14 @@ pub fn from_value(document: Value) -> Result<Descriptor, String> {
             Some(v) => Err(format!("x-nils.needs.{key} is a number above 0, not {v}")),
         }
     };
+    let memory_gb_base = positive("memory-gb", DEFAULT_MEMORY_GB)?;
+    let memory_gb_per_core = positive("memory-gb-per-core", 0.0)?;
     let needs = Needs {
         cores,
         lane_cores,
-        memory_gb: positive("memory-gb", DEFAULT_MEMORY_GB)?,
+        memory_gb: memory_gb_base + memory_gb_per_core * f64::from(cores.max(1)),
+        memory_gb_base,
+        memory_gb_per_core,
         gpu_memory_gb: positive("gpu-memory-gb", DEFAULT_GPU_MEMORY_GB)?,
         cores_input: opt_text(n, "cores-input", "x-nils.needs.")?,
         memory_input: opt_text(n, "memory-input", "x-nils.needs.")?,
@@ -2016,6 +2057,7 @@ impl Descriptor {
                 .map_or(u32::MAX, |m| m.max(1.0).min(f64::from(u32::MAX)) as u32);
             d.needs.cores = lane_cores.min(most).max(1);
         }
+        d.needs.memory_gb = d.needs.memory_gb_for(d.needs.cores);
         d
     }
 
@@ -2941,6 +2983,8 @@ x-nils:
                 cores: 4,
                 lane_cores: false,
                 memory_gb: 12.0,
+                memory_gb_base: 12.0,
+                memory_gb_per_core: 0.0,
                 gpu_memory_gb: 6.0,
                 cores_input: None,
                 memory_input: None,
@@ -3055,6 +3099,45 @@ x-nils:
             let e = parse(&with(needs)).unwrap_err();
             assert!(e.contains(words), "{needs}: {e}");
         }
+    }
+
+    /// 2026-11-05: a unit's memory follows the cores it takes, a base and
+    /// so much a core, sized to the lane and to a start's cores; a lane
+    /// short of memory gives fewer cores; threads the caller set are kept.
+    #[test]
+    fn a_unit_s_memory_follows_the_cores_it_takes() {
+        let base = doc(&format!("antsx/ants@sha256:{HEX}"));
+        let with =
+            |needs: &str| base.replace("  needs: {gpu: optional}", &format!("  needs: {needs}"));
+        let d = parse(&with(
+            "{cores: lane, memory-gb: 4, memory-gb-per-core: 0.5, cores-input: dimension}",
+        ))
+        .unwrap();
+        assert_eq!(d.needs.memory_gb_base, 4.0);
+        assert_eq!(d.needs.memory_gb_per_core, 0.5);
+        // the parameter's maximum is 4 in the document: a lane of 48 gives
+        // 4 cores and 6 GB, a lane of 2 gives 2 cores and 5 GB
+        assert_eq!(d.sized_to(48).needs.memory_gb, 6.0);
+        assert_eq!(d.sized_to(2).needs.memory_gb, 5.0);
+        assert_eq!(d.needs.memory_gb_for(64), 36.0);
+        // what the lane's free memory holds: 10 GB holds 12 workers, so 4
+        // stay 4 and 48 become 12; under the base, one, which then waits
+        let big = d.sized_to(48);
+        assert_eq!(big.needs.cores_within_memory(4, 10 * 1024), 4);
+        assert_eq!(big.needs.cores_within_memory(48, 10 * 1024), 12);
+        assert_eq!(big.needs.cores_within_memory(48, 4 * 1024), 1);
+        assert_eq!(big.needs.cores_within_memory(48, 1024), 1);
+        // nothing a core: the base, whatever the cores
+        let flat = parse(&with("{cores: lane, memory-gb: 6}")).unwrap();
+        assert_eq!(flat.sized_to(48).needs.memory_gb, 6.0);
+        assert_eq!(flat.needs.memory_gb_for(48), 6.0);
+        assert_eq!(flat.sized_to(48).needs.cores_within_memory(48, 1024), 48);
+        // a number of cores is not trimmed by memory
+        let fixed = parse(&with("{cores: 2, memory-gb: 1, memory-gb-per-core: 1}")).unwrap();
+        assert_eq!(fixed.needs.memory_gb, 3.0);
+        assert_eq!(fixed.needs.cores_within_memory(2, 1024), 2);
+        let e = parse(&with("{cores: lane, memory-gb-per-core: 0}")).unwrap_err();
+        assert!(e.contains("memory-gb-per-core"), "{e}");
     }
 
     /// Record 55 T24: a unit that asks every core of the lane (`cores:

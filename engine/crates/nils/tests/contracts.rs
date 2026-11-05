@@ -561,6 +561,9 @@ fn a_unit_may_ask_every_core_of_the_lane_in_the_contract_and_the_runner() {
     let job = json("job/v1/nils.job.schema.json");
     let cores = &job["$defs"]["needs"]["properties"]["cores"];
     assert_eq!(cores["oneOf"][1]["const"], descriptor::LANE_CORES);
+    // 2026-11-05: the memory a unit takes for each core it is given
+    let needs = &job["$defs"]["needs"]["properties"];
+    assert_eq!(needs["memory-gb-per-core"]["type"], "number");
     let hex = "59c45f54a1f1dc69134f63bec91a726e41c71c64a16cc21cda0b54526910a3c3";
     let text = |cores: &str| {
         format!(
