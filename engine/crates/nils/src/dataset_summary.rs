@@ -38,16 +38,19 @@
 //! keep ran out, one reading runs apart in the background while the
 //! requests keep answering the copy, which the document says
 //! (`counts_as_of`, `counting`); only a dataset with no copy at all waits,
-//! once, for the first reading. The stamp names what moves the counts and
-//! nothing else ([`stamp`]): the batches, the newest finished job that is
-//! no worker, the questions, the judgements, the merges, the samples sealed,
-//! the labels and the session cache; not the audit, which a person's every
-//! look moves, and not the workers' rows, which run as long as the engine
-//! does. The pictures and the 3D views are looked for
-//! on disk under a key of their own ([`made_key`]), the newest finished
-//! pictures or 3D-views job and the working place, never on a page visit.
+//! once, for the first reading. The copy outlives a start of the engine
+//! (2026-11-05): it is kept in `registry_meta` under its stamp, so an
+//! update counts nothing again that did not move. The stamp names what
+//! moves the counts and nothing else ([`stamp`]): the batches, the newest
+//! finished job that is no worker, the questions, the judgements, the
+//! merges, the samples sealed, the labels and the session cache; not the
+//! audit, which a person's every look moves, and not the workers' rows,
+//! which run as long as the engine does. The pictures and the 3D views are
+//! looked for on disk under a key of their own ([`made_key`]), the newest
+//! finished pictures or 3D-views job and the working place, never on a
+//! page visit.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, LazyLock, Mutex};
@@ -929,43 +932,69 @@ fn by_axis(
 }
 
 /// How many of the stacks have a preview and how many a 3D view built
-/// under the working place: a file each, looked at on a few threads, since
-/// a working place may be a share.
+/// under the working place: the folders they lie in listed, never a file
+/// looked at a stack (2026-11-05). A look at a missing file on a working
+/// place on a share took 14 ms under load, and the two looks a stack of a
+/// dataset of 456,000 scans held the first summary after a start of the
+/// engine for over half an hour; its thousand preview folders list in a
+/// second or two on a few threads, and the 3D views' folder once.
 fn made(working: &Path, stacks: &[i64]) -> (i64, i64) {
     if stacks.is_empty() {
         return (0, 0);
     }
+    let wanted: HashSet<i64> = stacks.iter().copied().collect();
+    // the preview folders any of the stacks falls in
+    let folders: Vec<_> = stacks
+        .iter()
+        .map(|stack| crate::preview::folder(working, *stack))
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
     let threads = std::thread::available_parallelism()
         .map_or(4, |n| n.get())
         .clamp(1, 8);
-    let chunk = stacks.len().div_ceil(threads).max(1);
-    std::thread::scope(|s| {
-        let handles: Vec<_> = stacks
+    let chunk = folders.len().div_ceil(threads).max(1);
+    let (wanted, folders) = (&wanted, &folders);
+    let pictures = std::thread::scope(|s| {
+        let handles: Vec<_> = folders
             .chunks(chunk)
             .map(|part| {
                 s.spawn(move || {
                     let mut pictures = 0;
-                    let mut views = 0;
-                    for stack in part {
-                        if crate::preview::path(working, *stack, false).is_file() {
-                            pictures += 1;
-                        }
-                        if crate::pyramid::dir(working, *stack)
-                            .join("manifest.json")
-                            .is_file()
-                        {
-                            views += 1;
+                    for folder in part {
+                        let Ok(entries) = std::fs::read_dir(folder) else {
+                            continue;
+                        };
+                        for entry in entries.flatten() {
+                            let name = entry.file_name();
+                            if let Some((stack, false)) =
+                                crate::preview::stack_of(&name.to_string_lossy())
+                                && wanted.contains(&stack)
+                                && entry.file_type().is_ok_and(|t| !t.is_dir())
+                            {
+                                pictures += 1;
+                            }
                         }
                     }
-                    (pictures, views)
+                    pictures
                 })
             })
             .collect();
-        handles
-            .into_iter()
-            .map(|h| h.join().unwrap_or((0, 0)))
-            .fold((0, 0), |a, b| (a.0 + b.0, a.1 + b.1))
-    })
+        handles.into_iter().map(|h| h.join().unwrap_or(0)).sum()
+    });
+    // a 3D view is a folder a stack, whole once its manifest is written
+    let mut views = 0;
+    if let Ok(entries) = std::fs::read_dir(crate::pyramid::root(working)) {
+        for entry in entries.flatten() {
+            let Ok(stack) = entry.file_name().to_string_lossy().parse::<i64>() else {
+                continue;
+            };
+            if wanted.contains(&stack) && entry.path().join("manifest.json").is_file() {
+                views += 1;
+            }
+        }
+    }
+    (pictures, views)
 }
 
 /// The kinds of the jobs that make pictures and 3D views.
@@ -985,11 +1014,13 @@ static MADE: LazyLock<Mutex<HashMap<(String, i64), Made>>> = LazyLock::new(Defau
 
 /// What a dataset's pictures and 3D views are counted under (2026-10-31):
 /// the newest finished pictures or 3D-views job and the working place. A
-/// look at a file on a working place on a share takes a third of a
-/// millisecond, and a dataset of 456,000 scans took 15 seconds on eight
-/// threads to look at on every page visit; nothing but such a job, or a
-/// working place bound anew, makes a picture, so they are looked for again
-/// only then, and a door's write ([`forget`]) leaves them as they are.
+/// look at a file on a working place on a share took a third of a
+/// millisecond, and 14 ms under load, and a dataset of 456,000 scans took
+/// 15 seconds, then over half an hour, on eight threads to look at on
+/// every page visit (its folders are listed since 2026-11-05, [`made`]);
+/// nothing but such a job, or a working place bound anew, makes a picture,
+/// so they are looked for again only then, and a door's write
+/// ([`forget`]) leaves them as they are.
 fn made_key(store: &mut Store, working: &Path) -> Result<String, StoreError> {
     let job = store.query(
         &format!(
@@ -1101,7 +1132,7 @@ fn policy_reasons() -> String {
 /// (`left_out`); the files gone from the tree since a read; and the newest
 /// batch that refused a file a person may look at (none set aside by
 /// policy, none held for its instance).
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct Files {
     pub(crate) new: i64,
     pub(crate) copies: i64,
@@ -1560,6 +1591,11 @@ struct Slot {
     kept: Option<Kept>,
     reading: bool,
     reads: usize,
+    /// Whether the counts the registry keeps were looked for, once after a
+    /// start of the engine ([`stored_read`]), and whether a request is
+    /// looking now.
+    loaded: bool,
+    loading: bool,
 }
 
 /// A dataset's slot: its place's folder and id, and whether a sample sealed
@@ -1709,20 +1745,185 @@ fn read_and_keep(registry: &mut Registry, asked: &Asked) -> Result<Answer, Reply
         asked.working.as_ref().map(|w| Path::new(&w.path)),
     )?);
     let (slots, _) = &*KEPT;
-    let mut held = slots.lock().unwrap_or_else(|e| e.into_inner());
-    held.entry(asked.key.clone()).or_default().kept = Some(Kept {
-        stamp: asked.stamp.clone(),
-        at: Instant::now(),
-        as_of: as_of.clone(),
-        ttl: if asked.busy { KEEP_BUSY } else { KEEP },
-        stale: FORGOTTEN.load(Ordering::SeqCst) != forgotten,
-        counts: Arc::clone(&counts),
-    });
+    {
+        let mut held = slots.lock().unwrap_or_else(|e| e.into_inner());
+        held.entry(asked.key.clone()).or_default().kept = Some(Kept {
+            stamp: asked.stamp.clone(),
+            at: Instant::now(),
+            as_of: as_of.clone(),
+            ttl: if asked.busy { KEEP_BUSY } else { KEEP },
+            stale: FORGOTTEN.load(Ordering::SeqCst) != forgotten,
+            counts: Arc::clone(&counts),
+        });
+    }
+    stored_write(registry.store(), asked, &as_of, &counts);
     Ok(Answer {
         counts,
         as_of,
         counting: false,
     })
+}
+
+/// The `registry_meta` key a dataset's counts are kept under between starts
+/// of the engine: its place's id, and whether a sample sealed now is left
+/// out of them.
+fn stored_key(key: &Key) -> String {
+    format!(
+        "dataset_counts:{}:{}",
+        key.1,
+        if key.2 { "hidden" } else { "all" }
+    )
+}
+
+/// A dataset's counts as the registry keeps them (2026-11-05): the counts
+/// under the stamp they were read under, and when, so that a start of the
+/// engine answers them at once and counts again only where the stamp moved,
+/// as the engine's own memory does between requests. Until then every start
+/// of the engine, so every update, counted every dataset from nothing at
+/// its first visit, and a dataset of 456,000 scans held the page for as
+/// long as that took.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct Stored {
+    path: String,
+    stamp: String,
+    as_of: String,
+    studies: i64,
+    stacks: i64,
+    sessions: Option<i64>,
+    subjects: i64,
+    files: Files,
+    identity_questions: i64,
+    set_aside: Vec<(String, String, i64)>,
+    set_aside_no_scans: nils_registry::dataset_subjects::SetAside,
+    classified: i64,
+    certainty: crate::certainty::Certainty,
+    passes: i64,
+    kinds: Vec<(String, i64)>,
+    regions: Vec<(String, i64)>,
+    sorts: BTreeSet<i64>,
+    picks: Value,
+    pictures: i64,
+    views: i64,
+    operations: Vec<Value>,
+}
+
+impl Stored {
+    fn of(path: &str, stamp: &str, as_of: &str, c: &Counts) -> Stored {
+        Stored {
+            path: path.to_string(),
+            stamp: stamp.to_string(),
+            as_of: as_of.to_string(),
+            studies: c.studies,
+            stacks: c.stacks,
+            sessions: c.sessions,
+            subjects: c.subjects,
+            files: c.files.clone(),
+            identity_questions: c.identity_questions,
+            set_aside: c
+                .set_aside
+                .iter()
+                .map(|s| (s.kind.to_string(), s.words.to_string(), s.count))
+                .collect(),
+            set_aside_no_scans: c.set_aside_no_scans,
+            classified: c.classified,
+            certainty: c.certainty.clone(),
+            passes: c.passes,
+            kinds: c.kinds.clone(),
+            regions: c.regions.clone(),
+            sorts: c.sorts.clone(),
+            picks: c.picks.clone(),
+            pictures: c.pictures,
+            views: c.views,
+            operations: c
+                .operations
+                .iter()
+                .map(crate::operations::Counted::stored)
+                .collect(),
+        }
+    }
+
+    /// The counts read back; none where an operation kept is one this
+    /// engine has not, which is then counted anew.
+    fn counts(self) -> Option<Counts> {
+        Some(Counts {
+            studies: self.studies,
+            stacks: self.stacks,
+            sessions: self.sessions,
+            subjects: self.subjects,
+            files: self.files,
+            identity_questions: self.identity_questions,
+            set_aside: self
+                .set_aside
+                .iter()
+                .map(|(kind, words, count)| SetAside {
+                    kind: interned(kind),
+                    words: interned(words),
+                    count: *count,
+                })
+                .collect(),
+            set_aside_no_scans: self.set_aside_no_scans,
+            classified: self.classified,
+            certainty: self.certainty,
+            passes: self.passes,
+            kinds: self.kinds,
+            regions: self.regions,
+            sorts: self.sorts,
+            picks: self.picks,
+            pictures: self.pictures,
+            views: self.views,
+            operations: self
+                .operations
+                .iter()
+                .map(crate::operations::Counted::from_stored)
+                .collect::<Option<Vec<_>>>()?,
+        })
+    }
+}
+
+/// A constant text of the engine's (a set-aside kind, its words) read back
+/// from the registry: the same `&'static str` for the same words, kept for
+/// the engine's life, a few dozen at most.
+fn interned(words: &str) -> &'static str {
+    static KNOWN: Mutex<BTreeSet<&'static str>> = Mutex::new(BTreeSet::new());
+    let mut known = KNOWN.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(known) = known.get(words) {
+        return known;
+    }
+    let kept: &'static str = Box::leak(words.to_string().into_boxed_str());
+    known.insert(kept);
+    kept
+}
+
+/// The counts the registry keeps of a dataset, read once after a start of
+/// the engine; none where it keeps none, keeps another folder's, or keeps
+/// what this engine cannot read, which is then counted anew.
+fn stored_read(store: &mut Store, key: &Key, dataset: &Place) -> Option<Kept> {
+    let text = nils_registry::home::get_meta(store, &stored_key(key))
+        .ok()
+        .flatten()?;
+    let stored: Stored = serde_json::from_str(&text).ok()?;
+    if stored.path != dataset.path {
+        return None;
+    }
+    let (stamp, as_of) = (stored.stamp.clone(), stored.as_of.clone());
+    Some(Kept {
+        stamp,
+        at: Instant::now(),
+        as_of,
+        ttl: KEEP,
+        stale: false,
+        counts: Arc::new(stored.counts()?),
+    })
+}
+
+/// Keep a dataset's counts in the registry under their stamp, for the next
+/// start of the engine; a failure to write them costs that start one
+/// reading and nothing else.
+fn stored_write(store: &mut Store, asked: &Asked, as_of: &str, counts: &Counts) {
+    let stored = Stored::of(&asked.dataset.path, &asked.stamp, as_of, counts);
+    if let Ok(text) = serde_json::to_string(&stored) {
+        let _ = nils_registry::home::set_meta(store, &stored_key(&asked.key), &text);
+    }
 }
 
 /// Read a dataset's counts on a thread of its own, on a connection of its
@@ -1777,6 +1978,27 @@ fn kept(
     let mut held = slots.lock().unwrap_or_else(|e| e.into_inner());
     loop {
         let slot = held.entry(key.clone()).or_default();
+        // the counts the registry keeps from before a start of the engine
+        // (2026-11-05): looked for once, by the first request, which the
+        // ones at once with it wait for, and kept as the engine's own
+        if !slot.loaded {
+            if slot.loading {
+                held = over.wait(held).unwrap_or_else(|e| e.into_inner());
+                continue;
+            }
+            slot.loading = true;
+            drop(held);
+            let stored = stored_read(registry.store(), &key, dataset);
+            held = slots.lock().unwrap_or_else(|e| e.into_inner());
+            let slot = held.entry(key.clone()).or_default();
+            slot.loading = false;
+            slot.loaded = true;
+            if slot.kept.is_none() {
+                slot.kept = stored;
+            }
+            over.notify_all();
+            continue;
+        }
         if let Some(k) = &slot.kept {
             let answer = Answer {
                 counts: Arc::clone(&k.counts),
@@ -1847,14 +2069,32 @@ fn settled(dataset: &Place, hide: bool) {
 }
 
 /// Drop the dataset's kept counts, as a start of the engine leaves them,
-/// for the tests.
+/// for the tests: the registry's copy is looked for again.
 #[cfg(test)]
 fn dropped(dataset: &Place, hide: bool) {
     let (slots, _) = &*KEPT;
     let mut held = slots.lock().unwrap_or_else(|e| e.into_inner());
     if let Some(slot) = held.get_mut(&(dataset.path.clone(), dataset.id, hide)) {
         slot.kept = None;
+        slot.loaded = false;
     }
+}
+
+/// Drop the counts the registry keeps of the dataset, as a registry from
+/// before they were kept has none, for the tests.
+#[cfg(test)]
+fn stored_dropped(store: &mut Store, dataset: &Place, hide: bool) {
+    let key: Key = (dataset.path.clone(), dataset.id, hide);
+    store
+        .execute(
+            &format!(
+                "DELETE FROM {} WHERE key = '{}'",
+                store.qualified("registry_meta"),
+                stored_key(&key)
+            ),
+            &[],
+        )
+        .unwrap();
 }
 
 /// How many times a dataset's counts were read from the registry, for the
@@ -3108,6 +3348,35 @@ mod tests {
         }
     }
 
+    #[test]
+    fn pictures_and_views_are_counted_from_the_folders_listed() {
+        let dir = TempDir::new("made-listed");
+        let work = dir.path().join("work");
+        let picture = |stack: i64, held: bool| {
+            let p = crate::preview::path(&work, stack, held);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, b"p").unwrap();
+        };
+        // a stack with a picture, another in the same folder, one with a
+        // held picture only, one of another dataset, and a stray file
+        picture(1, false);
+        picture(1001, false);
+        picture(2, true);
+        picture(3, false);
+        std::fs::write(crate::preview::folder(&work, 1).join("notes.txt"), b"").unwrap();
+        // a 3D view whole, one still being built, and one of another dataset
+        for (stack, whole) in [(1, true), (1001, false), (3, true)] {
+            let view = crate::pyramid::dir(&work, stack);
+            std::fs::create_dir_all(&view).unwrap();
+            if whole {
+                std::fs::write(view.join("manifest.json"), b"{}").unwrap();
+            }
+        }
+        assert_eq!(super::made(&work, &[1, 2, 1001, 4]), (2, 1));
+        assert_eq!(super::made(&work, &[]), (0, 0));
+        assert_eq!(super::made(&dir.path().join("nowhere"), &[1]), (0, 0));
+    }
+
     fn summary(registry: &mut Registry, dataset: &Place) -> Value {
         match super::document(registry, &crate::grants::Access::everything(), dataset) {
             Ok(doc) => doc,
@@ -3388,10 +3657,21 @@ mod tests {
         }
         assert_eq!(reads(&m), 3, "eight requests, one reading apart");
 
-        // eight requests at once with no kept counts at all, as after a
-        // start of the engine: one reading, waited for by all, the same
-        // answer to each
+        // eight requests at once with the engine's memory empty, as after
+        // a start of it: the counts the registry keeps, read under the same
+        // stamp, are answered at once and nothing is read (2026-11-05)
         super::dropped(&m.dataset, hide);
+        for answer in eight_at_once(&m) {
+            assert_eq!(answer["counting"], false, "{answer}");
+            assert_eq!(counted_of(&answer), counted_of(&first));
+        }
+        assert_eq!(reads(&m), 3, "a start: the registry's counts, no reading");
+
+        // and with the registry keeping none either, as one from before
+        // they were kept: one reading, waited for by all, the same answer
+        // to each
+        super::dropped(&m.dataset, hide);
+        super::stored_dropped(m.registry.store(), &m.dataset, hide);
         for answer in eight_at_once(&m) {
             assert_eq!(answer["counting"], false, "{answer}");
             assert_eq!(counted_of(&answer), counted_of(&first));

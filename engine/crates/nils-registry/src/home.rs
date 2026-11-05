@@ -473,6 +473,12 @@ pub fn set_meta(store: &mut Store, key: &str, value: &str) -> Result<(), store::
     set_meta_in(store, "registry_meta", key, value)
 }
 
+/// Read one `registry_meta` row through a store the caller holds without
+/// its [`Registry`]; none where the key has no row.
+pub fn get_meta(store: &mut Store, key: &str) -> Result<Option<String>, store::Error> {
+    get_meta_in(store, "registry_meta", key)
+}
+
 /// Bump the epoch on a registry store the caller holds without its
 /// [`Registry`] (a merge inside an import, an audit row written from a
 /// store): read what is there, write one more, inside the caller's

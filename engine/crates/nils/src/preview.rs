@@ -145,13 +145,29 @@ pub struct Header {
 
 /// Where a stack's preview lives under a working place.
 pub fn path(working: &Path, stack: i64, held: bool) -> PathBuf {
+    folder(working, stack).join(format!(
+        "{stack}{}.preview",
+        if held { ".held" } else { "" }
+    ))
+}
+
+/// The folder a stack's previews lie in under a working place: one of a
+/// thousand under `previews`, by the stack's id.
+pub fn folder(working: &Path, stack: i64) -> PathBuf {
     working
         .join("previews")
         .join(format!("{:03}", stack.rem_euclid(1000)))
-        .join(format!(
-            "{stack}{}.preview",
-            if held { ".held" } else { "" }
-        ))
+}
+
+/// The stack a file in such a folder is the preview of, and whether it is
+/// the held one; none for a file that is no preview.
+pub fn stack_of(file_name: &str) -> Option<(i64, bool)> {
+    let rest = file_name.strip_suffix(".preview")?;
+    let (rest, held) = match rest.strip_suffix(".held") {
+        Some(rest) => (rest, true),
+        None => (rest, false),
+    };
+    rest.parse().ok().map(|stack| (stack, held))
 }
 
 /// One of a stack's files with what the digest is made of, and where the

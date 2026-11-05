@@ -295,7 +295,12 @@ impl Volume {
 
 /// The directory a stack's pyramid lives in.
 pub fn dir(working: &Path, stack: i64) -> PathBuf {
-    working.join("pyramids").join(stack.to_string())
+    root(working).join(stack.to_string())
+}
+
+/// The folder every stack's 3D view lies under on a working place.
+pub fn root(working: &Path) -> PathBuf {
+    working.join("pyramids")
 }
 
 /// One file of a stack, and which of its frames are the stack's planes.

@@ -1144,6 +1144,39 @@ pub(crate) struct Counted {
 }
 
 /// The counts of the operations named, over the scans in scope.
+impl Counted {
+    /// The count as the registry keeps a dataset's counts between starts of
+    /// the engine (`dataset_summary`): a document of its fields.
+    pub(crate) fn stored(&self) -> Value {
+        json!({
+            "name": self.name,
+            "answered": self.answered,
+            "look": self.look,
+            "hint": self.hint,
+            "label": self.label,
+        })
+    }
+
+    /// A count kept so, read back; none for an operation this engine has
+    /// not, or a document that is no count.
+    pub(crate) fn from_stored(stored: &Value) -> Option<Counted> {
+        let name = OPERATIONS
+            .iter()
+            .map(|(name, _)| *name)
+            .find(|name| Some(*name) == stored["name"].as_str())?;
+        Some(Counted {
+            name,
+            answered: stored["answered"].as_i64()?,
+            look: stored["look"].as_i64()?,
+            hint: stored["hint"].clone(),
+            label: match &stored["label"] {
+                Value::Null => None,
+                label => Some(label.clone()),
+            },
+        })
+    }
+}
+
 pub(crate) fn counted(
     store: &mut Store,
     scope: Scope<'_>,

@@ -4,6 +4,10 @@ All notable changes to NILS v1 are recorded here. The format follows [Keep a Cha
 
 ## [Unreleased]
 
+### Fixed
+
+- A dataset's summary (`GET /api/datasets/{name}/summary`) counts its pictures and 3D views by listing the folders they lie in on the working place, not by looking at two files a stack. On a working place that is a network share under load a look at a missing file took 14 ms, so the first summary of a dataset of 456,000 scans after a start of the engine, which has no kept counts yet, held the desk's Data page for over half an hour; it answers in seconds now. And the counts are kept in the registry under the stamp they were read under, so a start of the engine, which every update is, answers them at once and counts again only where the data or the runs moved, as it does between requests; until now every start counted every dataset from nothing at its first visit.
+
 ## [1.0.0-beta.6] - 2026-11-02
 
 The sixth beta opens the software place to what a site already holds and closes the cleanup round of Wave 7b. A software place is chosen in the setup record, one place of the role, moved or retired at will; a shared folder is the site's, the engine writes only a subfolder of its own in it, and the folder's own sandboxes and SIF files are found and matched to the packages that pin their image, so one registration stands for every pipeline the image serves; an image already on the machine is said as cached. The site participation doors are listed, so a desk offers the page; a stack's header facts have a command and a door; a pipeline descriptor names the engines it works with; the echoes of one volume stay a stack each; a card lease counts what a unit still has to load; a release's lock is judged by its file's age. Kvasir 1.0.0-alpha.12 and the assistant 1.0.0-alpha.32 are pinned. The MRI pack 1.4.0 ships unchanged.
