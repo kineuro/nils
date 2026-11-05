@@ -484,6 +484,40 @@ fn the_reader_reads_batches_orders_and_times_and_a_certificate_unseals() {
         assert_eq!(rest["accepted"].as_array().unwrap().len(), 1, "{rest}");
         assert!(rest["held_back"].as_array().unwrap().is_empty(), "{rest}");
     }
+    // 2026-11-05: a batch may be accepted as another value than the one
+    // suggested (a person who sees neck where the rules said spine): the
+    // answers carry the value given, with the suggestion kept beside them
+    let mut extra_batched = 0usize;
+    let left = server.ok("GET", "/api/campaigns/bases/batches", None, ANNA);
+    if let Some(group) = left["groups"].as_array().and_then(|g| g.first()) {
+        let suggested = group["suggested"].as_str().unwrap_or("").to_string();
+        let other = if suggested == "T2w" { "T1w" } else { "T2w" };
+        let key = group["key"].as_str().unwrap();
+        let as_other = server.ok(
+            "POST",
+            &format!("/api/campaigns/bases/batches/{key}/accept"),
+            Some(json!({"value": other})),
+            ANNA,
+        );
+        assert_eq!(as_other["value"], other, "{as_other}");
+        assert_eq!(as_other["suggested"], suggested, "{as_other}");
+        let taken = as_other["accepted"].as_array().unwrap();
+        extra_batched = taken.len();
+        if let Some(first) = taken.first() {
+            let answers = server.ok("GET", "/api/campaigns/bases/answers", None, CURATOR);
+            let mine = answers["answers"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|a| a["item_id"] == first["item"] && a["principal"] == "anna@lab")
+                .cloned()
+                .unwrap_or_else(|| panic!("{answers}"));
+            assert_eq!(mine["value"], other, "{mine}");
+            assert_eq!(mine["suggested"], suggested, "{mine}");
+            assert_eq!(mine["changed"], true, "{mine}");
+            assert_eq!(mine["via"], "batch", "{mine}");
+        }
+    }
     // the held item is read alone: no batch takes it now
     let again = server.ok("GET", "/api/campaigns/bases/batches", None, BO);
     assert!(
@@ -548,7 +582,7 @@ fn the_reader_reads_batches_orders_and_times_and_a_certificate_unseals() {
     // the speed, per rater; a rater reads their own row
     let stats = server.ok("GET", "/api/campaigns/bases/stats", None, CURATOR);
     assert_eq!(stats["raters"].as_array().unwrap().len(), 2, "{stats}");
-    assert_eq!(stats["all"]["batched"], 1, "{stats}");
+    assert_eq!(stats["all"]["batched"], 1 + extra_batched, "{stats}");
     let mine = server.ok("GET", "/api/campaigns/bases/stats", None, ANNA);
     assert_eq!(mine["blind"], true, "{mine}");
     assert!(mine.get("all").is_none(), "{mine}");
