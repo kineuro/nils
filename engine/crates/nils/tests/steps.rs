@@ -514,8 +514,16 @@ fn round(pg: Option<(String, String)>) {
     assert_eq!(status, 409, "{doc}");
     assert_eq!(doc["reason"], "no_pipeline", "{doc}");
     assert_eq!(doc["error"], "no body-part pipeline is installed", "{doc}");
-    // a step no door runs, a dataset or a cohort that is not there
+    // 2026-11-05: the sort runs from the card too, a classify job over the
+    // scans frozen into a handle, or 409 where there is no scan to sort
     let (status, doc) = server.run("datasets/ds", "sorted", OPS);
+    assert!(
+        (status == 202 && doc["step"] == "sorted" && doc["command"][0] == "classify")
+            || (status == 409 && doc.to_string().contains("no scans to sort")),
+        "{status} {doc}"
+    );
+    // a step no door runs, a dataset or a cohort that is not there
+    let (status, doc) = server.run("datasets/ds", "pictures", OPS);
     assert_eq!(status, 404, "{doc}");
     assert_eq!(doc["reason"], "no_step", "{doc}");
     let (status, _) = server.run("datasets/nowhere", "body_part", OPS);

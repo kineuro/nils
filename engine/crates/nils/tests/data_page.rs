@@ -1427,6 +1427,25 @@ fn a_stack_outside_the_rules_is_never_not_sorted() {
     assert_eq!(sorted["unsorted"], 0, "{sorted}");
     assert_eq!(sorted["scans"], 1, "{sorted}");
     assert_eq!(sorted["state"], "done", "{sorted}");
+
+    // 2026-11-05: the sort runs from the card too, as a classify job over
+    // the dataset's scans frozen into a handle; a second press while it is
+    // queued is refused with the job
+    let (status, queued) = server.call("POST", "/api/datasets/outside/steps/sorted/run", None, OPS);
+    assert_eq!(status, 202, "{queued}");
+    assert_eq!(queued["step"], "sorted", "{queued}");
+    assert_eq!(queued["scans"], 2, "{queued}");
+    let command = queued["command"].as_array().unwrap();
+    assert_eq!(command[0], "classify", "{queued}");
+    assert!(
+        command
+            .iter()
+            .any(|w| w.as_str().unwrap_or("").starts_with("handle:")),
+        "{queued}"
+    );
+    let (status, again) = server.call("POST", "/api/datasets/outside/steps/sorted/run", None, OPS);
+    assert_eq!(status, 409, "{again}");
+    assert!(again.to_string().contains("a sort runs already"), "{again}");
     drop(server);
     drop(tree);
 }

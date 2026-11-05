@@ -14,6 +14,10 @@ All notable changes to NILS v1 are recorded here. The format follows [Keep a Cha
 
 ### Added
 
+- The sort runs from a dataset's and a cohort's card: `POST /api/datasets/{name}/steps/sorted/run` and `POST /api/cohorts/{name}/steps/sorted/run` freeze the card's scans into a handle and queue a classify job over them alone, by the served pack, answered 202 with the job, and refused while a sort over the same scans is queued or runs. The main scans run over a cohort is the pick run door's, with the cohort named, as before.
+
+### Added
+
 - A pipeline may declare the memory a unit takes for each core it is given, `x-nils.needs.memory-gb-per-core` beside `memory-gb`, the base (job contract v1, added in place and additively). The engine sizes a unit's memory to the cores it takes, for the pre-flight and the lane's budget at the lane's cores and at each unit's start at the cores it takes then, and where the lane's free memory holds fewer such workers than its free cores a unit whose threads were left open takes as many as the memory holds, so one descriptor fits a laptop and a large server. The container is told the sized memory and held to it.
 
 ### Changed
