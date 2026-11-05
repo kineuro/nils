@@ -4,6 +4,11 @@ All notable changes to NILS v1 are recorded here. The format follows [Keep a Cha
 
 ## [Unreleased]
 
+### Fixed
+
+- A cohort's sorted step counts its stacks outside the rules as the dataset's does: `outside` and `outside_by` beside `unsorted`, and the step done once every scan the rules judge is judged; a cohort of 456,000 MR scans with 31 CT scans kept reading "31 not sorted".
+- The counts a dataset was summarised at are read again once by an engine other than the one that kept them, answering the kept ones meanwhile: the stamp they are kept under names the engine's version. Production kept "31 not sorted" through the update that made those 31 outside the rules.
+
 ## [1.0.0-beta.8] - 2026-11-05
 
 The eighth beta finishes what the seventh began on a large dataset: the 3D views are counted on a few threads, so a dataset's first count takes a minute rather than seven on a working place with half a million view folders, and a scan the rules never judge (a CT scan under the MRI pack) is counted outside the rules rather than as not sorted, so the sorted step is done once every scan the rules judge is judged. Kvasir 1.0.0-alpha.12, the assistant 1.0.0-alpha.32 and the MRI pack 1.4.0 ship unchanged.

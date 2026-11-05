@@ -1711,9 +1711,14 @@ fn stamp(
     } else {
         format!("{question}|{open_questions}|{judged}")
     };
+    // and the engine itself (2026-11-05): counts kept in the registry outlive
+    // a start, so an engine that counts differently reads them again once,
+    // answering the old ones meanwhile; production kept "31 not sorted"
+    // through the update that made those 31 outside the rules
     let key = format!(
-        "{batches}|{last_batch}|{running}|{finished}|{moving}|{merged}|{sealed}|{labels}|{sets}|\
+        "{}|{batches}|{last_batch}|{running}|{finished}|{moving}|{merged}|{sealed}|{labels}|{sets}|\
          {sessions}:{visits}|{ids:?}|{}|{}",
+        env!("CARGO_PKG_VERSION"),
         dataset.as_json(),
         working
             .map(|w| format!("{}:{}", w.id, w.path))
