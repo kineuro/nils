@@ -2579,12 +2579,16 @@ pub fn open_for(
     let d = store.dialect();
     let a = store.qualified("campaign_assignment");
     // a lease past its end holds its item for no one, as a claim finds it
+    // never an item the rater holds, answered or refused; one whose lease
+    // ran out, or was given back, is theirs to take again (2026-11-05: two
+    // items of a campaign of 4,838 sat open and unreachable behind leases
+    // that had expired)
     let sql = format!(
         "SELECT {} FROM {} i WHERE i.campaign_id = {} AND i.state = 'open' AND i.round = 1 \
          AND (i.held_back IS NULL OR i.held_back = 0) \
          AND (SELECT COUNT(*) FROM {a} a WHERE a.item_id = i.id AND a.role = 'rater' \
               AND (a.state = 'submitted' OR (a.state = 'leased' AND a.lease_until >= {}))) < COALESCE(i.raters, {}) \
-         AND NOT EXISTS (SELECT 1 FROM {a} a WHERE a.item_id = i.id AND a.principal = {}) \
+         AND NOT EXISTS (SELECT 1 FROM {a} a WHERE a.item_id = i.id AND a.principal = {} AND a.state NOT IN ('expired', 'released')) \
          ORDER BY i.position",
         select_list(store, "campaign_item", &ITEM_COLUMNS, Some("i")),
         store.qualified("campaign_item"),
@@ -2622,7 +2626,7 @@ pub fn held_back_open(
          AND i.held_back = 1 \
          AND (SELECT COUNT(*) FROM {a} a WHERE a.item_id = i.id AND a.role = 'rater' \
               AND (a.state = 'submitted' OR (a.state = 'leased' AND a.lease_until >= {}))) < COALESCE(i.raters, {}) \
-         AND NOT EXISTS (SELECT 1 FROM {a} a WHERE a.item_id = i.id AND a.principal = {})",
+         AND NOT EXISTS (SELECT 1 FROM {a} a WHERE a.item_id = i.id AND a.principal = {} AND a.state NOT IN ('expired', 'released'))",
         store.qualified("campaign_item"),
         d.param(1, Type::Int),
         d.param(2, Type::Timestamp),
@@ -3352,7 +3356,7 @@ fn rater_order(
         "SELECT i.id, i.position, i.stack_id, i.held_back FROM {i} i WHERE i.campaign_id = {} AND i.state = 'open' AND i.round = 1 \
          AND (SELECT COUNT(*) FROM {a} a WHERE a.item_id = i.id AND a.role = 'rater' \
               AND a.state IN ('leased', 'submitted')) < COALESCE(i.raters, {}) \
-         AND NOT EXISTS (SELECT 1 FROM {a} a WHERE a.item_id = i.id AND a.principal = {}) \
+         AND NOT EXISTS (SELECT 1 FROM {a} a WHERE a.item_id = i.id AND a.principal = {} AND a.state NOT IN ('expired', 'released')) \
          ORDER BY i.position{}",
         d.param(1, Type::Int),
         d.param(2, Type::Int),

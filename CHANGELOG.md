@@ -4,6 +4,10 @@ All notable changes to NILS v1 are recorded here. The format follows [Keep a Cha
 
 ## [Unreleased]
 
+### Fixed
+
+- An item whose lease ran out, or was given back, is the rater's to take again: the claim, the batches and the gallery left out every item a rater had ever held, so two items of a campaign of 4,838 sat open and unreachable behind expired leases. An item the rater holds, answered or refused stays out, as before.
+
 ### Changed
 
 - A campaign that trains or measures nothing may hold back none of a batch: `--hold-back 0` at creation, and `nils campaign hold-back <campaign> 0` on an open one, which sends the items held back and still open back to the batches and the gallery. The hold-back is the guard a study keeps against a click-through, and a curation pass of one's own was paying for it: 530 of 4,838 items of such a campaign waited to be read one by one. A study's floor of a tenth stands, and a campaign given a study purpose takes the floor.
