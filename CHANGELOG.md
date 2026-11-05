@@ -4,20 +4,14 @@ All notable changes to NILS v1 are recorded here. The format follows [Keep a Cha
 
 ## [Unreleased]
 
-### Fixed
+## [1.0.0-beta.9] - 2026-11-05
 
-- Committing a staged decision re-sorts the scans it reaches at once, as answering a question at the desk does: `POST /api/decisions/{id}/commit`, `POST /api/decisions/commit` and `nils review commit` (the reply's and the command's `resort`). Until now a committed decision was in force in the registry while the stack and session pages kept showing the sort's old value until the next sort; a site that committed a model's body-part proposals from the command line read spine beside a decision for brain-neck.
+The ninth beta is the day's work on the Data page and the reviewer's desk, measured on production. A pipeline declares the memory it takes for each core it is given, and the engine sizes a unit to the cores it takes, so one descriptor fits a laptop and a large server (the body-part pass declares 4 GB and half a GB a worker, after a run was killed at a 16 GB cap). Committing a decision re-sorts the scans it reaches, so every page reads the value in force. A batch of like stacks may be accepted as another value than the one suggested. The sort runs from a dataset's and a cohort's card. The kept counts name the engine that kept them, a cohort's sorted step counts its stacks outside the rules, and the 3D views are counted on a few threads. Kvasir 1.0.0-alpha.12, the assistant 1.0.0-alpha.32 and the MRI pack 1.4.0 ship unchanged.
 
 ### Added
 
 - A batch of like stacks may be accepted as another value than the one suggested: `POST /api/campaigns/{id}/batches/{batch}/accept` takes `value` (a string for an axis question, an object by axis for an axes question), read as the answer door reads one; the answers carry the value given with the suggestion beside them, so the change counts, and the reply says both. Until now a batch could only take the suggestion, and a person who saw neck where the rules said spine had to hold every stack back and read them one by one.
-
-### Added
-
 - The sort runs from a dataset's and a cohort's card: `POST /api/datasets/{name}/steps/sorted/run` and `POST /api/cohorts/{name}/steps/sorted/run` freeze the card's scans into a handle and queue a classify job over them alone, by the served pack, answered 202 with the job, and refused while a sort over the same scans is queued or runs. The main scans run over a cohort is the pick run door's, with the cohort named, as before.
-
-### Added
-
 - A pipeline may declare the memory a unit takes for each core it is given, `x-nils.needs.memory-gb-per-core` beside `memory-gb`, the base (job contract v1, added in place and additively). The engine sizes a unit's memory to the cores it takes, for the pre-flight and the lane's budget at the lane's cores and at each unit's start at the cores it takes then, and where the lane's free memory holds fewer such workers than its free cores a unit whose threads were left open takes as many as the memory holds, so one descriptor fits a laptop and a large server. The container is told the sized memory and held to it.
 
 ### Changed
@@ -26,6 +20,7 @@ All notable changes to NILS v1 are recorded here. The format follows [Keep a Cha
 
 ### Fixed
 
+- Committing a staged decision re-sorts the scans it reaches at once, as answering a question at the desk does: `POST /api/decisions/{id}/commit`, `POST /api/decisions/commit` and `nils review commit` (the reply's and the command's `resort`). Until now a committed decision was in force in the registry while the stack and session pages kept showing the sort's old value until the next sort; a site that committed a model's body-part proposals from the command line read spine beside a decision for brain-neck.
 - A cohort's sorted step counts its stacks outside the rules as the dataset's does: `outside` and `outside_by` beside `unsorted`, and the step done once every scan the rules judge is judged; a cohort of 456,000 MR scans with 31 CT scans kept reading "31 not sorted".
 - The counts a dataset was summarised at are read again once by an engine other than the one that kept them, answering the kept ones meanwhile: the stamp they are kept under names the engine's version. Production kept "31 not sorted" through the update that made those 31 outside the rules.
 
