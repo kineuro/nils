@@ -4,6 +4,10 @@ All notable changes to NILS v1 are recorded here. The format follows [Keep a Cha
 
 ## [Unreleased]
 
+### Fixed
+
+- The dataset summary looks at the 3D views' manifests on a few threads, as it lists the picture folders, instead of one after another: a working place with 495,000 view folders took seven minutes for the first count of a dataset after 1.0.0-beta.7.
+
 ## [1.0.0-beta.7] - 2026-11-05
 
 The seventh beta is one fix, for a site whose working place is a network share: the Data page no longer waits for the engine to look at every scan's picture file after a start, and the counts a dataset was summarised at outlive the engine's restarts. Kvasir 1.0.0-alpha.12, the assistant 1.0.0-alpha.32 and the MRI pack 1.4.0 ship unchanged.
