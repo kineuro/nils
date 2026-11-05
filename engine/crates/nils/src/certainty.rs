@@ -526,7 +526,7 @@ fn stacks_of_sources(
 
 /// What the sources door says of a dataset's certainty, and what the Data
 /// page's summary says with it.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct Certainty {
     /// The stacks that need a look: a question of the sort's waits on a
     /// person for each.

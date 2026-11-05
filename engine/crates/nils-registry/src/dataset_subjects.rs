@@ -110,7 +110,7 @@ pub fn of(store: &mut Store, sources: &[i64]) -> Result<BTreeSet<i64>, Error> {
 }
 
 /// What a dataset's set-aside files say of subjects with no stack in it.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct SetAside {
     /// The subjects the set-aside files are of that have no stack the
     /// dataset's tree holds a file of.
