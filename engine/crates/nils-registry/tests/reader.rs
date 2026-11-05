@@ -355,13 +355,15 @@ fn claims_in_order_of_value_take_disagreement_then_doubt_first() {
 
 /// R1, timing: an answer keeps the seconds from its claim, the suggestion
 /// and whether it changed it; a campaign's stats give the median seconds
-/// and the share changed per rater, and never a value.
+/// and the share changed per rater, and never a value. 2026-11-05: a claim
+/// held open past the pause bound is a break, counted and left out of the
+/// times.
 #[test]
 fn an_answer_is_timed_and_a_campaign_says_how_fast_it_is_read() {
     for mut l in labs() {
         let name = l.name;
         let reg = &mut l.registry;
-        let ids = stacks(reg, 3);
+        let ids = stacks(reg, 4);
         let q = body_part();
         let adj = json!({"when": "never"});
         let c =
@@ -403,6 +405,13 @@ fn an_answer_is_timed_and_a_campaign_says_how_fast_it_is_read() {
             .unwrap()
             .unwrap();
         campaign::answer(reg, &give(b.assignment.id, "bo@lab", "neck"), &at(3, 10)).unwrap();
+        // then leaves his next claim open 25 minutes, the page renewing it
+        let b = campaign::claim(reg, c.id, "bo@lab", Role::Rater, &at(4, 0))
+            .unwrap()
+            .unwrap();
+        campaign::renew(reg, b.assignment.id, "bo@lab", &at(12, 0)).unwrap();
+        campaign::renew(reg, b.assignment.id, "bo@lab", &at(21, 0)).unwrap();
+        campaign::answer(reg, &give(b.assignment.id, "bo@lab", "neck"), &at(29, 0)).unwrap();
 
         let all = campaign::answers(reg.store(), c.id).unwrap();
         assert_eq!(all[0].seconds, Some(90.0), "{name}");
@@ -425,8 +434,22 @@ fn an_answer_is_timed_and_a_campaign_says_how_fast_it_is_read() {
         assert_eq!(anna["suggested"], 2, "{name}");
         assert_eq!(anna["changed"], 1, "{name}");
         assert_eq!(anna["share_changed"], 0.5, "{name}");
-        assert_eq!(stats["all"]["answers"], 3, "{name}");
+        assert_eq!(stats["all"]["answers"], 4, "{name}");
+        // the break is counted, and left out of the times
+        assert_eq!(stats["pause_seconds"], 300.0, "{name}: {stats}");
+        assert_eq!(stats["all"]["paused"], 1, "{name}: {stats}");
+        assert_eq!(stats["all"]["timed"], 3, "{name}: {stats}");
         assert_eq!(stats["all"]["median_seconds"], 30.0, "{name}");
+        assert_eq!(stats["all"]["p90_seconds"], 90.0, "{name}");
+        let bo = stats["raters"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["principal"] == "bo@lab")
+            .unwrap();
+        assert_eq!(bo["paused"], 1, "{name}: {bo}");
+        assert_eq!(bo["median_seconds"], 10.0, "{name}: {bo}");
+        assert_eq!(bo["p90_seconds"], 10.0, "{name}: {bo}");
         // counts and times only
         for word in ["brain", "spine", "neck"] {
             assert!(!stats.to_string().contains(word), "{name}: {stats}");

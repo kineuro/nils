@@ -750,6 +750,22 @@ fn job_of(r: &crate::store::Row) -> Result<Job, Error> {
     })
 }
 
+/// The last `limit` jobs of one kind, newest first, in every state: how a
+/// campaign's page finds the close it follows (2026-11-05).
+pub fn of_kind(store: &mut Store, kind: &str, limit: usize) -> Result<Vec<Job>, Error> {
+    let sql = format!(
+        "SELECT {} FROM {} WHERE kind = {} ORDER BY id DESC LIMIT {limit}",
+        select_columns(store),
+        store.qualified("job"),
+        store.dialect().param(1, Type::Text)
+    );
+    store
+        .query(&sql, &[Param::from(kind)])?
+        .iter()
+        .map(job_of)
+        .collect()
+}
+
 /// The jobs, newest first: the ones not over, or with `all` the last
 /// `limit` of every state.
 pub fn list(store: &mut Store, all: bool, limit: usize) -> Result<Vec<Job>, Error> {

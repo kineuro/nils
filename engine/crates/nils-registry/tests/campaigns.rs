@@ -3423,6 +3423,137 @@ fn an_expired_lease_never_blocks_and_an_operator_releases_another_s_claim() {
     }
 }
 
+/// 2026-11-05: a close runs as a job, one close of a campaign at a time: a
+/// second close of the same campaign is refused while the first runs, a
+/// close of another campaign is not, and once the first is over the next
+/// may start. The campaign's page reads the latest close job.
+#[test]
+fn one_close_of_a_campaign_runs_at_a_time() {
+    for mut l in labs() {
+        let name = l.name;
+        let reg = &mut l.registry;
+        let ids = stacks(reg, 2);
+        let q = body_part();
+        let adj = json!({"when": "never"});
+        let one = campaign::create(
+            reg,
+            &new("one", &q, &adj, Items::Stacks(vec![ids[0]]), 1, "none"),
+        )
+        .unwrap();
+        let two = campaign::create(
+            reg,
+            &new("two", &q, &adj, Items::Stacks(vec![ids[1]]), 1, "none"),
+        )
+        .unwrap();
+        assert!(
+            campaign::close_job(reg.store(), one.id).unwrap().is_none(),
+            "{name}"
+        );
+        let first = campaign::claim_close(reg.store(), &one, "cleo@lab").unwrap();
+        match campaign::claim_close(reg.store(), &one, "cleo@lab") {
+            Err(campaign::Error::Refused(why)) => {
+                assert!(why.contains("closing now"), "{name}: {why}")
+            }
+            other => panic!("{name}: {other:?}"),
+        }
+        let other = campaign::claim_close(reg.store(), &two, "cleo@lab").unwrap();
+        let j = campaign::close_job(reg.store(), one.id).unwrap().unwrap();
+        assert_eq!(j.id, first, "{name}");
+        let shown = campaign::close_job_json(&j);
+        assert_eq!(shown["running"], true, "{name}: {shown}");
+        assert_eq!(shown["by"], "cleo@lab", "{name}: {shown}");
+        assert!(shown.get("args").is_none(), "{name}: {shown}");
+
+        nils_registry::job::set_result(reg.store(), first, &json!({"decisions": []})).unwrap();
+        nils_registry::job::finish(reg.store(), first, nils_registry::job::State::Done, None)
+            .unwrap();
+        let next = campaign::claim_close(reg.store(), &one, "cleo@lab").unwrap();
+        assert!(next > other, "{name}");
+        let j = campaign::close_job(reg.store(), one.id).unwrap().unwrap();
+        assert_eq!(j.id, next, "{name}");
+        let done = nils_registry::job::show(reg.store(), first)
+            .unwrap()
+            .unwrap();
+        let shown = campaign::close_job_json(&done);
+        assert_eq!(shown["running"], false, "{name}");
+        assert_eq!(shown["state"], "done", "{name}");
+        assert_eq!(shown["result"]["decisions"], json!([]), "{name}");
+    }
+}
+
+/// 2026-11-05: a release of an assignment that holds nothing already (its
+/// lease ran out and a claim or an expiry wrote it so, or it was given
+/// back) answers it as it is, free, rather than refusing it, whoever asks;
+/// an answered one is refused in words that say so; and an adjudicator the
+/// campaign names gives back a rater's live claim.
+#[test]
+fn a_release_of_an_ended_lease_says_it_is_free_and_an_adjudicator_gives_back() {
+    for mut l in labs() {
+        let name = l.name;
+        let reg = &mut l.registry;
+        let ids = stacks(reg, 4);
+        let q = body_part();
+        let adj = json!({"when": "never"});
+        let mut n = new("free", &q, &adj, Items::Stacks(ids), 1, "none");
+        n.adjudicators = vec!["ada@lab".to_string()];
+        let c = campaign::create(reg, &n).unwrap();
+
+        // anna's lease runs out and an expiry writes it so
+        let a = campaign::claim(reg, c.id, "anna@lab", Role::Rater, &at(0))
+            .unwrap()
+            .unwrap();
+        campaign::expire(reg, &at(20)).unwrap();
+        for who in ["anna@lab", "bo@lab"] {
+            let r = campaign::release(reg, a.assignment.id, who, &at(21)).unwrap();
+            assert_eq!(r.state, "expired", "{name}: {who}");
+            assert!(campaign::already_free(&r), "{name}");
+        }
+        // nothing was audited for a release that had nothing to do
+        assert_eq!(
+            count(reg, "audit", " WHERE action = 'campaign.release'"),
+            0,
+            "{name}"
+        );
+
+        // a claim given back, then given back again
+        let b = campaign::claim(reg, c.id, "bo@lab", Role::Rater, &at(22))
+            .unwrap()
+            .unwrap();
+        campaign::release(reg, b.assignment.id, "bo@lab", &at(23)).unwrap();
+        let again = campaign::release(reg, b.assignment.id, "bo@lab", &at(24)).unwrap();
+        assert_eq!(again.state, "released", "{name}");
+
+        // an answered one is refused, and says why
+        let d = campaign::claim(reg, c.id, "dan@lab", Role::Rater, &at(25))
+            .unwrap()
+            .unwrap();
+        campaign::answer(reg, &give(d.assignment.id, "dan@lab", "brain"), &at(26)).unwrap();
+        match campaign::release(reg, d.assignment.id, "dan@lab", &at(27)) {
+            Err(campaign::Error::Refused(why)) => {
+                assert!(why.contains("answered"), "{name}: {why}")
+            }
+            other => panic!("{name}: {other:?}"),
+        }
+
+        // the named adjudicator gives back a rater's live claim, audited
+        // with its holder; another rater may not
+        let e = campaign::claim(reg, c.id, "eve@lab", Role::Rater, &at(28))
+            .unwrap()
+            .unwrap();
+        assert!(
+            campaign::release(reg, e.assignment.id, "fay@lab", &at(29)).is_err(),
+            "{name}"
+        );
+        let r = campaign::release(reg, e.assignment.id, "ada@lab", &at(29)).unwrap();
+        assert_eq!(r.state, "released", "{name}");
+        assert_eq!(
+            count(reg, "audit", " WHERE action = 'campaign.release'"),
+            2,
+            "{name}"
+        );
+    }
+}
+
 /// Record 48: an exclusion between axes refuses an answer that holds both
 /// sides, a hint refuses nothing, and constraints frozen before either
 /// existed read as they did.
