@@ -1677,6 +1677,86 @@ fn arrival_params(registry: &mut Registry, label: &str) -> Vec<(String, String)>
         .unwrap_or_default()
 }
 
+/// The sort over a dataset's or a cohort's scans, from its card (2026-11-05):
+/// the scans frozen into a handle and a classify job over them alone, by
+/// the served pack, as a scoped re-sort at the command line; answered 202
+/// with the job. Refused while a sort over the same scans is queued or
+/// runs, and where there is no scan to sort.
+fn sort_door(
+    doors: &Doors,
+    registry: &mut Registry,
+    caller: &Caller,
+    scope: &crate::viewer::Scope,
+) -> Result<Reply, Reply> {
+    let failed = |e: StoreError| Reply::error(500, e.to_string());
+    let target = format!("{}:{}", scope.kind(), scope.name());
+    let turn = DoorTurn::take(&target, "sorted");
+    let _held = turn.lock.lock().unwrap_or_else(|e| e.into_inner());
+    let epoch = registry.meta().epoch;
+    let ids;
+    let held = match scope {
+        crate::viewer::Scope::Dataset { sources, .. } => {
+            ids = list(sources);
+            Scope::Sources(&ids)
+        }
+        crate::viewer::Scope::Cohort(c) => Scope::Cohort(c.id),
+        crate::viewer::Scope::Registry { .. } => {
+            return Err(Reply::error(400, "a step runs over a dataset or a cohort"));
+        }
+    };
+    let store = registry.store();
+    // a sort of these scans queued or running already is the one that runs
+    let running = store
+        .query(
+            &format!(
+                "SELECT id FROM {} WHERE kind = 'classify' AND name = {} \
+                 AND state IN ('queued', 'running') ORDER BY id LIMIT 1",
+                store.qualified("job"),
+                store.dialect().param(1, nils_registry::schema::Type::Text)
+            ),
+            &[nils_registry::store::Param::from(target.as_str())],
+        )
+        .map_err(failed)?
+        .first()
+        .and_then(|r| r.int(0).ok());
+    if let Some(job) = running {
+        return Err(Reply::error(
+            409,
+            format!("a sort runs already over these scans, as job {job}"),
+        ));
+    }
+    let (handle, frozen) =
+        freeze(store, held, &caller.principal, epoch).map_err(|e| Reply::error(500, e))?;
+    if frozen == 0 {
+        drop_handle(store, handle).map_err(failed)?;
+        return Err(Reply::error(409, "there are no scans to sort here"));
+    }
+    let mut command = vec![
+        "classify".to_string(),
+        "--pack".to_string(),
+        doors.ask_pack.clone(),
+        "--scope".to_string(),
+        format!("handle:{handle}"),
+        "--name".to_string(),
+        format!("{target} sort"),
+    ];
+    if let Some(d) = &doors.pack_dir {
+        command.extend(["--pack-dir".to_string(), d.display().to_string()]);
+    }
+    let id = nils_registry::job::enqueue_with(
+        store,
+        &command,
+        Some(&target),
+        Some(&caller.principal),
+        crate::serve::queued_by(caller),
+    )
+    .map_err(crate::serve::job_err)?;
+    Ok(Reply::accepted(json!({
+        "job": id, "state": "queued", "step": "sorted", "for": target,
+        "scans": frozen, "handle": handle, "command": command,
+    })))
+}
+
 /// `POST /api/datasets/{name}/steps/{step}/run` and `POST
 /// /api/cohorts/{name}/steps/{step}/run`: the step's run over the scans it
 /// counts, frozen now into a handle, queued for the dataset or the cohort
@@ -1699,6 +1779,13 @@ pub(crate) fn run_door(
         "cohorts" => crate::viewer::Scope::cohort(registry, name)?,
         _ => crate::viewer::Scope::dataset(registry, name)?,
     };
+    // 2026-11-05 (Nima: a cohort's card runs the sort and the main scans
+    // too): the sort over the scope's scans is a step this door runs, as a
+    // classify job over them frozen into a handle; the main scans are the
+    // pick run door's, with the cohort or the dataset named
+    if step == "sorted" {
+        return sort_door(doors, registry, caller, &scope);
+    }
     // record 55 D3: System 1 is a step a door runs too, owning no axis
     let system1: (&str, &[&str]) = (crate::system1::STEP, &[]);
     let Some((step, axes)) = OPERATIONS
@@ -1710,7 +1797,9 @@ pub(crate) fn run_door(
         return Err(Refused::new(
             404,
             "no_step",
-            format!("{step} is not a step a door runs; body_part, post_contrast and system1 are"),
+            format!(
+                "{step} is not a step a door runs; sorted, body_part, post_contrast and system1 are"
+            ),
         )
         .reply(step));
     };
