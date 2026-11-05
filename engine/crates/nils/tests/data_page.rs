@@ -1327,6 +1327,110 @@ fn scan_file(tree: &TempDir, patient: &str, study: &str, series: &str, date: &st
     );
 }
 
+/// A CT scan in the tree, which the MRI pack never judges.
+fn ct_file(tree: &TempDir, patient: &str, study: &str, series: &str, date: &str, what: &str) {
+    let sop = format!("{series}.1");
+    let mut e = synth::minimal_ct(study, series, &sop);
+    e.push(synth::text(tags::PATIENT_ID, VR::LO, patient));
+    e.push(synth::text(tags::STUDY_DATE, VR::DA, date));
+    e.push(synth::text(tags::SERIES_DESCRIPTION, VR::LO, what));
+    tree.file(
+        &format!("derivatives/dcm-anon/{study}/{sop}"),
+        &synth::part10(&MetaFields::ct(&sop), &e, true),
+    );
+}
+
+/// A stack outside the rules (2026-11-05): a CT scan beside an MR scan is
+/// never judged by the MRI pack, so it is counted outside, by its
+/// modality, and never as not sorted, on the card's totals and in the
+/// summary, whose sorted step is done once the MR scan is judged. A
+/// dataset of 456,000 MR scans with 31 CT scans read "31 not sorted" and
+/// its sorted step undone after every sort.
+#[test]
+fn a_stack_outside_the_rules_is_never_not_sorted() {
+    let home = Home {
+        dir: TempDir::new("data-page-outside"),
+        pg: None,
+    };
+    let (good, _, err) = home.run(&["key", "add", "k"], Some("a data page test key\n"));
+    assert!(good, "{err}");
+    home.ok(&["init", "--key", "k"]);
+    let tree = TempDir::new("data-page-outside-ds");
+    scan_file(
+        &tree,
+        "S-0001",
+        "1.2.9.A",
+        "1.2.9.A.1",
+        "20260102",
+        "t1 mprage",
+    );
+    ct_file(
+        &tree,
+        "S-0001",
+        "1.2.9.A",
+        "1.2.9.A.2",
+        "20260102",
+        "head ct",
+    );
+    home.ok(&[
+        "place",
+        "add",
+        "outside",
+        tree.path().to_str().unwrap(),
+        "--role",
+        "source",
+        "--patient-id",
+        "id-type:patient-id",
+        "--subjects",
+        "map",
+    ]);
+    let map = home
+        .dir
+        .file("map.csv", b"PatientID,subject_code\nS-0001,outside-0001\n");
+    home.ok(&[
+        "linkage",
+        "import",
+        map.to_str().unwrap(),
+        "--id-column",
+        "PatientID",
+        "--code-column",
+        "subject_code",
+    ]);
+    home.ok(&["digest", "--name", "outside", "--no-private", "@outside"]);
+    home.ok(&["fingerprint"]);
+    home.ok(&["classify", "--pack-dir", &packs()]);
+    let server = Worked::serve(&home, false);
+    let n = |v: &Value, k: &str| v[k].as_i64().unwrap_or_else(|| panic!("{k}: {v}"));
+    let sources = server.get("/api/sources", READS);
+    let totals = sources["sources"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|d| d["name"] == "outside")
+        .map(|d| d["totals"].clone())
+        .unwrap_or_else(|| panic!("{sources}"));
+    assert_eq!(totals["stacks"], 2, "{totals}");
+    assert_eq!(totals["outside"], 1, "{totals}");
+    assert_eq!(totals["outside_by"], json!({"CT": 1}), "{totals}");
+    assert_eq!(totals["unsorted"], 0, "{totals}");
+    assert_eq!(
+        n(&totals, "sure") + n(&totals, "to_sort") + n(&totals, "unsorted") + n(&totals, "outside"),
+        2,
+        "{totals}"
+    );
+    let summary = server.summary("/api/datasets/outside/summary", READS);
+    assert_eq!(summary["outside"], 1, "{summary}");
+    assert_eq!(summary["outside_by"], json!({"CT": 1}), "{summary}");
+    assert_eq!(summary["unsorted"], 0, "{summary}");
+    let sorted = step(&summary, "sorted");
+    assert_eq!(sorted["outside"], 1, "{sorted}");
+    assert_eq!(sorted["unsorted"], 0, "{sorted}");
+    assert_eq!(sorted["scans"], 1, "{sorted}");
+    assert_eq!(sorted["state"], "done", "{sorted}");
+    drop(server);
+    drop(tree);
+}
+
 /// Record 55 H3 and record 56 (2026-10-09): "need a look" means one thing
 /// wherever it is shown, the sort's own questions that wait for a person.
 /// A registry is sorted, what the sort asked is let go, and a question of
@@ -1780,6 +1884,7 @@ S-0002|1.2.9.D|1.2.9.D.2|20260510|sc t2";
     assert_eq!(members["totals"]["look"], 4, "{members}");
     let page = server.get("/api/cohorts/both/scans?limit=200", READS);
     assert_eq!(marked(&page), expected, "{page}");
+
     drop(server);
     drop(tree);
 }

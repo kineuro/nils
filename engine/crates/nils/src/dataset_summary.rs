@@ -2316,6 +2316,7 @@ pub(crate) fn document(
         json!({
             "scans": c.classified, "of": stacks, "look": certainty.to_sort,
             "passes": c.passes, "unsorted": unsorted,
+            "outside": certainty.outside, "outside_by": certainty.outside_by,
         }),
     ));
     // body part and post-contrast, the operations of their own, over its
@@ -2421,6 +2422,8 @@ pub(crate) fn document(
         "sure": certainty.sure,
         "need_a_look": certainty.to_sort,
         "unsorted": unsorted,
+        "outside": certainty.outside,
+        "outside_by": certainty.outside_by,
         "look_kinds": certainty.need_a_look,
         "identity_questions": c.identity_questions,
         "kinds": pairs(&c.kinds, "kind"),
