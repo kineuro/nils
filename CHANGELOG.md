@@ -7,6 +7,7 @@ All notable changes to NILS v1 are recorded here. The format follows [Keep a Cha
 ### Fixed
 
 - The dataset summary looks at the 3D views' manifests on a few threads, as it lists the picture folders, instead of one after another: a working place with 495,000 view folders took seven minutes for the first count of a dataset after 1.0.0-beta.7.
+- A stack outside the rules is no longer "not sorted". The sources door's totals and the dataset summary count the stacks no sort has judged whose modality no sort has judged any stack of (a CT stack under the MRI pack) as `outside`, by modality in `outside_by`, and leave them out of `unsorted`, so a dataset's sorted step is done once every scan the rules judge is judged; 31 CT scans among 456,000 MR scans kept a dataset's step undone after every sort.
 
 ## [1.0.0-beta.7] - 2026-11-05
 

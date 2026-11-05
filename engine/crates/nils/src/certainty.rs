@@ -533,8 +533,19 @@ pub(crate) struct Certainty {
     pub(crate) to_sort: i64,
     /// Sorted stacks that need no look.
     pub(crate) sure: i64,
-    /// Stacks no sort has judged yet.
+    /// Stacks no sort has judged yet, of a modality a sort judges; never
+    /// the ones outside the rules.
     pub(crate) unsorted: i64,
+    /// Stacks outside the rules (2026-11-05): no sort has judged them and
+    /// none has judged any stack of their modality, as a CT stack under
+    /// the MRI pack, so no sort will. A dataset with 31 of them among
+    /// 456,000 MR scans read "31 not sorted", and its sorted step as not
+    /// done, after every sort.
+    #[serde(default)]
+    pub(crate) outside: i64,
+    /// The same, by modality.
+    #[serde(default)]
+    pub(crate) outside_by: BTreeMap<String, i64>,
     /// The stacks that need a look, by the kind of the sort's question
     /// (`base:missing`, `classify.asked`, ...). A stack asked two questions
     /// counts under each, so these may add up to more than `to_sort`.
@@ -558,7 +569,7 @@ pub(crate) fn of_sources(
     let holds = crate::operations::Scope::Sources(sources).holds(store);
     let look = asks.count(store, &holds)?;
     let q = |t: &str| store.qualified(t);
-    let (stack, class) = (q("stack"), q("classification"));
+    let (stack, class, fingerprint) = (q("stack"), q("classification"), q("stack_fingerprint"));
     let of_source = format!("WHERE {holds}");
     let sorted = store.query(
         &format!(
@@ -593,12 +604,39 @@ pub(crate) fn of_sources(
     if split > 0 {
         noted.insert(nils_classify::classify::SPLIT_NOTE.to_string(), split);
     }
+    // the stacks no sort has judged, by the modality their fingerprint
+    // names; a modality no sort has judged any stack of is outside the
+    // rules, and a stack with no fingerprint yet is unsorted
+    let mut outside_by = BTreeMap::new();
+    for r in store.query(
+        &format!(
+            "SELECT f.modality, COUNT(*) FROM {stack} x              JOIN {fingerprint} f ON f.stack_id = x.id {of_source}              AND f.modality IS NOT NULL AND f.modality <> ''              AND NOT EXISTS (SELECT 1 FROM {class} cl WHERE cl.stack_id = x.id)              GROUP BY f.modality"
+        ),
+        &[],
+    )? {
+        let (modality, count) = (r.text(0)?.to_string(), r.int(1)?);
+        let judged = store
+            .query_opt(
+                &format!(
+                    "SELECT 1 FROM {fingerprint} f WHERE f.modality = {}                      AND EXISTS (SELECT 1 FROM {class} cl WHERE cl.stack_id = f.stack_id) LIMIT 1",
+                    store.dialect().param(1, nils_registry::schema::Type::Text)
+                ),
+                &[nils_registry::store::Param::from(modality.as_str())],
+            )?
+            .is_some();
+        if !judged {
+            outside_by.insert(modality, count);
+        }
+    }
+    let outside: i64 = outside_by.values().sum();
     Ok(Certainty {
         to_sort: look.scans,
         sure: (sorted - look.scans).max(0),
-        unsorted: (stacks - sorted).max(0),
+        unsorted: (stacks - sorted - outside).max(0),
         need_a_look: look.kinds,
         noted,
+        outside,
+        outside_by,
     })
 }
 
