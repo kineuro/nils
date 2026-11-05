@@ -4,6 +4,10 @@ All notable changes to NILS v1 are recorded here. The format follows [Keep a Cha
 
 ## [Unreleased]
 
+## [1.0.0-beta.7] - 2026-11-05
+
+The seventh beta is one fix, for a site whose working place is a network share: the Data page no longer waits for the engine to look at every scan's picture file after a start, and the counts a dataset was summarised at outlive the engine's restarts. Kvasir 1.0.0-alpha.12, the assistant 1.0.0-alpha.32 and the MRI pack 1.4.0 ship unchanged.
+
 ### Fixed
 
 - A dataset's summary (`GET /api/datasets/{name}/summary`) counts its pictures and 3D views by listing the folders they lie in on the working place, not by looking at two files a stack. On a working place that is a network share under load a look at a missing file took 14 ms, so the first summary of a dataset of 456,000 scans after a start of the engine, which has no kept counts yet, held the desk's Data page for over half an hour; it answers in seconds now. And the counts are kept in the registry under the stamp they were read under, so a start of the engine, which every update is, answers them at once and counts again only where the data or the runs moved, as it does between requests; until now every start counted every dataset from nothing at its first visit.
