@@ -6,6 +6,10 @@ All notable changes to NILS v1 are recorded here. The format follows [Keep a Cha
 
 ### Added
 
+- A batch of like stacks may be accepted as another value than the one suggested: `POST /api/campaigns/{id}/batches/{batch}/accept` takes `value` (a string for an axis question, an object by axis for an axes question), read as the answer door reads one; the answers carry the value given with the suggestion beside them, so the change counts, and the reply says both. Until now a batch could only take the suggestion, and a person who saw neck where the rules said spine had to hold every stack back and read them one by one.
+
+### Added
+
 - A pipeline may declare the memory a unit takes for each core it is given, `x-nils.needs.memory-gb-per-core` beside `memory-gb`, the base (job contract v1, added in place and additively). The engine sizes a unit's memory to the cores it takes, for the pre-flight and the lane's budget at the lane's cores and at each unit's start at the cores it takes then, and where the lane's free memory holds fewer such workers than its free cores a unit whose threads were left open takes as many as the memory holds, so one descriptor fits a laptop and a large server. The container is told the sized memory and held to it.
 
 ### Changed
