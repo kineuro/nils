@@ -373,6 +373,16 @@ impl Served {
     }
 }
 
+/// How many handles the registry holds.
+fn handles(store: &mut Store) -> i64 {
+    let handle = store.qualified("handle");
+    store
+        .query(&format!("SELECT COUNT(*) FROM {handle}"), &[])
+        .unwrap()[0]
+        .int(0)
+        .unwrap()
+}
+
 /// One step of a summary's or a cohort document's steps.
 fn step(doc: &Value, name: &str) -> Value {
     doc["steps"]
@@ -711,15 +721,56 @@ fn round(pg: Option<(String, String)>) {
     assert_eq!(status, 400, "{doc}");
     let (status, doc) = server.run_over("datasets/ds", "body_part", json!(3), OPS);
     assert_eq!(status, 400, "{doc}");
-    let (status, doc) = server.run_over("datasets/ds", "sorted", json!("without"), OPS);
+    let (status, doc) = server.run_over("datasets/ds", "system1", json!("without"), OPS);
     assert_eq!(status, 400, "{doc}");
     assert!(
         doc["error"]
             .as_str()
             .unwrap()
-            .contains("body_part and post_contrast"),
+            .contains("sorted, body_part and post_contrast"),
         "{doc}"
     );
+    // 2026-11-06: the sort's "N not sorted" is a run of its own: its step
+    // says what a sort would go over, and a sort over the scans not sorted
+    // freezes those alone, or is refused where every scan is sorted
+    let sorted = step(&s, "sorted");
+    let unsorted = sorted["unsorted"].as_i64().unwrap();
+    // the sort the card ran above is over, whether or not the server that
+    // took it ended it
+    {
+        let mut store = home.store();
+        let job = store.qualified("job");
+        store
+            .execute(
+                &format!(
+                    "UPDATE {job} SET state = 'cancelled' WHERE kind = 'classify' AND state IN ('queued', 'running')"
+                ),
+                &[],
+            )
+            .unwrap();
+    }
+    assert_eq!(
+        sorted["runs"]["all"],
+        json!({"scans": 3, "parts": 1}),
+        "{s}"
+    );
+    assert_eq!(sorted["runs"]["without"]["scans"], unsorted, "{s}");
+    let (status, doc) = server.run_over("datasets/ds", "sorted", json!("without"), OPS);
+    if unsorted > 0 {
+        assert_eq!(status, 202, "{doc}");
+        assert_eq!(
+            (&doc["over"], &doc["scans"]),
+            (&json!("without"), &json!(unsorted)),
+            "{doc}"
+        );
+        let sort_job = doc["job"].as_i64().unwrap();
+        let (status, dropped) =
+            server.call("POST", &format!("/api/jobs/{sort_job}/cancel"), None, OPS);
+        assert_eq!(status, 200, "{dropped}");
+    } else {
+        assert_eq!(status, 409, "{doc}");
+        assert_eq!(doc["reason"], "none_without", "{doc}");
+    }
     // a dataset with no scans: served, and nothing to run it over
     let e = server.summary("/api/datasets/empty/summary", READS);
     assert_eq!(
@@ -883,6 +934,149 @@ fn round(pg: Option<(String, String)>) {
     assert!(step(&s, "body_part")["refusal"].is_null(), "{s}");
     assert_eq!(step(&s, "body_part")["runs"]["without"]["scans"], 2, "{s}");
     assert_eq!(step(&s, "body_part")["runs"]["all"]["scans"], 3, "{s}");
+    // 2026-11-06: a step over a saved selection, without a cohort: two of
+    // the dataset's scans, one of them told its body part
+    let (stacks, handles_now) = {
+        let mut store = home.store();
+        let stack = store.qualified("stack");
+        let ids: Vec<i64> = store
+            .query(&format!("SELECT id FROM {stack} ORDER BY id"), &[])
+            .unwrap()
+            .iter()
+            .map(|r| r.int(0).unwrap())
+            .collect();
+        (ids, handles(&mut store))
+    };
+    assert_eq!(stacks[0], told);
+    // a question sees a stack once it is fingerprinted
+    home.ok(&["fingerprint"]);
+    let chosen = work.file(
+        "chosen.json",
+        json!({
+            "ast_version": 1,
+            "sets": {"chosen": {"grain": "stack", "where": [
+                ["in", {}, ["field", {}, "id"], [stacks[0], stacks[1]]]
+            ]}},
+            "out": {"set": "chosen", "level": "record"}
+        })
+        .to_string()
+        .as_bytes(),
+    );
+    home.ok(&[
+        "ask",
+        "selections",
+        "save",
+        "--name",
+        "chosen",
+        "--file",
+        chosen.to_str().unwrap(),
+        "--pack-dir",
+        &packs(),
+    ]);
+    let over = server.get("/api/selections/chosen/steps", PLAIN);
+    assert_eq!(
+        over["selection"],
+        json!({"name": "chosen", "version": 1}),
+        "{over}"
+    );
+    assert_eq!(over["for"], "selection:chosen@1", "{over}");
+    assert_eq!(over["scans"], 2, "{over}");
+    let bp = step(&over, "body_part");
+    assert_eq!(bp["runs"]["all"], json!({"scans": 2, "parts": 1}), "{over}");
+    assert_eq!(
+        bp["runs"]["without"],
+        json!({"scans": 1, "parts": 1}),
+        "{over}"
+    );
+    assert!(bp["refusal"].is_null(), "{over}");
+    let sorted = step(&over, "sorted");
+    assert_eq!(sorted["runs"]["all"]["scans"], 2, "{over}");
+    assert_eq!(
+        sorted["runs"]["without"]["scans"], sorted["unsorted"],
+        "{over}"
+    );
+    // counting it froze nothing that stays
+    assert_eq!(handles(&mut home.store()), handles_now);
+    let (status, doc) = server.call("GET", "/api/selections/chosen@9/steps", None, OPS);
+    assert_eq!(status, 404, "{doc}");
+    let (status, doc) = server.call(
+        "POST",
+        "/api/selections/nothing/steps/body_part/run",
+        None,
+        OPS,
+    );
+    assert_eq!(status, 404, "{doc}");
+    let (status, doc) = server.run_over("selections/chosen", "body_part", json!("without"), PLAIN);
+    assert_eq!(status, 403, "a run reads pixels: {doc}");
+    let (status, picked) =
+        server.run_over("selections/chosen@1", "body_part", json!("without"), OPS);
+    assert_eq!(status, 202, "{picked}");
+    assert_eq!(picked["for"], "selection:chosen@1", "{picked}");
+    assert_eq!(
+        (&picked["scans"], &picked["over"]),
+        (&json!(1), &json!("without")),
+        "{picked}"
+    );
+    let picked_job = picked["job"].as_i64().unwrap();
+    {
+        // one handle more, the run's: the selection's own freeze let go;
+        // the run's holds the one scan without a body part and names the
+        // selection's version
+        let mut store = home.store();
+        assert_eq!(handles(&mut store), handles_now + 1);
+        let handle = picked["handle"].as_i64().unwrap();
+        let member = store.qualified("handle_member");
+        let held: Vec<i64> = store
+            .query(
+                &format!("SELECT key FROM {member} WHERE handle_id = {handle}"),
+                &[],
+            )
+            .unwrap()
+            .iter()
+            .map(|r| r.int(0).unwrap())
+            .collect();
+        assert_eq!(held, vec![stacks[1]]);
+        let pins = store
+            .query(
+                &format!(
+                    "SELECT selection_versions FROM {} WHERE id = {handle}",
+                    store.qualified("handle")
+                ),
+                &[],
+            )
+            .unwrap()[0]
+            .opt_text(0)
+            .unwrap()
+            .unwrap_or_default()
+            .to_string();
+        assert!(pins.contains("chosen"), "{pins}");
+    }
+    let (status, doc) = server.run("selections/chosen", "body_part", OPS);
+    assert_eq!(status, 409, "{doc}");
+    assert_eq!(doc["reason"], "running", "{doc}");
+    let (status, dropped) =
+        server.call("POST", &format!("/api/jobs/{picked_job}/cancel"), None, OPS);
+    assert_eq!(status, 200, "{dropped}");
+    let cli = home.json_on(
+        &[
+            "step",
+            "run",
+            "selection:chosen",
+            "body_part",
+            "--pack-dir",
+            &packs(),
+        ],
+        &path,
+    );
+    assert_eq!(
+        (&cli["scans"], &cli["over"]),
+        (&json!(2), &json!("all")),
+        "{cli}"
+    );
+    assert_eq!(cli["for"], "selection:chosen@1", "{cli}");
+    let cli_job = cli["job"].as_i64().unwrap();
+    let (status, dropped) = server.call("POST", &format!("/api/jobs/{cli_job}/cancel"), None, OPS);
+    assert_eq!(status, 200, "{dropped}");
     // 2026-11-05: a run over the two without a body part alone
     let (status, only) = server.run_over("datasets/ds", "body_part", json!("without"), OPS);
     assert_eq!(status, 202, "{only}");

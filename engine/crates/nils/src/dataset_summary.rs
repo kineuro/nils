@@ -2448,6 +2448,9 @@ pub(crate) fn document(
             "scans": c.classified, "of": stacks, "look": certainty.to_sort,
             "passes": c.passes, "unsorted": unsorted,
             "outside": certainty.outside, "outside_by": certainty.outside_by,
+            // 2026-11-06: what a sort from the card would go over, every
+            // scan or only the ones not sorted
+            "runs": crate::operations::sort_runs(stacks, unsorted),
         }),
     ));
     // body part and post-contrast, the operations of their own, over its

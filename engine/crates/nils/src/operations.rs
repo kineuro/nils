@@ -42,6 +42,16 @@
 //! before it starts (`runs`: every scan, and those without its answer, each
 //! with the parts the run takes). `nils step run` queues the same run at
 //! the command line ([`queue`]).
+//!
+//! Since 2026-11-06 a step runs over a saved selection as well, without a
+//! cohort: `POST /api/selections/{name}/steps/{step}/run` and `nils step
+//! run selection:NAME[@V]` freeze the selection whole, as `nils run
+//! --select` freezes it, and the run goes the one way a dataset's does, over
+//! a handle of those stacks ([`Scope::Handle`]); `GET
+//! /api/selections/{name}/steps` says what each step's run over it would go
+//! over before it starts. The sort's "N not sorted" is a run of its own too:
+//! `{"scans": "without"}` on the sorted step sorts the scans no sort has
+//! judged, those outside the rules left out ([`unsorted_condition`]).
 
 use std::collections::BTreeSet;
 
@@ -107,6 +117,9 @@ pub(crate) enum Scope<'a> {
     Sources(&'a str),
     /// A cohort's: the stacks of its open members.
     Cohort(i64),
+    /// A selection's (2026-11-06): the stacks a handle frozen from it now
+    /// holds.
+    Handle(i64),
 }
 
 /// Record 55 (Nima's duplicate policy, 2026-10-10): the condition a stack
@@ -149,6 +162,10 @@ impl Scope<'_> {
                  WHERE m.cohort_id = {id} AND m.left_at IS NULL)",
                 store.qualified("series"),
                 store.qualified("cohort_member"),
+            ),
+            Scope::Handle(id) => format!(
+                "x.id IN (SELECT hm.key FROM {} hm WHERE hm.handle_id = {id})",
+                store.qualified("handle_member")
             ),
         }
     }
@@ -257,6 +274,40 @@ fn without_kind(step: &str) -> &'static str {
     } else {
         "no_body_part"
     }
+}
+
+/// The sort's own "N not sorted" (2026-11-06): the stacks aliased `x` in
+/// scope (`holds`, a condition on them) that no sort has judged, as a
+/// condition, those outside the rules left out (a modality no sort has
+/// judged a stack of, as a CT stack under the MRI pack:
+/// [`crate::certainty::outside`]), since no sort will judge them. Its count
+/// is the sorted step's `unsorted`, and a run of the sort over `without`
+/// freezes these and no other.
+pub(crate) fn unsorted_condition(store: &mut Store, holds: &str) -> Result<String, StoreError> {
+    let (_, by) = crate::certainty::outside(store, holds)?;
+    let mut condition = format!(
+        "NOT EXISTS (SELECT 1 FROM {} cl WHERE cl.stack_id = x.id)",
+        store.qualified("classification")
+    );
+    if !by.is_empty() {
+        let modalities: Vec<String> = by.into_keys().collect();
+        condition.push_str(&format!(
+            " AND NOT EXISTS (SELECT 1 FROM {} f WHERE f.stack_id = x.id AND f.modality IN ({}))",
+            store.qualified("stack_fingerprint"),
+            quoted(&modalities)
+        ));
+    }
+    Ok(condition)
+}
+
+/// What a run of the sort would go over (2026-11-06), as a model step's
+/// `runs` says it: every scan it counts, or only the ones not sorted, those
+/// outside the rules left out; one part each, since a sort is never split.
+pub(crate) fn sort_runs(scans: i64, unsorted: i64) -> Value {
+    json!({
+        "all": {"scans": scans, "parts": parts(scans, None)},
+        "without": {"scans": unsorted, "parts": parts(unsorted, None)},
+    })
 }
 
 /// Ruling 35 (b) of 2026-10-16: body part and post-contrast are optional
@@ -1554,6 +1605,7 @@ pub(crate) fn of_cohort(
     // a stack outside the rules (a CT stack under the MRI pack) is never
     // sorted and never waits for it (2026-11-05)
     let (outside, outside_by) = crate::certainty::outside(store, &holds)?;
+    let unsorted = (scans - sorted - outside).max(0);
     let mut out = vec![json!({
         "step": "sorted",
         "state": if scans > 0 && sorted + outside >= scans { "done" } else { "waiting" },
@@ -1565,9 +1617,12 @@ pub(crate) fn of_cohort(
         "of": scans,
         "look": look,
         "passes": passes,
-        "unsorted": (scans - sorted - outside).max(0),
+        "unsorted": unsorted,
         "outside": outside,
         "outside_by": outside_by,
+        // 2026-11-06: what a sort would go over, every scan or the ones
+        // not sorted
+        "runs": sort_runs(scans, unsorted),
     })];
     out.extend(steps(
         store,
@@ -1585,14 +1640,16 @@ pub(crate) fn of_cohort(
 /// now among them, as a selection frozen for a run keeps them (record 48,
 /// D1 of the move), so the handle opens only to a scope that reads sealed
 /// stacks; with `over`, only the stacks that meet it as well (a step's
-/// scans without its answer, 2026-11-05). Answers the handle and how many
-/// stacks it holds.
+/// scans without its answer, 2026-11-05). A selection's handle names the
+/// selection's version it was frozen from (`pinned`, 2026-11-06). Answers
+/// the handle and how many stacks it holds.
 fn freeze(
     store: &mut Store,
     scope: Scope<'_>,
     over: Option<&str>,
     principal: &str,
     epoch: i64,
+    pinned: &Pinned<'_>,
 ) -> Result<(i64, usize), String> {
     let holds = scope.holds(store);
     // 2026-11-05: or only those a step counts without its answer
@@ -1615,13 +1672,14 @@ fn freeze(
         })
         .collect::<Result<_, StoreError>>()
         .map_err(|e| e.to_string())?;
-    save_stacks(store, rows, principal, epoch, &Pinned::default())
+    save_stacks(store, rows, principal, epoch, pinned)
 }
 
 /// What a handle of stacks frozen by the engine records of where they came
 /// from: its pins (a scope's main scans name the version of the rules they
-/// were read under), the pack and the scheme. None of these for a step's
-/// scans, which are every scan in scope.
+/// were read under, a selection's scans the selection's version), the pack
+/// and the scheme. None of these for a dataset's or a cohort's scans, which
+/// are every scan in scope.
 #[derive(Debug, Default)]
 pub(crate) struct Pinned<'a> {
     pub(crate) versions: Value,
@@ -1824,39 +1882,190 @@ impl<'a> Asker<'a> {
     }
 }
 
-/// The scans of a dataset or a cohort a step runs over, as the operations
-/// scope them.
-fn held_of<'s>(scope: &crate::viewer::Scope, ids: &'s mut String) -> Result<Scope<'s>, Reply> {
-    match scope {
-        crate::viewer::Scope::Dataset { sources, .. } => {
-            *ids = list(sources);
-            Ok(Scope::Sources(ids))
+/// What a step's door runs over (2026-11-06): a dataset's or a cohort's
+/// scans, or a saved selection's, frozen now.
+pub(crate) enum Target {
+    View(crate::viewer::Scope),
+    Selection(Chosen),
+}
+
+/// A saved selection frozen for a step (2026-11-06): its name and version,
+/// the handle its stacks were frozen into whole, as `nils run --select
+/// selection:NAME@V` freezes it, and what that handle pins.
+pub(crate) struct Chosen {
+    pub(crate) name: String,
+    pub(crate) version: u64,
+    pub(crate) handle: i64,
+    versions: Value,
+    pack_version: Option<String>,
+}
+
+impl Target {
+    /// The dataset, the cohort or the selection a door names: `kind` is
+    /// the door's `datasets`, `cohorts` or `selections`, and a selection is
+    /// `NAME` or `NAME@V`, frozen here.
+    pub(crate) fn named(
+        asker: &Asker<'_>,
+        registry: &mut Registry,
+        kind: &str,
+        name: &str,
+    ) -> Result<Target, Reply> {
+        Ok(match kind {
+            "cohorts" => Target::View(crate::viewer::Scope::cohort(registry, name)?),
+            "selections" => {
+                let (name, version) = selection_named(name)?;
+                Target::Selection(chosen(asker, registry, name, version)?)
+            }
+            _ => Target::View(crate::viewer::Scope::dataset(registry, name)?),
+        })
+    }
+
+    /// What the step's job is for, as its state and log find it:
+    /// `dataset:NAME`, `cohort:NAME` or `selection:NAME@V`.
+    pub(crate) fn words(&self) -> String {
+        match self {
+            Target::View(scope) => format!("{}:{}", scope.kind(), scope.name()),
+            Target::Selection(c) => format!("selection:{}@{}", c.name, c.version),
         }
-        crate::viewer::Scope::Cohort(c) => Ok(Scope::Cohort(c.id)),
-        // a step door names a dataset or a cohort, never the registry
-        crate::viewer::Scope::Registry { .. } => {
-            Err(Reply::error(400, "a step runs over a dataset or a cohort"))
+    }
+
+    /// The scans a step over it counts, as the operations scope them.
+    fn held<'s>(&self, ids: &'s mut String) -> Result<Scope<'s>, Reply> {
+        match self {
+            Target::View(crate::viewer::Scope::Dataset { sources, .. }) => {
+                *ids = list(sources);
+                Ok(Scope::Sources(ids))
+            }
+            Target::View(crate::viewer::Scope::Cohort(c)) => Ok(Scope::Cohort(c.id)),
+            // a step door names a dataset, a cohort or a selection, never
+            // the registry
+            Target::View(crate::viewer::Scope::Registry { .. }) => Err(Reply::error(
+                400,
+                "a step runs over a dataset, a cohort or a selection",
+            )),
+            Target::Selection(c) => Ok(Scope::Handle(c.handle)),
+        }
+    }
+
+    /// What the run's handle pins of where its stacks came from.
+    fn pinned(&self) -> Pinned<'_> {
+        match self {
+            Target::View(_) => Pinned::default(),
+            Target::Selection(c) => Pinned {
+                versions: c.versions.clone(),
+                pack_version: c.pack_version.as_deref(),
+                scheme_digest: None,
+            },
+        }
+    }
+
+    /// Let go of what was frozen to read it: a selection's own handle,
+    /// which nothing reads once a run's handle is frozen from it.
+    pub(crate) fn release(&self, store: &mut Store) {
+        if let Target::Selection(c) = self {
+            let _ = drop_handle(store, c.handle);
         }
     }
 }
 
-/// The sort over a dataset's or a cohort's scans, from its card (2026-11-05):
-/// the scans frozen into a handle and a classify job over them alone, by
-/// the served pack, as a scoped re-sort at the command line; answered with
-/// the job. Refused while a sort over the same scans is queued or runs, and
-/// where there is no scan to sort.
+/// A selection as a door or `nils step run` names it: `NAME`, or `NAME@V`
+/// for one version of it; its current version where none is named.
+pub(crate) fn selection_named(words: &str) -> Result<(&str, Option<u64>), Reply> {
+    let words = words.trim().trim_start_matches("selection:");
+    let (name, version) = match words.rsplit_once('@') {
+        Some((name, v)) => (
+            name,
+            Some(v.trim().parse::<u64>().map_err(|_| {
+                Reply::error(
+                    400,
+                    format!("{words}: a selection is NAME, or NAME@V for one of its versions"),
+                )
+            })?),
+        ),
+        None => (words, None),
+    };
+    if name.trim().is_empty() {
+        return Err(Reply::error(400, "name the selection"));
+    }
+    Ok((name.trim(), version))
+}
+
+/// A saved selection frozen whole into a handle of its stacks (2026-11-06),
+/// as a run over it freezes it (`crate::ask_cli::freeze_doc`): a selection
+/// of subjects or of visits by their stacks, under the pack the sort reads.
+fn chosen(
+    asker: &Asker<'_>,
+    registry: &mut Registry,
+    name: &str,
+    version: Option<u64>,
+) -> Result<Chosen, Reply> {
+    use nils_ask::ast::Grain;
+    let saved = nils_ask::selection::get(registry.store(), name, version)
+        .map_err(|e| Reply::error(500, e.to_string()))?
+        .ok_or_else(|| {
+            Reply::error(
+                404,
+                match version {
+                    Some(v) => format!("no version {v} of a selection named {name}"),
+                    None => format!("no selection named {name}"),
+                },
+            )
+        })?;
+    let grain = saved
+        .ask
+        .sets
+        .get(&saved.ask.out.set)
+        .map(|s| s.grain)
+        .unwrap_or(Grain::Subject);
+    let spec = format!("selection:{}@{}", saved.name, saved.version);
+    let doc = crate::campaigns::freeze_document(&saved.name, saved.version, grain, Grain::Stack)
+        .map_err(|_| {
+            Reply::error(
+                400,
+                format!(
+                    "{spec} is a {} set; a step runs over the stacks of subjects, visits or stacks",
+                    grain.name()
+                ),
+            )
+        })?;
+    let dir = crate::pack_dir(asker.home, asker.pack_dir.map(std::path::Path::to_path_buf))
+        .map_err(|e| Reply::error(409, e.message))?;
+    let pack = crate::ask_cli::load_pack(&dir, asker.ask_pack)
+        .map_err(|e| Reply::error(409, e.message))?;
+    let f = crate::ask_cli::freeze_doc(registry, &pack, &doc, crate::ask_cli::Freeze::Whole, &spec)
+        .map_err(|e| Reply::error(400, e.message))?;
+    let h = nils_ask::handle::get(registry.store(), f.handle)
+        .map_err(|e| Reply::error(500, e.to_string()))?
+        .ok_or_else(|| Reply::error(500, format!("handle {} is gone", f.handle)))?;
+    Ok(Chosen {
+        name: saved.name,
+        version: saved.version,
+        handle: f.handle,
+        versions: h.selection_versions,
+        pack_version: h.pack_version,
+    })
+}
+
+/// The sort over a dataset's, a cohort's or a selection's scans, from its
+/// card (2026-11-05): the scans frozen into a handle and a classify job over
+/// them alone, by the served pack, as a scoped re-sort at the command line;
+/// answered with the job. With `without` (2026-11-06), only the scans no
+/// sort has judged, those outside the rules left out. Refused while a sort
+/// over the same scans is queued or runs, and where there is no scan to
+/// sort.
 fn sort_door(
     asker: &Asker<'_>,
     registry: &mut Registry,
-    scope: &crate::viewer::Scope,
+    target: &Target,
+    over: Over,
 ) -> Result<Value, Reply> {
     let failed = |e: StoreError| Reply::error(500, e.to_string());
-    let target = format!("{}:{}", scope.kind(), scope.name());
-    let turn = DoorTurn::take(&target, "sorted");
+    let named = target.words();
+    let turn = DoorTurn::take(&named, "sorted");
     let _held = turn.lock.lock().unwrap_or_else(|e| e.into_inner());
     let epoch = registry.meta().epoch;
     let mut ids = String::new();
-    let held = held_of(scope, &mut ids)?;
+    let held = target.held(&mut ids)?;
     let store = registry.store();
     // a sort of these scans queued or running already is the one that runs
     let running = store
@@ -1867,22 +2076,46 @@ fn sort_door(
                 store.qualified("job"),
                 store.dialect().param(1, nils_registry::schema::Type::Text)
             ),
-            &[nils_registry::store::Param::from(target.as_str())],
+            &[nils_registry::store::Param::from(named.as_str())],
         )
         .map_err(failed)?
         .first()
         .and_then(|r| r.int(0).ok());
     if let Some(job) = running {
-        return Err(Reply::error(
+        return Err(Refused::new(
             409,
+            "running",
             format!("a sort runs already over these scans, as job {job}"),
-        ));
+        )
+        .reply("sorted"));
     }
-    let (handle, frozen) =
-        freeze(store, held, None, asker.principal, epoch).map_err(|e| Reply::error(500, e))?;
+    let only = match over {
+        Over::All => None,
+        Over::Without => {
+            let holds = held.holds(store);
+            Some(unsorted_condition(store, &holds).map_err(failed)?)
+        }
+    };
+    let (handle, frozen) = freeze(
+        store,
+        held,
+        only.as_deref(),
+        asker.principal,
+        epoch,
+        &target.pinned(),
+    )
+    .map_err(|e| Reply::error(500, e))?;
     if frozen == 0 {
         drop_handle(store, handle).map_err(failed)?;
-        return Err(Reply::error(409, "there are no scans to sort here"));
+        return Err(match over {
+            Over::All => Refused::new(409, "no_scans", "there are no scans to sort here"),
+            Over::Without => Refused::new(
+                409,
+                "none_without",
+                "every scan here is sorted already, or outside the rules",
+            ),
+        }
+        .reply("sorted"));
     }
     let mut command = vec![
         "classify".to_string(),
@@ -1891,22 +2124,26 @@ fn sort_door(
         "--scope".to_string(),
         format!("handle:{handle}"),
         "--name".to_string(),
-        format!("{target} sort"),
+        format!("{named} sort"),
     ];
     if let Some(d) = asker.pack_dir {
         command.extend(["--pack-dir".to_string(), d.display().to_string()]);
     }
+    let mut extra = asker.queued_by.clone();
+    extra["step"] = json!("sorted");
+    extra["for"] = json!(named);
+    extra["over"] = json!(over.name());
     let id = nils_registry::job::enqueue_with(
         store,
         &command,
-        Some(&target),
+        Some(&named),
         Some(asker.principal),
-        asker.queued_by.clone(),
+        extra,
     )
     .map_err(crate::serve::job_err)?;
     Ok(json!({
-        "job": id, "state": "queued", "step": "sorted", "for": target,
-        "scans": frozen, "over": Over::All.name(), "parts": 1, "handle": handle,
+        "job": id, "state": "queued", "step": "sorted", "for": named,
+        "scans": frozen, "over": over.name(), "parts": 1, "handle": handle,
         "command": command,
     }))
 }
@@ -1940,18 +2177,21 @@ fn parts(stacks: i64, size: Option<i64>) -> i64 {
     }
 }
 
-/// `POST /api/datasets/{name}/steps/{step}/run` and `POST
-/// /api/cohorts/{name}/steps/{step}/run`: the step's run over the scans it
-/// counts, frozen now into a handle, queued for the dataset or the cohort
-/// as a pipeline job under the caller's principal, grants and detail, and
+/// `POST /api/datasets/{name}/steps/{step}/run`, `POST
+/// /api/cohorts/{name}/steps/{step}/run` and, since 2026-11-06, `POST
+/// /api/selections/{name}/steps/{step}/run` (a saved selection, `NAME` or
+/// `NAME@V`, frozen whole first): the step's run over the scans it counts,
+/// frozen now into a handle, queued for the dataset, the cohort or the
+/// selection as a pipeline job under the caller's principal, grants and
+/// detail, and
 /// answered 202 with the job. Refused, with its reason (`reason`), while a
 /// run of it over those scans is queued or runs, where nothing here runs
 /// it (no pipeline or no model for it, no container runtime, no working
 /// place: post-contrast always, until a model for it is installed), and
 /// where there are no scans to run it over. The body may say which of the
 /// scans (2026-11-05): `{"scans": "without"}` runs body part or
-/// post-contrast over its "N without" alone, `all` (the default) over every
-/// scan it counts.
+/// post-contrast over its "N without" alone, and the sort over the scans
+/// not sorted (2026-11-06), `all` (the default) over every scan it counts.
 pub(crate) fn run_door(
     doors: &Doors,
     registry: &mut Registry,
@@ -1973,10 +2213,11 @@ pub(crate) fn run_door(
     queue(&asker, registry, kind, name, step, over).map(Reply::accepted)
 }
 
-/// A step's run over a dataset's (`kind` datasets) or a cohort's scans,
-/// queued as its door and `nils step run` queue it: the job, what it is
-/// for, how many scans it froze and over which (`over`), the parts it runs
-/// in, the handle and the command.
+/// A step's run over a dataset's (`kind` datasets), a cohort's or a saved
+/// selection's scans (`selections`, `NAME` or `NAME@V`, 2026-11-06), queued
+/// as its door and `nils step run` queue it: the job, what it is for, how
+/// many scans it froze and over which (`over`), the parts it runs in, the
+/// handle and the command.
 pub(crate) fn queue(
     asker: &Asker<'_>,
     registry: &mut Registry,
@@ -1985,32 +2226,14 @@ pub(crate) fn queue(
     step: &str,
     over: Over,
 ) -> Result<Value, Reply> {
-    let failed = |e: StoreError| Reply::error(500, e.to_string());
-    let scope = match kind {
-        "cohorts" => crate::viewer::Scope::cohort(registry, name)?,
-        _ => crate::viewer::Scope::dataset(registry, name)?,
-    };
-    // 2026-11-05 (Nima: a cohort's card runs the sort and the main scans
-    // too): the sort over the scope's scans is a step this door runs, as a
-    // classify job over them frozen into a handle; the main scans are the
-    // pick run door's, with the cohort or the dataset named
-    if step == "sorted" {
-        if over != Over::All {
-            return Err(Reply::error(
-                400,
-                "the sort runs over every scan; scans: without is for body_part and post_contrast",
-            ));
-        }
-        return sort_door(asker, registry, &scope);
-    }
     // record 55 D3: System 1 is a step a door runs too, owning no axis
     let system1: (&str, &[&str]) = (crate::system1::STEP, &[]);
-    let Some((step, axes)) = OPERATIONS
+    let operation = OPERATIONS
         .iter()
         .chain(std::iter::once(&system1))
         .find(|(n, _)| *n == step)
-        .copied()
-    else {
+        .copied();
+    if step != "sorted" && operation.is_none() {
         return Err(Refused::new(
             404,
             "no_step",
@@ -2019,17 +2242,40 @@ pub(crate) fn queue(
             ),
         )
         .reply(step));
-    };
-    // only an operation that owns an axis has scans without its answer
-    if over == Over::Without && axes.is_empty() {
+    }
+    // only a step that owns an axis, or the sort, has scans without its answer
+    if over == Over::Without && operation.is_some_and(|(_, axes)| axes.is_empty()) {
         return Err(Reply::error(
             400,
             format!(
-                "{step} runs over every scan; scans: without is for body_part and post_contrast"
+                "{step} runs over every scan; scans: without is for sorted, body_part and post_contrast"
             ),
         ));
     }
-    let target = format!("{}:{}", scope.kind(), scope.name());
+    let target = Target::named(asker, registry, kind, name)?;
+    let queued = match operation {
+        // 2026-11-05 (Nima: a cohort's card runs the sort and the main scans
+        // too): the sort over the scope's scans is a step this door runs, as
+        // a classify job over them frozen into a handle; the main scans are
+        // the pick run door's, with the cohort or the dataset named
+        None => sort_door(asker, registry, &target, over),
+        Some(operation) => queue_operation(asker, registry, &target, operation, over),
+    };
+    target.release(registry.store());
+    queued
+}
+
+/// [`queue`] for an operation of its own, or System 1, over the target's
+/// scans.
+fn queue_operation(
+    asker: &Asker<'_>,
+    registry: &mut Registry,
+    scope: &Target,
+    (step, axes): (&str, &[&str]),
+    over: Over,
+) -> Result<Value, Reply> {
+    let failed = |e: StoreError| Reply::error(500, e.to_string());
+    let target = scope.words();
     // #455: the busy check and the insert are one step: a second request
     // for the same step over the same scope waits here until the first has
     // queued its job, then finds it and is refused
@@ -2038,7 +2284,7 @@ pub(crate) fn queue(
     let planned = plan(registry, step).map_err(failed)?;
     let epoch = registry.meta().epoch;
     let mut ids = String::new();
-    let held = held_of(&scope, &mut ids)?;
+    let held = scope.held(&mut ids)?;
     let store = registry.store();
     let only = (over == Over::Without).then(|| without_condition(store, step));
     let scans = count(
@@ -2070,8 +2316,15 @@ pub(crate) fn queue(
     let Ok(plan) = planned else {
         return Err(Reply::error(500, "a refused run was planned"));
     };
-    let (handle, frozen) = freeze(store, held, only.as_deref(), asker.principal, epoch)
-        .map_err(|e| Reply::error(500, e))?;
+    let (handle, frozen) = freeze(
+        store,
+        held,
+        only.as_deref(),
+        asker.principal,
+        epoch,
+        &scope.pinned(),
+    )
+    .map_err(|e| Reply::error(500, e))?;
     let arrival = arrival_params(registry, &plan.pipeline);
     let mut command = vec![
         "run".to_string(),
@@ -2141,12 +2394,116 @@ pub(crate) fn queue(
     }))
 }
 
+/// `GET /api/selections/{name}/steps` (2026-11-06): what each step's run
+/// over a saved selection's scans (`NAME` or `NAME@V`) would go over before
+/// it starts, as a dataset's summary says it of its steps: the sort, with
+/// its scans sorted and not, then body part and post-contrast, each with
+/// `runs` (every scan, and those without its answer, with the parts it
+/// takes), where a run of it over these scans is, and why one would be
+/// refused now. The selection is frozen whole to be counted, as a run over
+/// it freezes it, and that handle let go once counted. Counts only.
+pub(crate) fn selection_steps_door(
+    doors: &Doors,
+    registry: &mut Registry,
+    caller: &Caller,
+    name: &str,
+) -> Result<Reply, Reply> {
+    let asker = Asker::of_door(doors, caller);
+    let (name, version) = selection_named(name)?;
+    let target = Target::Selection(chosen(&asker, registry, name, version)?);
+    let doc = match &target {
+        Target::Selection(c) => over_selection(registry, c, !crate::sealed::reads(&caller.access)),
+        Target::View(_) => Ok(Value::Null),
+    };
+    target.release(registry.store());
+    doc.map(Reply::ok)
+        .map_err(|e| Reply::error(500, e.to_string()))
+}
+
+/// A frozen selection's steps, as [`selection_steps_door`] answers them.
+fn over_selection(
+    registry: &mut Registry,
+    c: &Chosen,
+    hide_sealed: bool,
+) -> Result<Value, StoreError> {
+    let plans = plans(registry)?;
+    let store = registry.store();
+    let scope = Scope::Handle(c.handle);
+    let holds = shown(store, scope.holds(store), hide_sealed);
+    let (stack, class) = (store.qualified("stack"), store.qualified("classification"));
+    let scans = count(
+        store,
+        &format!("SELECT COUNT(*) FROM {stack} x WHERE {holds}"),
+    )?;
+    let sorted = count(
+        store,
+        &format!(
+            "SELECT COUNT(*) FROM {stack} x WHERE {holds} \
+             AND EXISTS (SELECT 1 FROM {class} cl WHERE cl.stack_id = x.id)"
+        ),
+    )?;
+    let (outside, outside_by) = crate::certainty::outside(store, &holds)?;
+    let unsorted = (scans - sorted - outside).max(0);
+    let named = format!("selection:{}@{}", c.name, c.version);
+    // a sort of these scans queued or running, as the sort's door finds it
+    let sorting = store
+        .query(
+            &format!(
+                "SELECT id, state FROM {} WHERE kind = 'classify' AND name = {} \
+                 AND state IN ('queued', 'running') ORDER BY id LIMIT 1",
+                store.qualified("job"),
+                store.dialect().param(1, nils_registry::schema::Type::Text)
+            ),
+            &[nils_registry::store::Param::from(named.as_str())],
+        )?
+        .first()
+        .map(|r| Ok::<_, StoreError>((r.int(0)?, r.text(1)?.to_string())))
+        .transpose()?;
+    let refused = match &sorting {
+        Some((job, _)) => Some(Refused::new(
+            409,
+            "running",
+            format!("a sort runs already over these scans, as job {job}"),
+        )),
+        None if scans <= 0 => Some(Refused::new(
+            409,
+            "no_scans",
+            "there are no scans to run it over",
+        )),
+        None => None,
+    };
+    let state = match &sorting {
+        Some((_, state)) => state.as_str(),
+        None if scans > 0 && sorted + outside >= scans => "done",
+        None => "waiting",
+    };
+    let mut out = vec![json!({
+        "step": "sorted",
+        "state": state,
+        "job": sorting.as_ref().map(|(job, _)| *job),
+        "scans": sorted,
+        "of": scans,
+        "unsorted": unsorted,
+        "outside": outside,
+        "outside_by": outside_by,
+        "refusal": refused.map(|r| r.doc()),
+        "runs": sort_runs(scans, unsorted),
+    })];
+    out.extend(steps(store, scope, &named, scans, &plans, hide_sealed)?);
+    Ok(json!({
+        "selection": {"name": c.name, "version": c.version},
+        "for": named,
+        "scans": scans,
+        "steps": out,
+    }))
+}
+
 /// `nils step`: a dataset's or a cohort's steps from the command line, as
 /// their doors run them.
 #[derive(Debug, clap::Subcommand)]
 pub(crate) enum StepCommand {
-    /// Queue a step's run over a dataset's or a cohort's scans, as the
-    /// step's Run on its card and its door (`POST
+    /// Queue a step's run over a dataset's, a cohort's or a saved
+    /// selection's scans, as the step's Run on its card and its door (`POST
     /// /api/datasets/{name}/steps/{step}/run`) queue it: sorted, body_part,
     /// post_contrast or system1
     Run(StepRunArgs),
@@ -2155,13 +2512,16 @@ pub(crate) enum StepCommand {
 /// The arguments of `nils step run`.
 #[derive(Debug, clap::Args)]
 pub(crate) struct StepRunArgs {
-    /// The dataset as @NAME or dataset:NAME, or the cohort as cohort:NAME
-    #[arg(value_name = "@NAME|dataset:NAME|cohort:NAME")]
+    /// The dataset as @NAME or dataset:NAME, the cohort as cohort:NAME, or
+    /// a saved selection as selection:NAME, or selection:NAME@V for one of
+    /// its versions
+    #[arg(value_name = "@NAME|dataset:NAME|cohort:NAME|selection:NAME[@V]")]
     scope: String,
     /// The step: sorted, body_part, post_contrast or system1
     step: String,
-    /// Which of its scans: all, or without (body part and post-contrast
-    /// only: the scans without its answer, the "N without" its step counts)
+    /// Which of its scans: all, or without (the scans without its answer,
+    /// the "N without" its step counts: no body part, T1 brain whose
+    /// contrast is unknown, or not sorted; not for system1)
     #[arg(long, default_value = "all", value_name = "all|without")]
     scans: String,
     /// The pack a sort reads
@@ -2172,8 +2532,9 @@ pub(crate) struct StepRunArgs {
     pack_dir: Option<std::path::PathBuf>,
 }
 
-/// The dataset's or the cohort's name a `nils step run` scope names, with
-/// the door's kind (`datasets` or `cohorts`).
+/// The dataset's, the cohort's or the selection's name a `nils step run`
+/// scope names, with the door's kind (`datasets`, `cohorts` or
+/// `selections`).
 pub(crate) fn scope_named(words: &str) -> Result<(&'static str, &str), String> {
     let words = words.trim();
     let (kind, name) = if let Some(name) = words.strip_prefix('@') {
@@ -2182,13 +2543,17 @@ pub(crate) fn scope_named(words: &str) -> Result<(&'static str, &str), String> {
         ("datasets", name)
     } else if let Some(name) = words.strip_prefix("cohort:") {
         ("cohorts", name)
+    } else if let Some(name) = words.strip_prefix("selection:") {
+        ("selections", name)
     } else {
         return Err(format!(
-            "{words}: a step runs over a dataset, @NAME or dataset:NAME, or a cohort, cohort:NAME"
+            "{words}: a step runs over a dataset, @NAME or dataset:NAME, a cohort, cohort:NAME, or a saved selection, selection:NAME[@V]"
         ));
     };
     if name.trim().is_empty() {
-        return Err(format!("{words}: name the dataset or the cohort"));
+        return Err(format!(
+            "{words}: name the dataset, the cohort or the selection"
+        ));
     }
     Ok((kind, name.trim()))
 }
@@ -2293,6 +2658,36 @@ mod tests {
         );
         drop(second);
         assert!(!DoorTurn::held("dataset:turns", "body_part"));
+    }
+
+    /// 2026-11-06: a selection a step runs over is NAME, or NAME@V for one
+    /// of its versions, with or without its `selection:` prefix.
+    #[test]
+    fn a_selection_is_named_with_its_version_or_without() {
+        assert_eq!(super::selection_named("t1").ok(), Some(("t1", None)));
+        assert_eq!(super::selection_named("t1@3").ok(), Some(("t1", Some(3))));
+        assert_eq!(
+            super::selection_named("selection:t1@2").ok(),
+            Some(("t1", Some(2)))
+        );
+        for bad in ["", "@2", "t1@two", "selection:"] {
+            assert!(super::selection_named(bad).is_err(), "{bad}");
+        }
+    }
+
+    /// 2026-11-06: what a sort would go over, every scan or the ones not
+    /// sorted, in one part each.
+    #[test]
+    fn a_sort_s_runs_say_every_scan_and_those_not_sorted() {
+        use serde_json::json;
+        assert_eq!(
+            super::sort_runs(456_132, 135),
+            json!({"all": {"scans": 456_132, "parts": 1}, "without": {"scans": 135, "parts": 1}})
+        );
+        assert_eq!(
+            super::sort_runs(3, 0)["without"],
+            json!({"scans": 0, "parts": 0})
+        );
     }
 
     #[test]

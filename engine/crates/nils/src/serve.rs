@@ -3186,10 +3186,11 @@ fn routed(
         }
         // 2026-10-10: the body-part or post-contrast step of a dataset or a
         // cohort run from its rail: its scans frozen into a handle and the
-        // step's pipeline queued over them for it (crate::operations)
+        // step's pipeline queued over them for it (crate::operations); since
+        // 2026-11-06 a saved selection's scans too, without a cohort
         [
             "api",
-            kind @ ("datasets" | "cohorts"),
+            kind @ ("datasets" | "cohorts" | "selections"),
             _,
             "steps",
             step,
@@ -3203,6 +3204,11 @@ fn routed(
             &decoded(step),
             body,
         ),
+        // 2026-11-06: what each step's run over a saved selection would go
+        // over, before it starts (crate::operations)
+        ["api", "selections", name, "steps"] if get => {
+            crate::operations::selection_steps_door(doors, registry, caller, &decoded(name))
+        }
         ["api", "places"] if get => {
             // Wave 5 §12.5: every place with its role, guarantees, probe and
             // the deployment's paths bound under it. `?probe=1` measures
@@ -5839,8 +5845,13 @@ pub(crate) fn door(method: &str, segs: &[&str]) -> (Need, Detail) {
         }
         // 2026-10-10: a step's run is a pipeline run queued, which reads
         // pixels: Pipelines work at detail quasi, as `run` at the jobs door
-        ("POST", ["api", "datasets" | "cohorts", _, "steps", _, "run"]) => {
+        ("POST", ["api", "datasets" | "cohorts" | "selections", _, "steps", _, "run"]) => {
             (Need::One("pipelines:work"), Quasi)
+        }
+        // 2026-11-06: what a step's run over a saved selection would go over,
+        // counted as the funnel counts a selection: no row leaves it
+        ("GET", ["api", "selections", _, "steps"]) => {
+            (Need::AnyOf(&["pipelines:see", "query:see"]), Plain)
         }
         // record 55 H2 (round 4): counts of a dataset's picks, for its card
         ("GET", ["api", "picks", "summary"]) => {
@@ -6725,6 +6736,8 @@ pub(crate) fn doors_list() -> Vec<String> {
         "GET /api/datasets/{name}/summary",
         "POST /api/datasets/{name}/steps/{step}/run",
         "POST /api/cohorts/{name}/steps/{step}/run",
+        "POST /api/selections/{name}/steps/{step}/run",
+        "GET /api/selections/{name}/steps",
         "GET /api/pseudonymize/tags",
         "GET /api/places",
         "POST /api/places",
@@ -8350,6 +8363,24 @@ pub(crate) fn policy() -> Vec<serde_json::Value> {
             "one id",
             "Running a cohort's step",
             "Ran a cohort's step",
+        ),
+        row(
+            "POST /api/selections/{name}/steps/{step}/run",
+            true,
+            false,
+            "job",
+            "one id",
+            "Running a step over a selection",
+            "Ran a step over a selection",
+        ),
+        row(
+            "GET /api/selections/{name}/steps",
+            false,
+            false,
+            "bounded",
+            "one document",
+            "Reading what a step over a selection would run over",
+            "Read what a step over a selection would run over",
         ),
         row(
             "POST /api/places",
