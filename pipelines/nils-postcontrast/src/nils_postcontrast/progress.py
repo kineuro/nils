@@ -49,7 +49,11 @@ class Progress:
                 f.write(json.dumps(doc))
             os.replace(part, self.path)
         except OSError:
-            pass
+            # never leave the half-written file behind as if it were an output
+            try:
+                os.remove(part)
+            except OSError:
+                pass
 
     def add(self, n: int = 1) -> None:
         """``n`` more stacks answered."""

@@ -104,10 +104,16 @@ pub fn read(out: &Path) -> Option<Reported> {
     parse(&text)
 }
 
-/// Remove a unit's progress file once its container ended, so it is never
+/// The file a unit writes first and renames over [`FILE`], so the engine
+/// never reads one half written.
+pub const PART: &str = ".nils-progress.json.part";
+
+/// Remove a unit's progress file once its container ended, and the half
+/// written one a write that failed may have left beside it, so neither is
 /// taken for an output; nothing where there is none.
 pub fn remove(out: &Path) {
     let _ = std::fs::remove_file(out.join(FILE));
+    let _ = std::fs::remove_file(out.join(PART));
 }
 
 /// What the running containers of a run said, together: their `done` and
@@ -211,8 +217,11 @@ mod tests {
         // half written: nothing now, read again at the next look
         std::fs::write(dir.join(FILE), br#"{"done": 3, "o"#).unwrap();
         assert_eq!(read(&dir), None);
+        // a half-written file a failed rename left goes with it
+        std::fs::write(dir.join(PART), br#"{"done": 4"#).unwrap();
         remove(&dir);
         assert!(!dir.join(FILE).exists());
+        assert!(!dir.join(PART).exists());
         remove(&dir);
         // a link a container planted is not read through
         #[cfg(unix)]
