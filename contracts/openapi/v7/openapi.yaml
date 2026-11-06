@@ -3806,6 +3806,17 @@ paths:
         "400": {description: "No share, or one the campaign's purpose does not allow"}
         "403": {description: Neither the campaign's maker nor a holder of review:work}
         "409": {description: The campaign is not open}
+  /api/campaigns/{id}/requestion:
+    post:
+      summary: Ask fewer axes in an open campaign, the rest derived (2026-11-06; campaigns:work, the campaign's maker or a holder of review:work)
+      description: "Moves an open axes campaign to `axes`, each one asked before, as `nils campaign requestion` does, under the pack served here, which must be the one the campaign was made under (else 409; `nils campaign repack` moves it first). The axes derived from each answer through the pack's rules are `derive` where named; where not, every other axis of the pack where the axes asked cover it, else the axes the campaign asked or derived before that the pack derives from those asked now (a campaign that asked body_part and body_region, moved to body_part alone, derives body_region). The items and every answer are kept: an answer given before is never rewritten, is read on the axes asked now, and gains what it derives. Refused while an item is leased (409; the rater holds the old form), for an axis not asked before (409) and for a campaign that is not open or asks no axes (409). `dry_run` true checks the same and writes nothing, so a page says what changes before it does. Audited as campaign.requestion. Answers {campaign, name, asked_before, asked, derive, answers_kept, answers_derived, dry_run}."
+      parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+      requestBody: {content: {application/json: {schema: {type: object, required: [axes], properties: {axes: {type: array, items: {type: string}, minItems: 1}, derive: {type: array, items: {type: string}}, dry_run: {type: boolean}}}}}}
+      responses:
+        "200": {description: "{campaign, name, asked_before, asked, derive, answers_kept, answers_derived, dry_run}"}
+        "400": {description: "No axes, an axis the pack does not have, or an axis the pack may not derive"}
+        "403": {description: Neither the campaign's maker nor a holder of review:work}
+        "409": {description: "The campaign is not open or asks no axes, an item is leased, an axis was not asked before, or the pack served is not the campaign's"}
   /api/campaigns/{id}/stats:
     get:
       summary: How fast a campaign is read, per rater (record 48 R1; campaigns:see)
