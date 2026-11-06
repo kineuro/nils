@@ -102,6 +102,18 @@ impl Releases {
         tar.into_inner().unwrap().finish().unwrap()
     }
 
+    /// The contracts a published version speaks, in the `contracts.json` an
+    /// engine release carries, named in its sums.
+    fn speaks(&self, version: &str, openapi: u32, suite: u32) {
+        let into = self.dir.path().join("download").join(format!("v{version}"));
+        let doc = format!("{{\"openapi\": {openapi}, \"suite\": {suite}}}\n");
+        std::fs::write(into.join("contracts.json"), &doc).unwrap();
+        let sums = into.join("SHA256SUMS");
+        let mut text = std::fs::read_to_string(&sums).unwrap();
+        text.push_str(&format!("{}  contracts.json\n", sha256_hex(doc.as_bytes())));
+        std::fs::write(sums, text).unwrap();
+    }
+
     /// Overwrite one file of a published version, leaving its sum behind.
     fn tamper(&self, version: &str, name: &str) {
         let path = self
@@ -395,9 +407,16 @@ fn a_desk_released_alone_is_offered_while_the_engine_is_the_newest() {
         "--check changed the desk"
     );
 
-    // and the desk alone is taken, the engine left where it is
+    // and the desk alone is taken, the engine left where it is, said first
     let o = install.run(&["update", "--part", "desk"], &engine, desk.path());
     assert!(o.ok, "{}\n{}", o.stdout, o.stderr);
+    assert!(
+        o.stdout.contains(&format!(
+            "nils update takes the parts in this order:\n  1. desk {ENGINE} to 99.0.0\n"
+        )),
+        "{}",
+        o.stdout
+    );
     assert_eq!(
         install.desk(),
         "#!/bin/sh\necho nils-desk 99.0.0\n",
@@ -614,6 +633,109 @@ fn a_desk_that_needs_a_newer_engine_contract_is_not_installed() {
         "#!/bin/sh\necho nils-desk 99.0.1\n",
         "{}",
         o.stdout
+    );
+}
+
+/// 2026-11-06: Update everything says its order before it starts, and why:
+/// the engine first where the new desk needs its contract. A desk whose
+/// floor neither the installed engine nor the one offered speaks stays out
+/// and says why; the desk alone, without the engine, says what takes both;
+/// and an engine that cannot be taken stops the update before any part
+/// after it moves.
+#[test]
+fn an_update_says_its_order_and_a_desk_that_needs_the_new_engine_goes_after_it() {
+    let engine = Releases::new();
+    engine.publish("99.0.0", false);
+    let desk = TempDir::new("nils-desk-releases-order");
+    publish_desk(
+        desk.path(),
+        "99.0.0",
+        Some(r#"{"openapi": "8", "openapi_floor": "8", "suite": "3", "suite_floor": "1"}"#),
+    );
+    let install = Install::new(ENGINE, ENGINE);
+    let o = install.run(&["update", "--check"], &engine, desk.path());
+    assert!(o.ok, "{}\n{}", o.stdout, o.stderr);
+    assert!(
+        o.stdout.contains(&format!(
+            "desk {ENGINE}: 99.0.0 is out, after the engine: it needs HTTP contract 8"
+        )),
+        "{}",
+        o.stdout
+    );
+    assert!(
+        o.stdout.contains(&format!(
+            "  in this order:\n    1. engine {ENGINE} to 99.0.0, first: desk 99.0.0 needs its HTTP contract 8\n    \
+             2. desk {ENGINE} to 99.0.0, after the engine: it needs HTTP contract 8\n"
+        )),
+        "{}",
+        o.stdout
+    );
+
+    // the engine's release says it speaks HTTP contract 7: the desk stays out, and says why
+    engine.speaks("99.0.0", 7, 3);
+    let o = install.run(&["update", "--check"], &engine, desk.path());
+    assert!(o.ok, "{}\n{}", o.stdout, o.stderr);
+    assert!(
+        o.stdout
+            .contains(&format!("    1. engine {ENGINE} to 99.0.0\n")),
+        "{}",
+        o.stdout
+    );
+    assert!(!o.stdout.contains("2. desk"), "{}", o.stdout);
+    assert!(
+        o.stdout.contains(&format!(
+            "desk 99.0.0 stays out: desk 99.0.0 needs HTTP contract 8, which neither engine {ENGINE} nor 99.0.0 speaks"
+        )),
+        "{}",
+        o.stdout
+    );
+
+    // an engine release that does speak it: the desk alone says what takes both
+    engine.publish("99.0.1", false);
+    engine.speaks("99.0.1", 8, 3);
+    let o = install.run(
+        &["update", "--check", "--part", "desk"],
+        &engine,
+        desk.path(),
+    );
+    assert!(o.ok, "{}\n{}", o.stdout, o.stderr);
+    assert!(
+        o.stdout.contains(
+            "and engine 99.0.1 is out: nils update --part engine --part desk takes the engine first"
+        ),
+        "{}",
+        o.stdout
+    );
+    let o = install.run(&["update", "--check"], &engine, desk.path());
+    assert!(
+        o.stdout.contains(&format!(
+            "1. engine {ENGINE} to 99.0.1, first: desk 99.0.0 needs its HTTP contract 8"
+        )),
+        "{}",
+        o.stdout
+    );
+
+    // the engine's file is not its release's: the update says its order, stops
+    // at the engine, and nothing after it moves
+    engine.tamper("99.0.1", &file());
+    let o = install.run(&["update", "--all"], &engine, desk.path());
+    assert!(!o.ok, "{}\n{}", o.stdout, o.stderr);
+    assert!(
+        o.stdout
+            .contains("nils update takes the parts in this order:"),
+        "{}",
+        o.stdout
+    );
+    assert!(
+        o.stderr
+            .contains("the update stops at the engine, and the parts after it stay as they are"),
+        "{}",
+        o.stderr
+    );
+    assert_eq!(
+        install.desk(),
+        format!("#!/bin/sh\necho nils-desk {ENGINE}\n"),
+        "the desk moved without its engine"
     );
 }
 

@@ -935,6 +935,64 @@ fn the_install_door_never_offers_an_older_release_and_looks_again_no_more_than_o
     assert_eq!(doc["release"]["looked_at"], at, "{doc}");
 }
 
+/// 2026-11-05: after a release, the Parts page went on naming the installed
+/// engine as the newest for minutes, until Look again. While the page is
+/// open the desk asks the door to watch (`?watch=1`): a release published
+/// since is noticed at the next read with no look asked for, the door says
+/// when it looked, and the order an update takes says the engine. A read
+/// without it keeps the look as before.
+#[test]
+fn the_install_door_notices_a_release_at_once_while_the_parts_page_watches() {
+    let c = Channel::new();
+    let install = c.dir.path().join("install");
+    std::fs::create_dir_all(&install).unwrap();
+    std::fs::write(install.join("VERSION"), "1.0.0\n").unwrap();
+    // the watch may look again at once in this test
+    let config = c.config_with("engine", &install, "true", "watch_seconds = 0\n");
+    let releases = Releases::new("1.0.0-alpha.83", "1.0.0-alpha.84");
+    let s = releases.serve(&config);
+    let token = Some("a-supervisor-token-of-length");
+
+    let (status, doc) = s.call("GET", "/api/supervise/install?watch=1", None, token);
+    assert_eq!(status, 200, "{doc}");
+    assert_eq!(doc["release"]["newer"], "1.0.0-alpha.84", "{doc}");
+    let looked = doc["release"]["looked_at"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    assert!(looked.len() == 20 && looked.ends_with('Z'), "{doc}");
+    assert!(doc["release"]["watched_at"].is_string(), "{doc}");
+    assert_eq!(
+        doc["release"]["watch_error"],
+        serde_json::Value::Null,
+        "{doc}"
+    );
+    assert_eq!(doc["release"]["watch_seconds"], 0, "{doc}");
+
+    releases.publish("1.0.0-alpha.85");
+    // a read without the watch keeps the look, as before
+    let (_, doc) = s.call("GET", "/api/supervise/install", None, token);
+    assert_eq!(doc["release"]["newer"], "1.0.0-alpha.84", "{doc}");
+    // the Parts page's next read notices it, with no Look again
+    let (status, doc) = s.call("GET", "/api/supervise/install?watch=1", None, token);
+    assert_eq!(status, 200, "{doc}");
+    assert_eq!(doc["release"]["newest"], "1.0.0-alpha.85", "{doc}");
+    assert_eq!(doc["release"]["newer"], "1.0.0-alpha.85", "{doc}");
+    assert_eq!(engine_row(&doc)["newer"], "1.0.0-alpha.85", "{doc}");
+    assert!(
+        doc["release"]["looked_at"].as_str().unwrap_or_default() >= looked.as_str(),
+        "{doc}"
+    );
+    assert_eq!(
+        doc["release"]["order"],
+        serde_json::json!([{"part": "engine", "pack": null, "from": "1.0.0-alpha.83", "to": "1.0.0-alpha.85", "why": null}]),
+        "{doc}"
+    );
+    // and a plain read after it answers with what the watch found
+    let (_, doc) = s.call("GET", "/api/supervise/install", None, token);
+    assert_eq!(doc["release"]["newer"], "1.0.0-alpha.85", "{doc}");
+}
+
 /// The signed channel's door (the first of the supervisor's) offers a release
 /// newer than the installed one, never one that only differs: a channel that
 /// still names an older release after a newer one is installed offers nothing.
@@ -1240,6 +1298,23 @@ fn the_install_door_offers_a_rules_release_and_its_update_takes_only_the_rules()
     assert_eq!(row["command"], "nils update --part rules", "{row}");
     assert_eq!(release["rules"][0], row, "{doc}");
 
+    // the order Update everything says before it starts: the rules alone
+    assert_eq!(
+        release["order"],
+        serde_json::json!([{"part": "rules", "pack": "mri", "from": "0.8.0", "to": "0.9.0", "why": null}]),
+        "{doc}"
+    );
+    assert_eq!(release["stays"], serde_json::json!([]), "{doc}");
+    // several parts are named one by one, and only parts with releases of their own
+    for bad in [
+        r#"{"parts":[]}"#,
+        r#"{"parts":["postgres"]}"#,
+        r#"{"parts":["rules", 3]}"#,
+    ] {
+        let (status, said) = s.call("POST", "/api/supervise/update-all", Some(bad), token);
+        assert_eq!(status, 400, "{bad}: {said}");
+    }
+
     // the desk's update control for it: a run of nils update --part rules
     let (status, run) = s.call(
         "POST",
@@ -1295,6 +1370,33 @@ fn the_install_door_offers_a_rules_release_and_its_update_takes_only_the_rules()
     let (_, doc) = s.call("GET", "/api/supervise/install", None, token);
     assert_eq!(doc["release"]["behind"], serde_json::json!([]), "{doc}");
     assert_eq!(doc["release"]["newer"], serde_json::Value::Null, "{doc}");
+    assert_eq!(doc["release"]["order"], serde_json::json!([]), "{doc}");
+
+    // parts named in a list are a run of nils update with each one, in the order given
+    let (status, run) = s.call(
+        "POST",
+        "/api/supervise/update-all",
+        Some(r#"{"parts":["rules"]}"#),
+        token,
+    );
+    assert_eq!(status, 202, "{run}");
+    assert_eq!(
+        run["command"].as_array().map(|c| c[c.len() - 3..].to_vec()),
+        Some(vec![
+            serde_json::json!("update"),
+            serde_json::json!("--part"),
+            serde_json::json!("rules")
+        ]),
+        "{run}"
+    );
+    let id = run["id"].as_str().unwrap().to_string();
+    for _ in 0..300 {
+        let (_, doc) = s.call("GET", &format!("/api/supervise/runs/{id}"), None, token);
+        if matches!(doc["state"].as_str(), Some("done" | "failed" | "ended")) {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
 }
 
 /// A run the door starts is read back by its id at once, and on every read

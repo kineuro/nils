@@ -239,9 +239,12 @@ jobs:
           # the rule sets travel with the binary: one tarball holding `packs/`,
           # which is what the installer unpacks and `nils update` swaps.
           tar -czf bin/packs.tar.gz packs
+          # the contracts this engine speaks, which an install reads before it
+          # takes the engine, so a desk that needs them is said to go after it
+          printf '{"openapi": %s, "suite": %s}\n' "$(tr -d '[:space:]' < contracts/openapi/VERSION)" "$(tr -d '[:space:]' < contracts/suite/VERSION)" > bin/contracts.json
           # the model pipelines' descriptors, pinned to this release's images,
           # which `nils pipeline add --release <name>` reads
-          (cd bin && sha256sum nils-* packs.tar.gz pipelines.tar.gz IMAGES > SHA256SUMS && echo "$v" > VERSION && ls -la)
+          (cd bin && sha256sum nils-* packs.tar.gz pipelines.tar.gz IMAGES contracts.json > SHA256SUMS && echo "$v" > VERSION && ls -la)
       - name: release notes from the changelog
         run: |
           v=${GITHUB_REF_NAME#v}
@@ -263,6 +266,7 @@ jobs:
             bin/packs.tar.gz
             bin/pipelines.tar.gz
             bin/IMAGES
+            bin/contracts.json
             bin/SHA256SUMS
             bin/VERSION
 

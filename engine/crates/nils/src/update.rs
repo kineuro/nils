@@ -262,7 +262,7 @@ fn version_file(base: &str) -> Result<String, Exit> {
 
 /// The `owner/name` of a base that is a GitHub repository's releases, and
 /// `None` for a channel of a deployment's own.
-fn github_repo(base: &str) -> Option<&str> {
+pub(crate) fn github_repo(base: &str) -> Option<&str> {
     base.strip_prefix("https://github.com/")?
         .strip_suffix("/releases")
 }
@@ -295,7 +295,7 @@ fn newest_answered(url: &str, answer: &Answer) -> Result<Option<String>, String>
 
 /// One answer from GitHub's API, kept whole: a refusal is told from a
 /// listing by the status and the headers, which [`fetch`] throws away.
-#[derive(Default)]
+#[derive(Default, Clone)]
 struct Answer {
     status: u16,
     body: String,
@@ -377,10 +377,132 @@ impl Answer {
     }
 }
 
+/// How many of GitHub's requests an hour for one address a supervisor
+/// spends on its own looks at the releases: half of the sixty an address
+/// without a token has, so an update run, and the other machines behind the
+/// same address, keep the rest. A conditional request answered 304 counts
+/// against the sixty as well, without a token, so an ETag saves nothing.
+pub(crate) const API_BUDGET: usize = 30;
+
+/// What this process knows of its address's allowance at GitHub's API: when
+/// it asked in the last hour, and what the last answer said is left and when
+/// the hour begins again.
+struct Allowance {
+    made: std::collections::VecDeque<std::time::Instant>,
+    remaining: Option<u64>,
+    reset: Option<i64>,
+}
+
+static ALLOWANCE: std::sync::Mutex<Allowance> = std::sync::Mutex::new(Allowance {
+    made: std::collections::VecDeque::new(),
+    remaining: None,
+    reset: None,
+});
+
+/// A look at GitHub's API that waits, and until when (seconds since the
+/// epoch), with why in a person's words.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Waits {
+    pub(crate) until: i64,
+    pub(crate) why: String,
+}
+
+/// Whether `cost` more requests fit, from the ages in seconds of the ones
+/// made in the last hour, what GitHub last said is left and when its hour
+/// resets, at `now` (seconds since the epoch).
+fn allows_at(
+    ages: &[u64],
+    remaining: Option<u64>,
+    reset: Option<i64>,
+    now: i64,
+    cost: usize,
+    budget: usize,
+) -> Result<(), Waits> {
+    // an update run needs a few of its own, so a look leaves them
+    const KEPT_FOR_AN_UPDATE: u64 = 10;
+    if let (Some(left), Some(reset)) = (remaining, reset)
+        && reset > now
+        && left < cost as u64 + KEPT_FOR_AN_UPDATE
+    {
+        return Err(Waits {
+            until: reset,
+            why: format!("GitHub has {left} of this hour's requests left for this address"),
+        });
+    }
+    let recent: Vec<u64> = ages.iter().copied().filter(|a| *a < 3600).collect();
+    if recent.len() + cost > budget {
+        // the oldest that must age out for `cost` more to fit
+        let mut sorted = recent.clone();
+        sorted.sort_unstable_by(|a, b| b.cmp(a));
+        let must = (recent.len() + cost - budget).min(sorted.len());
+        let age = sorted.get(must.saturating_sub(1)).copied().unwrap_or(0);
+        return Err(Waits {
+            until: now + (3600 - age.min(3600)) as i64,
+            why: format!("the {budget} requests an hour this install spends at GitHub are spent"),
+        });
+    }
+    Ok(())
+}
+
+/// Whether `cost` more requests to GitHub's API fit this hour: under the
+/// supervisor's own budget ([`API_BUDGET`]) and under what GitHub last said
+/// is left.
+pub(crate) fn api_allows(cost: usize) -> Result<(), Waits> {
+    let now = jiff::Timestamp::now().as_second();
+    let Ok(held) = ALLOWANCE.lock() else {
+        return Ok(());
+    };
+    let ages: Vec<u64> = held.made.iter().map(|at| at.elapsed().as_secs()).collect();
+    allows_at(&ages, held.remaining, held.reset, now, cost, API_BUDGET)
+}
+
+/// An answer kept for a minute, which is as long as GitHub keeps its own
+/// (`cache-control: public, max-age=60`): two lookups of one listing within
+/// it cost one request.
+type Asked = (std::time::Instant, Answer);
+static ASKED: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, Asked>>> =
+    std::sync::OnceLock::new();
+
 /// Ask the API for one URL, keeping the status and the headers a refusal is
 /// read from. [`fetch`] keeps neither, so a 403 that says how long the wait
-/// is would come back as a line about a status and nothing else.
+/// is would come back as a line about a status and nothing else. Each
+/// request is counted against the hour ([`api_allows`]), and an answer is
+/// kept for a minute.
 fn ask(url: &str) -> Result<Answer, String> {
+    let kept = ASKED.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+    if let Ok(guard) = kept.lock()
+        && let Some((at, answer)) = guard.get(url)
+        && at.elapsed() < std::time::Duration::from_secs(60)
+    {
+        return Ok(answer.clone());
+    }
+    let answer = ask_github(url)?;
+    if let Ok(mut held) = ALLOWANCE.lock() {
+        let now = std::time::Instant::now();
+        held.made.push_back(now);
+        while held
+            .made
+            .front()
+            .is_some_and(|at| at.elapsed() >= std::time::Duration::from_secs(3600))
+        {
+            held.made.pop_front();
+        }
+        if let Some(left) = answer.remaining.as_ref().and_then(|r| r.parse().ok()) {
+            held.remaining = Some(left);
+        }
+        if let Some(reset) = answer.reset.as_ref().and_then(|r| r.parse().ok()) {
+            held.reset = Some(reset);
+        }
+    }
+    if let Ok(mut guard) = kept.lock() {
+        guard.retain(|_, (at, _)| at.elapsed() < std::time::Duration::from_secs(60));
+        guard.insert(url.to_string(), (std::time::Instant::now(), answer.clone()));
+    }
+    Ok(answer)
+}
+
+/// One request to the API, as it is answered.
+fn ask_github(url: &str) -> Result<Answer, String> {
     let response = ureq::get(url)
         .header("accept", "application/vnd.github+json")
         .config()
@@ -624,66 +746,59 @@ fn hand_over(path: &Path) -> std::io::Error {
     }
 }
 
-/// `nils update --check`: what an update would do, and nothing done. The
-/// engine as always, and where a setup is recorded, every part beside its own
-/// newest release, since the desk, the assistant and Kvasir release on their
-/// own and any one of them may be behind while the engine is not.
-fn check(args: &UpdateArgs, base: &str) -> Result<(), Exit> {
-    let state = crate::setup::read_state();
-    let engine = match &args.version {
-        Some(v) => Ok(v.trim().trim_start_matches('v').to_string()),
-        None => newest_version(base),
-    };
-    // With no setup recorded the engine is all there is, and a release that
-    // cannot be read is the answer, as it always was.
-    let Some(state) = state else {
-        return engine_check(args, &engine?);
-    };
-    match &engine {
-        Ok(wanted) => engine_check(args, wanted)?,
-        Err(e) => println!(
-            "nils {VERSION}: the newest release could not be read: {}",
-            e.message
-        ),
-    }
+/// What a check says and the order an update says before it starts are
+/// made from: each part beside its own newest release, the packs and the
+/// rules beside theirs.
+struct Measured {
+    rows: Vec<PartRelease>,
+    /// The packs' and the rules' lines, said after the parts'.
+    lines: Vec<String>,
+    rules: Vec<crate::rules::Row>,
+    /// The engine release whose packs replace the ones in place, where they
+    /// are behind it, and the summary of them (`packs of <v> (<names>)`).
+    packs: Option<(String, String)>,
+}
+
+/// Every part of a recorded install beside its own newest release, as `nils
+/// update --check` says it and the order of an update is made from. The
+/// engine's newest is `engine`, read once by the caller.
+fn measure(
+    args: &UpdateArgs,
+    base: &str,
+    state: &crate::setup::State,
+    engine: &Result<String, Exit>,
+) -> Measured {
     let channel = args.channel.as_deref();
-    let rows = crate::releases::part_releases(
-        &state,
+    let asks = |part: &str| args.parts.is_empty() || args.parts.iter().any(|p| p == part);
+    let rows = crate::releases::part_releases_with(
+        state,
         &mut |part| match part {
-            "engine" => engine
-                .as_ref()
-                .map(Clone::clone)
-                .map_err(|e| e.message.clone()),
+            "engine" => match engine {
+                Ok(v) => Ok(v.clone()),
+                Err(e) => Err(e.message.clone()),
+            },
             other => crate::releases::newest_of(other, channel),
         },
         &mut |v| crate::releases::desk_floor(&desk_base(channel), v, false),
         &mut || versions(&desk_base(channel)).map_err(|e| e.message),
         crate::releases::engine_contracts(),
+        &mut |v| crate::releases::engine_release_contracts(base, v),
+        asks("engine"),
     );
-    let asked: Vec<&PartRelease> = rows
-        .iter()
-        .filter(|r| args.parts.is_empty() || args.parts.contains(&r.part))
-        .collect();
-    for row in &asked {
-        println!("  {}", row.line());
-    }
-    let mut behind: Vec<String> = asked
-        .iter()
-        .filter(|r| r.behind())
-        .filter_map(|r| r.to_take().map(|n| format!("{} {n}", r.part)))
-        .collect();
+    let mut lines = Vec::new();
+    let mut rules_rows = Vec::new();
+    let mut packs_behind = None;
     // The packs beside the engine's release: the one an update takes, or the
     // one installed where the engine is at its newest; and beside each
     // first-party pack's own releases, which an update takes with no engine
     // release (record 55 B5).
-    let asks = |part: &str| args.parts.is_empty() || args.parts.iter().any(|p| p == part);
     let (packs, rules) = (asks("engine"), asks(crate::rules::PART));
     if packs || rules {
         let engine_row = rows.iter().find(|r| r.part == "engine");
         let release = engine_row
             .and_then(|r| r.to_take().map(str::to_string))
-            .or_else(|| crate::setup::engine_version(&state));
-        let dir = crate::setup::engine_pack_dir(&state);
+            .or_else(|| crate::setup::engine_version(state));
+        let dir = crate::setup::engine_pack_dir(state);
         match (dir, release) {
             (Some(dir), Some(release)) => {
                 // where the engine's release cannot be read, a pack's own
@@ -691,10 +806,10 @@ fn check(args: &UpdateArgs, base: &str) -> Result<(), Exit> {
                 let carried = match crate::packs::bundled(base, &release) {
                     Ok(carried) => Some(carried),
                     Err(why) => {
-                        println!(
-                            "  packs in {}: the ones engine {release} was released with could not be read: {why}",
+                        lines.push(format!(
+                            "packs in {}: the ones engine {release} was released with could not be read: {why}",
                             dir.display()
-                        );
+                        ));
                         None
                     }
                 };
@@ -727,28 +842,92 @@ fn check(args: &UpdateArgs, base: &str) -> Result<(), Exit> {
                         &engine,
                     );
                     if packs && read {
-                        for line in plan.status.lines() {
-                            println!("  {line}");
-                        }
+                        lines.extend(plan.status.lines());
                         if plan.status.behind() {
-                            behind.push(format!(
-                                "packs of {release} ({})",
-                                plan.status.stale.join(", ")
+                            packs_behind = Some((
+                                release.clone(),
+                                format!("packs of {release} ({})", plan.status.stale.join(", ")),
                             ));
                         }
                     }
                     for row in crate::rules::rows(&plan, &found) {
-                        println!("  {}", row.line());
-                        if let Some(version) = &row.takes {
-                            behind.push(format!("{} {} {version}", crate::rules::PART, row.pack));
-                        }
+                        lines.push(row.line());
+                        rules_rows.push(row);
                     }
                 }
             }
-            (None, _) if rules && !args.parts.is_empty() => println!(
-                "  rules: this install's engine runs in a container, whose image carries its packs"
+            (None, _) if rules && !args.parts.is_empty() => lines.push(
+                "rules: this install's engine runs in a container, whose image carries its packs"
+                    .to_string(),
             ),
             _ => {}
+        }
+    }
+    let rows = rows
+        .into_iter()
+        .filter(|r| args.parts.is_empty() || args.parts.contains(&r.part))
+        .collect();
+    Measured {
+        rows,
+        lines,
+        rules: rules_rows,
+        packs: packs_behind,
+    }
+}
+
+impl Measured {
+    /// The order the update takes them in, with the newer releases that stay out.
+    fn order(&self) -> (Vec<crate::releases::Step>, Vec<crate::releases::Stay>) {
+        crate::releases::order(
+            &self.rows,
+            &self.rules,
+            self.packs.as_ref().map(|(release, _)| release.as_str()),
+        )
+    }
+}
+
+/// `nils update --check`: what an update would do, and nothing done. The
+/// engine as always, and where a setup is recorded, every part beside its own
+/// newest release, since the desk, the assistant and Kvasir release on their
+/// own and any one of them may be behind while the engine is not; and the
+/// order an update would take them in.
+fn check(args: &UpdateArgs, base: &str) -> Result<(), Exit> {
+    let state = crate::setup::read_state();
+    let engine = match &args.version {
+        Some(v) => Ok(v.trim().trim_start_matches('v').to_string()),
+        None => newest_version(base),
+    };
+    // With no setup recorded the engine is all there is, and a release that
+    // cannot be read is the answer, as it always was.
+    let Some(state) = state else {
+        return engine_check(args, &engine?);
+    };
+    match &engine {
+        Ok(wanted) => engine_check(args, wanted)?,
+        Err(e) => println!(
+            "nils {VERSION}: the newest release could not be read: {}",
+            e.message
+        ),
+    }
+    let measured = measure(args, base, &state, &engine);
+    for row in &measured.rows {
+        println!("  {}", row.line());
+    }
+    let mut behind: Vec<String> = measured
+        .rows
+        .iter()
+        .filter(|r| r.behind())
+        .filter_map(|r| r.to_take().map(|n| format!("{} {n}", r.part)))
+        .collect();
+    for line in &measured.lines {
+        println!("  {line}");
+    }
+    if let Some((_, said)) = &measured.packs {
+        behind.push(said.clone());
+    }
+    for row in &measured.rules {
+        if let Some(version) = &row.takes {
+            behind.push(format!("{} {} {version}", crate::rules::PART, row.pack));
         }
     }
     if behind.is_empty() {
@@ -763,7 +942,32 @@ fn check(args: &UpdateArgs, base: &str) -> Result<(), Exit> {
             behind.join(", ")
         );
     }
+    let (steps, stays) = measured.order();
+    for line in crate::releases::order_lines(&steps, &stays) {
+        println!("  {line}");
+    }
     Ok(())
+}
+
+/// The order an update takes the parts in, said before it starts, where a
+/// setup is recorded and the releases can be read; nothing where they
+/// cannot, and the update goes on as it would have.
+fn say_order(args: &UpdateArgs, base: &str) {
+    let Some(state) = crate::setup::read_state() else {
+        return;
+    };
+    let engine = match &args.version {
+        Some(v) => Ok(v.trim().trim_start_matches('v').to_string()),
+        None => newest_version(base),
+    };
+    let (steps, stays) = measure(args, base, &state, &engine).order();
+    for line in crate::releases::order_lines(&steps, &stays) {
+        if line == "in this order:" {
+            println!("nils update takes the parts in this order:");
+        } else {
+            println!("{line}");
+        }
+    }
 }
 
 /// The engine's own lines of a check.
@@ -832,6 +1036,8 @@ pub(crate) fn update(home: &nils_registry::home::Home, args: UpdateArgs) -> Resu
         if let Some(done) = crate::setup::update_by_helper(&only) {
             return done;
         }
+        // the order, and why, before anything changes
+        say_order(&args, &base);
         // Parts named without the engine leave its binary where it is.
         if !args.takes_engine() {
             if crate::setup::update_all(args.channel.as_deref(), &only)? {
@@ -870,7 +1076,17 @@ pub(crate) fn update(home: &nils_registry::home::Home, args: UpdateArgs) -> Resu
         )));
     }
 
-    let bytes = fetch_checked(&base, &wanted, &file)?;
+    let bytes = fetch_checked(&base, &wanted, &file).map_err(|e| {
+        if args.takes_parts() {
+            // the engine goes first, so nothing after it moves without it
+            fail(format!(
+                "the update stops at the engine, and the parts after it stay as they are: {}",
+                e.message
+            ))
+        } else {
+            e
+        }
+    })?;
     install_binary(&path, &bytes)?;
     println!("nils {wanted} at {} (was {VERSION})", path.display());
     let serves = crate::setup::record_engine_version(&path, &wanted);
@@ -945,6 +1161,41 @@ pub(crate) fn update(home: &nils_registry::home::Home, args: UpdateArgs) -> Resu
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// GitHub allows an address without a token sixty requests an hour, and
+    /// a 304 counts too: a supervisor's looks spend half of them at most,
+    /// and none once GitHub says the hour's are gone, until it resets.
+    #[test]
+    fn looks_at_githubs_api_keep_to_half_the_hour_and_to_what_github_says_is_left() {
+        let now = 1_800_000_000;
+        assert_eq!(allows_at(&[], None, None, now, 3, 30), Ok(()));
+        // 27 in the hour leave room for one more look of three, not for two
+        let ages: Vec<u64> = (0..27).map(|i| i * 60).collect();
+        assert_eq!(allows_at(&ages, None, None, now, 3, 30), Ok(()));
+        let ages: Vec<u64> = (0..28).map(|i| i * 60).collect();
+        let waits = allows_at(&ages, None, None, now, 3, 30).unwrap_err();
+        // the oldest (27 minutes) ages out in 33 minutes, and then three fit
+        assert_eq!(waits.until, now + 33 * 60);
+        assert!(waits.why.contains("30 requests an hour"), "{}", waits.why);
+        // requests older than the hour do not count
+        let ages: Vec<u64> = (0..40).map(|i| 3_600 + i).collect();
+        assert_eq!(allows_at(&ages, None, None, now, 3, 30), Ok(()));
+        // GitHub says twelve are left until its hour resets: a look of three
+        // would leave fewer than an update run needs, so it waits for the reset
+        let waits = allows_at(&[], Some(12), Some(now + 600), now, 3, 30).unwrap_err();
+        assert_eq!(waits.until, now + 600);
+        assert!(
+            waits.why.contains("12 of this hour's requests left"),
+            "{}",
+            waits.why
+        );
+        assert_eq!(
+            allows_at(&[], Some(13), Some(now + 600), now, 3, 30),
+            Ok(())
+        );
+        // and once it has reset, what it said no longer holds
+        assert_eq!(allows_at(&[], Some(0), Some(now - 1), now, 3, 30), Ok(()));
+    }
 
     #[test]
     fn the_newest_release_is_the_highest_version_not_the_first_listed() {
