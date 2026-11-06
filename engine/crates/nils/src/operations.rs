@@ -1184,8 +1184,11 @@ fn with_live(mut doc: Value, live: Value, has_units: bool) -> Option<Value> {
         return has_units.then_some(doc);
     };
     for (k, v) in live {
-        // the lane's figures are the run page's, not a step's
-        if k == "lane" || (matches!(k.as_str(), "done" | "total") && !v.is_u64()) {
+        // the lane's figures are the run page's, not a step's, and so are
+        // each part's own beat and run where parts run at once (2026-11-06)
+        if matches!(k.as_str(), "lane" | "each" | "runs")
+            || (matches!(k.as_str(), "done" | "total") && !v.is_u64())
+        {
             continue;
         }
         doc[k] = v;

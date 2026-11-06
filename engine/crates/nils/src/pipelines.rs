@@ -1196,7 +1196,7 @@ pub(crate) fn run_doc_at(store: &mut Store, r: &Run, quasi: bool) -> Result<Valu
     }
     doc["unit_states"] = json!(by_state);
     // 2026-11-05: how far it is while it runs, a unit's own count included
-    doc["progress"] = live_progress(store, r.id, r.job_id, &r.status);
+    doc["progress"] = run_progress(store, r.id, r.job_id, &r.status);
     // record 55 (rulings of 2026-10-12, item 6): a run over a dataset's or a
     // cohort's main scans says which, and under which rules they were read
     doc["main"] = r
@@ -1295,6 +1295,11 @@ pub(crate) fn run_doc_at(store: &mut Store, r: &Run, quasi: bool) -> Result<Valu
 /// since when its job runs (`since`, every part's). One read of the job's
 /// row, never of a file. Null for a run that does not run now, or whose
 /// job's last beat was of another part.
+///
+/// Where parts of the run go at once (2026-11-06), the job's beat is theirs
+/// summed ([`job_beat`]), naming each part's run in `runs`: a run among them
+/// reads that sum, the job's, with `part` `{at, to, of}` saying which parts
+/// run now.
 pub(crate) fn live_progress(store: &mut Store, run: i64, job: Option<i64>, status: &str) -> Value {
     if status != "running" {
         return Value::Null;
@@ -1303,12 +1308,45 @@ pub(crate) fn live_progress(store: &mut Store, run: i64, job: Option<i64>, statu
         return Value::Null;
     };
     match j.progress {
-        Some(mut p) if !j.state.is_over() && p["run"] == run => {
+        Some(mut p) if !j.state.is_over() && beats_for(&p, run) => {
             p["since"] = json!(j.started_at);
             p
         }
         _ => Value::Null,
     }
+}
+
+/// Whether a job's beat is of this run: its own, or a sum of the parts
+/// running at once that names it.
+fn beats_for(p: &Value, run: i64) -> bool {
+    p["run"] == run
+        || p["runs"]
+            .as_array()
+            .is_some_and(|runs| runs.iter().any(|r| *r == run))
+}
+
+/// How far one run is, as its own page reads it (2026-11-06): the job's
+/// beat ([`live_progress`]), and where that is the sum of parts running at
+/// once, this part's own beat in it (`each`), with the sum beside it as
+/// `job`.
+fn run_progress(store: &mut Store, run: i64, job: Option<i64>, status: &str) -> Value {
+    let mut p = live_progress(store, run, job, status);
+    let own = p
+        .get("each")
+        .and_then(|each| each.get(run.to_string()))
+        .cloned();
+    if let Value::Object(m) = &mut p {
+        m.remove("each");
+    }
+    let Some(mut own) = own else {
+        return p;
+    };
+    if let Value::Object(m) = &mut p {
+        m.remove("lane");
+    }
+    own["since"] = p["since"].clone();
+    own["job"] = p;
+    own
 }
 
 /// The most runs one page of `GET /api/pipeline-runs` answers.
@@ -7960,6 +7998,8 @@ fn folder_word(id: &str) -> Result<&str, String> {
 /// Materialise, schedule the containers in the lane, take in what each
 /// left as it ends, and close with what the run as a whole said.
 fn execute(home: &Home, registry: &mut Registry, x: &Execution<'_>) -> Result<Ended, String> {
+    // a part's beat counts in its job's while its run goes on here
+    let _beat = PartBeat::enter(x.job_id, x.part);
     let heart = Heart::start(registry, x.job_id);
     let ended = execute_run(home, registry, x);
     if let Some(h) = heart {
@@ -8090,9 +8130,12 @@ fn execute_run(home: &Home, registry: &mut Registry, x: &Execution<'_>) -> Resul
     let _ = job::beat(
         registry.store(),
         x.job_id,
-        Some(
-            &json!({"run": x.run_id, "phase": "materialise", "layout": d.layout.name(), "part": part_doc(x.part)}),
-        ),
+        Some(&job_beat(
+            x.job_id,
+            x.part,
+            json!({"run": x.run_id, "phase": "materialise", "layout": d.layout.name(), "part": part_doc(x.part)}),
+            None,
+        )),
     );
 
     let released_before = x.resume.and_then(|r| r.input_release_id);
@@ -8745,7 +8788,7 @@ fn execute_run(home: &Home, registry: &mut Registry, x: &Execution<'_>) -> Resul
     // whatever ended the schedule, no container outlives it: a stop, a
     // cancel and an error each give their units back to the queue
     if !running.is_empty() {
-        let mut pulse = Pulse::new(x.job_id, json!({"run": x.run_id, "phase": "stop"}));
+        let mut pulse = Pulse::new(x.job_id, x.part, json!({"run": x.run_id, "phase": "stop"}));
         for mut r in running.drain(..) {
             // E1 (2026-10-30): a container that ended before the stop was
             // heard finished its units; they are taken in as it ended and
@@ -9406,6 +9449,8 @@ fn schedule(
                 },
             });
             how_far(&mut progress, x, running);
+            // 2026-11-06: where parts go at once, the running parts summed
+            let progress = job_beat(x.job_id, x.part, progress, Some(units_word(x.descriptor)));
             if let Ok(job::Asked::Cancel) = job::beat(registry.store(), x.job_id, Some(&progress)) {
                 return Ok(Scheduled::Cancelled);
             }
@@ -9579,6 +9624,118 @@ fn how_far(progress: &mut Value, x: &Execution<'_>, running: &[Running]) {
     progress["together"] = json!(together);
     progress["reported"] = reported.map_or(Value::Null, |s| s.doc());
     progress["part"] = part_doc(x.part);
+}
+
+/// The last beat of each part of a job running in this process (wave 7b
+/// §18, 2026-11-06), by job and by part: where parts run at once each beats
+/// the one job, and its record said whichever part beat last.
+type PartBeats = std::sync::Mutex<BTreeMap<i64, BTreeMap<usize, Value>>>;
+
+fn part_beats() -> &'static PartBeats {
+    static BEATS: std::sync::OnceLock<PartBeats> = std::sync::OnceLock::new();
+    BEATS.get_or_init(Default::default)
+}
+
+/// A part's place among its job's beats, held while the part's run goes on
+/// here and let go once it ends, however it ends, so a part over is no
+/// longer counted.
+struct PartBeat {
+    job: i64,
+    at: usize,
+}
+
+impl PartBeat {
+    fn enter(job: i64, part: Option<(usize, usize)>) -> Option<PartBeat> {
+        part.map(|(at, _)| PartBeat { job, at })
+    }
+}
+
+impl Drop for PartBeat {
+    fn drop(&mut self) {
+        let mut all = part_beats().lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(parts) = all.get_mut(&self.job) {
+            parts.remove(&self.at);
+            if parts.is_empty() {
+                all.remove(&self.job);
+            }
+        }
+    }
+}
+
+/// What the job's record says once a part beat `doc` (2026-11-06): the
+/// part's own beat where it runs alone, as one after another always does;
+/// where parts run at once, the running parts' counts summed
+/// ([`summed_beats`]). `word` is what the run's units are, for a sum whose
+/// parts count different things.
+fn job_beat(job: i64, part: Option<(usize, usize)>, doc: Value, word: Option<&str>) -> Value {
+    let Some((at, of)) = part else {
+        return doc;
+    };
+    let mut all = part_beats().lock().unwrap_or_else(|e| e.into_inner());
+    let parts = all.entry(job).or_default();
+    parts.insert(at, doc.clone());
+    if parts.len() < 2 {
+        return doc;
+    }
+    summed_beats(parts, of, word).unwrap_or(doc)
+}
+
+/// The beats of the parts going at once, by part, as one: the counts of the
+/// parts in their run summed (`units`, `over`, `running`, `queued`, `done`,
+/// `total`, and what the containers said, `reported`); `part` `{at, to, of}`
+/// from the first part going to the last ("parts 3 to 5 of 23"); `runs`,
+/// every going part's run, and `each`, each part's own beat by its run.
+/// None while no part is in its run yet.
+fn summed_beats(parts: &BTreeMap<usize, Value>, of: usize, word: Option<&str>) -> Option<Value> {
+    let running: Vec<&Value> = parts.values().filter(|p| p["phase"] == "run").collect();
+    let mut out = (*running.first()?).clone();
+    let sum = |key: &str| -> u64 { running.iter().map(|p| p[key].as_u64().unwrap_or(0)).sum() };
+    for key in ["units", "over", "running", "queued"] {
+        out[key] = json!(sum(key));
+    }
+    let words: BTreeSet<&str> = running.iter().filter_map(|p| p["what"].as_str()).collect();
+    if words.len() > 1 {
+        // counts of different things are not summed: the units over of all
+        out["done"] = json!(sum("over"));
+        out["total"] = json!(sum("units"));
+        out["what"] = json!(word.unwrap_or("units"));
+    } else {
+        out["done"] = json!(sum("done"));
+        out["total"] = json!(sum("total"));
+    }
+    let said: Vec<&Value> = running
+        .iter()
+        .map(|p| &p["reported"])
+        .filter(|r| r.is_object())
+        .collect();
+    out["reported"] = if said.is_empty() {
+        Value::Null
+    } else {
+        let of: Option<u64> = said.iter().map(|r| r["of"].as_u64()).sum();
+        let what: BTreeSet<&str> = said.iter().filter_map(|r| r["what"].as_str()).collect();
+        json!({
+            "done": said.iter().map(|r| r["done"].as_u64().unwrap_or(0)).sum::<u64>(),
+            "of": of,
+            "what": (what.len() == 1).then(|| what.first().copied()).flatten(),
+            "units": said.iter().map(|r| r["units"].as_u64().unwrap_or(0)).sum::<u64>(),
+        })
+    };
+    let first = parts.keys().next().copied().unwrap_or(1);
+    let last = parts.keys().next_back().copied().unwrap_or(first);
+    out["part"] = json!({"at": first, "to": last, "of": of});
+    out["runs"] = json!(parts.values().map(|p| p["run"].clone()).collect::<Vec<_>>());
+    let mut each = serde_json::Map::new();
+    for p in parts.values() {
+        if let Some(run) = p["run"].as_i64() {
+            let mut own = p.clone();
+            if let Value::Object(m) = &mut own {
+                m.remove("lane");
+            }
+            each.insert(run.to_string(), own);
+        }
+    }
+    out["each"] = Value::Object(each);
+    Some(out)
 }
 
 /// Which part of a split run a run is, as its progress says it: `{at, of}`,
@@ -10588,14 +10745,18 @@ fn outcome_of(
 /// intake is never taken for a stale job.
 struct Pulse {
     job_id: i64,
+    /// Which part of a split run it beats for, whose job may be the beat
+    /// of parts at once ([`job_beat`]).
+    part: Option<(usize, usize)>,
     last: Instant,
     progress: Value,
 }
 
 impl Pulse {
-    fn new(job_id: i64, progress: Value) -> Pulse {
+    fn new(job_id: i64, part: Option<(usize, usize)>, progress: Value) -> Pulse {
         Pulse {
             job_id,
+            part,
             last: Instant::now(),
             progress,
         }
@@ -10605,7 +10766,8 @@ impl Pulse {
     fn tick(&mut self, store: &mut Store) {
         if self.last.elapsed() >= Duration::from_secs(5) {
             self.last = Instant::now();
-            let _ = job::beat(store, self.job_id, Some(&self.progress));
+            let beat = job_beat(self.job_id, self.part, self.progress.clone(), None);
+            let _ = job::beat(store, self.job_id, Some(&beat));
         }
     }
 }
@@ -10695,7 +10857,11 @@ fn take_in(
     }
     // record 49 R3: nothing a container left is read before what holds a
     // secret is swept from it
-    let mut pulse = Pulse::new(x.job_id, json!({"run": x.run_id, "phase": "intake"}));
+    let mut pulse = Pulse::new(
+        x.job_id,
+        x.part,
+        json!({"run": x.run_id, "phase": "intake"}),
+    );
     let (swept, shut) = sweep_batch(registry, x, b, &mut pulse)?;
     let (reported, unreadable) = read_results(&b.out);
     // each unit's entry by its name, found once and not searched for per
@@ -13096,6 +13262,69 @@ fn found_for(outputs: &[descriptor::Output], out: &Path, u: &Unit) -> Vec<String
 
 #[cfg(test)]
 mod tests {
+    /// 2026-11-06: parts that run at once each beat the one job; its record
+    /// sums the parts in their run, says the parts from the first going to
+    /// the last, names each part's run and keeps each part's own beat, and
+    /// once a part is over it no longer counts. A part alone beats as it did.
+    #[test]
+    fn parts_at_once_beat_their_job_summed() {
+        use serde_json::json;
+        let job = 912_345_678;
+        let beat = |run: i64, at: usize, done: u64| {
+            json!({"run": run, "phase": "run", "units": 870, "over": 0, "running": 870,
+                "queued": 0, "done": done, "total": 870, "what": "stacks",
+                "reported": {"done": done, "of": 870, "what": "stacks", "units": 1},
+                "part": {"at": at, "of": 23}, "lane": {"cores": 64}})
+        };
+        let third = super::PartBeat::enter(job, Some((3, 23))).unwrap();
+        let alone = super::job_beat(job, Some((3, 23)), beat(30, 3, 100), Some("stacks"));
+        assert_eq!(alone, beat(30, 3, 100), "a part alone beats as it did");
+        let fourth = super::PartBeat::enter(job, Some((4, 23))).unwrap();
+        let fifth = super::PartBeat::enter(job, Some((5, 23))).unwrap();
+        // the fifth still prepares its input: in the parts, not in the counts
+        super::job_beat(
+            job,
+            Some((5, 23)),
+            json!({"run": 32, "phase": "materialise", "part": {"at": 5, "of": 23}}),
+            None,
+        );
+        let sum = super::job_beat(job, Some((4, 23)), beat(31, 4, 250), Some("stacks"));
+        assert_eq!(
+            (&sum["done"], &sum["total"]),
+            (&json!(350), &json!(1740)),
+            "{sum}"
+        );
+        assert_eq!(sum["units"], 1740, "{sum}");
+        assert_eq!(sum["part"], json!({"at": 3, "to": 5, "of": 23}), "{sum}");
+        assert_eq!(sum["runs"], json!([30, 31, 32]), "{sum}");
+        assert_eq!(sum["reported"]["done"], 350, "{sum}");
+        assert_eq!(sum["each"]["31"]["done"], 250, "{sum}");
+        assert!(sum["each"]["31"].get("lane").is_none(), "{sum}");
+        assert!(super::beats_for(&sum, 32) && !super::beats_for(&sum, 33));
+        // the third ends: the fourth and fifth go on
+        drop(third);
+        let sum = super::job_beat(job, Some((4, 23)), beat(31, 4, 300), Some("stacks"));
+        assert_eq!(sum["part"], json!({"at": 4, "to": 5, "of": 23}), "{sum}");
+        assert_eq!(sum["done"], 300, "{sum}");
+        drop(fifth);
+        let alone = super::job_beat(job, Some((4, 23)), beat(31, 4, 400), Some("stacks"));
+        assert_eq!(alone, beat(31, 4, 400), "one part left beats as it did");
+        drop(fourth);
+        // parts that count different things are counted by their units over
+        let mut parts = std::collections::BTreeMap::new();
+        parts.insert(1, beat(1, 1, 5));
+        let mut other = beat(2, 2, 7);
+        other["what"] = json!("slices");
+        other["over"] = json!(2);
+        parts.insert(2, other);
+        let sum = super::summed_beats(&parts, 2, Some("stacks")).unwrap();
+        assert_eq!(
+            (&sum["done"], &sum["what"]),
+            (&json!(2), &json!("stacks")),
+            "{sum}"
+        );
+    }
+
     /// Wave 7b (P3), after review: a site file declared `sweep: false` is
     /// given to the run with no needles, so the sweep looks for the swept
     /// secrets alone.
