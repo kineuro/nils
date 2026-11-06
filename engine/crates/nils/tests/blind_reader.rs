@@ -859,6 +859,235 @@ fn an_open_campaign_moves_to_the_seven_asked_axes_keeping_its_answer() {
     assert!(out.contains("\"derive\""), "{out}");
 }
 
+/// 2026-11-06: the campaign page's "No gallery" line asks one axis in one
+/// press. The door moves an open campaign as `nils campaign requestion`
+/// does, for its maker or a reviewer; a dry run says what would change and
+/// writes nothing; the axis the campaign asked beside the body part is
+/// derived from it, and the answer given before is kept and derives it.
+#[test]
+fn the_door_asks_one_axis_and_derives_the_one_asked_beside_it() {
+    requestion_at_the_door(None);
+}
+
+#[test]
+fn the_door_asks_one_axis_on_postgres_too() {
+    let Some(dsn) = std::env::var("NILS_TEST_POSTGRES_DSN")
+        .ok()
+        .filter(|d| !d.is_empty())
+    else {
+        eprintln!("NILS_TEST_POSTGRES_DSN is not set; the Postgres half is skipped");
+        return;
+    };
+    let drop = || {
+        let mut store =
+            nils_registry::Store::connect_postgres(&dsn, REQUESTION_SCHEMA).expect("connect");
+        store
+            .batch(&format!(
+                "DROP SCHEMA IF EXISTS {REQUESTION_SCHEMA} CASCADE; DROP SCHEMA IF EXISTS {REQUESTION_SCHEMA}_linkage CASCADE"
+            ))
+            .expect("drop");
+    };
+    drop();
+    requestion_at_the_door(Some(&dsn));
+    drop();
+}
+
+/// The Postgres schema the requestion door's second run takes.
+const REQUESTION_SCHEMA: &str = "nils_requestion_door";
+
+fn requestion_at_the_door(dsn: Option<&str>) {
+    let home = TempDir::new("requestion-door-home");
+    let src = TempDir::new("requestion-door-src");
+    for n in 1..=3 {
+        study(&src, n);
+    }
+    ok(
+        &home,
+        &["key", "add", "k"],
+        Some("a requestion door test key\n"),
+    );
+    match dsn {
+        Some(dsn) => ok(
+            &home,
+            &[
+                "init",
+                "--backend",
+                "postgres",
+                "--dsn",
+                dsn,
+                "--schema",
+                REQUESTION_SCHEMA,
+                "--key",
+                "k",
+            ],
+            None,
+        ),
+        None => ok(&home, &["init", "--key", "k"], None),
+    };
+    ok(
+        &home,
+        &[
+            "digest",
+            "--name",
+            "a",
+            "--no-private",
+            src.path().to_str().unwrap(),
+        ],
+        None,
+    );
+    ok(&home, &["fingerprint"], None);
+    ok(
+        &home,
+        &["classify", "--pack-dir", packs().to_str().unwrap()],
+        None,
+    );
+    let server = Server::start(&home);
+    let cleo = token(
+        "cleo",
+        &["query:work", "data:see", "review:work", "campaigns:work"],
+        "quasi",
+    );
+    let anna = token("anna", &["campaigns:see", "campaigns:work"], "quasi");
+    server.ok(
+        "PUT",
+        "/api/ask/selections/three",
+        Some(selection_of(&[1, 2, 3])),
+        &cleo,
+    );
+    server.ok(
+        "POST",
+        "/api/campaigns",
+        Some(json!({
+            "name": "parts",
+            "question": {"kind": "axes", "axes": ["body_part", "body_region"]},
+            "source": {"selection": "three@1"},
+            "raters": ["anna@desk.example"], "raters_per_item": 1,
+            "adjudication": {"when": "never"}, "closes_into": "none",
+        })),
+        &cleo,
+    );
+    let claimed = server.ok("POST", "/api/campaigns/parts/claim", Some(json!({})), &anna);
+    let assignment = claimed["assignment"]["id"].as_i64().unwrap();
+    let given = json!({"body_part": "brain", "body_region": "head"});
+    server.ok(
+        "POST",
+        &format!("/api/campaigns/parts/assignments/{assignment}/answer"),
+        Some(json!({"value": given.to_string()})),
+        &anna,
+    );
+    let before = server.ok("GET", "/api/campaigns/parts/answers", None, &cleo);
+    let kept_value = before["answers"][0]["value"].clone();
+    let held = server.ok("POST", "/api/campaigns/parts/claim", Some(json!({})), &anna);
+    let one = json!({"axes": ["body_part"]});
+
+    // a rater of the campaign is neither its maker nor a reviewer
+    let (status, doc) = server.call(
+        "POST",
+        "/api/campaigns/parts/requestion",
+        Some(one.clone()),
+        &anna,
+    );
+    assert_eq!(status, 403, "{doc}");
+    // a leased item holds the old form, even for a dry run
+    let (status, doc) = server.call(
+        "POST",
+        "/api/campaigns/parts/requestion",
+        Some(json!({"axes": ["body_part"], "dry_run": true})),
+        &cleo,
+    );
+    assert_eq!(status, 409, "{doc}");
+    assert!(doc.to_string().contains("leased"), "{doc}");
+    server.ok(
+        "POST",
+        &format!(
+            "/api/campaigns/parts/assignments/{}/release",
+            held["assignment"]["id"]
+        ),
+        Some(json!({})),
+        &anna,
+    );
+    // no axes, an axis that is not a list, and an axis never asked
+    for (body, want) in [
+        (json!({"axes": []}), 400),
+        (json!({"axes": "body_part"}), 400),
+        (json!({"axes": ["body_part"], "derive": "body_region"}), 400),
+        (json!({"axes": ["body_part"], "dry_run": "yes"}), 400),
+        (json!({"axes": ["technique"]}), 409),
+    ] {
+        let (status, doc) = server.call(
+            "POST",
+            "/api/campaigns/parts/requestion",
+            Some(body.clone()),
+            &cleo,
+        );
+        assert_eq!(status, want, "{body}: {doc}");
+    }
+
+    // the dry run says what would change and writes nothing
+    let dry = server.ok(
+        "POST",
+        "/api/campaigns/parts/requestion",
+        Some(json!({"axes": ["body_part"], "dry_run": true})),
+        &cleo,
+    );
+    assert_eq!(dry["dry_run"], true, "{dry}");
+    assert_eq!(
+        dry["asked_before"],
+        json!(["body_part", "body_region"]),
+        "{dry}"
+    );
+    assert_eq!(dry["asked"], json!(["body_part"]), "{dry}");
+    assert_eq!(dry["derive"], json!(["body_region"]), "{dry}");
+    assert_eq!(dry["answers_kept"], 1, "{dry}");
+    assert_eq!(dry["answers_derived"], 0, "{dry}");
+    let still = server.ok("GET", "/api/campaigns/parts", None, &cleo);
+    assert_eq!(
+        still["question"]["axes"],
+        json!(["body_part", "body_region"]),
+        "{still}"
+    );
+    // and the keyboard's dry run says the same
+    let pack_dir = packs();
+    let said: Value = serde_json::from_str(&ok(
+        &home,
+        &[
+            "campaign",
+            "requestion",
+            "parts",
+            "--axes",
+            "body_part",
+            "--dry-run",
+            "--pack-dir",
+            pack_dir.to_str().unwrap(),
+            "--json",
+        ],
+        None,
+    ))
+    .unwrap();
+    assert_eq!(said, dry, "the command line and the door differ");
+
+    // the move: the item and the answer stay, the answer as given, and it
+    // derives the body region
+    let done = server.ok("POST", "/api/campaigns/parts/requestion", Some(one), &cleo);
+    assert_eq!(done["dry_run"], false, "{done}");
+    assert_eq!(done["derive"], json!(["body_region"]), "{done}");
+    assert_eq!(done["answers_kept"], 1, "{done}");
+    assert_eq!(done["answers_derived"], 1, "{done}");
+    let now = server.ok("GET", "/api/campaigns/parts", None, &cleo);
+    assert_eq!(now["question"]["axes"], json!(["body_part"]), "{now}");
+    assert_eq!(now["question"]["derive"], json!(["body_region"]), "{now}");
+    assert_eq!(now["items"].as_array().unwrap().len(), 3, "{now}");
+    let after = server.ok("GET", "/api/campaigns/parts/answers", None, &cleo);
+    assert_eq!(after["answers"][0]["value"], kept_value, "{after}");
+    assert_eq!(
+        after["answers"][0]["derived"]["body_region"], "head",
+        "{after}"
+    );
+    let (good, out, err) = run(&home, &["campaign", "show", "parts", "--json"], None);
+    assert!(good, "{err}");
+    assert!(out.contains("body_region"), "{out}");
+}
+
 /// Record 48, the reader's search: every name a value goes by is served
 /// with the question, blind or not, and the combinations are counted over
 /// the registry without any stack of the campaign or of a sealed sample,

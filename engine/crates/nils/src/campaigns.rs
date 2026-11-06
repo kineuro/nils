@@ -66,6 +66,9 @@ pub(crate) const DOORS: &[&str] = &[
     // 2026-11-05: the share of a batch read one by one, as `nils campaign
     // hold-back` sets it
     "POST /api/campaigns/{id}/hold-back",
+    // 2026-11-06: fewer axes asked, the rest derived, as `nils campaign
+    // requestion` moves them
+    "POST /api/campaigns/{id}/requestion",
     "GET /api/campaigns/{id}/ab",
     "GET /api/campaigns/{id}/ab/decisions",
     "GET /api/campaigns/{id}/items/{item}/ab",
@@ -136,7 +139,7 @@ pub(crate) fn door(method: &str, segs: &[&str]) -> Option<(Need, Detail)> {
         // own answer; the raters of an open campaign are its maker's to
         // change, or a reviewer's, which the door checks beside the grant
         ("POST", ["api", "campaigns", _, "answers", _, "amend"])
-        | ("POST", ["api", "campaigns", _, "raters" | "hold-back"]) => {
+        | ("POST", ["api", "campaigns", _, "raters" | "hold-back" | "requestion"]) => {
             (Need::One("campaigns:work"), Plain)
         }
         // record 50 R3: suggestions from outside are the campaign's maker's
@@ -501,6 +504,15 @@ pub(crate) const POLICY: &[(&str, bool, bool, &str, &str, &str, &str)] = &[
         "one campaign",
         "Setting how much of a batch is read one by one",
         "Set how much of a batch is read one by one",
+    ),
+    (
+        "POST /api/campaigns/{id}/requestion",
+        true,
+        true,
+        "bounded",
+        "every item and answer of one campaign",
+        "Asking fewer axes in a campaign",
+        "Asked fewer axes in a campaign",
     ),
     (
         "GET /api/campaigns/{id}/ab",
@@ -1250,6 +1262,88 @@ pub(crate) fn route(
                 Ok(Reply::ok(json!({
                     "campaign": c.id, "name": c.name, "hold_back": share, "freed": freed,
                 })))
+            }
+            // 2026-11-06: an open axes campaign moves to fewer asked axes,
+            // the rest derived, by its maker or a reviewer, as `nils
+            // campaign requestion` moves it; `dry_run` says what it would
+            // do and writes nothing
+            ["api", "campaigns", which, "requestion"] if post => {
+                let doc = json_body(body)?;
+                let c = campaign::find(registry.store(), which).map_err(campaign_err)?;
+                if c.owner != principal && !caller.access.holds("review:work") {
+                    return Err(Reply::error(
+                        403,
+                        format!(
+                            "which axes campaign {} asks is its maker's to change, or a holder of review:work's",
+                            c.name
+                        ),
+                    ));
+                }
+                if c.status != "open" {
+                    return Err(Reply::error(
+                        409,
+                        format!("campaign {} is {}", c.name, c.status),
+                    ));
+                }
+                let names = |v: &Value| -> Option<Vec<String>> {
+                    v.as_array()?
+                        .iter()
+                        .map(|a| a.as_str().map(str::to_string))
+                        .collect()
+                };
+                let axes = names(&doc["axes"])
+                    .filter(|a| !a.is_empty())
+                    .ok_or_else(|| {
+                        Reply::error(
+                            400,
+                            "axes: the axes the rater answers now, each asked before",
+                        )
+                    })?;
+                let derive = match &doc["derive"] {
+                    Value::Null => None,
+                    v => Some(
+                        names(v)
+                            .ok_or_else(|| Reply::error(400, "derive: a list of axis names"))?,
+                    ),
+                };
+                let dry = match &doc["dry_run"] {
+                    Value::Null => false,
+                    Value::Bool(b) => *b,
+                    _ => return Err(Reply::error(400, "dry_run: true or false")),
+                };
+                let served = crate::reader::served_pack(doors.pack_dir.as_deref(), &doors.ask_pack)
+                    .ok_or_else(|| {
+                        Reply::error(
+                            409,
+                            "no pack is served here, and the axes asked and derived are held to the pack's",
+                        )
+                    })?;
+                if let Some(v) = c.pack_version.as_deref()
+                    && v != format!("{}@{}", served.name, served.version)
+                {
+                    return Err(Reply::error(
+                        409,
+                        format!(
+                            "campaign {} was made under {v}, and the pack served is {}@{}; move it to the served pack first (nils campaign repack)",
+                            c.name, served.name, served.version
+                        ),
+                    ));
+                }
+                let question = requestion_question(&c, &served, &axes, derive.as_deref())
+                    .map_err(|(s, m)| Reply::error(s, m))?;
+                let done = if dry {
+                    campaign::requestion_dry(registry, which, &question, &now)
+                } else {
+                    campaign::requestion(registry, which, &question, principal, &now)
+                }
+                .map_err(campaign_err)?;
+                let filled = if dry {
+                    0
+                } else {
+                    let c = campaign::find(registry.store(), which).map_err(campaign_err)?;
+                    fill_derived(registry, Some(&served), &c)?
+                };
+                Ok(Reply::ok(requestioned(&c.name, &done, filled, dry)))
             }
             // record 45: the rating workspace's heartbeat
             ["api", "campaigns", which, "assignments", a, "renew"] if post => {
@@ -4230,6 +4324,57 @@ pub(crate) fn derive_answer(
     Value::Object(out)
 }
 
+/// The question an open axes campaign moves to when `axes` are asked now,
+/// for `nils campaign requestion` and its door alike: the values its maker
+/// chose stay on the axes still asked, and the axes derived are `derive`
+/// where named. Where not (2026-11-06): every other axis of the pack where
+/// the axes asked cover it ([`complete_axes`]), else the axes the campaign
+/// asked or derived before that the pack derives from those asked now, so
+/// a campaign that asked the body part and the body region, moved to the
+/// body part alone, derives the region.
+pub(crate) fn requestion_question(
+    c: &campaign::Campaign,
+    served: &nils_pack::Pack,
+    axes: &[String],
+    derive: Option<&[String]>,
+) -> Result<Value, (u16, String)> {
+    let mut values = serde_json::Map::new();
+    for a in axes {
+        if let Some(v) = c.question["values"].get(a) {
+            values.insert(a.clone(), v.clone());
+        }
+    }
+    let mut question = json!({"kind": "axes", "axes": axes, "values": values});
+    match derive {
+        Some(d) => question["derive"] = json!(d),
+        None => {
+            let whole = nils_pack::derive::infer(served, axes).map_err(|e| (400, e))?;
+            if whole.is_empty() {
+                let before: Vec<String> = strings_of(&c.question["axes"])
+                    .into_iter()
+                    .chain(strings_of(&c.question["derive"]))
+                    .filter(|a| !axes.contains(a))
+                    .collect();
+                let kept =
+                    nils_pack::derive::reachable(served, axes, &before).map_err(|e| (400, e))?;
+                question["derive"] = json!(kept);
+            }
+        }
+    }
+    complete_axes(&mut question, Some(served))?;
+    Ok(question)
+}
+
+/// What a requestion did, or would do, as its door and `--json` say it.
+fn requestioned(name: &str, done: &campaign::Requestioned, filled: usize, dry_run: bool) -> Value {
+    json!({
+        "campaign": done.campaign, "name": name,
+        "asked_before": done.asked_before, "asked": done.asked,
+        "derive": done.derive, "answers_kept": done.answers,
+        "answers_derived": filled, "dry_run": dry_run,
+    })
+}
+
 /// Record 48: every kept answer of an axes campaign that derives axes and
 /// has none kept yet (given to a batch, or before a requestion) gets what
 /// it derives, from its own value, through the served pack. What an answer
@@ -5314,7 +5459,10 @@ pub(crate) enum CampaignCommand {
         /// The axes the rater answers now, each asked before
         #[arg(long, value_name = "AXES", value_delimiter = ',', required = true)]
         axes: Vec<String>,
-        /// The axes derived from the answer; the pack's own when not given
+        /// The axes derived from the answer. When not given: every other
+        /// axis of the pack where the axes asked cover it, else the axes
+        /// the campaign asked or derived before that the pack derives from
+        /// those asked now
         #[arg(long, value_name = "AXES", value_delimiter = ',')]
         derive: Option<Vec<String>>,
         /// Where the pack is
@@ -5323,6 +5471,9 @@ pub(crate) enum CampaignCommand {
         /// The pack the campaign was made under
         #[arg(long, default_value = "mri")]
         pack: String,
+        /// Say what it would do and write nothing
+        #[arg(long)]
+        dry_run: bool,
         #[arg(long)]
         json: bool,
     },
@@ -6375,6 +6526,7 @@ pub(crate) fn campaign_command(home: &Home, cmd: CampaignCommand) -> Result<(), 
             derive,
             pack_dir,
             pack,
+            dry_run,
             json,
         } => {
             let mut registry = crate::open(home)?;
@@ -6395,43 +6547,39 @@ pub(crate) fn campaign_command(home: &Home, cmd: CampaignCommand) -> Result<(), 
                     c.name, served.name, served.version
                 )));
             }
-            // the vocabulary the campaign's maker chose stays, on the axes
-            // still asked
-            let mut values = serde_json::Map::new();
-            for a in &axes {
-                if let Some(v) = c.question["values"].get(a) {
-                    values.insert(a.clone(), v.clone());
-                }
-            }
-            let mut question = json!({"kind": "axes", "axes": axes, "values": values});
-            if let Some(d) = &derive {
-                question["derive"] = json!(d);
-            }
-            complete_axes(&mut question, Some(&served)).map_err(|(_, m)| usage(m))?;
-            let done = campaign::requestion(&mut registry, &which, &question, &who(), &now)
-                .map_err(cerr)?;
-            let c = campaign::find(registry.store(), &which).map_err(cerr)?;
-            let filled = fill_derived(&mut registry, Some(&served), &c).map_err(rerr)?;
-            let out = json!({
-                "campaign": done.campaign, "name": c.name,
-                "asked_before": done.asked_before, "asked": done.asked,
-                "derive": done.derive, "answers_kept": done.answers,
-                "answers_derived": filled,
-            });
+            let question = requestion_question(&c, &served, &axes, derive.as_deref())
+                .map_err(|(_, m)| usage(m))?;
+            let (done, filled) = if dry_run {
+                let done = campaign::requestion_dry(&mut registry, &which, &question, &now)
+                    .map_err(cerr)?;
+                (done, 0)
+            } else {
+                let done = campaign::requestion(&mut registry, &which, &question, &who(), &now)
+                    .map_err(cerr)?;
+                let c = campaign::find(registry.store(), &which).map_err(cerr)?;
+                let filled = fill_derived(&mut registry, Some(&served), &c).map_err(rerr)?;
+                (done, filled)
+            };
             if json {
-                print(&out);
+                print(&requestioned(&c.name, &done, filled, dry_run));
             } else {
                 println!(
-                    "campaign {} asks {} and derives {}; {} answer(s) kept, {} derived now",
+                    "campaign {} {} {} and derive{} {}; {} answer(s) kept, read on the axes asked{}",
                     c.name,
+                    if dry_run { "would ask" } else { "asks" },
                     done.asked.join(", "),
+                    if dry_run { "" } else { "s" },
                     if done.derive.is_empty() {
                         "nothing".to_string()
                     } else {
                         done.derive.join(", ")
                     },
                     done.answers,
-                    filled
+                    if dry_run {
+                        "; nothing written".to_string()
+                    } else {
+                        format!(", {filled} derived now")
+                    }
                 );
             }
             Ok(())

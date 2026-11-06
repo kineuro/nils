@@ -2364,6 +2364,20 @@ fn routed(
     {
         return r;
     }
+    // UX round 2: where each axis label of a scan or a visit came from,
+    // and the scans sorted again
+    if let Some(r) = crate::origins::route(
+        doors,
+        registry,
+        caller,
+        quasi,
+        method.as_str(),
+        &segs,
+        query,
+        body,
+    ) {
+        return r;
+    }
     // record 56 §6.3: Review round 1, the questions answered as a grid of
     // scans; a key is read decoded, as a pipeline's name is
     if let Some(r) = crate::review_questions::route(
@@ -3172,10 +3186,11 @@ fn routed(
         }
         // 2026-10-10: the body-part or post-contrast step of a dataset or a
         // cohort run from its rail: its scans frozen into a handle and the
-        // step's pipeline queued over them for it (crate::operations)
+        // step's pipeline queued over them for it (crate::operations); since
+        // 2026-11-06 a saved selection's scans too, without a cohort
         [
             "api",
-            kind @ ("datasets" | "cohorts"),
+            kind @ ("datasets" | "cohorts" | "selections"),
             _,
             "steps",
             step,
@@ -3189,6 +3204,11 @@ fn routed(
             &decoded(step),
             body,
         ),
+        // 2026-11-06: what each step's run over a saved selection would go
+        // over, before it starts (crate::operations)
+        ["api", "selections", name, "steps"] if get => {
+            crate::operations::selection_steps_door(doors, registry, caller, &decoded(name))
+        }
         ["api", "places"] if get => {
             // Wave 5 §12.5: every place with its role, guarantees, probe and
             // the deployment's paths bound under it. `?probe=1` measures
@@ -5675,6 +5695,10 @@ pub(crate) fn door(method: &str, segs: &[&str]) -> (Need, Detail) {
     if let Some(n) = crate::proposal_doors::door(method, segs) {
         return n;
     }
+    // UX round 2: where a scan's labels came from, and its re-sort
+    if let Some(n) = crate::origins::door(method, segs) {
+        return n;
+    }
     match (method, segs) {
         // the Query page: reading and running questions
         (
@@ -5821,8 +5845,13 @@ pub(crate) fn door(method: &str, segs: &[&str]) -> (Need, Detail) {
         }
         // 2026-10-10: a step's run is a pipeline run queued, which reads
         // pixels: Pipelines work at detail quasi, as `run` at the jobs door
-        ("POST", ["api", "datasets" | "cohorts", _, "steps", _, "run"]) => {
+        ("POST", ["api", "datasets" | "cohorts" | "selections", _, "steps", _, "run"]) => {
             (Need::One("pipelines:work"), Quasi)
+        }
+        // 2026-11-06: what a step's run over a saved selection would go over,
+        // counted as the funnel counts a selection: no row leaves it
+        ("GET", ["api", "selections", _, "steps"]) => {
+            (Need::AnyOf(&["pipelines:see", "query:see"]), Plain)
         }
         // record 55 H2 (round 4): counts of a dataset's picks, for its card
         ("GET", ["api", "picks", "summary"]) => {
@@ -6707,6 +6736,8 @@ pub(crate) fn doors_list() -> Vec<String> {
         "GET /api/datasets/{name}/summary",
         "POST /api/datasets/{name}/steps/{step}/run",
         "POST /api/cohorts/{name}/steps/{step}/run",
+        "POST /api/selections/{name}/steps/{step}/run",
+        "GET /api/selections/{name}/steps",
         "GET /api/pseudonymize/tags",
         "GET /api/places",
         "POST /api/places",
@@ -6752,6 +6783,7 @@ pub(crate) fn doors_list() -> Vec<String> {
     .chain(crate::rule_changes::DOORS.iter())
     .chain(crate::review_questions::DOORS.iter())
     .chain(crate::proposal_doors::DOORS.iter())
+    .chain(crate::origins::DOORS.iter())
     .map(|d| (*d).to_string())
     .collect()
 }
@@ -8333,6 +8365,24 @@ pub(crate) fn policy() -> Vec<serde_json::Value> {
             "Ran a cohort's step",
         ),
         row(
+            "POST /api/selections/{name}/steps/{step}/run",
+            true,
+            false,
+            "job",
+            "one id",
+            "Running a step over a selection",
+            "Ran a step over a selection",
+        ),
+        row(
+            "GET /api/selections/{name}/steps",
+            false,
+            false,
+            "bounded",
+            "one document",
+            "Reading what a step over a selection would run over",
+            "Read what a step over a selection would run over",
+        ),
+        row(
             "POST /api/places",
             true,
             false,
@@ -8998,6 +9048,7 @@ pub(crate) fn policy() -> Vec<serde_json::Value> {
             .chain(crate::rule_changes::POLICY.iter())
             .chain(crate::review_questions::POLICY.iter())
             .chain(crate::proposal_doors::POLICY.iter())
+            .chain(crate::origins::POLICY.iter())
             .chain(crate::participate::POLICY.iter())
             .map(|(door, writes, idem, cost, cap, now, then)| {
                 row(door, *writes, *idem, cost, cap, now, then)

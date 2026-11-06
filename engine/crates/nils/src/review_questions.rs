@@ -2166,6 +2166,34 @@ pub(crate) fn resort_committed(
             "words": "no scan to re-sort",
         });
     }
+    let mut done = resort_stacks(
+        registry,
+        pack_dir,
+        &format!(
+            "re-sort after {who} committed {} decision(s)",
+            decisions.len()
+        ),
+        "committed decisions",
+        &stacks,
+    );
+    done["unreached"] = json!(unreached);
+    done
+}
+
+/// Sort these stacks again (UX round 2, 2026-11-06, taken out of
+/// [`resort_committed`] for the origins door): a classify over them alone,
+/// by the pack, the version and the overlay each was last sorted with, so
+/// the decisions in force reach the axis every page reads; a stack no sort
+/// has judged is left to the first sort. `label` is the job's label and
+/// `lead` the words its scope starts with. What was done, as `{state,
+/// stacks, sorted, jobs, words}`.
+pub(crate) fn resort_stacks(
+    registry: &mut Registry,
+    pack_dir: Option<&std::path::Path>,
+    label: &str,
+    lead: &str,
+    stacks: &BTreeSet<i64>,
+) -> Value {
     let started = std::time::Instant::now();
     // the pack, its version and the overlay each stack was last sorted with
     let mut by_pack: BTreeMap<(String, String, Option<String>), Vec<i64>> = BTreeMap::new();
@@ -2222,14 +2250,11 @@ pub(crate) fn resort_committed(
             }
         };
         let settings = nils_classify::Settings {
-            name: format!(
-                "re-sort after {who} committed {} decision(s)",
-                decisions.len()
-            ),
+            name: label.to_string(),
             stacks: nils_classify::job::Stacks::Only(std::sync::Arc::new(
                 list.iter().copied().collect(),
             )),
-            scope: vec![format!("committed decisions: {} scans", list.len())],
+            scope: vec![format!("{lead}: {} scans", list.len())],
             ..nils_classify::Settings::default()
         };
         let cancel = nils_digest::Cancel::new();
@@ -2285,7 +2310,7 @@ pub(crate) fn resort_committed(
     );
     json!({
         "state": state, "stacks": stacks.len(), "sorted": sorted, "jobs": jobs,
-        "unreached": unreached, "words": words,
+        "words": words,
     })
 }
 

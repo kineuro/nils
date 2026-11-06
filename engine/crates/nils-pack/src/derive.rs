@@ -160,6 +160,46 @@ pub fn infer(pack: &Pack, asked: &[String]) -> Result<Vec<String>, String> {
         .collect())
 }
 
+/// The axes of `among` that may be derived beside `asked`, in the pack's
+/// order: each one [`check`] allows with the others found, reading the
+/// asked axes and one another. An axis of `among` that reads anything else,
+/// or reads the file, is left out rather than refused. A campaign moved to
+/// fewer asked axes keeps deriving what it asked before where the pack can
+/// (2026-11-06: a body-part campaign that asked the body region too, moved
+/// to the body part alone, derives the region).
+pub fn reachable(pack: &Pack, asked: &[String], among: &[String]) -> Result<Vec<String>, String> {
+    let asked_i: BTreeSet<usize> = asked
+        .iter()
+        .map(|a| index(pack, a))
+        .collect::<Result<_, _>>()?;
+    let among_i: BTreeSet<usize> = among
+        .iter()
+        .map(|a| index(pack, a))
+        .collect::<Result<_, _>>()?;
+    let mut covered = asked_i.clone();
+    loop {
+        let mut grew = false;
+        for &i in &among_i {
+            if covered.contains(&i) {
+                continue;
+            }
+            let mut with = covered.clone();
+            with.insert(i);
+            if qualifies(pack, i, &asked_i, &with).is_ok() {
+                covered = with;
+                grew = true;
+            }
+        }
+        if !grew {
+            break;
+        }
+    }
+    Ok((0..pack.axes.len())
+        .filter(|i| covered.contains(i) && !asked_i.contains(i))
+        .map(|i| pack.axes[i].name.clone())
+        .collect())
+}
+
 /// The asked axes a derived axis reads, through the derived axes it reads.
 pub fn depends(pack: &Pack, axis: &str, asked: &[String], derive: &[String]) -> BTreeSet<String> {
     let asked_s: BTreeSet<&str> = asked.iter().map(String::as_str).collect();
@@ -411,6 +451,26 @@ mod tests {
         assert!(e.contains("reads"), "{e}");
         let e = check(&pack, &words(PHASE0), &words(&["base"])).unwrap_err();
         assert!(e.contains("asked"), "{e}");
+    }
+
+    /// 2026-11-06: of the axes a campaign asked before, the body part alone
+    /// still derives the body region, and nothing the pack reads off the
+    /// file; what it finds passes [`check`].
+    #[test]
+    fn the_body_part_alone_reaches_the_body_region_and_nothing_else() {
+        let pack = mri();
+        let asked = words(&["body_part"]);
+        let got = reachable(&pack, &asked, &words(&["body_region", "technique", "base"])).unwrap();
+        assert_eq!(got, words(&["body_region"]));
+        check(&pack, &asked, &got).unwrap();
+        assert!(reachable(&pack, &asked, &[]).unwrap().is_empty());
+        assert!(reachable(&pack, &asked, &words(&["no_such_axis"])).is_err());
+        // where the asked axes cover the pack, it finds what infer does
+        let mut all = infer(&pack, &words(PHASE0)).unwrap();
+        let mut got = reachable(&pack, &words(PHASE0), &all).unwrap();
+        all.sort();
+        got.sort();
+        assert_eq!(got, all);
     }
 
     /// Can't tell on base leaves what reads base can't tell, and nothing

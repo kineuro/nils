@@ -4127,6 +4127,29 @@ pub fn requestion(
     who: &str,
     now: &str,
 ) -> Result<Requestioned, Error> {
+    requestion_in(registry, which, question, who, now, true)
+}
+
+/// What [`requestion`] would do, checked the same way under the campaign's
+/// lock, and nothing written or audited (2026-11-06: the desk's confirm
+/// says what changes before anything does).
+pub fn requestion_dry(
+    registry: &mut Registry,
+    which: &str,
+    question: &Value,
+    now: &str,
+) -> Result<Requestioned, Error> {
+    requestion_in(registry, which, question, "", now, false)
+}
+
+fn requestion_in(
+    registry: &mut Registry,
+    which: &str,
+    question: &Value,
+    who: &str,
+    now: &str,
+    write: bool,
+) -> Result<Requestioned, Error> {
     let c = find(registry.store(), which)?;
     if c.status != "open" {
         return Err(refused(format!("campaign {} is {}", c.name, c.status)));
@@ -4212,6 +4235,16 @@ pub fn requestion(
             return Err(e);
         }
     };
+    if !write {
+        store.rollback()?;
+        return Ok(Requestioned {
+            campaign: c.id,
+            asked_before: before,
+            asked: axes.clone(),
+            derive: derive.clone(),
+            answers: kept,
+        });
+    }
     store.commit()?;
     audit::record(
         registry,

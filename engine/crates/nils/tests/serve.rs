@@ -5224,6 +5224,24 @@ fn every_door_needs_its_grant_and_a_refusal_names_it() {
             "pipelines-see",
             "pipelines:work",
         ),
+        // 2026-11-06: a step over a saved selection runs as a dataset's does,
+        // and what it would go over is read on the Pipelines or Query grant
+        (
+            "POST",
+            "/api/selections/none/steps/body_part/run",
+            "{}",
+            "operator",
+            "pipelines-see",
+            "pipelines:work",
+        ),
+        (
+            "GET",
+            "/api/selections/none/steps",
+            "",
+            "pipelines-see",
+            "data-see",
+            "pipelines:see",
+        ),
         (
             "POST",
             "/api/places",

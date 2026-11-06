@@ -17834,6 +17834,10 @@ pub(crate) fn update_all(channel: Option<&str>, only: &[String]) -> Result<bool,
         })
         .map(|(name, _)| name.clone())
         .collect();
+    // in the order an update says it takes them: the engine's image, the
+    // desk whose contract it may need, then the parts that need neither
+    let mut names = names;
+    names.sort_by_key(|name| crate::releases::rank(name));
     for name in names {
         let part = state.parts[&name].clone();
         match part.kind.as_str() {
@@ -17842,9 +17846,18 @@ pub(crate) fn update_all(channel: Option<&str>, only: &[String]) -> Result<bool,
                 // engine speaks, under whatever number it carries
                 let found = if name == "desk" {
                     match desk_to_move_to(channel, &part.version) {
-                        Ok(Some(version)) => Some(version),
-                        Ok(None) => {
-                            println!("{name}: {} is the newest this engine speaks", part.version);
+                        Ok((Some(version), waits)) => {
+                            if let Some(why) = waits {
+                                println!("{name}: a newer release stays out: {why}");
+                            }
+                            Some(version)
+                        }
+                        Ok((None, waits)) => {
+                            println!(
+                                "{name}: {} is the newest this engine speaks{}",
+                                part.version,
+                                waits.map(|w| format!("; {w}")).unwrap_or_default()
+                            );
                             continue;
                         }
                         Err(why) => {
@@ -19028,15 +19041,23 @@ fn start_supervisor(plan: &Plan, state: &State, console: &Console) {
 /// engine speaks would refuse to start, so it is passed over for the newest
 /// that does; the numbers of the two need not match. This binary is the
 /// newest engine by now, since an update installs it first and hands over.
-fn desk_to_move_to(channel: Option<&str>, installed: &str) -> Result<Option<String>, String> {
-    let version = crate::releases::desk_to_take(channel, true)
+/// Beside it, why a newer desk release stays out, where one does.
+fn desk_to_move_to(
+    channel: Option<&str>,
+    installed: &str,
+) -> Result<(Option<String>, Option<String>), String> {
+    let (version, held) = crate::releases::desk_to_take_said(channel, true)
         .map_err(|why| format!("kept where it is: {why}"))?;
+    // only a release newer than the one installed is said to stay out
+    let waits = held
+        .filter(|(v, _)| update::newer(v, installed))
+        .map(|(_, why)| why);
     let moves = if crate::releases::desk_pin().is_some() {
         version != installed.trim_start_matches('v')
     } else {
         update::newer(&version, installed)
     };
-    Ok(moves.then_some(version))
+    Ok((moves.then_some(version), waits))
 }
 
 /// One binary part from its own releases, when a newer one is published.
@@ -19050,12 +19071,14 @@ fn update_binary_part(
     }
     let base = &update::desk_base(channel);
     let path = &part.path;
-    let version = match desk_to_move_to(channel, &part.version).map_err(fail)? {
+    let (to, waits) = desk_to_move_to(channel, &part.version).map_err(fail)?;
+    let waits = waits.map(|w| format!("; {w}")).unwrap_or_default();
+    let version = match to {
         Some(version) => version,
         None if Path::new(path).exists() => {
             return Ok((
                 part.version.clone(),
-                format!("{} is the newest this engine speaks", part.version),
+                format!("{} is the newest this engine speaks{waits}", part.version),
             ));
         }
         // a desk whose binary is gone is taken again at the version to take
@@ -19064,7 +19087,7 @@ fn update_binary_part(
     let file = update::part_file("nils-desk", &update::host_target());
     let bytes = update::fetch_checked(base, &version, &file)?;
     update::install_binary(Path::new(path), &bytes)?;
-    Ok((version.clone(), format!("{version} at {path}")))
+    Ok((version.clone(), format!("{version} at {path}{waits}")))
 }
 
 // ----------------------------------------------------------- the uninstall
