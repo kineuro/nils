@@ -73,6 +73,7 @@ mod measures;
 mod model_cli;
 mod operations;
 mod originals;
+mod origins;
 mod packs;
 mod pair;
 mod participate;
@@ -396,6 +397,8 @@ enum Command {
     },
     /// Provenance (record 57 P8, record 58 P5): which steps ran on a subject, a session or a stack, with which keys and results, and each result's curation state
     Provenance(provenance::ProvenanceArgs),
+    /// Where each axis label of a scan or a visit's scans came from (UX round 2): the rules, a model or a decision, who and when, and a decision the sort has not applied yet; --resort sorts them again first
+    Origins(origins::OriginsArgs),
     /// The yield funnel of a selection through a pipeline or family: subjects, sessions and stacks left after each filter and each hard need, by year, base and 2D or 3D, and the error-budget line (record 58 P4)
     Funnel(funnel::FunnelArgs),
     /// The software place (record 57 P5): the tools installed by digest and the installs a site registers, verified, with their licences as recorded acceptances
@@ -2514,6 +2517,7 @@ fn main() -> ExitCode {
         Command::Software { command } => software::command(&home, command),
         Command::Workflow { command } => workflows::command(&home, command),
         Command::Provenance(args) => provenance::command(&home, args),
+        Command::Origins(args) => origins::command(&home, args),
         Command::Funnel(args) => funnel::command(&home, args),
         Command::Login(args) => login_command(args),
         Command::Logout => {

@@ -951,6 +951,38 @@ paths:
         "400": {description: "No model or axis, a field that is not the caller's to say, or a name that is a number"}
         "404": {description: No registered model answers to the reference}
         "409": {description: "Nothing the model proposed on the axis waits below its threshold outside a campaign, a campaign so named exists, or no pack is served"}
+  /api/origins:
+    get:
+      summary: Where each axis label of one scan or of one visit's scans came from (UX round 2; data:see or review:see; nils origins)
+      description: "Added in place, additively, on 2026-11-06. Name exactly one of `stack` (a stack id), `session` (a session the cache holds, as the visits door gave it) or `studies` (the studies of a visit it does not hold, a comma list). Answers {of {kind, id | ids}, count, unsorted, stacks [{stack, sorted {pack, version, overlay, job, at} | null, unsorted, axes [{axis, values, confidence, tier, origin, line, state, words, rules, from, decided}]}], withheld {stacks, why}}. `values` are what the sort holds on the axis (none for nothing). `origin` is where they came from: `rules` (the pack and version in `sorted`, and `rules` [{rule_set, rule, source, value, tier, basis, confidence, pass, matched}], the evidence rows that carried the held values; `matched`, the words a rule read, only at detail quasi), `model` (a model's answer applied as a decision: `from` {kind, by, version, model {id, name, version, label}, campaign, scope}), `decision` (a person's or an agent's: `from` {kind, by, campaign, scope}) or `none`. `decided` is the decision in force on the axis by the sort's own precedence (a person over an agent over a model, then the narrowest scope: the stack, a grouped question it is a member of, its series, its subject, its machine), {id, kind, scope, at, value, values, by, committed_by, model {id, name, version, label, p, run}, campaign {id, name, status, item, position}, review_item {id, kind}}, null where none. `state` is `current`; `unsorted` where the decision in force and the held values differ (`words`: decided <value>; sorted before the decision); `withdrawn` where the held value was a decision no longer in force; or `withheld` where a campaign not closed yet wrote the decision and the caller does not read every answer of it (review:work or its adjudicator), when `decided` names the campaign alone (record 45, record 48). A stack of a sample sealed now is left out and counted in `withheld` without sealed:see. A fixed number of queries for the visit, never one per scan; at most 5,000 scans."
+      parameters:
+        - {name: stack, in: query, required: false, schema: {type: integer}}
+        - {name: session, in: query, required: false, schema: {type: integer}}
+        - {name: studies, in: query, required: false, schema: {type: string}}
+      responses:
+        "200": {description: The axes and their origins}
+        "400": {description: "None or more than one of stack, session and studies, an id that is not a number, or more than 5,000 scans"}
+        "403": {description: Neither data:see nor review:see}
+        "404": {description: No such stack}
+  /api/origins/resort:
+    post:
+      summary: One scan or one visit's scans sorted again, so the decisions in force reach their labels (UX round 2; pipelines:work; nils origins --resort)
+      description: "Added in place, additively, on 2026-11-06. The body names exactly one of `stack`, `session` or `studies` (an array or a comma list), as the origins door does. The target's scans a sort has judged are sorted again at once, each by the pack, version and overlay it was sorted with, as the re-sort after a commit does; a scan no sort has judged is left to the first sort, and a stack of a sample sealed now is left out without sealed:see. A sort holding the registry past a short wait leaves them to the next (`state` waiting). Answers {resort {state, stacks, sorted, jobs, words}, origins} with `origins` as GET /api/origins answers after the sort."
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                stack: {type: integer}
+                session: {type: integer}
+                studies: {type: array, items: {type: integer}}
+      responses:
+        "200": {description: What the re-sort did, and the origins after it}
+        "400": {description: "None or more than one of stack, session and studies"}
+        "403": {description: No pipelines:work}
+        "404": {description: No such stack}
   /api/datasets/{name}/headers:
     get:
       summary: A dataset's damaged-header flag (record 56 section 3; data:see or review:see)

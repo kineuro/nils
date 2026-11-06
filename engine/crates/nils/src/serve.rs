@@ -2364,6 +2364,20 @@ fn routed(
     {
         return r;
     }
+    // UX round 2: where each axis label of a scan or a visit came from,
+    // and the scans sorted again
+    if let Some(r) = crate::origins::route(
+        doors,
+        registry,
+        caller,
+        quasi,
+        method.as_str(),
+        &segs,
+        query,
+        body,
+    ) {
+        return r;
+    }
     // record 56 §6.3: Review round 1, the questions answered as a grid of
     // scans; a key is read decoded, as a pipeline's name is
     if let Some(r) = crate::review_questions::route(
@@ -5675,6 +5689,10 @@ pub(crate) fn door(method: &str, segs: &[&str]) -> (Need, Detail) {
     if let Some(n) = crate::proposal_doors::door(method, segs) {
         return n;
     }
+    // UX round 2: where a scan's labels came from, and its re-sort
+    if let Some(n) = crate::origins::door(method, segs) {
+        return n;
+    }
     match (method, segs) {
         // the Query page: reading and running questions
         (
@@ -6752,6 +6770,7 @@ pub(crate) fn doors_list() -> Vec<String> {
     .chain(crate::rule_changes::DOORS.iter())
     .chain(crate::review_questions::DOORS.iter())
     .chain(crate::proposal_doors::DOORS.iter())
+    .chain(crate::origins::DOORS.iter())
     .map(|d| (*d).to_string())
     .collect()
 }
@@ -8998,6 +9017,7 @@ pub(crate) fn policy() -> Vec<serde_json::Value> {
             .chain(crate::rule_changes::POLICY.iter())
             .chain(crate::review_questions::POLICY.iter())
             .chain(crate::proposal_doors::POLICY.iter())
+            .chain(crate::origins::POLICY.iter())
             .chain(crate::participate::POLICY.iter())
             .map(|(door, writes, idem, cost, cap, now, then)| {
                 row(door, *writes, *idem, cost, cap, now, then)
