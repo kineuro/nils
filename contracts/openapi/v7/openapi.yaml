@@ -979,7 +979,7 @@ paths:
                 session: {type: integer}
                 studies: {type: array, items: {type: integer}}
       responses:
-        "200": {description: What the re-sort did, and the origins after it}
+        "200": {description: "What the re-sort did, and the origins after it"}
         "400": {description: "None or more than one of stack, session and studies"}
         "403": {description: No pipelines:work}
         "404": {description: No such stack}
