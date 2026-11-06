@@ -61,6 +61,7 @@ import numpy as np
 from . import AXIS, GIVEN, NOT_GIVEN, __version__
 from . import calibration, evidence, manifest, parts, slices
 from .fusion import Fusion, FusionError, stage1
+from .progress import Progress
 from .results import FAILED, SKIPPED, Run, Unit
 
 logger = logging.getLogger("nils_postcontrast")
@@ -106,11 +107,13 @@ def _table(sid: int, cas, **kw) -> dict:
 
 
 def score(stacks, context, cas, F: Fusion, device: str = "cpu", workers: int = 8, batch: int = 64, threads: int | None = None,
-          raw: bool = False) -> tuple:
+          raw: bool = False, progress=None) -> tuple:
     """(every stack's table by stack id, the evidence rows the fusion read
     them from, ``evidence.rows_for``): the run's logic without its files.
     With ``raw`` (the raw-score mode) a T1-type brain stack at a site with
-    no calibration is read and scored too, for its log-odds alone."""
+    no calibration is read and scored too, for its log-odds alone.
+    ``progress``, where given, is told how many stacks have their table as
+    they come (2026-11-05: the engine shows it while the run works)."""
     rows = evidence.rows_for(stacks, context, F)
     out: dict = {}
     tasks = []
@@ -135,6 +138,12 @@ def score(stacks, context, cas, F: Fusion, device: str = "cpu", workers: int = 8
                 uncal.add(e.stack_id)
             iop = (e.geometry or {}).get("image_orientation_patient")
             tasks.append((e.stack_id, iop, manifest.ordered_files(e), manifest.multi_frame(e), r["acq3d"], r["thick"] or 0.0))
+
+    def say() -> None:
+        if progress is not None:
+            progress(len(out))
+
+    say()
     if not tasks:
         return out, rows
     from .student import Student
@@ -164,6 +173,7 @@ def score(stacks, context, cas, F: Fusion, device: str = "cpu", workers: int = 8
                 out[sid] = table(sid, p_given=None if s.p != s.p else round(s.p, 6), stage1="deferred", reason="deferred",
                                  margin=round(s.margin, 4), seeds_agree=int(s.agree), files_read=opened)
         buf.clear()
+        say()
 
     import multiprocessing
 
@@ -177,6 +187,7 @@ def score(stacks, context, cas, F: Fusion, device: str = "cpu", workers: int = 8
                     out[sid] = table(sid, stage1=why, reason="no-calibration", files_read=opened)
                 else:
                     out[sid] = table(sid, stage1=why, reason="deferred", files_read=opened)
+                say()
                 continue
             buf.append((sid, x, opened))
             if len(buf) >= batch:
@@ -205,7 +216,11 @@ def cmd_cascade(a: argparse.Namespace) -> int:
         print(f"nils-postcontrast: {e}", file=sys.stderr)
         return 1
     t0 = time.time()
-    tables, rows = score(stacks, context, cas, F, device=device, workers=a.threads, batch=a.batch, threads=a.student_threads, raw=bool(a.raw_scores))
+    # how far it is, as the engine reads it while it runs (2026-11-05)
+    progress = Progress(len(stacks))
+    tables, rows = score(stacks, context, cas, F, device=device, workers=a.threads, batch=a.batch, threads=a.student_threads, raw=bool(a.raw_scores),
+                         progress=progress.set)
+    progress.finish()
     counts: dict = {}
     for e in stacks:
         doc = tables[e.stack_id]

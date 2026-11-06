@@ -1526,7 +1526,10 @@ fn decision_keys(store: &mut Store, ids: &[i64]) -> Result<Vec<(i64, String, Str
 
 /// Record 51 R3: of these staged decisions, the ones on an axis an open
 /// campaign asks of a stack they reach, each with that campaign's name.
-fn held_decisions(store: &mut Store, ids: &[i64]) -> Result<BTreeMap<i64, String>, Error> {
+pub(crate) fn held_decisions(
+    store: &mut Store,
+    ids: &[i64],
+) -> Result<BTreeMap<i64, String>, Error> {
     let mut out = BTreeMap::new();
     if ids.is_empty() {
         return Ok(out);

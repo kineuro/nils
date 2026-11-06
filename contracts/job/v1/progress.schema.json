@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nils.kineuro.se/contracts/job/v1/progress.schema.json",
+  "title": "NILS unit progress (/output/.nils-progress.json)",
+  "description": "Optional, amended in place on 2026-11-05: how far a running unit is, as it says of itself. The engine names the file in the container's NILS_PROGRESS, /output/.nils-progress.json. A unit may replace it whole (write a file beside it, then rename it over), as often as it likes, with how many of what it was given it has done. The engine reads it while the container runs, at most every few seconds and one small read at a time, never a walk of the folder; it removes the file once the container ended and never registers it. A file that is not whole is read again at the next look. A unit that writes nothing is shown by its units done of its units and its time running.",
+  "x-nils-file": "/output/.nils-progress.json",
+  "x-nils-env": "NILS_PROGRESS",
+  "type": "object",
+  "required": ["done"],
+  "properties": {
+    "done": {"type": "integer", "minimum": 0, "description": "How many it has done; one past `of` is read as `of`"},
+    "of": {"type": "integer", "minimum": 0, "description": "Of how many: for a stacks unit that holds many stacks, the stacks it was given"},
+    "what": {"type": "string", "pattern": "^[A-Za-z -]{1,24}$", "description": "What it counts, a short plural word: stacks, slices, steps. Another word is dropped"}
+  }
+}

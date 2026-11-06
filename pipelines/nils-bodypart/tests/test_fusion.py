@@ -203,6 +203,17 @@ def test_the_entry_point_scores_every_stack_it_can(world):
     assert r["metrics"]["no_fingerprint"] == 1 and r["metrics"]["no_geometry"] == 1
 
 
+def test_the_entry_point_says_how_far_it_is(world, tmp_path, monkeypatch):
+    """2026-11-05: the stacks answered of the stacks given, where the engine
+    names the file, the last count every stack."""
+    said = tmp_path / ".nils-progress.json"
+    monkeypatch.setenv("NILS_PROGRESS", str(said))
+    code, r = run(world, tmp_path / "out")
+    assert code == 0
+    assert json.loads(said.read_text()) == {"done": 5, "of": 5, "what": "stacks"}
+    assert r["counts"]["total"] == 5
+
+
 def test_without_a_coarse_model_only_fine_mode_runs(world, tmp_path):
     inputs = tmp_path / "inputs"
     shutil.copytree(world["inputs"], inputs)

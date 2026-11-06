@@ -2038,3 +2038,220 @@ fn workflow_versions_added_at_once_are_distinct_or_said_taken() {
         assert_eq!(again.id, first.id);
     }
 }
+
+/// UX round 1 (2026-11-05): a model's proposals on an axis, counted per
+/// model and axis, are committed at or above its threshold by the model and
+/// the axis, and the rest becomes a campaign of its own in one move: the
+/// maker its one rater, held back none, the model's answer suggested on each
+/// scan, closing into decisions in force. Both backends.
+#[test]
+fn the_proposals_per_model_and_axis_commit_and_the_rest_becomes_a_campaign() {
+    use nils_registry::campaign::{self, Items, New, Suggest};
+    use std::collections::BTreeMap;
+    for mut l in labs() {
+        let name = l.name;
+        let reg = &mut l.registry;
+        let ids = stacks(reg, 3);
+        let a = head(reg, "1", '1', Some(0.9));
+        let run = |id| Run {
+            id,
+            job_id: None,
+            principal: "runner@lab",
+            stacks: None,
+            models: None,
+        };
+        // three scans at or above 0.9 (two bands), two below it
+        let given = [
+            proposal(ids[0], "brain", 0.97, a.id),
+            proposal(ids[1], "brain", 0.97, a.id),
+            proposal(ids[2], "brain", 0.92, a.id),
+            proposal(ids[3], "spine", 0.6, a.id),
+            proposal(ids[4], "brain", 0.7, a.id),
+        ];
+        proposals::ingest(reg, &run(7), &given, None).unwrap();
+        assert!(
+            proposals::standing(reg).unwrap().len() == 1,
+            "{name}: one model, one axis"
+        );
+        let s = &proposals::standing(reg).unwrap()[0];
+        assert_eq!(s.model.id, a.id, "{name}");
+        assert_eq!(s.axis, "body_part", "{name}");
+        assert_eq!(s.thresholds, vec![0.9], "{name}");
+        assert_eq!((s.staged.groups, s.staged.stacks), (2, 3), "{name}");
+        assert_eq!((s.below.groups, s.below.stacks), (2, 2), "{name}");
+        assert_eq!(
+            (s.held.stacks, s.asked.stacks, s.drifted),
+            (0, 0, 0),
+            "{name}"
+        );
+        assert_eq!(s.runs, vec![7], "{name}");
+        assert_eq!(s.name, "bp-head-body_part-unsure", "{name}");
+        let shown = s.as_json();
+        assert_eq!(shown["commit"], json!({"groups": 2, "stacks": 3}), "{name}");
+        assert_eq!(shown["label"], "bp-head@1", "{name}");
+
+        // an open campaign that took a question about the axis of one staged
+        // scan from the queue holds its group's decision, and one staged
+        // before the registry moved on is drifted
+        let q = json!({"kind": "axis", "axis": "body_part", "values": ["brain", "spine"]});
+        let none = json!({"when": "never", "metric": "exact"});
+        let asked = row(
+            reg.store(),
+            "review_item",
+            &[
+                ("kind", Param::from("body_part:low_confidence")),
+                ("scope", Param::from("stack")),
+                ("ref", Param::from(json!({"stack_id": ids[2]}).to_string())),
+                (
+                    "evidence",
+                    Param::from(json!({"axis": "body_part"}).to_string()),
+                ),
+                ("status", Param::from("open")),
+            ],
+        );
+        let holding = campaign::create(
+            reg,
+            &New {
+                name: "holds-one",
+                owner: "anna@lab",
+                question: &q,
+                source: json!({}),
+                items: Items::Review(vec![asked]),
+                handle_id: None,
+                content_hash: None,
+                pack_version: None,
+                raters_per_item: 1,
+                raters: Vec::new(),
+                adjudicators: Vec::new(),
+                adjudication: &none,
+                closes_into: "none",
+                lease_seconds: 3600,
+                inputs: BTreeMap::new(),
+                hold_back: None,
+                suggest: None,
+                hide_header: false,
+            },
+        )
+        .unwrap();
+        let store = reg.store();
+        let sql = format!(
+            "UPDATE {} SET epoch_staged = epoch_staged - 1 WHERE id = (SELECT MIN(id) FROM {} WHERE staged_at IS NOT NULL)",
+            store.qualified("decision"),
+            store.qualified("decision")
+        );
+        store.execute(&sql, &[]).unwrap();
+        let s = &proposals::standing(reg).unwrap()[0];
+        assert_eq!((s.held.groups, s.held.stacks), (1, 1), "{name}");
+        assert_eq!(s.commits().stacks, 2, "{name}");
+        assert_eq!(s.drifted, 1, "{name}");
+
+        // the rest as a campaign: one transaction, its suggestions the model's
+        let names = BTreeMap::new();
+        let made = proposals::campaign_of_rest(
+            reg,
+            &proposals::RestCampaign {
+                model: "bp-head@1",
+                axis: "body_part",
+                name: None,
+                owner: "cleo@lab",
+                question: &q,
+                pack_version: None,
+                names: &names,
+            },
+        )
+        .unwrap();
+        let c = &made.campaign;
+        assert_eq!(c.name, "bp-head-body_part-unsure", "{name}");
+        assert_eq!(c.raters(), vec!["cleo@lab".to_string()], "{name}");
+        assert_eq!(c.hold_back, 0.0, "{name}");
+        assert_eq!(c.suggest, Suggest::Imported, "{name}");
+        assert_eq!(c.closes_into, "decision", "{name}");
+        assert_eq!(c.source["proposals"]["model"], a.id, "{name}");
+        assert_eq!(c.source["proposals"]["runs"], json!([7]), "{name}");
+        assert_eq!(made.adopted.len(), 2, "{name}");
+        let items = campaign::items(reg.store(), c.id).unwrap();
+        let mut asked: Vec<i64> = items.iter().filter_map(|i| i.stack_id).collect();
+        asked.sort();
+        assert_eq!(asked, vec![ids[3], ids[4]], "{name}");
+        assert_eq!(made.suggestions.suggestions, 2, "{name}");
+        let told = nils_registry::suggestion::of_campaign(reg.store(), c.id).unwrap();
+        let mut said: Vec<(Option<i64>, String, String)> = told
+            .iter()
+            .map(|t| (t.stack_id, t.value.clone(), t.author.clone()))
+            .collect();
+        said.sort();
+        assert_eq!(
+            said,
+            vec![
+                (Some(ids[3]), "spine".to_string(), "bp-head@1".to_string()),
+                (Some(ids[4]), "brain".to_string(), "bp-head@1".to_string()),
+            ],
+            "{name}"
+        );
+        assert!(
+            told.iter().all(|t| t.confidence.is_some()),
+            "{name}: each with the model's probability"
+        );
+        // what waits now: the rest asked by the new campaign, none below
+        let s = &proposals::standing(reg).unwrap()[0];
+        assert_eq!(s.below.stacks, 0, "{name}");
+        assert_eq!(s.asked.stacks, 2, "{name}");
+        assert_eq!(s.campaigns, vec![(c.id, c.name.clone())], "{name}");
+        assert_eq!(
+            s.name, "bp-head-body_part-unsure-2",
+            "{name}: the next free name"
+        );
+        // nothing waits below the threshold outside a campaign any more
+        let e = proposals::campaign_of_rest(
+            reg,
+            &proposals::RestCampaign {
+                model: "bp-head@1",
+                axis: "body_part",
+                name: Some("again"),
+                owner: "cleo@lab",
+                question: &q,
+                pack_version: None,
+                names: &names,
+            },
+        )
+        .unwrap_err();
+        assert!(
+            e.to_string().contains("waits below its threshold"),
+            "{name}: {e}"
+        );
+        let e = proposals::campaign_of_rest(
+            reg,
+            &proposals::RestCampaign {
+                model: "no-such@1",
+                axis: "body_part",
+                name: None,
+                owner: "cleo@lab",
+                question: &q,
+                pack_version: None,
+                names: &names,
+            },
+        )
+        .unwrap_err();
+        assert!(e.to_string().contains("no registered model"), "{name}: {e}");
+
+        // the commit by the model and the axis takes what no campaign holds
+        let done = review::commit_where(
+            reg,
+            &CommitFilter {
+                model: Some(a.id.to_string()),
+                axis: Some("body_part".into()),
+                ..CommitFilter::default()
+            },
+            true,
+            "cleo@lab",
+            "person",
+        )
+        .unwrap();
+        assert_eq!(done.decisions.len(), 1, "{name}: {done:?}");
+        assert_eq!(done.left_held, 1, "{name}: {done:?}");
+        let s = &proposals::standing(reg).unwrap()[0];
+        assert_eq!((s.staged.stacks, s.held.stacks), (1, 1), "{name}");
+        assert_eq!(s.commits().stacks, 0, "{name}");
+        assert_eq!(holding.closes_into, "none", "{name}");
+    }
+}

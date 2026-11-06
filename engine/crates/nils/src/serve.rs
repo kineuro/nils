@@ -2357,6 +2357,13 @@ fn routed(
     {
         return r;
     }
+    // UX round 1: what models proposed, per model and axis, and a campaign
+    // of what one left below its threshold
+    if let Some(r) =
+        crate::proposal_doors::route(doors, registry, caller, method.as_str(), &segs, body)
+    {
+        return r;
+    }
     // record 56 §6.3: Review round 1, the questions answered as a grid of
     // scans; a key is read decoded, as a pipeline's name is
     if let Some(r) = crate::review_questions::route(
@@ -3152,10 +3159,15 @@ fn routed(
             // Wave 7a, the Data page (2026-10-09): what a dataset holds and
             // where it is, step by step, in counts
             let dataset = crate::scans::dataset_named(registry, &decoded(segs[2]))?;
+            // 2026-11-05: `?at_once=1` never waits for a first count
+            let at_once = query
+                .get("at_once")
+                .is_some_and(|v| v == "1" || v == "true");
             Ok(Reply::ok(crate::dataset_summary::document(
                 registry,
                 &caller.access,
                 &dataset,
+                at_once,
             )?))
         }
         // 2026-10-10: the body-part or post-contrast step of a dataset or a
@@ -3175,6 +3187,7 @@ fn routed(
             kind,
             &decoded(segs[2]),
             &decoded(step),
+            body,
         ),
         ["api", "places"] if get => {
             // Wave 5 §12.5: every place with its role, guarantees, probe and
@@ -5657,6 +5670,11 @@ pub(crate) fn door(method: &str, segs: &[&str]) -> (Need, Detail) {
     if let Some(n) = crate::review_questions::door(method, segs) {
         return n;
     }
+    // UX round 1: what models proposed, per model and axis, before the
+    // table's pattern for one item
+    if let Some(n) = crate::proposal_doors::door(method, segs) {
+        return n;
+    }
     match (method, segs) {
         // the Query page: reading and running questions
         (
@@ -6733,6 +6751,7 @@ pub(crate) fn doors_list() -> Vec<String> {
     .chain(crate::participate::DOORS.iter())
     .chain(crate::rule_changes::DOORS.iter())
     .chain(crate::review_questions::DOORS.iter())
+    .chain(crate::proposal_doors::DOORS.iter())
     .map(|d| (*d).to_string())
     .collect()
 }
@@ -8978,6 +8997,7 @@ pub(crate) fn policy() -> Vec<serde_json::Value> {
             .chain(crate::clinical_doors::POLICY.iter())
             .chain(crate::rule_changes::POLICY.iter())
             .chain(crate::review_questions::POLICY.iter())
+            .chain(crate::proposal_doors::POLICY.iter())
             .chain(crate::participate::POLICY.iter())
             .map(|(door, writes, idem, cost, cap, now, then)| {
                 row(door, *writes, *idem, cost, cap, now, then)

@@ -27,6 +27,7 @@ from . import PACK_VALUES, PACK_VERSION, PREPROCESS_VERSION, __version__
 from . import embeddings as emb
 from . import manifest
 from .encoders import DEFAULT_CHAIN, Encoders
+from .progress import Progress
 from .preprocess import central_slice_indices, load_frames, preprocess_slice, seed_slice_index, slices_to_embed
 from .results import FAILED, SKIPPED, Run, Unit
 
@@ -499,7 +500,11 @@ def cmd_infer(a: argparse.Namespace) -> Run:
     digests = [c["digest"] for c in chain]
     labels: dict[str, int] = {}
     needs = 0
-    for st in manifest.load(a.stacks, source_root=a.source_root):
+    stacks = manifest.load(a.stacks, source_root=a.source_root)
+    # how far it is, as the engine reads it while it runs (2026-11-05)
+    progress = Progress(len(stacks))
+    for st in stacks:
+        progress.add()
         feats = _features(store, digests, st, list(range(st.num_slices)))
         pred = predict_stack(head=head, stack=str(st.stack_id), num_slices=st.num_slices, orientation=st.orientation, slice_features=feats, config=cfg)
         if pred.label is None:
@@ -530,6 +535,7 @@ def cmd_infer(a: argparse.Namespace) -> Run:
         if pred.reasoning.get("aggregation") == "axial_compose":
             p["note"] = "axial brain-neck rule: brain in the upper slices, spine in the lower"
         run.proposals.append(p)
+    progress.finish()
     run.metrics = {"proposed": len(run.proposals), "per_value": labels, "needs_check": needs}
     return run
 
@@ -690,6 +696,8 @@ def cmd_infer_fusion(a: argparse.Namespace) -> Run:
         return _infer_cascade(a, model, cas, device)
     run = Run("bodypart-infer-fusion", a.output, params, device)
     stacks = manifest.load(a.stacks, source_root=a.source_root)
+    # how far it is, as the engine reads it while it runs (2026-11-05)
+    progress = Progress(len(stacks))
     decoded: dict = {}
     done = scoring.score(
         model, a.inputs, stacks, workers=a.threads, device=device, encoder_device=encoder_device, batch=a.batch, stats=decoded, gpu_workers=a.gpu_workers,
@@ -699,6 +707,7 @@ def cmd_infer_fusion(a: argparse.Namespace) -> Run:
     counts = {"answered_fine": 0, "answered_coarse": 0, "no_fingerprint": 0, "no_geometry": 0, "failed": 0, "cohort_calibrated": 0}
     per_value: dict[str, dict[str, int]] = {"fine": {}, "coarse": {}}
     for st, r, why in done:
+        progress.add()
         if r is None:
             status, error = why
             run.units.append(Unit(st.unit, status=status, error=error))
@@ -734,6 +743,7 @@ def cmd_infer_fusion(a: argparse.Namespace) -> Run:
             run.proposals.append(
                 {"stack_id": st.stack_id, "axis": fusion.COARSE_AXIS, "value": c["value"], "probabilities": fusion.proposed(c), "model_digest": model.coarse_part.digest}
             )
+    progress.finish()
     run.metrics = {"stacks": len(stacks), **counts, "per_value": per_value}
     if decoded:
         run.metrics["decoded_frames"] = decoded
@@ -864,9 +874,15 @@ def _infer_cascade(a: argparse.Namespace, model, cas, device: str) -> Run:
         # the manifest read as it is used, its stacks planned in the pool,
         # and each table written once its stack's outcome is final (the
         # speed study's A5.2.3e); with the slice cache, after the run
-        final = None
-        if writer is None and a.cache_fill == "none":
-            def final(o) -> None:
+        emit = writer is None and a.cache_fill == "none"
+        # how far it is (2026-11-05): the stacks whose outcome is final, of
+        # the stacks the engine knows it gave, since the manifest is read
+        # as it goes
+        progress = Progress(None)
+
+        def final(o) -> None:
+            progress.add()
+            if emit:
                 written[o.stack.stack_id] = _emit(run, model, cas, o)
         outcomes = cascade_mod.score_stream(model, cas, a.inputs, Path(a.stacks), source_root=a.source_root, workers=a.threads, on_final=final,
                                             **common)
@@ -876,8 +892,9 @@ def _infer_cascade(a: argparse.Namespace, model, cas, device: str) -> Run:
         # the rest of each session the run holds part of, for the session's top
         context = manifest.context(doc, skip={st.stack_id for st in stacks})
         del doc
+        progress = Progress(len(stacks))
         outcomes = cascade_mod.score(model, cas, a.inputs, stacks, workers=a.threads, context=context, overlap=a.overlap == "on", cache=reader,
-                                     **common)
+                                     progress=progress.set, **common)
     counts = {"answered_fine": 0, "answered_coarse": 0, "failed": 0, "cohort_calibrated": 0}
     stages = {"s1": 0, cas.b24: 0, "touched": 0}
     reasons = {k: 0 for k in cascade_mod.REASONS}
@@ -905,6 +922,8 @@ def _infer_cascade(a: argparse.Namespace, model, cas, device: str) -> Run:
         counts["cohort_calibrated"] += int(r.cohort is not None)
         if writer is not None:
             _cache_entries(writer, o, r, model)
+    progress.of = len(outcomes)
+    progress.finish()
     run.metrics = {"stacks": len(outcomes), **counts, "per_value": per_value, "stages": stages, "reasons": reasons,
                    "files_read": files_total, "files_per_scored_stack": round(files_total / max(1, sum(stages.values())), 3),
                    "stage1": {k: v for k, v in stats.items() if k.startswith("stage1") or k in ("straight_to_planes", "context_stacks")}}

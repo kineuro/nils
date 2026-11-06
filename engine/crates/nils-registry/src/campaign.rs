@@ -1675,6 +1675,18 @@ pub fn review_items(store: &mut Store, q: &ReviewQuery) -> Result<Vec<i64>, Erro
 /// Create a campaign: its row, one item per key, each backed by a review
 /// item, in one transaction; then the audit row.
 pub fn create(registry: &mut Registry, n: &New<'_>) -> Result<Campaign, Error> {
+    create_with(registry, n, |_, _| Ok(()))
+}
+
+/// [`create`], and `then` inside the same transaction once the campaign and
+/// its items are written, given the store and the campaign's id: what it
+/// writes is kept with the campaign, or nothing is (UX round 1, 2026-11-05:
+/// a campaign of a model's proposals is made with their suggestions).
+pub fn create_with(
+    registry: &mut Registry,
+    n: &New<'_>,
+    then: impl FnOnce(&mut Store, i64) -> Result<(), Error>,
+) -> Result<Campaign, Error> {
     let name = n.name.trim();
     if name.is_empty() || name.parse::<i64>().is_ok() {
         return Err(invalid("a campaign's name is a word, not a number"));
@@ -2251,6 +2263,7 @@ pub fn create(registry: &mut Registry, n: &New<'_>) -> Result<Campaign, Error> {
         if let Items::Checks(list) = &n.items {
             crate::check::write_panels(store, id, list)?;
         }
+        then(store, id)?;
         Ok((id, rows.len()))
     })();
     let (id, items) = match written {
@@ -2372,7 +2385,7 @@ pub fn held_pairs(store: &mut Store) -> Result<BTreeMap<(i64, String), String>, 
 /// The review items the open campaigns ask, each with the asking
 /// campaign's name: the ones its items stand on, and those its axes items
 /// answer (`asks`, record 45).
-fn held_review_items(store: &mut Store) -> Result<BTreeMap<i64, String>, Error> {
+pub(crate) fn held_review_items(store: &mut Store) -> Result<BTreeMap<i64, String>, Error> {
     let sql = format!(
         "SELECT i.review_item_id, c.name FROM {} i JOIN {} c ON c.id = i.campaign_id \
          WHERE c.status IN ('open', 'closing') ORDER BY c.id, i.review_item_id",
@@ -3806,12 +3819,21 @@ fn ran_out(a: &Assignment, now: &str) -> bool {
             .is_some_and(|u| secs_of(u).zip(secs_of(now)).is_some_and(|(u, n)| u < n))
 }
 
+/// Whether an assignment holds its item for no one already: its lease ran
+/// out or it was given back. A release of it has nothing to do, and says so
+/// rather than refusing (2026-11-05: `nils campaign release` on a lease that
+/// had run out answered "is expired, not leased", which read as a failure).
+pub fn already_free(a: &Assignment) -> bool {
+    matches!(a.state.as_str(), "expired" | "released")
+}
+
 /// [`release`], where `oversees` says the principal may give back another
 /// person's claim: a holder of review:work, which the caller checks. The
-/// campaign's owner may as well, which this checks. A lease that already
-/// ran out is no one's claim: it is written `expired`, as the next claim
-/// would write it, whoever asks. Every release is audited with the holder
-/// it took the item from.
+/// campaign's owner and the adjudicators it names may as well, which this
+/// checks. A lease that already ran out is no one's claim: it is written
+/// `expired`, as the next claim would write it, whoever asks; one already
+/// ended ([`already_free`]) is answered as it is, nothing written. Every
+/// release is audited with the holder it took the item from.
 pub fn release_as(
     registry: &mut Registry,
     assignment_id: i64,
@@ -3819,24 +3841,44 @@ pub fn release_as(
     oversees: bool,
     now: &str,
 ) -> Result<Assignment, Error> {
+    release_said(registry, assignment_id, principal, oversees, now).map(|(a, _)| a)
+}
+
+/// [`release_as`], answering beside the assignment whether it was free
+/// already ([`already_free`]), so the words can say there was nothing to
+/// give back.
+pub fn release_said(
+    registry: &mut Registry,
+    assignment_id: i64,
+    principal: &str,
+    oversees: bool,
+    now: &str,
+) -> Result<(Assignment, bool), Error> {
     let store = registry.store();
     let a = assignment(store, assignment_id)?
         .ok_or_else(|| Error::NotFound(format!("no assignment {assignment_id}")))?;
+    if already_free(&a) {
+        return Ok((a, true));
+    }
     let expired = ran_out(&a, now);
     let own = a.principal.as_deref() == Some(principal);
     if !own && !expired && !oversees {
-        let owner = get(store, a.campaign_id)?.is_some_and(|c| c.owner == principal);
-        if !owner {
+        let minds = get(store, a.campaign_id)?.is_some_and(|c| {
+            c.owner == principal || c.adjudicators().iter().any(|p| p == principal)
+        });
+        if !minds {
             return Err(Error::Forbidden(format!(
-                "assignment {assignment_id} is not {principal}'s; the campaign's owner or a holder of review:work gives back another's claim"
+                "assignment {assignment_id} is not {principal}'s; the campaign's owner, its adjudicators or a holder of review:work give back another's claim"
             )));
         }
     }
     if a.state != "leased" {
-        return Err(refused(format!(
-            "assignment {assignment_id} is {}, not leased",
-            a.state
-        )));
+        return Err(refused(match a.state.as_str() {
+            "submitted" => {
+                format!("assignment {assignment_id} is answered; nothing is held to give back")
+            }
+            other => format!("assignment {assignment_id} is {other}, not leased"),
+        }));
     }
     store.begin()?;
     let done = (|| -> Result<(), StoreError> {
@@ -3882,8 +3924,9 @@ pub fn release_as(
             details: Some(details),
         },
     )?;
-    assignment(registry.store(), assignment_id)?
-        .ok_or_else(|| Error::NotFound(format!("no assignment {assignment_id}")))
+    let a = assignment(registry.store(), assignment_id)?
+        .ok_or_else(|| Error::NotFound(format!("no assignment {assignment_id}")))?;
+    Ok((a, false))
 }
 
 // ------------------------------------------------------------ the answers
@@ -5964,10 +6007,18 @@ fn p90(mut v: Vec<f64>) -> Option<f64> {
     Some(v[rank - 1])
 }
 
+/// How long a claim may stay open before the time from it to its answer
+/// is a break rather than reading (2026-11-05: a 4,838-item campaign read
+/// alone showed 1,694 s at the ninetieth percentile, a lease left open
+/// overnight, not a read): five minutes. An answer past it is counted as
+/// paused and left out of the median and the percentile.
+pub const PAUSE_SECONDS: f64 = 300.0;
+
 /// Record 48 R1: how fast a campaign is read, per rater and over all: the
 /// answers, those read one by one and those given to a batch, the median
 /// and the ninetieth percentile of the seconds from claim to answer over
-/// the ones read one by one, to a tenth of a second, and of the
+/// the ones read one by one and within [`PAUSE_SECONDS`] (those past it
+/// counted as `paused`), to a tenth of a second, and of the
 /// answers that had a suggestion, how many changed it and the share.
 /// Counts and times only: never a value.
 pub fn stats(store: &mut Store, campaign: i64) -> Result<Value, Error> {
@@ -5990,7 +6041,13 @@ pub fn stats(store: &mut Store, campaign: i64) -> Result<Value, Error> {
             .filter(|a| a.via.as_deref() == Some("amend"))
             .count();
         let batched = list.len() - read.len() - amended;
-        let seconds: Vec<f64> = read.iter().filter_map(|a| a.seconds).collect();
+        // a claim held open past the pause bound is a break, not reading
+        let all_seconds: Vec<f64> = read.iter().filter_map(|a| a.seconds).collect();
+        let paused = all_seconds.iter().filter(|s| **s > PAUSE_SECONDS).count();
+        let seconds: Vec<f64> = all_seconds
+            .into_iter()
+            .filter(|s| *s <= PAUSE_SECONDS)
+            .collect();
         let suggested = list.iter().filter(|a| a.changed.is_some()).count();
         let changed = list.iter().filter(|a| a.changed == Some(true)).count();
         let tenth = |v: Option<f64>| v.map(|x| (x * 10.0).round() / 10.0);
@@ -6000,6 +6057,7 @@ pub fn stats(store: &mut Store, campaign: i64) -> Result<Value, Error> {
             "batched": batched,
             "amended": amended,
             "timed": seconds.len(),
+            "paused": paused,
             "median_seconds": tenth(median(seconds.clone())),
             "p90_seconds": tenth(p90(seconds)),
             "suggested": suggested,
@@ -6022,7 +6080,10 @@ pub fn stats(store: &mut Store, campaign: i64) -> Result<Value, Error> {
         })
         .collect();
     let every: Vec<&Answer> = all.iter().collect();
-    Ok(json!({"campaign": campaign, "all": summary(&every), "raters": raters}))
+    Ok(json!({
+        "campaign": campaign, "all": summary(&every), "raters": raters,
+        "pause_seconds": PAUSE_SECONDS,
+    }))
 }
 
 /// For an axes item, the share of round-one raters whose answer on each
@@ -6558,27 +6619,76 @@ impl Closed {
     }
 }
 
-/// Close a campaign. Every agreed or adjudicated item is written as the
-/// campaign says: through [`review::apply`] into one decision, in force or
-/// staged; into a person's pick; or into nothing, the review item closed
-/// with the outcome. Every answer stays. The rest are left unresolved,
-/// their leases ended, and the campaign is closed.
-///
-/// Record 42 R6, extended to agents: a decision goes in force as it closes
-/// only when the answers behind it and the closer are all persons. An item
-/// a model's or an agent's answer settled is staged, and keeps the model as its author when that
-/// model's answers were all there was; an agent's or a model's close is
-/// staged whoever rated. A person commits them.
-pub fn close(registry: &mut Registry, cl: &Close<'_>, now: &str) -> Result<Closed, Error> {
-    let c = get(registry.store(), cl.campaign)?
-        .ok_or_else(|| Error::NotFound(format!("no campaign {}", cl.campaign)))?;
-    // A close that died part way left the campaign closing; a person runs
-    // it again, and it writes what the first did not. After type 3's pipe
-    // test (record 55 H3): a check closed with items it refused, whose
-    // questions are still open, is closed again by a person, which writes
-    // those it can now and leaves the rest refused.
-    let refused_left = closes_again(registry.store(), &c)?;
-    let again = (c.status == "closing" || refused_left) && cl.author_kind == "person";
+/// The kind of the job a close runs as (2026-11-05): one close of a
+/// campaign at a time, a close of another campaign beside it. The close of
+/// a 4,838-item campaign took some 40 s, during which a page offered to
+/// close it again; a close run as a job is followed, and a second refused.
+pub const CLOSE_JOB: &str = "campaign-close";
+
+/// Claim the close of a campaign as a job of [`CLOSE_JOB`]: refused while
+/// another close of the same campaign runs, in words that say so. A close
+/// that died (its process gone) is failed on the way, and this one writes
+/// what it did not. Answers the job's id.
+pub fn claim_close(store: &mut Store, c: &Campaign, principal: &str) -> Result<i64, Error> {
+    let (id, name) = (c.id, c.name.clone());
+    crate::job::claim_beside(
+        store,
+        &crate::job::Claim {
+            kind: CLOSE_JOB,
+            name: &format!("close {}", c.name),
+            args: json!({"campaign": c.id, "principal": principal}),
+        },
+        &mut |_, job, args| {
+            Ok((args["campaign"].as_i64() == Some(id)).then(|| {
+                format!("campaign {name} is closing now (job {job}); it closes by itself, so wait for it")
+            }))
+        },
+    )
+    .map_err(|e| match e {
+        crate::job::Error::Store(s) => Error::Store(s),
+        other => refused(other.to_string()),
+    })
+}
+
+/// The latest close of a campaign run as a job, if any: what a page
+/// follows while the campaign is closing, and what the close wrote once it
+/// is done.
+pub fn close_job(store: &mut Store, campaign: i64) -> Result<Option<crate::job::Job>, Error> {
+    let jobs = crate::job::of_kind(store, CLOSE_JOB, 200).map_err(|e| match e {
+        crate::job::Error::Store(s) => Error::Store(s),
+        other => invalid(other.to_string()),
+    })?;
+    Ok(jobs
+        .into_iter()
+        .find(|j| j.args["campaign"].as_i64() == Some(campaign)))
+}
+
+/// A close job as a campaign's page reads it: its state, whether it runs
+/// now, who started it and when, and once over what it wrote or why it
+/// failed. Never its command line.
+pub fn close_job_json(j: &crate::job::Job) -> Value {
+    json!({
+        "id": j.id,
+        "state": j.state.name(),
+        "running": crate::job::is_live(j),
+        "by": j.args["principal"],
+        "started_at": j.started_at,
+        "finished_at": j.finished_at,
+        "result": j.result,
+        "error": j.error,
+    })
+}
+
+/// Whether a close of this author may start now, or why not: an open
+/// campaign closes; a close that died part way left the campaign closing,
+/// and a person runs it again, which writes what the first did not. After
+/// type 3's pipe test (record 55 H3): a check closed with items it refused,
+/// whose questions are still open, is closed again by a person, which
+/// writes those it can now and leaves the rest refused. Read before a
+/// close's job is claimed, so a refused close leaves no job behind.
+pub fn may_close(store: &mut Store, c: &Campaign, author_kind: &str) -> Result<(), Error> {
+    let refused_left = closes_again(store, c)?;
+    let again = (c.status == "closing" || refused_left) && author_kind == "person";
     if c.status != "open" && !again {
         return Err(refused(format!(
             "campaign {} is {}{}",
@@ -6593,6 +6703,24 @@ pub fn close(registry: &mut Registry, cl: &Close<'_>, now: &str) -> Result<Close
             }
         )));
     }
+    Ok(())
+}
+
+/// Close a campaign. Every agreed or adjudicated item is written as the
+/// campaign says: through [`review::apply`] into one decision, in force or
+/// staged; into a person's pick; or into nothing, the review item closed
+/// with the outcome. Every answer stays. The rest are left unresolved,
+/// their leases ended, and the campaign is closed.
+///
+/// Record 42 R6, extended to agents: a decision goes in force as it closes
+/// only when the answers behind it and the closer are all persons. An item
+/// a model's or an agent's answer settled is staged, and keeps the model as its author when that
+/// model's answers were all there was; an agent's or a model's close is
+/// staged whoever rated. A person commits them.
+pub fn close(registry: &mut Registry, cl: &Close<'_>, now: &str) -> Result<Closed, Error> {
+    let c = get(registry.store(), cl.campaign)?
+        .ok_or_else(|| Error::NotFound(format!("no campaign {}", cl.campaign)))?;
+    may_close(registry.store(), &c, cl.author_kind)?;
     let question = c.question()?;
     // a lease past its end ends as expired, not as released by the close
     {

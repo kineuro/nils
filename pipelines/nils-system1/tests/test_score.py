@@ -111,6 +111,19 @@ def test_a_sealed_stack_gets_no_opinion(tmp_path):
     assert unit["status"] == "skipped"
 
 
+def test_a_run_says_how_far_it_is(tmp_path, monkeypatch):
+    """2026-11-05: the stacks written of the stacks given, where the engine
+    names the file, the stack it gives no opinion on counted at once."""
+    said = tmp_path / ".nils-progress.json"
+    monkeypatch.setenv("NILS_PROGRESS", str(said))
+    archive = bundle(tmp_path)
+    out = tmp_path / "out"
+    assert cli.main(["score", "--stacks", str(manifest(tmp_path, sealed=2)), "--inputs",
+                     str(inputs(tmp_path, archive)), "--output", str(out), "--explain", "none"]) == 0
+    units = json.loads((out / "results.json").read_text())["units"]
+    assert json.loads(said.read_text()) == {"done": len(units), "of": len(units), "what": "stacks"}
+
+
 def test_a_bundle_is_checked_before_it_is_read(tmp_path):
     archive = bundle(tmp_path)
     # a member changed after the manifest named it is refused

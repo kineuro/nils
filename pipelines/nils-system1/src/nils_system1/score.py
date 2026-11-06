@@ -37,6 +37,7 @@ from pathlib import Path
 
 from . import __version__
 from .bundle import BundleError, load_predictor, open_bundle
+from .progress import Progress
 
 PIPELINE = "system1-score"
 
@@ -162,6 +163,10 @@ def run(stacks_json: Path, inputs: Path, output: Path, trust_code: bool, explain
     manifest = open_bundle(Path(archive), scratch)
     predictor = load_predictor(scratch, manifest, trust_code)
     records, left = records_of(stacks, rows)
+    # how far it is, as the engine reads it while it runs (2026-11-05): the
+    # stacks it gives no opinion on at once, the rest as each is written
+    progress = Progress(len(records) + len(left))
+    progress.set(len(left), force=True)
     base = predictor.predict(records, rows) if records else []
     if len(base) != len(records):
         raise BundleError("the predictor answered another number of stacks than it was given")
@@ -195,6 +200,7 @@ def run(stacks_json: Path, inputs: Path, output: Path, trust_code: bool, explain
         p = output / relpath
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_bytes(data)
+        progress.add()
         units.append({
             "unit_id": r["unit"], "work_unit": "stack", "status": "succeeded",
             "derivatives": [relpath],
@@ -206,6 +212,7 @@ def run(stacks_json: Path, inputs: Path, output: Path, trust_code: bool, explain
         units.append({"unit_id": f"stack-{sid}", "work_unit": "stack", "status": "skipped", "derivatives": [],
                       "outputs": [], "metrics": {},
                       "error": "sealed now, or no fingerprint row: System 1 gives no opinion on it"})
+    progress.finish()
     results = {
         "schema_version": "1",
         "pipeline": PIPELINE,

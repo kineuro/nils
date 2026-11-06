@@ -81,6 +81,7 @@ import numpy as np
 from . import AXIS, GIVEN, NOT_GIVEN, calibration, evidence, features, manifest, parts, tools
 from .arms import Arms, ArmsError
 from .fusion import Fusion, FusionError, calibrated, log_odds
+from .progress import Progress
 from .results import FAILED, SKIPPED, Run, Unit
 
 logger = logging.getLogger("nils_postcontrast.full")
@@ -376,7 +377,8 @@ def frangi_card_env(env: tools.Env, work: Path) -> None:
         os.environ["CUPY_CACHE_DIR"] = str(cache)
 
 
-def features_of(todo: list, work: Path, atlas: dict, hpn: dict, vxn: dict, env: tools.Env, cards: list, opts: dict) -> tuple[dict, dict]:
+def features_of(todo: list, work: Path, atlas: dict, hpn: dict, vxn: dict, env: tools.Env, cards: list, opts: dict,
+                progress=None) -> tuple[dict, dict]:
     """Every candidate's arm columns and what happened to it, by stack id;
     and the run's counts."""
     stats: dict = {"pool_rebuilt": 0}
@@ -493,6 +495,8 @@ def features_of(todo: list, work: Path, atlas: dict, hpn: dict, vxn: dict, env: 
         for sid, r in out:
             progressed = True
             finished += 1
+            if progress is not None:
+                progress(finished)
             rec[sid]["stage"]["features"] = r.get("s")
             rec[sid]["cols"] = r.get("cols") or {}
             rec[sid]["base_fail"] = (r.get("base") or {}).get("fail")
@@ -502,6 +506,8 @@ def features_of(todo: list, work: Path, atlas: dict, hpn: dict, vxn: dict, env: 
             stats["frangi_card_failed"] = stats.get("frangi_card_failed", 0) + int(r.get("frangi_card_failed") or 0)
         for sid in dead:
             finished += 1
+            if progress is not None:
+                progress(finished)
             rec[sid]["cols"] = {}
             rec[sid]["features_died"] = True
         if progressed:
@@ -620,6 +626,10 @@ def cmd_full(a) -> int:
         return 1
     t0 = time.time()
     rows, why, todo = candidates(stacks, context, P.F, a.features_for == "all", raw)
+    # how far it is, as the engine reads it while it runs (2026-11-05): the
+    # stacks that need no features are done at once, the rest as theirs are
+    progress = Progress(len(stacks))
+    progress.set(len(stacks) - len(todo), force=True)
 
     def table(sid, **kw):
         return evidence.table_row(rows, sid, raw, functools.partial(_table, P=P), **kw)
@@ -628,7 +638,9 @@ def cmd_full(a) -> int:
     opts = {"workers": a.threads, "convert_workers": a.convert_workers, "wave": a.wave, "card_waves": a.card_waves,
             "synthseg_procs": a.synthseg_procs, "synthseg_mib": a.synthseg_mib, "synthseg_retry_mib": a.synthseg_retry_mib,
             "other_mib": a.other_mib, "keep_free_mib": a.keep_free_mib, "memory_gb": a.memory_gb, "frangi": frangi, "stall_s": a.stall_s}
-    rec, stats = features_of(todo, work, atlas, hpn, vxn, tools.Env.from_environ(), cards, opts) if todo else ({}, {})
+    rec, stats = features_of(todo, work, atlas, hpn, vxn, tools.Env.from_environ(), cards, opts,
+                             progress=lambda k: progress.set(len(stacks) - len(todo) + k)) if todo else ({}, {})
+    progress.finish()
     # the arms and model r1's fusion, as the cascade's first stage fuses
     ids = [e.stack_id for e in todo]
     frows = []

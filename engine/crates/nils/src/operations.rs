@@ -35,6 +35,13 @@
 //! pipeline, `postcontrast-full`, queued over those stacks when it is
 //! installed. Its own label (record 55 F2 and F5, the time rule) is
 //! `crate::contrast`'s, and its counts are on its step.
+//!
+//! Since 2026-11-05 a run may go over a step's "N without" alone: the door
+//! takes `{"scans": "without"}` and freezes only the scans its hint counts
+//! ([`without_condition`]), and each step says what a run would go over
+//! before it starts (`runs`: every scan, and those without its answer, each
+//! with the parts the run takes). `nils step run` queues the same run at
+//! the command line ([`queue`]).
 
 use std::collections::BTreeSet;
 
@@ -182,39 +189,33 @@ fn count(store: &mut Store, sql: &str) -> Result<i64, StoreError> {
     store.query(sql, &[])?[0].int(0)
 }
 
-/// Ruling 35 (b) of 2026-10-16: body part and post-contrast are optional
-/// models a person runs when the data need them, so each step says how many
-/// of the scans in scope its model would add an answer to, and what that
-/// is: for body part the scans with no body part (no rule's and no model's
-/// answer); for post-contrast the scans that can be T1-type brain by their
-/// stored axes (the test the cascade applies, [`crate::score::can_be_t1_brain`])
-/// whose contrast neither the rules nor its model told. A count, never a
-/// value; read-only.
-fn hint(
-    store: &mut Store,
-    step: &str,
-    holds: &str,
-    groups: &[String],
-) -> Result<Value, StoreError> {
-    let (axis, stack, member, item) = (
+/// The scans of a step's own "N without" (ruling 35 (b) of 2026-10-16, a
+/// run over them alone since 2026-11-05): the stacks aliased `x` its model
+/// would add an answer to, as a condition. For body part the scans with no
+/// body part (no rule's and no model's answer); for post-contrast the scans
+/// that can be T1-type brain by their stored axes (the test the cascade
+/// applies, [`crate::score::can_be_t1_brain`]) whose contrast neither the
+/// rules nor its model told. Its model's own answers, staged or put in
+/// force since, count as told. Its hint counts these scans, and a run of
+/// the step over `without` freezes these and no other.
+fn without_condition(store: &Store, step: &str) -> String {
+    let (axis, member, item) = (
         store.qualified("classification_axis"),
-        store.qualified("stack"),
         store.qualified("review_member"),
         store.qualified("review_item"),
     );
-    let has = |name: &str| {
-        format!(
-            "EXISTS (SELECT 1 FROM {axis} a WHERE a.stack_id = x.id AND a.axis = '{name}' \
-             AND a.value IS NOT NULL AND a.value <> '')"
-        )
-    };
+    let groups: Vec<String> = OPERATIONS
+        .iter()
+        .find(|(name, _)| *name == step)
+        .map(|(_, axes)| axes.iter().map(|a| format!("{a}:model")).collect())
+        .unwrap_or_default();
     // what its model answered already, staged or put in force since
     let answered = format!(
         "EXISTS (SELECT 1 FROM {member} rm JOIN {item} ri ON ri.id = rm.item_id \
          WHERE rm.stack_id = x.id AND ri.kind IN ({}) AND ri.status IN ('staged', 'accepted'))",
-        quoted(groups)
+        quoted(&groups)
     );
-    let (kind, scans) = if step == "post_contrast" {
+    if step == "post_contrast" {
         // Wave 7b: one grouped pass over the axes of the stacks whose base
         // is T1w, rather than eight lookups a stack over every stack in
         // scope (on 450,000 synthetic stacks under PostgreSQL, 3.7 s against
@@ -222,8 +223,8 @@ fn hint(
         // applies: the greatest base T1w and technique neither TOF nor PC;
         // neither body axis answered, or a body part of the brain, or a
         // region of the head; and no post-contrast answer.
-        let sql = format!(
-            "SELECT COUNT(*) FROM {stack} x JOIN (\
+        format!(
+            "x.id IN (SELECT t.stack_id FROM (\
                SELECT a.stack_id, \
                  MAX(CASE WHEN a.axis = 'base' THEN a.value END) AS base, \
                  MAX(CASE WHEN a.axis = 'technique' THEN a.value END) AS technique, \
@@ -236,25 +237,73 @@ fn hint(
                  AND a.value IS NOT NULL AND a.value <> '' \
                  AND a.stack_id IN (SELECT b.stack_id FROM {axis} b WHERE b.axis = 'base' AND b.value = 'T1w') \
                GROUP BY a.stack_id\
-             ) t ON t.stack_id = x.id \
-             WHERE {holds} AND t.base = 'T1w' AND COALESCE(t.technique, '') NOT IN ('TOF', 'PC') \
+             ) t WHERE t.base = 'T1w' AND COALESCE(t.technique, '') NOT IN ('TOF', 'PC') \
                AND ((t.body_part IS NULL AND t.region = 0) OR t.body_part LIKE '%brain%' OR t.head = 1) \
-               AND t.told = 0 AND NOT {answered}"
-        );
-        ("t1_brain_contrast_unknown", count(store, &sql)?)
-    } else {
-        (
-            "no_body_part",
-            count(
-                store,
-                &format!(
-                    "SELECT COUNT(*) FROM {stack} x WHERE {holds} AND NOT {} AND NOT {answered}",
-                    has("body_part")
-                ),
-            )?,
+               AND t.told = 0) AND NOT {answered}"
         )
-    };
-    Ok(json!({"kind": kind, "scans": scans}))
+    } else {
+        format!(
+            "NOT EXISTS (SELECT 1 FROM {axis} a WHERE a.stack_id = x.id AND a.axis = 'body_part' \
+             AND a.value IS NOT NULL AND a.value <> '') AND NOT {answered}"
+        )
+    }
+}
+
+/// What a step's hint calls its scans without (ruling 35 (b)): the kind of
+/// its count.
+fn without_kind(step: &str) -> &'static str {
+    if step == "post_contrast" {
+        "t1_brain_contrast_unknown"
+    } else {
+        "no_body_part"
+    }
+}
+
+/// Ruling 35 (b) of 2026-10-16: body part and post-contrast are optional
+/// models a person runs when the data need them, so each step says how many
+/// of the scans in scope its model would add an answer to, and what that
+/// is ([`without_condition`]). A count, never a value; read-only.
+fn hint(store: &mut Store, step: &str, holds: &str) -> Result<Value, StoreError> {
+    let scans = count(
+        store,
+        &format!(
+            "SELECT COUNT(*) FROM {} x WHERE {holds} AND {}",
+            store.qualified("stack"),
+            without_condition(store, step)
+        ),
+    )?;
+    Ok(json!({"kind": without_kind(step), "scans": scans}))
+}
+
+/// Which of the scans a step counts a run of it goes over (2026-11-05): every
+/// one (`all`, as a run always went), or only those its hint counts, the
+/// scans without its model's answer (`without`). Production's body part
+/// said "135 with no body part" on a dataset of 456,132 scans, and its Run
+/// went over all of them in 23 parts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Over {
+    All,
+    Without,
+}
+
+impl Over {
+    /// `all` or `without`, as a door's body and the command line say it.
+    pub(crate) fn parse(words: &str) -> Result<Over, String> {
+        match words.trim() {
+            "" | "all" => Ok(Over::All),
+            "without" => Ok(Over::Without),
+            other => Err(format!(
+                "scans is all (every scan the step counts) or without (only those without its answer), not {other}"
+            )),
+        }
+    }
+
+    pub(crate) fn name(self) -> &'static str {
+        match self {
+            Over::All => "all",
+            Over::Without => "without",
+        }
+    }
 }
 
 /// Why a step's run is refused: the status a door answers it with, a short
@@ -1073,6 +1122,48 @@ impl Attempts {
     }
 }
 
+/// A going run's progress on its step (2026-11-05): the units over of the
+/// units, as the unit rows count them, with the run's own last beat laid
+/// over them (`crate::pipelines::live_progress`: the count a person reads
+/// first, a container's own where it says, the part, since when). A beat
+/// whose count is not whole leaves the rows' count. None while the run has
+/// no units yet and no beat says anything.
+fn with_live(mut doc: Value, live: Value, has_units: bool) -> Option<Value> {
+    let Value::Object(live) = live else {
+        return has_units.then_some(doc);
+    };
+    for (k, v) in live {
+        // the lane's figures are the run page's, not a step's
+        if k == "lane" || (matches!(k.as_str(), "done" | "total") && !v.is_u64()) {
+            continue;
+        }
+        doc[k] = v;
+    }
+    Some(doc)
+}
+
+/// Why a failed step failed: the failure of the door's job that made no
+/// run, where the newest attempt was one, else the newest run's, as the
+/// jobs door and the run door say them (`{kind, cause, advice, fix}`, with
+/// a memory cap's `said` and `cap_gb`); the engine's own words, never a
+/// tool's, so they are shown at any detail. Null where neither is read.
+fn failure_of(store: &mut Store, at: &Attempts) -> Value {
+    if let Some(j) = at.unmade().filter(|j| j.state == "failed") {
+        return nils_registry::job::show(store, j.id)
+            .ok()
+            .flatten()
+            .map_or(Value::Null, |j| {
+                crate::failures::job_doc(&j)["failure"].clone()
+            });
+    }
+    at.runs
+        .first()
+        .filter(|r| r.status == "failed")
+        .and_then(|r| nils_registry::pipeline::run(store, r.id).ok().flatten())
+        .and_then(|r| serde_json::to_value(&r).ok())
+        .map_or(Value::Null, |doc| crate::failures::of_run_doc(&doc))
+}
+
 /// Why a step's run over a scope's scans is refused now, or none: a run
 /// of it over them is queued or runs, nothing here runs it, or there are
 /// no scans to run it over.
@@ -1215,7 +1306,7 @@ pub(crate) fn counted(
         .count(store, &holds)?
         .scans;
         // ruling 35 (b): how many scans its model would add an answer to
-        let hint = hint(store, name, &holds, &groups)?;
+        let hint = hint(store, name, &holds)?;
         // record 55 F5: post-contrast's own label, the time rule's, on the
         // scans in scope
         let label = if name == "post_contrast" {
@@ -1324,12 +1415,36 @@ pub(crate) fn steps_counted(
                     &[],
                 )?;
                 let (total, over) = (rows[0].int(0)?, rows[0].int(1)?);
-                (total > 0).then(|| json!({"done": over, "total": total}))
+                // 2026-11-05: the run's own beat over the unit rows' count,
+                // so a unit that holds many stacks moves while it works
+                let live = crate::pipelines::live_progress(store, r.id, r.job, &r.status);
+                with_live(json!({"done": over, "total": total}), live, total > 0)
             }
             (None, Some(j)) => j.progress.clone(),
             (None, None) => None,
         };
+        // 2026-11-05: a failed step says why, in the engine's words for its
+        // failure, beside the run (or the job, where none was made) it was
+        let failure = if state == "failed" {
+            failure_of(store, &at)
+        } else {
+            Value::Null
+        };
         let refused = refusal(name, at.busy(), planned, scans);
+        // what a run of it would go over, before it starts (2026-11-05): every
+        // scan it counts, or the ones without its answer that its hint
+        // counts, each with the parts it would run in
+        let runs = match planned {
+            Ok(p) => {
+                let size = part_size(store, &p.pipeline);
+                let mut runs = json!({"all": {"scans": scans, "parts": parts(scans, size)}});
+                if let Some(n) = c.hint["scans"].as_i64() {
+                    runs["without"] = json!({"scans": n, "parts": parts(n, size)});
+                }
+                runs
+            }
+            Err(_) => Value::Null,
+        };
         out.push(json!({
             "step": name,
             "state": state,
@@ -1338,6 +1453,7 @@ pub(crate) fn steps_counted(
             "started_at": started_at,
             "finished_at": finished_at,
             "progress": progress,
+            "failure": failure,
             "served": served,
             "answered": answered,
             "look": look,
@@ -1346,6 +1462,7 @@ pub(crate) fn steps_counted(
             "refusal": refused.map(|r| r.doc()),
             "label": c.label,
             "hint": c.hint,
+            "runs": runs,
         }));
     }
     Ok(out)
@@ -1467,17 +1584,22 @@ pub(crate) fn of_cohort(
 /// subject, in stack order: every stack the step counts, a sample sealed
 /// now among them, as a selection frozen for a run keeps them (record 48,
 /// D1 of the move), so the handle opens only to a scope that reads sealed
-/// stacks. Answers the handle and how many stacks it holds.
+/// stacks; with `over`, only the stacks that meet it as well (a step's
+/// scans without its answer, 2026-11-05). Answers the handle and how many
+/// stacks it holds.
 fn freeze(
     store: &mut Store,
     scope: Scope<'_>,
+    over: Option<&str>,
     principal: &str,
     epoch: i64,
 ) -> Result<(i64, usize), String> {
     let holds = scope.holds(store);
+    // 2026-11-05: or only those a step counts without its answer
+    let only = over.map(|c| format!(" AND {c}")).unwrap_or_default();
     let sql = format!(
         "SELECT x.id, se.subject_id FROM {} x JOIN {} se ON se.id = x.series_id \
-         WHERE {holds} ORDER BY x.id",
+         WHERE {holds}{only} ORDER BY x.id",
         store.qualified("stack"),
         store.qualified("series"),
     );
@@ -1677,33 +1799,64 @@ fn arrival_params(registry: &mut Registry, label: &str) -> Vec<(String, String)>
         .unwrap_or_default()
 }
 
+/// Who asks for a step's run and with what (2026-11-05): the registry
+/// home, the packs and the pack a sort reads, the principal the job is
+/// queued under, and what it records of who asked (the grants and the
+/// detail a door's caller holds, or the keyboard's at the command line).
+pub(crate) struct Asker<'a> {
+    pub(crate) home: &'a nils_registry::home::Home,
+    pub(crate) pack_dir: Option<&'a std::path::Path>,
+    pub(crate) ask_pack: &'a str,
+    pub(crate) principal: &'a str,
+    pub(crate) queued_by: Value,
+}
+
+impl<'a> Asker<'a> {
+    /// A door's caller.
+    pub(crate) fn of_door(doors: &'a Doors, caller: &'a Caller) -> Asker<'a> {
+        Asker {
+            home: &doors.home,
+            pack_dir: doors.pack_dir.as_deref(),
+            ask_pack: &doors.ask_pack,
+            principal: &caller.principal,
+            queued_by: crate::serve::queued_by(caller),
+        }
+    }
+}
+
+/// The scans of a dataset or a cohort a step runs over, as the operations
+/// scope them.
+fn held_of<'s>(scope: &crate::viewer::Scope, ids: &'s mut String) -> Result<Scope<'s>, Reply> {
+    match scope {
+        crate::viewer::Scope::Dataset { sources, .. } => {
+            *ids = list(sources);
+            Ok(Scope::Sources(ids))
+        }
+        crate::viewer::Scope::Cohort(c) => Ok(Scope::Cohort(c.id)),
+        // a step door names a dataset or a cohort, never the registry
+        crate::viewer::Scope::Registry { .. } => {
+            Err(Reply::error(400, "a step runs over a dataset or a cohort"))
+        }
+    }
+}
+
 /// The sort over a dataset's or a cohort's scans, from its card (2026-11-05):
 /// the scans frozen into a handle and a classify job over them alone, by
-/// the served pack, as a scoped re-sort at the command line; answered 202
-/// with the job. Refused while a sort over the same scans is queued or
-/// runs, and where there is no scan to sort.
+/// the served pack, as a scoped re-sort at the command line; answered with
+/// the job. Refused while a sort over the same scans is queued or runs, and
+/// where there is no scan to sort.
 fn sort_door(
-    doors: &Doors,
+    asker: &Asker<'_>,
     registry: &mut Registry,
-    caller: &Caller,
     scope: &crate::viewer::Scope,
-) -> Result<Reply, Reply> {
+) -> Result<Value, Reply> {
     let failed = |e: StoreError| Reply::error(500, e.to_string());
     let target = format!("{}:{}", scope.kind(), scope.name());
     let turn = DoorTurn::take(&target, "sorted");
     let _held = turn.lock.lock().unwrap_or_else(|e| e.into_inner());
     let epoch = registry.meta().epoch;
-    let ids;
-    let held = match scope {
-        crate::viewer::Scope::Dataset { sources, .. } => {
-            ids = list(sources);
-            Scope::Sources(&ids)
-        }
-        crate::viewer::Scope::Cohort(c) => Scope::Cohort(c.id),
-        crate::viewer::Scope::Registry { .. } => {
-            return Err(Reply::error(400, "a step runs over a dataset or a cohort"));
-        }
-    };
+    let mut ids = String::new();
+    let held = held_of(scope, &mut ids)?;
     let store = registry.store();
     // a sort of these scans queued or running already is the one that runs
     let running = store
@@ -1726,7 +1879,7 @@ fn sort_door(
         ));
     }
     let (handle, frozen) =
-        freeze(store, held, &caller.principal, epoch).map_err(|e| Reply::error(500, e))?;
+        freeze(store, held, None, asker.principal, epoch).map_err(|e| Reply::error(500, e))?;
     if frozen == 0 {
         drop_handle(store, handle).map_err(failed)?;
         return Err(Reply::error(409, "there are no scans to sort here"));
@@ -1734,27 +1887,57 @@ fn sort_door(
     let mut command = vec![
         "classify".to_string(),
         "--pack".to_string(),
-        doors.ask_pack.clone(),
+        asker.ask_pack.to_string(),
         "--scope".to_string(),
         format!("handle:{handle}"),
         "--name".to_string(),
         format!("{target} sort"),
     ];
-    if let Some(d) = &doors.pack_dir {
+    if let Some(d) = asker.pack_dir {
         command.extend(["--pack-dir".to_string(), d.display().to_string()]);
     }
     let id = nils_registry::job::enqueue_with(
         store,
         &command,
         Some(&target),
-        Some(&caller.principal),
-        crate::serve::queued_by(caller),
+        Some(asker.principal),
+        asker.queued_by.clone(),
     )
     .map_err(crate::serve::job_err)?;
-    Ok(Reply::accepted(json!({
+    Ok(json!({
         "job": id, "state": "queued", "step": "sorted", "for": target,
-        "scans": frozen, "handle": handle, "command": command,
-    })))
+        "scans": frozen, "over": Over::All.name(), "parts": 1, "handle": handle,
+        "command": command,
+    }))
+}
+
+/// How many parts a run of `pipeline` (its label) over `stacks` stacks is
+/// split into, one run each, one after another in one job: one where they
+/// fit one container of it, none for no stacks (2026-10-17's parts, said
+/// before a run starts since 2026-11-05).
+pub(crate) fn parts_of(store: &mut Store, pipeline: &str, stacks: i64) -> i64 {
+    parts(stacks, part_size(store, pipeline))
+}
+
+/// How many stacks one part of a run of `pipeline` (its label) holds, none
+/// where its runs are never split ([`crate::pipelines::part_stacks`]).
+fn part_size(store: &mut Store, pipeline: &str) -> Option<i64> {
+    nils_registry::pipeline::resolve(store, pipeline)
+        .ok()
+        .flatten()
+        .and_then(|p| nils_pipeline::descriptor::from_value(p.descriptor).ok())
+        .and_then(|d| crate::pipelines::part_stacks(&d))
+        .and_then(|n| i64::try_from(n).ok())
+        .filter(|n| *n > 0)
+}
+
+/// `stacks` stacks in parts of `size`: one where they fit, none for none.
+fn parts(stacks: i64, size: Option<i64>) -> i64 {
+    match size {
+        _ if stacks <= 0 => 0,
+        Some(n) if stacks > n => (stacks + n - 1) / n,
+        _ => 1,
+    }
 }
 
 /// `POST /api/datasets/{name}/steps/{step}/run` and `POST
@@ -1765,7 +1948,10 @@ fn sort_door(
 /// run of it over those scans is queued or runs, where nothing here runs
 /// it (no pipeline or no model for it, no container runtime, no working
 /// place: post-contrast always, until a model for it is installed), and
-/// where there are no scans to run it over.
+/// where there are no scans to run it over. The body may say which of the
+/// scans (2026-11-05): `{"scans": "without"}` runs body part or
+/// post-contrast over its "N without" alone, `all` (the default) over every
+/// scan it counts.
 pub(crate) fn run_door(
     doors: &Doors,
     registry: &mut Registry,
@@ -1773,7 +1959,32 @@ pub(crate) fn run_door(
     kind: &str,
     name: &str,
     step: &str,
+    body: &str,
 ) -> Result<Reply, Reply> {
+    let doc = crate::serve::json_body(body)?;
+    let over = match &doc["scans"] {
+        Value::Null => Over::All,
+        Value::String(words) => Over::parse(words).map_err(|e| Reply::error(400, e))?,
+        _ => {
+            return Err(Reply::error(400, "scans is all or without, as a string"));
+        }
+    };
+    let asker = Asker::of_door(doors, caller);
+    queue(&asker, registry, kind, name, step, over).map(Reply::accepted)
+}
+
+/// A step's run over a dataset's (`kind` datasets) or a cohort's scans,
+/// queued as its door and `nils step run` queue it: the job, what it is
+/// for, how many scans it froze and over which (`over`), the parts it runs
+/// in, the handle and the command.
+pub(crate) fn queue(
+    asker: &Asker<'_>,
+    registry: &mut Registry,
+    kind: &str,
+    name: &str,
+    step: &str,
+    over: Over,
+) -> Result<Value, Reply> {
     let failed = |e: StoreError| Reply::error(500, e.to_string());
     let scope = match kind {
         "cohorts" => crate::viewer::Scope::cohort(registry, name)?,
@@ -1784,7 +1995,13 @@ pub(crate) fn run_door(
     // classify job over them frozen into a handle; the main scans are the
     // pick run door's, with the cohort or the dataset named
     if step == "sorted" {
-        return sort_door(doors, registry, caller, &scope);
+        if over != Over::All {
+            return Err(Reply::error(
+                400,
+                "the sort runs over every scan; scans: without is for body_part and post_contrast",
+            ));
+        }
+        return sort_door(asker, registry, &scope);
     }
     // record 55 D3: System 1 is a step a door runs too, owning no axis
     let system1: (&str, &[&str]) = (crate::system1::STEP, &[]);
@@ -1803,6 +2020,15 @@ pub(crate) fn run_door(
         )
         .reply(step));
     };
+    // only an operation that owns an axis has scans without its answer
+    if over == Over::Without && axes.is_empty() {
+        return Err(Reply::error(
+            400,
+            format!(
+                "{step} runs over every scan; scans: without is for body_part and post_contrast"
+            ),
+        ));
+    }
     let target = format!("{}:{}", scope.kind(), scope.name());
     // #455: the busy check and the insert are one step: a second request
     // for the same step over the same scope waits here until the first has
@@ -1811,38 +2037,41 @@ pub(crate) fn run_door(
     let _held = turn.lock.lock().unwrap_or_else(|e| e.into_inner());
     let planned = plan(registry, step).map_err(failed)?;
     let epoch = registry.meta().epoch;
-    let ids;
-    let held = match &scope {
-        crate::viewer::Scope::Dataset { sources, .. } => {
-            ids = list(sources);
-            Scope::Sources(&ids)
-        }
-        crate::viewer::Scope::Cohort(c) => Scope::Cohort(c.id),
-        // a step door names a dataset or a cohort, never the registry
-        crate::viewer::Scope::Registry { .. } => {
-            return Err(Reply::error(400, "a step runs over a dataset or a cohort"));
-        }
-    };
+    let mut ids = String::new();
+    let held = held_of(&scope, &mut ids)?;
     let store = registry.store();
+    let only = (over == Over::Without).then(|| without_condition(store, step));
     let scans = count(
         store,
         &format!(
-            "SELECT COUNT(*) FROM {} x WHERE {}",
+            "SELECT COUNT(*) FROM {} x WHERE {}{}",
             store.qualified("stack"),
-            held.holds(store)
+            held.holds(store),
+            only.as_deref()
+                .map(|c| format!(" AND {c}"))
+                .unwrap_or_default()
         ),
     )
     .map_err(failed)?;
     let (pipelines, _) = proposing(store, axes).map_err(failed)?;
     let at = Attempts::of(store, step, &pipelines, held, &target).map_err(failed)?;
+    // every scan here has its answer: said as such, not as a scope with no scans
+    if at.busy().is_none() && planned.is_ok() && only.is_some() && scans == 0 {
+        return Err(Refused::new(
+            409,
+            "none_without",
+            format!("every scan here has its {} answer already", title(step)),
+        )
+        .reply(step));
+    }
     if let Some(refused) = refusal(step, at.busy(), &planned, scans) {
         return Err(refused.reply(step));
     }
     let Ok(plan) = planned else {
         return Err(Reply::error(500, "a refused run was planned"));
     };
-    let (handle, frozen) =
-        freeze(store, held, &caller.principal, epoch).map_err(|e| Reply::error(500, e))?;
+    let (handle, frozen) = freeze(store, held, only.as_deref(), asker.principal, epoch)
+        .map_err(|e| Reply::error(500, e))?;
     let arrival = arrival_params(registry, &plan.pipeline);
     let mut command = vec![
         "run".to_string(),
@@ -1861,30 +2090,30 @@ pub(crate) fn run_door(
     for (id, value) in arrival {
         command.extend(["--param".to_string(), format!("{id}={value}")]);
     }
-    let command = crate::pipelines::located(doors.pack_dir.as_deref(), command)?;
+    let command = crate::pipelines::located(asker.pack_dir, command)?;
     // 2026-10-12: refused by its kind where it lacks what it needs here
     // (its scans are counted above, and its units are a stack each)
-    crate::requirements::at_the_door(
-        &doors.home,
-        doors.pack_dir.as_deref(),
-        registry,
-        &command,
-        false,
-    )?;
+    crate::requirements::at_the_door(asker.home, asker.pack_dir, registry, &command, false)?;
     let store = registry.store();
     // 2026-10-17: more scans than one container of the pipeline holds are
     // run in parts, each a run of its own, in this one job
+    let parts = parts_of(
+        store,
+        &command[1],
+        i64::try_from(frozen).unwrap_or(i64::MAX),
+    );
     let command = crate::pipelines::in_parts(store, command, frozen);
     // the step and what it is for, which its state and the dataset's log
-    // find it by, beside who asked and under what
-    let mut extra = crate::serve::queued_by(caller);
+    // find it by, beside who asked and under what; and which of its scans
+    let mut extra = asker.queued_by.clone();
     extra["step"] = json!(step);
     extra["for"] = json!(target);
+    extra["over"] = json!(over.name());
     let id = nils_registry::job::enqueue_with(
         store,
         &command,
         Some(&target),
-        Some(&caller.principal),
+        Some(asker.principal),
         extra,
     )
     .map_err(crate::serve::job_err)?;
@@ -1905,10 +2134,100 @@ pub(crate) fn run_door(
         )
         .reply(step));
     }
-    Ok(Reply::accepted(json!({
+    Ok(json!({
         "job": id, "state": "queued", "step": step, "for": target,
-        "scans": frozen, "handle": handle, "command": command,
-    })))
+        "scans": frozen, "over": over.name(), "parts": parts, "handle": handle,
+        "command": command,
+    }))
+}
+
+/// `nils step`: a dataset's or a cohort's steps from the command line, as
+/// their doors run them.
+#[derive(Debug, clap::Subcommand)]
+pub(crate) enum StepCommand {
+    /// Queue a step's run over a dataset's or a cohort's scans, as the
+    /// step's Run on its card and its door (`POST
+    /// /api/datasets/{name}/steps/{step}/run`) queue it: sorted, body_part,
+    /// post_contrast or system1
+    Run(StepRunArgs),
+}
+
+/// The arguments of `nils step run`.
+#[derive(Debug, clap::Args)]
+pub(crate) struct StepRunArgs {
+    /// The dataset as @NAME or dataset:NAME, or the cohort as cohort:NAME
+    #[arg(value_name = "@NAME|dataset:NAME|cohort:NAME")]
+    scope: String,
+    /// The step: sorted, body_part, post_contrast or system1
+    step: String,
+    /// Which of its scans: all, or without (body part and post-contrast
+    /// only: the scans without its answer, the "N without" its step counts)
+    #[arg(long, default_value = "all", value_name = "all|without")]
+    scans: String,
+    /// The pack a sort reads
+    #[arg(long, default_value = "mri")]
+    pack: String,
+    /// Where the packs are, for the run the step queues
+    #[arg(long, value_name = "DIR")]
+    pack_dir: Option<std::path::PathBuf>,
+}
+
+/// The dataset's or the cohort's name a `nils step run` scope names, with
+/// the door's kind (`datasets` or `cohorts`).
+pub(crate) fn scope_named(words: &str) -> Result<(&'static str, &str), String> {
+    let words = words.trim();
+    let (kind, name) = if let Some(name) = words.strip_prefix('@') {
+        ("datasets", name)
+    } else if let Some(name) = words.strip_prefix("dataset:") {
+        ("datasets", name)
+    } else if let Some(name) = words.strip_prefix("cohort:") {
+        ("cohorts", name)
+    } else {
+        return Err(format!(
+            "{words}: a step runs over a dataset, @NAME or dataset:NAME, or a cohort, cohort:NAME"
+        ));
+    };
+    if name.trim().is_empty() {
+        return Err(format!("{words}: name the dataset or the cohort"));
+    }
+    Ok((kind, name.trim()))
+}
+
+/// `nils step run`: the step's run queued as its door queues it, at the
+/// keyboard's reach and under its principal; prints what the door answers.
+pub(crate) fn command(
+    home: &nils_registry::home::Home,
+    cmd: StepCommand,
+) -> Result<(), crate::Exit> {
+    let StepCommand::Run(args) = cmd;
+    let (kind, name) = scope_named(&args.scope).map_err(crate::usage)?;
+    let over = Over::parse(&args.scans).map_err(crate::usage)?;
+    let mut registry = crate::open(home)?;
+    let keyboard = crate::grants::Access::keyboard(crate::sealed::keyboard_reads());
+    let principal = crate::actor();
+    let asker = Asker {
+        home,
+        pack_dir: args.pack_dir.as_deref(),
+        ask_pack: &args.pack,
+        principal: &principal,
+        queued_by: json!({
+            "detail": keyboard.detail.name(),
+            "actor": principal,
+            "grants": keyboard.list(),
+        }),
+    };
+    match queue(&asker, &mut registry, kind, name, &args.step, over) {
+        Ok(doc) => {
+            println!("{doc}");
+            Ok(())
+        }
+        Err(reply) => Err(crate::fail(
+            reply.body["error"]
+                .as_str()
+                .map(str::to_string)
+                .unwrap_or_else(|| reply.body.to_string()),
+        )),
+    }
 }
 
 #[cfg(test)]
@@ -2011,5 +2330,38 @@ mod tests {
             Some("no_scans")
         );
         assert_eq!(refusal("body_part", None, &plan, 3), None);
+    }
+
+    /// 2026-11-05: a going run's step reads its run's own beat over the unit
+    /// rows' count: a container's own count, its part and since when, never
+    /// the lane's figures, and the rows' count where the beat has none.
+    #[test]
+    fn a_step_s_progress_is_its_run_s_beat_over_its_rows() {
+        use serde_json::{Value, json};
+        let rows = json!({"done": 0, "total": 870});
+        let beat = json!({"run": 3, "phase": "run", "units": 870, "over": 0, "done": 312,
+            "total": 870, "what": "stacks", "part": {"at": 4, "of": 23},
+            "since": "2026-11-05T22:00:00Z", "lane": {"cores": 64}});
+        let p = super::with_live(rows.clone(), beat, true).unwrap();
+        assert_eq!((&p["done"], &p["total"]), (&json!(312), &json!(870)));
+        assert_eq!(p["part"], json!({"at": 4, "of": 23}));
+        assert!(p.get("lane").is_none(), "{p}");
+        // a beat as the input is prepared says its phase and keeps the rows' count
+        let p = super::with_live(
+            rows.clone(),
+            json!({"run": 3, "phase": "materialise", "done": null}),
+            true,
+        )
+        .unwrap();
+        assert_eq!(
+            (&p["done"], &p["phase"]),
+            (&json!(0), &json!("materialise"))
+        );
+        // no beat: the rows' count where there are rows, else nothing
+        assert_eq!(
+            super::with_live(rows.clone(), Value::Null, true),
+            Some(rows.clone())
+        );
+        assert_eq!(super::with_live(rows, Value::Null, false), None);
     }
 }
