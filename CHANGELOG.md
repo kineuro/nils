@@ -46,6 +46,7 @@ All notable changes to NILS v1 are recorded here. The format follows [Keep a Cha
 
 ### Changed
 
+- The post-contrast package is 0.3.1 and both its pipelines pin its new images: the full stage's image now writes the progress file as each stack's features finish, so a run of it says how far it is instead of nothing until its end. Its answers are unchanged.
 - The campaign's maker reads who holds each open item and until when, without reading any answer, and the adjudicators a campaign names may give back a rater's live claim as its maker may.
 - A campaign that trains or measures nothing may hold back none of a batch: `--hold-back 0` at creation, and `nils campaign hold-back <campaign> 0` on an open one, which sends the items held back and still open back to the batches and the gallery. The hold-back is the guard a study keeps against a click-through, and a curation pass of one's own was paying for it: 530 of 4,838 items of such a campaign waited to be read one by one. A study's floor of a tenth stands, and a campaign given a study purpose takes the floor.
 
