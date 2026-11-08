@@ -12284,6 +12284,14 @@ fn finalize(
             .filter(|u| by_name.contains_key(u.unit.as_str()))
             .map(|u| &u.outcome),
     );
+    // 2026-11-08: the runs its reused units were taken from, for the words
+    let reused_from: Vec<i64> = unit_rows
+        .iter()
+        .filter(|u| by_name.contains_key(u.unit.as_str()))
+        .filter_map(|u| u.reused_from_run)
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect();
     let first_log = unit_rows
         .first()
         .and_then(|u| u.outcome["log"].as_str().map(str::to_string));
@@ -12292,6 +12300,7 @@ fn finalize(
             "total": m.units.len(), "succeeded": count("succeeded"), "failed": count("failed"),
             "skipped": count("skipped"), "unreported": count("unreported"),
             "reused": count("reused"),
+            "reused_from": reused_from,
             "missing_input": missing_input,
         },
         "failures_by_cause": failures_by_cause,

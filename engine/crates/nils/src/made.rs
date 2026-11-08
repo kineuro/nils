@@ -129,6 +129,10 @@ struct Counts {
     failed: Option<u64>,
     skipped: Option<u64>,
     left: u64,
+    /// Units counted in `made` that were taken from an earlier run, and
+    /// the runs they came from.
+    reused: u64,
+    reused_from: Vec<i64>,
 }
 
 /// The reasons of one status on a line: ": why", or with their counts where
@@ -166,6 +170,13 @@ fn line(c: &Counts, why: &[Value]) -> String {
     }
     let mut parts = vec![match c.made {
         Some(0) => "nothing made".to_string(),
+        Some(m) if c.reused > 0 => {
+            let from = match c.reused_from.as_slice() {
+                [one] if c.reused == m => format!("{} reused from run {one}", c.reused),
+                _ => format!("{} reused", c.reused),
+            };
+            format!("{m} of {} made ({from})", c.total)
+        }
         Some(m) => format!("{m} of {} made", c.total),
         None => format!("{} units", c.total),
     }];
@@ -198,6 +209,7 @@ fn doc(c: &Counts, why: Vec<Value>) -> Value {
         "failed": c.failed,
         "skipped": c.skipped,
         "left": c.left,
+        "reused": c.reused,
         "nothing": nothing,
         "line": line(c, &why),
         "why": why,
@@ -213,7 +225,9 @@ pub(crate) fn of_summary(summary: &Value, skipped: Option<&Value>) -> Value {
     let Some(total) = units["total"].as_u64() else {
         return Value::Null;
     };
-    let made = counted(units, "succeeded");
+    // a reused unit is made: its earlier run made it
+    let reused = counted(units, "reused").unwrap_or(0);
+    let made = counted(units, "succeeded").map(|m| m + reused);
     let failed = match (counted(units, "failed"), counted(units, "unreported")) {
         (Some(a), Some(b)) => Some(a + b),
         _ => None,
@@ -246,6 +260,13 @@ pub(crate) fn of_summary(summary: &Value, skipped: Option<&Value>) -> Value {
             failed,
             skipped: skipped_n,
             left,
+            reused,
+            reused_from: units["reused_from"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_i64)
+                .collect(),
         },
         why,
     )
@@ -259,6 +280,7 @@ pub(crate) fn of_units(units: &[rows::Unit]) -> Value {
         return Value::Null;
     }
     let (mut made, mut failed, mut skipped, mut left) = (0u64, 0u64, 0u64, 0u64);
+    let (mut reused, mut reused_from) = (0u64, std::collections::BTreeSet::new());
     let mut causes: BTreeMap<String, usize> = BTreeMap::new();
     for u in units {
         if u.state != "over" {
@@ -267,6 +289,11 @@ pub(crate) fn of_units(units: &[rows::Unit]) -> Value {
         }
         match u.outcome["status"].as_str().unwrap_or("failed") {
             "succeeded" => made += 1,
+            "reused" => {
+                made += 1;
+                reused += 1;
+                reused_from.extend(u.reused_from_run);
+            }
             "skipped" => skipped += 1,
             s if FAILED.contains(&s) => {
                 failed += 1;
@@ -301,6 +328,8 @@ pub(crate) fn of_units(units: &[rows::Unit]) -> Value {
             failed: Some(failed),
             skipped: Some(skipped),
             left,
+            reused,
+            reused_from: reused_from.into_iter().collect(),
         },
         why,
     )
@@ -470,6 +499,86 @@ mod tests {
         assert_eq!(held["nothing"], false);
         // nothing counted yet
         assert!(of_summary(&json!({"phase": "run"}), None).is_null());
+    }
+
+    #[test]
+    fn a_reused_unit_is_made_in_a_summary() {
+        let skipped = json!([{"why": "no FLAIR picked", "units": 1}]);
+        let all = of_summary(
+            &json!({"units": {"total": 4, "succeeded": 0, "failed": 0, "skipped": 1, "unreported": 0, "reused": 3, "reused_from": [6]}}),
+            Some(&skipped),
+        );
+        assert_eq!(
+            all["line"],
+            "3 of 4 made (3 reused from run 6) · 1 skipped: no FLAIR picked"
+        );
+        assert_eq!(
+            (all["made"].as_u64(), all["reused"].as_u64()),
+            (Some(3), Some(3))
+        );
+        assert_eq!(
+            (all["failed"].as_u64(), all["left"].as_u64()),
+            (Some(0), Some(0))
+        );
+        assert_eq!(all["nothing"], false);
+        let some = of_summary(
+            &json!({"units": {"total": 8, "succeeded": 2, "reused": 3, "skipped": 3, "reused_from": [5, 6]}}),
+            None,
+        );
+        assert_eq!(some["line"], "5 of 8 made (3 reused) · 3 skipped");
+        assert_eq!(some["left"], 0);
+    }
+
+    #[test]
+    fn a_reused_unit_is_made_among_units() {
+        let unit = |state: &str, outcome: Value, from: Option<i64>| rows::Unit {
+            id: 0,
+            run_id: 1,
+            unit: "u".into(),
+            position: 0,
+            state: state.into(),
+            attempts: 0,
+            cores: None,
+            memory_mb: None,
+            gpu_card: None,
+            gpu_memory_mb: None,
+            device: None,
+            container: None,
+            pid: None,
+            host: None,
+            started_at: None,
+            finished_at: None,
+            exit_code: None,
+            outcome,
+            pack: Value::Null,
+            comparability_key: None,
+            result_key: None,
+            reused_from_run: from,
+            curation: Value::Null,
+        };
+        let units = [
+            unit(
+                "over",
+                json!({"status": "reused", "words": "reused from run 6"}),
+                Some(6),
+            ),
+            unit("over", json!({"status": "reused"}), Some(6)),
+            unit("over", json!({"status": "reused"}), Some(6)),
+            unit("over", json!({"status": "skipped"}), None),
+        ];
+        let m = of_units(&units);
+        assert!(
+            m["line"]
+                .as_str()
+                .unwrap()
+                .starts_with("3 of 4 made (3 reused from run 6) · 1 skipped"),
+            "{m}"
+        );
+        assert_eq!(
+            (m["made"].as_u64(), m["failed"].as_u64(), m["left"].as_u64()),
+            (Some(3), Some(0), Some(0))
+        );
+        assert_eq!(m["reused"], 3);
     }
 
     #[test]
