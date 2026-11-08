@@ -97,6 +97,7 @@ mod reader;
 mod rehearse;
 mod releases;
 mod requirements;
+mod resort_job;
 mod results;
 mod reuse;
 mod review_questions;
@@ -1991,6 +1992,9 @@ enum ReviewCommand {
         campaign: Option<String>,
         #[arg(long)]
         anyway: bool,
+        /// Print the re-sort's job and return, without following it
+        #[arg(long)]
+        no_wait: bool,
     },
     /// Withdraw a decision, staged or committed: it stops being in force,
     /// the items it closed open again, and nothing is deleted
@@ -2022,6 +2026,16 @@ enum ReviewCommand {
         /// when not given
         #[arg(long, value_name = "NAME")]
         name: Option<String>,
+        /// How many scans at most (an item's scans are taken together), or
+        /// 0 for every one
+        #[arg(long, value_name = "N", default_value_t = crate::proposal_doors::DEFAULT_LIMIT)]
+        limit: i64,
+        /// Which scans first: least_sure, most_sure or random
+        #[arg(long, value_name = "ORDER", default_value = "least_sure")]
+        order: String,
+        /// The seed of a random order; made when not given
+        #[arg(long, value_name = "SEED")]
+        seed: Option<u64>,
         #[arg(long, value_name = "DIR")]
         pack_dir: Option<PathBuf>,
         #[arg(long, default_value = "mri")]
@@ -2029,6 +2043,18 @@ enum ReviewCommand {
         /// Machine-readable output
         #[arg(long)]
         json: bool,
+    },
+    /// Sort the scans the committed decisions reach again, as the job a
+    /// commit queues (UX round 5); run by the worker, or by hand
+    Resort {
+        /// The decisions, as ids joined by commas
+        #[arg(long, value_name = "IDS", value_delimiter = ',', required = true)]
+        decisions: Vec<i64>,
+        /// Who committed them, for the job's name
+        #[arg(long, value_name = "WHO")]
+        who: Option<String>,
+        #[arg(long, value_name = "DIR")]
+        pack_dir: Option<PathBuf>,
     },
     /// Acknowledge one review item: the machine was right and you checked.
     /// Not a decision, and not counted as one (Wave 4a section 13.4)
@@ -2967,26 +2993,34 @@ fn classify(home: &Home, args: ClassifyArgs) -> Result<(), Exit> {
 /// The stacks a classify's `--scope` words hold, their union (record 56
 /// §6.5): a site, a dataset, a scanner or a batch as the rehearsal reads
 /// them, or a frozen handle's stacks.
-/// After `nils review commit`: the scans the decisions reach are re-sorted
-/// at once, as after an answer at the desk (2026-11-05), so that every
-/// page reads the value in force; what happened is said on stdout.
+/// After `nils review commit`: the scans the decisions reach are sorted
+/// again by a queued job (UX round 5, 2026-11-08), as after a commit at the
+/// desk, so that every page reads the value in force; the job is printed
+/// and followed to its end unless `--no-wait`.
 fn resort_after_commit(
     registry: &mut Registry,
     home: &nils_registry::Home,
     pack_dir: Option<PathBuf>,
     decisions: &[i64],
-) {
+    no_wait: bool,
+) -> Result<(), Exit> {
     if decisions.is_empty() {
-        return;
+        return Ok(());
     }
     let dir = crate::pack_dir(home, pack_dir).ok();
-    let resort = crate::review_questions::resort_committed(
-        registry,
-        dir.as_deref(),
-        "the command line",
-        decisions,
+    let resort =
+        crate::resort_job::queue_resort_committed(registry, dir.as_deref(), &actor(), decisions);
+    println!(
+        "re-sort: {}",
+        resort["words"].as_str().unwrap_or("not queued")
     );
-    println!("re-sort: {}", resort["words"].as_str().unwrap_or("not run"));
+    let Some(job) = resort["job"].as_i64() else {
+        return Ok(());
+    };
+    if no_wait {
+        return Ok(());
+    }
+    crate::resort_job::follow(registry, job)
 }
 
 fn classify_scope(
@@ -7356,6 +7390,9 @@ fn review_command(home: &Home, command: ReviewCommand) -> Result<(), Exit> {
             model,
             axis,
             name,
+            limit,
+            order,
+            seed,
             pack_dir,
             pack,
             json,
@@ -7366,9 +7403,25 @@ fn review_command(home: &Home, command: ReviewCommand) -> Result<(), Exit> {
                 &model,
                 &axis,
                 name.as_deref(),
+                limit,
+                &order,
+                seed,
                 pack_dir,
                 &pack,
                 json,
+            );
+        }
+        ReviewCommand::Resort {
+            decisions,
+            who,
+            pack_dir,
+        } => {
+            let dir = crate::pack_dir(home, pack_dir).ok();
+            return crate::resort_job::run_verb(
+                &mut open(home)?,
+                dir.as_deref(),
+                who.as_deref().unwrap_or("a person"),
+                &decisions,
             );
         }
         other => other,
@@ -7494,6 +7547,7 @@ fn review_command(home: &Home, command: ReviewCommand) -> Result<(), Exit> {
             pack,
             pack_dir,
             anyway,
+            no_wait,
         } => {
             drop(columns);
             if min_confidence.is_some()
@@ -7563,7 +7617,7 @@ fn review_command(home: &Home, command: ReviewCommand) -> Result<(), Exit> {
                         )
                     }
                 );
-                resort_after_commit(&mut registry, home, pack_dir, &done.decisions);
+                resort_after_commit(&mut registry, home, pack_dir, &done.decisions, no_wait)?;
                 return Ok(());
             }
             if id.is_none() && !all {
@@ -7591,7 +7645,7 @@ fn review_command(home: &Home, command: ReviewCommand) -> Result<(), Exit> {
                 done.decisions.len(),
                 done.items
             );
-            resort_after_commit(&mut registry, home, pack_dir, &done.decisions);
+            resort_after_commit(&mut registry, home, pack_dir, &done.decisions, no_wait)?;
             Ok(())
         }
         ReviewCommand::Withdraw { id } => {
@@ -7615,7 +7669,8 @@ fn review_command(home: &Home, command: ReviewCommand) -> Result<(), Exit> {
         }
         ReviewCommand::Asked { .. }
         | ReviewCommand::Proposals { .. }
-        | ReviewCommand::ProposalsCampaign { .. } => {
+        | ReviewCommand::ProposalsCampaign { .. }
+        | ReviewCommand::Resort { .. } => {
             unreachable!("answered before the registry opened")
         }
         ReviewCommand::Show { id, json } => {

@@ -2806,8 +2806,10 @@ pub(crate) fn route(
                     other => Reply::error(500, other.to_string()),
                 })?;
                 // 2026-11-05: in force means every page reads it, so the
-                // scans the decisions reach are re-sorted at once
-                let resort = crate::review_questions::resort_committed(
+                // scans the decisions reach are re-sorted; UX round 5: as a
+                // queued job, so the door answers at once (a commit of
+                // 50,006 scans held the desk's dialog for three minutes)
+                let resort = crate::resort_job::queue_resort_committed(
                     registry,
                     doors.pack_dir.as_deref(),
                     principal,
