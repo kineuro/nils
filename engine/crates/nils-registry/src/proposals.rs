@@ -1612,7 +1612,7 @@ pub fn pace_s(store: &mut Store, axis: &str) -> Result<Option<f64>, Error> {
             in_list(chunk)
         );
         for r in store.query(&sql, &[])? {
-            if let Ok(Some(v)) = r.opt_double(0) {
+            if let Some(v) = r.opt_double(0)? {
                 seconds.push(v);
             }
         }
