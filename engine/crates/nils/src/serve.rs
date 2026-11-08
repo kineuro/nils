@@ -4725,7 +4725,10 @@ fn routed(
                 registry,
                 &caller.access,
                 // an empty ?dataset= is no dataset, as `by_kind` above reads it
-                query.get("dataset").map(String::as_str).filter(|d| !d.is_empty()),
+                query
+                    .get("dataset")
+                    .map(String::as_str)
+                    .filter(|d| !d.is_empty()),
                 // a cohort scope reads the cohort's open memberships as the
                 // questions door does; a dataset and a cohort at once is the
                 // dataset's, as `by_kind` above is
