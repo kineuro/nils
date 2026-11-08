@@ -12090,8 +12090,12 @@ fn a_run_taken_up_again_is_checked_as_a_new_run_is() {
         assert_eq!(door["units"]["ready"], 2, "{door}");
         assert_eq!(door["cannot"], json!([]), "{door}");
         // without its converter it is refused for it, as a new run is
-        let (good, _, err) =
-            lab.run_on(&path_without_dcm2niix(lab), &["run", "--resume", "1"], None);
+        // (in this shell beside the engine's worker, UX round 3: --here)
+        let (good, _, err) = lab.run_on(
+            &path_without_dcm2niix(lab),
+            &["run", "--resume", "1", "--here"],
+            None,
+        );
         assert!(!good, "{err}");
         assert!(err.contains("refused before it started"), "{err}");
         assert!(err.contains("nils tools install dcm2niix"), "{err}");

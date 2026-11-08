@@ -188,18 +188,14 @@ pub(crate) fn enqueue_line(own: &[String]) -> String {
         .into_iter()
         .filter(|w| w != "--here")
         .collect();
+    // a run taken up again is named for its run, else for its pipeline,
+    // which `nils run` takes as its first word
     let name = words
         .iter()
-        .skip(1)
-        .find(|w| !w.starts_with('-'))
-        .cloned()
-        .or_else(|| {
-            words
-                .iter()
-                .position(|w| w == "--resume")
-                .and_then(|i| words.get(i + 1))
-                .map(|r| format!("run-{r}"))
-        })
+        .position(|w| w == "--resume")
+        .and_then(|i| words.get(i + 1))
+        .map(|r| format!("run-{r}"))
+        .or_else(|| words.get(1).filter(|w| !w.starts_with('-')).cloned())
         .unwrap_or_else(|| "run".to_string());
     format!(
         "nils jobs enqueue --name {} -- {}",
