@@ -964,6 +964,48 @@ paths:
         "400": {description: "No model or axis, a field that is not the caller's to say, a name that is a number, a limit under one, an order not among the three, or a seed that is not a whole number"}
         "404": {description: No registered model answers to the reference}
         "409": {description: "Nothing the model proposed on the axis waits below its threshold outside a campaign, a campaign so named exists, or no pack is served"}
+  /api/review/proposals/scans:
+    get:
+      summary: One page of what one model proposed on one axis, narrowed by the value proposed and the probability band, the most sure first (UX round 5; review:see; nils review proposals-scans)
+      description: "Added in place, additively, on 2026-11-08. `model` (its id, digest or name@version) and `axis` are required; `value` keeps the scans it proposed that value for; `min` (inclusive) and `max` (exclusive) keep the scans whose probability of the value proposed is in the band; `page` from 1 and `size` (500 by default, 1000 at most). The scans are the members not decided yet of the model's open `<axis>:model` items (below its threshold; a staged item's members are the model's staged decision, which `POST /api/decisions/commit` puts in force) that no open campaign asks (`asked` counts those left out) and of no sample sealed now (`withheld_sealed`). Each scan: `stack`, `item`, `proposed`, `probability`, `run`, `now` (the value the sort holds on the axis, null for none), `decided` (a person's decision in force on it), its facts (subject, session, day, series_description), `name`, `bids`, `axes` and `picture` as the question grid gives them, with `pictures` {shown, why} beside. For the filter row and the histogram: `values` [{value, count}], each value's scans in the band, most first; `bands` [{from, to, count}], ten equal bands over the model's whole `range` {low, high} for the value asked, the last band closed at the top; `threshold` and `thresholds`; `total`, `page`, `pages`, `size`."
+      parameters:
+        - {name: model, in: query, required: true, schema: {type: string}}
+        - {name: axis, in: query, required: true, schema: {type: string}}
+        - {name: value, in: query, required: false, schema: {type: string}}
+        - {name: min, in: query, required: false, schema: {type: number}}
+        - {name: max, in: query, required: false, schema: {type: number}}
+        - {name: page, in: query, required: false, schema: {type: integer}}
+        - {name: size, in: query, required: false, schema: {type: integer}}
+      responses:
+        "200": {description: "{model, label, axis, value, min, max, threshold, thresholds, range: {low, high}, values: [{value, count}], bands: [{from, to, count}], total, page, pages, size, asked, withheld_sealed, scans: [{stack, item, proposed, probability, run, now, decided, subject, session, day, series_description, name, bids, axes, picture}], pictures: {shown, why}}"}
+        "400": {description: "No model or axis, a probability not between 0 and 1, min at or above max, or a page or size that is not a number from 1"}
+        "404": {description: No registered model answers to the reference}
+  /api/review/proposals/accept:
+    post:
+      summary: Accept what one model proposed on the scans seen but the ones set apart, one decision a scan in the caller's name with the model's probability kept beside it, then the re-sort queued as a job (UX round 5; review:work; nils review proposals-accept)
+      description: "Added in place, additively, on 2026-11-08. The body: `model`, `axis`, `value` (the value proposed, which the accept writes), `min` and `max` (the band the page was read in), `seen` (the scans the page showed, as ids), `except` (the scans set apart, a subset of seen, not written: they stay proposals) and `why` (a word kept with each decision). For each scan seen and not set apart, one decision at the stack's scope, in force, by the caller as the verified actor, whose words name the model, its value, its probability and its run (`accepted bp-head@1's neck at 0.731 (run 41)`), written through the review spine in one transaction; the item whose last member is decided closes as accepted. A scan a person decided meanwhile keeps that decision (`kept_decided`), and a stack of a sample sealed now takes none (`left_out_sealed`). The re-sort of the decided scans is queued as the job a commit queues (`nils review resort --decisions IDS`, kind resort, the decisions written in its arguments), run by the engine's worker, so the door answers at once: `resort` {job, state: queued, stacks, unreached, words}, or state done with no job where nothing was decided; the job's progress and end are read through GET /api/jobs/{id}. Refused with 409 where a scan seen no longer waits as the page showed it (decided meanwhile, another value proposed since, or out of the band): the page is read again."
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [model, axis, value, seen]
+              properties:
+                model: {type: string}
+                axis: {type: string}
+                value: {type: string}
+                min: {type: number}
+                max: {type: number}
+                seen: {type: array, items: {type: integer}}
+                except: {type: array, items: {type: integer}}
+                why: {type: string}
+      responses:
+        "200": {description: "{model, label, axis, value, decided, decisions: [{stack, decision}], closed, left_in_items, kept_decided, left_out_sealed, set_apart, resort: {job, state, stacks}}"}
+        "400": {description: "No model, axis, value or seen, a probability not between 0 and 1, or a scan set apart the page did not show"}
+        "403": {description: "A body that names an author other than the verified actor"}
+        "404": {description: No registered model answers to the reference}
+        "409": {description: "A scan seen that no longer waits as the page showed it, or a decision of a higher rank on it"}
   /api/origins:
     get:
       summary: Where each axis label of one scan or of one visit's scans came from (UX round 2; data:see or review:see; nils origins)

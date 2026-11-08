@@ -2385,7 +2385,7 @@ pub fn held_pairs(store: &mut Store) -> Result<BTreeMap<(i64, String), String>, 
 /// The review items the open campaigns ask, each with the asking
 /// campaign's name: the ones its items stand on, and those its axes items
 /// answer (`asks`, record 45).
-pub(crate) fn held_review_items(store: &mut Store) -> Result<BTreeMap<i64, String>, Error> {
+pub fn held_review_items(store: &mut Store) -> Result<BTreeMap<i64, String>, Error> {
     let sql = format!(
         "SELECT i.review_item_id, c.name FROM {} i JOIN {} c ON c.id = i.campaign_id \
          WHERE c.status IN ('open', 'closing') ORDER BY c.id, i.review_item_id",

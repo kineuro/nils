@@ -1451,7 +1451,7 @@ fn list(
 
 /// The facts of each scan a tile shows: its subject, its visit and day,
 /// shaped below detail quasi as the dataset scans door shapes them.
-fn facts(
+pub(crate) fn facts(
     store: &mut Store,
     stacks: &[i64],
     quasi: bool,

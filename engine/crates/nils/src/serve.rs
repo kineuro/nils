@@ -2364,6 +2364,20 @@ fn routed(
     {
         return r;
     }
+    // UX round 5: a model's proposals as a grid, narrowed by value and by
+    // probability, accepted in one move
+    if let Some(r) = crate::proposal_grid::route(
+        doors,
+        registry,
+        caller,
+        quasi,
+        method.as_str(),
+        &segs,
+        query,
+        body,
+    ) {
+        return r;
+    }
     // UX round 2: where each axis label of a scan or a visit came from,
     // and the scans sorted again
     if let Some(r) = crate::origins::route(
@@ -5762,6 +5776,10 @@ pub(crate) fn door(method: &str, segs: &[&str]) -> (Need, Detail) {
     if let Some(n) = crate::proposal_doors::door(method, segs) {
         return n;
     }
+    // UX round 5: the batch accept grid of a model's proposals
+    if let Some(n) = crate::proposal_grid::door(method, segs) {
+        return n;
+    }
     // UX round 2: where a scan's labels came from, and its re-sort
     if let Some(n) = crate::origins::door(method, segs) {
         return n;
@@ -6851,6 +6869,7 @@ pub(crate) fn doors_list() -> Vec<String> {
     .chain(crate::rule_changes::DOORS.iter())
     .chain(crate::review_questions::DOORS.iter())
     .chain(crate::proposal_doors::DOORS.iter())
+    .chain(crate::proposal_grid::DOORS.iter())
     .chain(crate::origins::DOORS.iter())
     .map(|d| (*d).to_string())
     .collect()
@@ -9126,6 +9145,7 @@ pub(crate) fn policy() -> Vec<serde_json::Value> {
             .chain(crate::rule_changes::POLICY.iter())
             .chain(crate::review_questions::POLICY.iter())
             .chain(crate::proposal_doors::POLICY.iter())
+            .chain(crate::proposal_grid::POLICY.iter())
             .chain(crate::origins::POLICY.iter())
             .chain(crate::participate::POLICY.iter())
             .map(|(door, writes, idem, cost, cap, now, then)| {
