@@ -1482,7 +1482,8 @@ fn the_keyboard_asks_several_axes_and_commits_one_axis_of_them() {
     {
         let mut reg = nils_registry::home::Home::new(home.path()).open().unwrap();
         let base = nils_registry::proposals::pace_s(reg.store(), "base").unwrap();
-        assert!(base.is_some_and(|p| p > 0.0), "{base:?}");
+        // the answers of a test come within a second, so the pace may be 0
+        assert!(base.is_some_and(|p| p >= 0.0), "{base:?}");
         assert_eq!(
             nils_registry::proposals::pace_s(reg.store(), "post_contrast").unwrap(),
             None
@@ -1513,6 +1514,9 @@ fn the_keyboard_asks_several_axes_and_commits_one_axis_of_them() {
             "technique",
             "--to",
             "MPRAGE",
+            // the first commit moved the epoch (record 42 R6), so the
+            // decisions staged before it are committed knowingly
+            "--anyway",
             "--no-wait",
         ],
     );

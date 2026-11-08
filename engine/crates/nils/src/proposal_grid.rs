@@ -109,9 +109,7 @@ pub(crate) fn route(
         ("GET", ["api", "review", "proposals", "scans"]) => {
             scans(doors, registry, caller, quasi, query)
         }
-        ("POST", ["api", "review", "proposals", "accept"]) => {
-            accept(doors, registry, caller, body)
-        }
+        ("POST", ["api", "review", "proposals", "accept"]) => accept(doors, registry, caller, body),
         _ => return None,
     })
 }
