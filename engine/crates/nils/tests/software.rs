@@ -248,6 +248,8 @@ impl Lab {
             .arg(self.home.path())
             .env("USER", "adm")
             .env("HOSTNAME", "ward-3")
+            // UX round 3: the stand-in apptainer needs no session bus
+            .env("NILS_TEST_APPTAINER_LIMITS", "0")
             .env("PATH", &self.path)
             .env("FAKE_DOCKER_ARGS", &self.args_log)
             .env_remove("FAKE_DOCKER_DIGEST")

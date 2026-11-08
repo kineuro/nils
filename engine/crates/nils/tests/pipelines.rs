@@ -32,6 +32,10 @@ use dicom_dictionary_std::tags;
 use nils_dicom::synth::{self, MetaFields, TempDir};
 use serde_json::{Value, json};
 
+/// UX round 3: a job's life beside the engine's service.
+#[path = "pipelines/jobs_lifecycle.rs"]
+mod jobs_lifecycle;
+
 fn nils() -> Command {
     Command::new(env!("CARGO_BIN_EXE_nils"))
 }
@@ -381,6 +385,9 @@ impl Lab {
             .env("PATH", path)
             .env("NILS_PACK_DIR", packs())
             .env("FAKE_PODMAN_ARGS", self.bin.path().join("args.log"))
+            // UX round 3: whatever this machine's cgroups and session, the
+            // stand-in apptainer needs no session bus
+            .env("NILS_TEST_APPTAINER_LIMITS", "0")
             .env_remove("NILS_DSN")
             .env_remove("NILS_JOB_ID")
             .env_remove("NILS_JOB_DETAIL");
@@ -1040,6 +1047,126 @@ fn a_stacks_run_registers_its_outputs_raises_its_failures_and_repeats_its_digest
     assert_eq!(audited, 7);
     let shown = lab.ok(&["pipeline", "runs", &run1.to_string()], None);
     assert!(shown.contains("4 succeeded, 0 failed"), "{shown}");
+}
+
+/// 2026-11-08 (UX round 3): the failures runs left on stacks a later run
+/// of the same pipeline then did are retired as review items, by that run,
+/// and nothing is deleted; a run that failed after its containers ended is
+/// refused when taken up again, with the later run that did its units and
+/// the command that starts a new run over the same stacks.
+#[test]
+fn a_later_run_retires_the_failures_earlier_runs_left_on_its_stacks() {
+    if !have("python3") {
+        eprintln!(
+            "python3 is not installed; the stand-in podman needs it, so this test is skipped"
+        );
+        return;
+    }
+    let lab = Lab::new("pipelines-retire");
+    lab.add_descriptor(
+        "stack-echo",
+        &stack_echo(&format!("example.org/stack-echo@sha256:{}", "a".repeat(64))),
+    );
+    let run = |mode: &str| -> Value {
+        let (_, out, err) = lab.run(
+            &[
+                "run",
+                "stack-echo",
+                "--select",
+                "selection:every@1",
+                "--param",
+                &format!("mode={mode}"),
+                "--json",
+            ],
+            None,
+        );
+        serde_json::from_str(&out).unwrap_or_else(|_| panic!("{out} {err}"))
+    };
+    // a container that failed as a whole (one item of the run), a unit that
+    // failed (one item) and units the results did not name (three)
+    let crashed = run("crash");
+    assert_eq!(crashed["status"], "failed", "{crashed}");
+    let failed = run("fail-last");
+    assert_eq!(failed["status"], "partial", "{failed}");
+    let partial = run("partial");
+    assert_eq!(partial["status"], "partial", "{partial}");
+    let open = |lab: &Lab| -> Vec<Value> {
+        lab.json(&[
+            "review",
+            "list",
+            "--kind",
+            "pipeline:qc",
+            "--status",
+            "open",
+            "--json",
+        ])["items"]
+            .as_array()
+            .unwrap()
+            .clone()
+    };
+    assert_eq!(open(&lab).len(), 5);
+    let crashed_id = crashed["id"].as_i64().unwrap();
+
+    // taken up again, the failed run is refused with the command for a new run
+    let (ok, _, err) = lab.run(&["run", "--resume", &crashed_id.to_string()], None);
+    assert!(!ok);
+    assert!(
+        err.contains(&format!(
+            "start a new run over the same stacks: nils run stack-echo@1 --handle {} --param mode=crash",
+            crashed["handle_id"]
+        )),
+        "{err}"
+    );
+    assert!(
+        err.contains("1 of its review items stay open until a run succeeds on those units"),
+        "{err}"
+    );
+
+    // a run that does every stack retires all five, each by that run
+    let done = run("all");
+    assert_eq!(done["status"], "done", "{done}");
+    let done_id = done["id"].as_i64().unwrap();
+    assert_eq!(done["summary"]["retired"]["items"], 5, "{done}");
+    assert_eq!(
+        done["summary"]["retired"]["runs"],
+        json!([crashed_id, failed["id"], partial["id"]]),
+        "{done}"
+    );
+    assert!(open(&lab).is_empty(), "{:?}", open(&lab));
+    let mut store = lab.store();
+    let rows = store
+        .query(
+            "SELECT status, actor, decision FROM review_item WHERE kind = 'pipeline:qc' ORDER BY id",
+            &[],
+        )
+        .unwrap();
+    assert_eq!(rows.len(), 5, "nothing is deleted");
+    for r in &rows {
+        assert_eq!(r.text(0).unwrap(), "superseded");
+        assert_eq!(r.text(1).unwrap(), format!("run:{done_id}"));
+        let decision: Value = serde_json::from_str(r.text(2).unwrap()).unwrap();
+        assert_eq!(decision["retired_by_run"], done_id, "{decision}");
+    }
+    drop(store);
+    // the old run keeps its record
+    let again = lab.json(&["pipeline", "runs", &crashed_id.to_string(), "--json"]);
+    assert_eq!(again["status"], "failed", "{again}");
+
+    // and its refusal names the run that did its units
+    let (ok, _, err) = lab.run(&["run", "--resume", &crashed_id.to_string()], None);
+    assert!(!ok);
+    assert!(
+        err.contains(&format!(
+            "run {done_id} succeeded on its units since and retired 1 of its review items"
+        )),
+        "{err}"
+    );
+    assert!(!err.contains("stay open"), "{err}");
+
+    // nothing is left to retire, and a later run's own failure is open
+    let late = run("fail-last");
+    assert_eq!(late["summary"]["retired"]["items"], 0, "{late}");
+    assert_eq!(open(&lab).len(), 1);
 }
 
 #[test]
@@ -12083,8 +12210,12 @@ fn a_run_taken_up_again_is_checked_as_a_new_run_is() {
         assert_eq!(door["units"]["ready"], 2, "{door}");
         assert_eq!(door["cannot"], json!([]), "{door}");
         // without its converter it is refused for it, as a new run is
-        let (good, _, err) =
-            lab.run_on(&path_without_dcm2niix(lab), &["run", "--resume", "1"], None);
+        // (in this shell beside the engine's worker, UX round 3: --here)
+        let (good, _, err) = lab.run_on(
+            &path_without_dcm2niix(lab),
+            &["run", "--resume", "1", "--here"],
+            None,
+        );
         assert!(!good, "{err}");
         assert!(err.contains("refused before it started"), "{err}");
         assert!(err.contains("nils tools install dcm2niix"), "{err}");

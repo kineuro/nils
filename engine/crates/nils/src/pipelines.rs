@@ -1550,6 +1550,13 @@ pub(crate) fn summary_totals_only(s: &mut Value) {
             withheld.push("review_items");
         }
     }
+    // the earlier failures it retired are a count of units as well
+    if let Some(n) = s["retired"]["items"].as_u64()
+        && held("n", n as usize)["withheld"] == true
+    {
+        s["retired"]["items"] = Value::Null;
+        withheld.push("retired");
+    }
     s["failures_by_reason"] = json!(held_list("reason", "units", by_reason));
     // 2026-10-12: the failures by their cause, each count held as a count
     // of units is
@@ -2679,6 +2686,11 @@ pub(crate) struct RunArgs {
     /// Machine-readable output
     #[arg(long)]
     pub(crate) json: bool,
+    /// Run in this shell even while the engine's worker runs pipelines for
+    /// this registry (UX round 3); without it such a run is refused with
+    /// the `nils jobs enqueue` line that queues it for the engine
+    #[arg(long)]
+    pub(crate) here: bool,
     /// The parts of a split run still to run after one of them was taken
     /// up again; never on the command line
     #[arg(skip)]
@@ -4019,6 +4031,42 @@ fn wait_beating(
             let _ = child.kill();
             let status = child.wait().map_err(|e| e.to_string())?;
             Ok((status, true))
+        }
+    }
+}
+
+/// UX round 3 (2026-11-08): wait for a child that leads a process group of
+/// its own (an image's pull and build), looking for a cancel every second;
+/// a cancel ends the child and every process of its group at once (the
+/// group this run made, by the child's recorded id), so a pull that
+/// fetches layers in processes of its own stops with it and not minutes
+/// later.
+fn wait_beating_group(
+    child: &mut std::process::Child,
+    store: &mut Store,
+    job_id: i64,
+    progress: &Value,
+) -> Result<(std::process::ExitStatus, bool), String> {
+    let waited = nils_proc::wait_with_tick(
+        child,
+        Duration::from_millis(100),
+        Duration::from_secs(1),
+        &mut || {
+            matches!(
+                job::beat(store, job_id, Some(progress)),
+                Ok(job::Asked::Cancel)
+            )
+        },
+    );
+    match waited {
+        Ok(Some(status)) => Ok((status, false)),
+        Ok(None) => Ok((
+            nils_proc::end_group(child).map_err(|e| e.to_string())?,
+            true,
+        )),
+        Err(e) => {
+            let _ = nils_proc::end_group(child);
+            Err(e.to_string())
         }
     }
 }
@@ -5762,7 +5810,16 @@ pub(crate) fn sweep_workdirs(store: &mut Store) -> Result<usize, String> {
 /// the job that ran it recorded: its principal, its detail and its actor.
 /// A run someone asked to stop is closed as cancelled instead. Answers how
 /// many were queued.
-pub(crate) fn take_up_interrupted(store: &mut Store) -> Result<usize, String> {
+///
+/// UX round 3 (2026-11-08): only a run whose engine went away is taken up
+/// by itself. `engine_since` is when the worker that looks started: a run
+/// whose job, of this host, was heard from after that ended while this
+/// engine ran (its process was killed by hand or by the system), and it is
+/// marked interrupted with the command that takes it up, never queued.
+pub(crate) fn take_up_interrupted(
+    store: &mut Store,
+    engine_since: Option<&str>,
+) -> Result<usize, String> {
     let err = |e: nils_registry::Error| e.to_string();
     let mut queued = 0;
     for r in rows::runs_in(store, "running").map_err(err)? {
@@ -5793,6 +5850,18 @@ pub(crate) fn take_up_interrupted(store: &mut Store) -> Result<usize, String> {
                 },
             )
             .map_err(err)?;
+            continue;
+        }
+        if let Some(j) = old
+            .as_ref()
+            .filter(|j| ended_beside_engine(j, engine_since))
+        {
+            let why = format!(
+                "its process (job {}) ended while the engine ran, stopped by hand or by the system; \
+                 nils jobs resume {} takes it up again where it stopped",
+                j.id, j.id
+            );
+            rows::interrupt(store, r.id, &why).map_err(err)?;
             continue;
         }
         let why = format!(
@@ -5862,6 +5931,21 @@ pub(crate) fn take_up_interrupted(store: &mut Store) -> Result<usize, String> {
         queued += 1;
     }
     Ok(queued)
+}
+
+/// Whether a run's job ended while the engine that looks was up (UX round
+/// 3): a job of this host last heard from after the engine started. The
+/// same second is the engine's own start, and is taken as the engine going
+/// away, as before.
+fn ended_beside_engine(j: &job::Job, engine_since: Option<&str>) -> bool {
+    let Some(since) = engine_since.and_then(nils_registry::time::secs_of) else {
+        return false;
+    };
+    if j.host.as_deref() != Some(job::hostname().as_str()) {
+        return false;
+    }
+    let heard = j.heartbeat_at.as_deref().unwrap_or(j.started_at.as_str());
+    nils_registry::time::secs_of(heard).is_some_and(|heard| heard > since)
 }
 
 /// `nils run`.
@@ -7014,16 +7098,139 @@ pub(crate) fn resume_refused(store: &mut Store, r: &Run) -> Option<Exit> {
             "run {} is {}: nothing is left to run",
             r.id, r.status
         ))),
-        "failed" if r.results_digest.is_some() => Some(usage(format!(
-            "run {} failed after its containers ended, and its failures are review items; start a new run",
-            r.id
-        ))),
+        "failed" if r.results_digest.is_some() => Some(usage(failed_run_refusal(store, r))),
         "running" => r.job_id.filter(|j| job_alive(store, *j)).map(|j| Exit {
             code: crate::BUSY,
             message: format!("run {} is running, as job {j}", r.id),
         }),
         _ => None,
     }
+}
+
+/// A word as a shell reads it: as it is where it is plain, else in single
+/// quotes.
+fn shell_word(w: &str) -> String {
+    if !w.is_empty()
+        && w.chars()
+            .all(|c| c.is_ascii_alphanumeric() || "@%+=:,./_-".contains(c))
+    {
+        w.to_string()
+    } else {
+        format!("'{}'", w.replace('\'', "'\\''"))
+    }
+}
+
+/// The command that starts a new run as `r` was started, over the same
+/// stacks (2026-11-08, UX round 3): its pipeline, its handle, and the
+/// parameters, models, label set and threshold its job was given, or, for
+/// a run whose job no longer says (one taken up again), those the run
+/// recorded.
+pub(crate) fn new_run_line(store: &mut Store, r: &Run) -> Option<String> {
+    let handle = r.handle_id?;
+    let label = rows::get(store, r.pipeline_id).ok().flatten()?.label();
+    let mut words = vec![
+        "nils".to_string(),
+        "run".into(),
+        label,
+        "--handle".into(),
+        handle.to_string(),
+    ];
+    let args = r
+        .job_id
+        .and_then(|j| job::show(store, j).ok().flatten())
+        .map(|j| j.args)
+        .filter(|a| a["pipeline"].is_string() && a["handle"].as_i64() == Some(handle));
+    let texts = |v: &Value| -> Vec<String> {
+        v.as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|x| x.as_str().map(str::to_string))
+            .collect()
+    };
+    let (params, models, labels): (Vec<String>, Vec<String>, Option<i64>) = match &args {
+        Some(a) => (
+            texts(&a["params"]),
+            texts(&a["models"]),
+            a["labels"].as_i64(),
+        ),
+        None => (
+            r.params
+                .as_object()
+                .into_iter()
+                .flatten()
+                .map(|(k, v)| match v {
+                    Value::String(s) => format!("{k}={s}"),
+                    other => format!("{k}={other}"),
+                })
+                .collect(),
+            r.model_ids
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_i64)
+                .map(|m| m.to_string())
+                .collect(),
+            r.label_set_id,
+        ),
+    };
+    for p in params {
+        words.push("--param".into());
+        words.push(p);
+    }
+    for m in models {
+        words.push("--model".into());
+        words.push(m);
+    }
+    if let Some(l) = labels {
+        words.push("--labels".into());
+        words.push(l.to_string());
+    }
+    if let Some(t) = r.threshold {
+        words.push("--threshold".into());
+        words.push(t.to_string());
+    }
+    Some(
+        words
+            .iter()
+            .map(|w| shell_word(w))
+            .collect::<Vec<_>>()
+            .join(" "),
+    )
+}
+
+/// Why a run that failed after its containers ended is not taken up again,
+/// and what to do instead (2026-11-08, UX round 3): its failures are review
+/// items until a later run succeeds on those units; the words name the
+/// later runs that did, with how many of its items each retired, and the
+/// command that starts a new run over the same stacks.
+fn failed_run_refusal(store: &mut Store, r: &Run) -> String {
+    let mut words = format!(
+        "run {} failed after its containers ended, so it is not taken up again",
+        r.id
+    );
+    let (open, by) = nils_registry::review::pipeline_qc_fate(store, r.id).unwrap_or_default();
+    if !by.is_empty() {
+        let later = by
+            .iter()
+            .map(|(run, n)| {
+                format!(
+                    "run {run} succeeded on its units since and retired {n} of its review items"
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("; ");
+        words.push_str(&format!("; {later}"));
+    }
+    if open > 0 {
+        words.push_str(&format!(
+            "; {open} of its review items stay open until a run succeeds on those units"
+        ));
+    }
+    match new_run_line(store, r) {
+        Some(line) => words.push_str(&format!("; start a new run over the same stacks: {line}")),
+        None => words.push_str("; start a new run over the same stacks"),
+    }
+    words
 }
 
 /// `nils run --resume <run>` (record 49 A1): a run that stopped, was
@@ -7327,6 +7534,7 @@ fn resume_command(home: &Home, args: &RunArgs, run_id: i64) -> Result<(), Exit> 
             go_on: Some(go_on),
             family: None,
             chain: args.chain.clone(),
+            here: args.here,
         },
     )
 }
@@ -10601,14 +10809,24 @@ fn ensure_image(
         x.job_id,
         Some(&json!({"run": x.run_id, "phase": "image", "image": x.pipeline.image})),
     );
-    let mut child = std::process::Command::new(&x.runtime.program)
+    let mut build = std::process::Command::new(&x.runtime.program);
+    build
         .args(runtime::build_argv(&x.pipeline.image, &part, form))
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::from(log))
-        .stderr(std::process::Stdio::from(err_log))
+        .stderr(std::process::Stdio::from(err_log));
+    // UX round 3: started in `/`, and leading a group of its own, so a
+    // cancel stops the whole pull at once
+    runtime::apptainer_starts_at_root(&mut build);
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        build.process_group(0);
+    }
+    let mut child = build
         .spawn()
         .map_err(|e| format!("apptainer could not start a build: {e}"))?;
-    let (status, stopped) = wait_beating(
+    let (status, stopped) = wait_beating_group(
         &mut child,
         registry.store(),
         x.job_id,
@@ -11369,6 +11587,7 @@ fn finalize(
     let reports: Vec<nils_pipeline::Results> =
         folders.iter().filter_map(|f| read_results(f).0).collect();
 
+    let mut retired = nils_registry::review::Retired::default();
     // what follows reads and writes what every run shares: a model
     // registered by its name, the review items a newer run supersedes, the
     // measures and the epoch; runs going on side by side take it one run
@@ -11384,6 +11603,7 @@ fn finalize(
         proposed,
         pack_flags,
     ) = with_lock(registry, INTAKE_LOCK, Some(x.job_id), |registry| {
+        let retired = &mut retired;
         // the run's own files (record 43): a model it fitted, registered from
         // its card, and any other run-level output; only a run that completed
         // with its units together
@@ -11683,6 +11903,25 @@ fn finalize(
             if !items.contains(&id) {
                 items.push(id);
             }
+        }
+
+        // 2026-11-08 (UX round 3): the units this run did, which earlier
+        // runs of the same pipeline left as failures, stop being open review
+        // items, each retired by this run; nothing is deleted
+        if completed {
+            let did: std::collections::BTreeSet<String> = statuses
+                .iter()
+                .filter(|(_, status, ..)| status == "succeeded" || status == "reused")
+                .map(|(i, ..)| m.units[*i].id.clone())
+                .collect();
+            *retired = nils_registry::review::retire_pipeline_qc(
+                registry.store(),
+                &p.name,
+                x.run_id,
+                &did,
+                &now,
+            )
+            .map_err(|e| e.to_string())?;
         }
 
         // record 49 A3: the declared checks, held against each unit that
@@ -12065,6 +12304,9 @@ fn finalize(
         "seeds": seeds_doc,
         "refused_files": refused,
         "review_items": items,
+        // 2026-11-08 (UX round 3): the failures of earlier runs this run did
+        // again, retired as review items, and the runs that raised them
+        "retired": {"items": retired.items.len(), "runs": retired.runs},
         // record 57 P4: the units the pack's checks flagged, each with the
         // check, its value and its threshold
         "flags": pack_flags,

@@ -511,7 +511,10 @@ impl Lab {
     /// release.
     fn pipeline_run(&self, select: &str) -> (i64, i64) {
         let before = self.int("SELECT COALESCE(MAX(id), 0) FROM {pipeline_run}");
-        let (_, out, err) = self.run(&["run", "needs-t1w", "--select", select, "--json"], None);
+        let (_, out, err) = self.run(
+            &["run", "needs-t1w", "--select", select, "--json", "--here"],
+            None,
+        );
         let run = self.int(&format!(
             "SELECT COALESCE(MAX(id), 0) FROM {{pipeline_run}} WHERE id > {before}"
         ));
@@ -625,7 +628,10 @@ impl Lab {
     /// A run taken up again; answers each unit's outcome.
     fn resume(&self, run: i64) -> Vec<Value> {
         self.interrupt(run);
-        let (_, out, err) = self.run(&["run", "--resume", &run.to_string(), "--json"], None);
+        let (_, out, err) = self.run(
+            &["run", "--resume", &run.to_string(), "--json", "--here"],
+            None,
+        );
         let mut store = self.store();
         let sql = format!(
             "SELECT CAST(outcome AS TEXT) FROM {} WHERE run_id = {run} ORDER BY id",
@@ -1198,7 +1204,10 @@ fn frozen(pg: Option<(String, String)>) {
                 m.run
             );
         }
-        let (good, out, err) = lab.run(&["run", "--resume", &m.run.to_string(), "--json"], None);
+        let (good, out, err) = lab.run(
+            &["run", "--resume", &m.run.to_string(), "--json", "--here"],
+            None,
+        );
         assert!(!good, "run {}: {out}", m.run);
         assert!(
             err.contains("refused before it started") && err.contains(why),

@@ -3964,15 +3964,16 @@ fn nils_jobs_lists_shows_cancels_queues_works_and_resumes() {
     let error = failed["error"].as_str().unwrap_or("");
     assert_eq!(error, "stack 999999 has not been classified", "{failed}");
 
-    // Resume: the digest runs again from its recorded command line, and
-    // finds nothing changed.
+    // Resume (UX round 3): the digest is queued again from its recorded
+    // command line, nothing runs in the shell, and the worker that takes
+    // it finds nothing changed.
     let resumed = run(&["jobs", "resume", &digest_id.to_string()]);
-    assert!(
-        resumed.contains("running again: nils --registry"),
-        "{resumed}"
-    );
-    assert!(resumed.contains("digest --name a"), "{resumed}");
-    assert!(resumed.contains("unchanged"), "{resumed}");
+    assert!(resumed.contains("queued as job"), "{resumed}");
+    assert!(resumed.contains("nils digest --name a"), "{resumed}");
+    assert!(!resumed.contains("unchanged"), "{resumed}");
+    let worked = run(&["jobs", "work", "--once"]);
+    assert!(worked.contains("digest --name a"), "{worked}");
+    assert!(worked.contains("unchanged"), "{worked}");
     // A job that is not over does not resume; a job that is not there is a
     // usage error.
     let out = nils()

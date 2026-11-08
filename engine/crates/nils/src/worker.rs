@@ -463,6 +463,12 @@ pub(crate) fn run(
             "nils: the pipeline lane could not clear old runs' work folders: {e}"
         );
     }
+    // UX round 3: when this worker started, so a run whose process ended
+    // while it ran is not taken up by itself
+    let engine_since = job::show(store, worker)
+        .ok()
+        .flatten()
+        .map(|w| w.started_at);
     let outcome = loop {
         if stop() {
             break Ok(());
@@ -475,7 +481,7 @@ pub(crate) fn run(
         // record 49 A1: a pipeline run whose engine went away is taken up
         // again by the lane that runs pipelines
         if matches!(opts.lane, job::Lane::All | job::Lane::Pipelines)
-            && let Err(e) = crate::pipelines::take_up_interrupted(store)
+            && let Err(e) = crate::pipelines::take_up_interrupted(store, engine_since.as_deref())
         {
             let _ = writeln!(
                 std::io::stderr(),

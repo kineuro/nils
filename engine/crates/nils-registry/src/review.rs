@@ -3425,6 +3425,215 @@ pub fn raise_pipeline_qc(
     )
 }
 
+/// The actor a run that retired an item is recorded as, `run:<id>`, so the
+/// items a run retired are found by a plain text and not by matching JSON.
+pub fn retired_by(run_id: i64) -> String {
+    format!("run:{run_id}")
+}
+
+/// What retiring an abandoned run's failures came to.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Retired {
+    /// The items closed, each as `superseded` with the run that retired it.
+    pub items: Vec<i64>,
+    /// The earlier runs they were raised by.
+    pub runs: Vec<i64>,
+}
+
+/// Retire the failures of earlier runs that a later run did again
+/// (2026-11-08, UX round 3): when run `run_id` of pipeline `name` succeeds
+/// on units, the open `pipeline:qc` items that earlier runs of the same
+/// pipeline name, of any version, raised for those units as failed or not
+/// reported stop being open review items. Each is closed as `superseded`,
+/// its actor [`retired_by`] the run and its decision saying so; nothing is
+/// deleted and the old run keeps its record. The earlier runs are those
+/// that failed, were cancelled, were interrupted or completed partial. An
+/// item of a run that failed as a whole (unit `run`) is retired once the
+/// later run succeeded on every unit that run had. A refused file and a
+/// check's breach are kept, since running again does not answer them, and
+/// so is an item a campaign holds. The caller holds the transaction.
+pub fn retire_pipeline_qc(
+    store: &mut Store,
+    name: &str,
+    run_id: i64,
+    succeeded: &BTreeSet<String>,
+    now: &str,
+) -> Result<Retired, StoreError> {
+    let mut out = Retired::default();
+    if succeeded.is_empty() {
+        return Ok(out);
+    }
+    let d = store.dialect();
+    let sql = format!(
+        "SELECT r.id FROM {} r JOIN {} p ON p.id = r.pipeline_id \
+         WHERE p.name = {} AND r.id < {} \
+         AND r.status IN ('failed', 'cancelled', 'interrupted', 'partial') ORDER BY r.id",
+        store.qualified("pipeline_run"),
+        store.qualified("pipeline"),
+        d.param(1, Type::Text),
+        d.param(2, Type::Int),
+    );
+    let earlier: Vec<i64> = store
+        .query(&sql, &[Param::from(name), Param::Int(run_id)])?
+        .iter()
+        .map(|r| r.int(0))
+        .collect::<Result<_, _>>()?;
+    let t = table("review_item");
+    let mut hit: Vec<(i64, i64)> = Vec::new();
+    for run in earlier {
+        let rows = store.query(
+            &format!(
+                "SELECT id, group_key, {} FROM {} WHERE kind = {} AND status = 'open' AND group_key LIKE {}",
+                d.text_of(t.column("evidence").expect("evidence")),
+                store.qualified("review_item"),
+                d.param(1, Type::Text),
+                d.param(2, Type::Text),
+            ),
+            &[
+                Param::from(PIPELINE_QC_KIND),
+                Param::from(format!("run:{run}|unit:%")),
+            ],
+        )?;
+        let prefix = format!("run:{run}|unit:");
+        let mut whole_run: Option<bool> = None;
+        for r in &rows {
+            let Some(unit) = r.opt_text(1)?.and_then(|k| k.strip_prefix(&prefix)) else {
+                continue;
+            };
+            let evidence: serde_json::Value = r
+                .opt_text(2)?
+                .and_then(|t| serde_json::from_str(t).ok())
+                .unwrap_or_default();
+            if !matches!(evidence["status"].as_str(), Some("failed" | "unreported")) {
+                continue;
+            }
+            let again = if unit == "run" {
+                match whole_run {
+                    Some(b) => b,
+                    None => {
+                        let units = store.query(
+                            &format!(
+                                "SELECT unit FROM {} WHERE run_id = {}",
+                                store.qualified("pipeline_unit"),
+                                d.param(1, Type::Int)
+                            ),
+                            &[Param::Int(run)],
+                        )?;
+                        let mut all = !units.is_empty();
+                        for u in &units {
+                            all &= succeeded.contains(u.text(0)?);
+                        }
+                        whole_run = Some(all);
+                        all
+                    }
+                }
+            } else {
+                succeeded.contains(unit)
+            };
+            if again {
+                hit.push((r.int(0)?, run));
+            }
+        }
+    }
+    if hit.is_empty() {
+        return Ok(out);
+    }
+    let mut held: BTreeSet<i64> = BTreeSet::new();
+    let ids: Vec<i64> = hit.iter().map(|h| h.0).collect();
+    for chunk in ids.chunks(500) {
+        let sql = format!(
+            "SELECT DISTINCT review_item_id FROM {} WHERE review_item_id IN ({})",
+            store.qualified("campaign_item"),
+            chunk
+                .iter()
+                .map(i64::to_string)
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+        for r in store.query(&sql, &[])? {
+            held.insert(r.int(0)?);
+        }
+    }
+    hit.retain(|(id, _)| !held.contains(id));
+    let actor = retired_by(run_id);
+    let decision = serde_json::json!({
+        "retired_by_run": run_id,
+        "why": format!("run {run_id} of {name} succeeded on the same unit"),
+    })
+    .to_string();
+    let ids: Vec<i64> = hit.iter().map(|h| h.0).collect();
+    for chunk in ids.chunks(500) {
+        store.execute(
+            &format!(
+                "UPDATE {} SET status = {}, decided_at = {}, actor = {}, decision = {} \
+                 WHERE status = 'open' AND id IN ({})",
+                store.qualified("review_item"),
+                d.param(1, Type::Text),
+                d.param(2, Type::Timestamp),
+                d.param(3, Type::Text),
+                d.param(4, Type::Json),
+                chunk
+                    .iter()
+                    .map(i64::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+            &[
+                Param::from(RESOLVED),
+                Param::from(now),
+                Param::from(actor.as_str()),
+                Param::from(decision.as_str()),
+            ],
+        )?;
+    }
+    out.items = ids;
+    out.runs = hit
+        .iter()
+        .map(|h| h.1)
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    Ok(out)
+}
+
+/// What became of the failures a run raised as review items: how many are
+/// still open, and the later runs that retired the others, each with how
+/// many (2026-11-08, UX round 3).
+pub fn pipeline_qc_fate(
+    store: &mut Store,
+    run_id: i64,
+) -> Result<(i64, Vec<(i64, i64)>), StoreError> {
+    let d = store.dialect();
+    let rows = store.query(
+        &format!(
+            "SELECT status, actor, COUNT(*) FROM {} WHERE kind = {} AND group_key LIKE {} \
+             GROUP BY status, actor",
+            store.qualified("review_item"),
+            d.param(1, Type::Text),
+            d.param(2, Type::Text),
+        ),
+        &[
+            Param::from(PIPELINE_QC_KIND),
+            Param::from(format!("run:{run_id}|unit:%")),
+        ],
+    )?;
+    let mut open = 0;
+    let mut by: BTreeMap<i64, i64> = BTreeMap::new();
+    for r in &rows {
+        let n = r.int(2)?;
+        match (r.text(0)?, r.opt_text(1)?) {
+            ("open", _) => open += n,
+            (s, Some(a)) if s == RESOLVED => {
+                if let Some(run) = a.strip_prefix("run:").and_then(|x| x.parse().ok()) {
+                    *by.entry(run).or_default() += n;
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok((open, by.into_iter().collect()))
+}
+
 /// Close the open `pick.border` item of one occasion, if there is one:
 /// `superseded` when a later run found nothing to doubt, `accepted` when a
 /// person's pick answered it. Answers how many were closed.

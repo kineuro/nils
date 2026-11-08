@@ -936,7 +936,14 @@ fn over_scopes(pg: Option<(String, String)>) {
     // and a run over the list frozen under alpha's version 2, now that
     // version 3 is read
     let (_, out, err) = lab.run(
-        &["run", "needs-t1w", "--handle", &held.to_string(), "--json"],
+        &[
+            "run",
+            "needs-t1w",
+            "--handle",
+            &held.to_string(),
+            "--json",
+            "--here",
+        ],
         None,
     );
     let run = {

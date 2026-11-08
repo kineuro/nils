@@ -47,7 +47,7 @@
 # on every row of every run, null without the switch.
 name: postcontrast-cascade
 schema-version: "0.5"
-tool-version: "0.3.0"
+tool-version: "0.3.1"
 description: >-
   Propose post_contrast per stack on T1-type brain with the certified
   post-contrast model, through its three-slice student; defer the rest of
