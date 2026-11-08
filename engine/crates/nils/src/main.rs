@@ -90,6 +90,7 @@ mod preflight;
 mod preview;
 mod profile;
 mod proposal_doors;
+mod proposal_grid;
 mod proposed_by;
 mod provenance;
 mod pyramid;
@@ -2026,6 +2027,93 @@ enum ReviewCommand {
         pack_dir: Option<PathBuf>,
         #[arg(long, default_value = "mri")]
         pack: String,
+        /// Machine-readable output
+        #[arg(long)]
+        json: bool,
+    },
+    /// One page of what one model proposed on one axis, not decided yet
+    /// (UX round 5): narrowed by the value proposed and the probability
+    /// band, the most sure first, with each value's count and ten bands
+    /// over the model's range; without pictures
+    ProposalsScans {
+        /// The model: its id, its digest or name@version
+        #[arg(long, value_name = "MODEL")]
+        model: String,
+        /// The axis it proposed on
+        #[arg(long, value_name = "AXIS")]
+        axis: String,
+        /// Only the scans it proposed this value for
+        #[arg(long, value_name = "VALUE")]
+        value: Option<String>,
+        /// Only at this probability or above
+        #[arg(long, value_name = "P")]
+        min: Option<String>,
+        /// Only below this probability
+        #[arg(long, value_name = "P")]
+        max: Option<String>,
+        #[arg(long, default_value_t = 1)]
+        page: usize,
+        /// Scans a page, 500 by default, 1000 at most
+        #[arg(long, default_value_t = 500)]
+        size: usize,
+        /// Machine-readable output
+        #[arg(long)]
+        json: bool,
+    },
+    /// Accept what one model proposed on the scans you saw, but the ones
+    /// set apart (UX round 5): one decision a scan in your name with the
+    /// model's probability beside it, the items whose scans are all decided
+    /// closed, and the scans sorted again
+    ProposalsAccept {
+        /// The model: its id, its digest or name@version
+        #[arg(long, value_name = "MODEL")]
+        model: String,
+        /// The axis it proposed on
+        #[arg(long, value_name = "AXIS")]
+        axis: String,
+        /// The value proposed, which the accept writes
+        #[arg(long, value_name = "VALUE")]
+        value: String,
+        /// The band the page was read in: at this probability or above
+        #[arg(long, value_name = "P")]
+        min: Option<String>,
+        /// The band the page was read in: below this probability
+        #[arg(long, value_name = "P")]
+        max: Option<String>,
+        /// The scans the page showed, as ids joined by commas
+        #[arg(long, value_name = "IDS", value_delimiter = ',')]
+        seen: Vec<i64>,
+        /// The scans set apart, not written, as ids joined by commas
+        #[arg(long, value_name = "IDS", value_delimiter = ',')]
+        except: Vec<i64>,
+        /// A word on why, kept with each decision
+        #[arg(long, value_name = "TEXT")]
+        why: Option<String>,
+        #[arg(long, value_name = "DIR")]
+        pack_dir: Option<PathBuf>,
+        /// Machine-readable output
+        #[arg(long)]
+        json: bool,
+    },
+    /// Sort these scans again, by the pack each was last sorted with (UX
+    /// round 5): what a door that decided them queues as a job, so that it
+    /// answers at once. The scans come from --stacks, or from the job this
+    /// command runs as
+    Resort {
+        /// The scans, as ids joined by commas
+        #[arg(long, value_name = "IDS", value_delimiter = ',')]
+        stacks: Option<Vec<i64>>,
+        /// The job's label
+        #[arg(long, value_name = "TEXT")]
+        label: Option<String>,
+        /// The words the job's scope starts with
+        #[arg(long, value_name = "TEXT")]
+        lead: Option<String>,
+        /// How long to wait for a sort that holds the registry, in seconds
+        #[arg(long, default_value_t = 600)]
+        wait: u64,
+        #[arg(long, value_name = "DIR")]
+        pack_dir: Option<PathBuf>,
         /// Machine-readable output
         #[arg(long)]
         json: bool,
@@ -7371,6 +7459,76 @@ fn review_command(home: &Home, command: ReviewCommand) -> Result<(), Exit> {
                 json,
             );
         }
+        // UX round 5: a model's proposals as a grid, accepted in one move,
+        // and the re-sort a door queues as a job
+        ReviewCommand::ProposalsScans {
+            model,
+            axis,
+            value,
+            min,
+            max,
+            page,
+            size,
+            json,
+        } => {
+            return crate::proposal_grid::scans_verb(
+                &mut open(home)?,
+                &model,
+                &axis,
+                value.as_deref(),
+                min.as_deref(),
+                max.as_deref(),
+                page,
+                size,
+                json,
+            );
+        }
+        ReviewCommand::ProposalsAccept {
+            model,
+            axis,
+            value,
+            min,
+            max,
+            seen,
+            except,
+            why,
+            pack_dir,
+            json,
+        } => {
+            return crate::proposal_grid::accept_verb(
+                home,
+                &mut open(home)?,
+                &model,
+                &axis,
+                &value,
+                min.as_deref(),
+                max.as_deref(),
+                seen,
+                except,
+                why.as_deref(),
+                pack_dir,
+                json,
+            );
+        }
+        ReviewCommand::Resort {
+            stacks,
+            label,
+            lead,
+            wait,
+            pack_dir,
+            json,
+        } => {
+            return crate::proposal_grid::resort_verb(
+                home,
+                &mut open(home)?,
+                stacks,
+                label.as_deref(),
+                lead.as_deref(),
+                wait,
+                pack_dir,
+                json,
+            );
+        }
         other => other,
     };
     let mut registry = open(home)?;
@@ -7615,7 +7773,10 @@ fn review_command(home: &Home, command: ReviewCommand) -> Result<(), Exit> {
         }
         ReviewCommand::Asked { .. }
         | ReviewCommand::Proposals { .. }
-        | ReviewCommand::ProposalsCampaign { .. } => {
+        | ReviewCommand::ProposalsCampaign { .. }
+        | ReviewCommand::ProposalsScans { .. }
+        | ReviewCommand::ProposalsAccept { .. }
+        | ReviewCommand::Resort { .. } => {
             unreachable!("answered before the registry opened")
         }
         ReviewCommand::Show { id, json } => {
