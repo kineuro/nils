@@ -350,6 +350,32 @@ def test_the_full_pipeline_answers_candidates_and_gives_every_other_stack_its_re
     assert all(k.startswith(("HP", "V", "T:")) for k in rec[1]["cols"])
 
 
+def test_the_full_pipeline_says_how_far_it_is_stack_by_stack(standin_env, monkeypatch):
+    """2026-11-08 (UX round 3): the stacks that need no features count at
+    once, then each candidate as its features are done, not all of them at
+    the end, where the engine names the file; the last count is every stack."""
+    said = standin_env / ".nils-progress.json"
+    monkeypatch.setenv("NILS_PROGRESS", str(said))
+    from nils_postcontrast import progress
+
+    seen: list = []
+    real = progress.Progress.set
+
+    def spy(self, done, force=False):
+        seen.append((done, (standin_env / "out" / "postcontrast").is_dir()))
+        real(self, done, force)
+
+    monkeypatch.setattr(progress.Progress, "set", spy)
+    rc, _ = run(standin_env)
+    assert rc == 0
+    assert json.loads(said.read_text()) == {"done": 5, "of": 5, "what": "stacks"}
+    counts = [d for d, _ in seen]
+    # three stacks need no features (not T1-type brain, sealed, no calibration), then stacks 1 and 2 one by one
+    assert counts == sorted(counts) and counts[0] == 3 and 4 in counts and counts[-1] == 5, counts
+    # told while the run works, before any table is written
+    assert all(not tabled for d, tabled in seen if d < 5), seen
+
+
 def test_a_tool_the_kernel_kills_does_not_end_the_run(standin_env, monkeypatch):
     monkeypatch.setenv("STANDIN_SYNTHSEG_DIES", "1")  # SynthSeg ends as a killed process (137), every time
     rc, out = run(standin_env)
