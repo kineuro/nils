@@ -179,6 +179,9 @@ impl Runtime for Cli {
     fn command(&self, inv: &Invocation) -> Command {
         let mut c = Command::new(&self.program);
         c.args(argv(self.kind, inv));
+        if self.kind == Kind::Apptainer {
+            apptainer_starts_at_root(&mut c);
+        }
         c
     }
 
@@ -861,6 +864,16 @@ pub fn run(
     }
 }
 
+/// UX round 3 (2026-11-08): apptainer is started in `/`, whatever folder
+/// the engine was started in. It reads its working folder before anything
+/// else, and one the engine's account cannot enter (a root shell's
+/// `/root`, under `runuser`) failed every unit with "can't change
+/// directory"; the containers start in `/` of the image (`--pwd /`) and
+/// bind no working folder (`--containall`), so nothing else changes.
+pub fn apptainer_starts_at_root(c: &mut Command) {
+    c.current_dir("/");
+}
+
 /// Start an invocation and leave it running, its output and errors into
 /// `log`: how the lane runs several at once (record 49 A1).
 pub fn spawn(
@@ -1388,6 +1401,24 @@ mod tests {
         assert!(inputs.join("labels").is_dir());
         assert!(inputs.join("head/card.json").is_file());
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// UX round 3: apptainer starts in `/`, whatever folder the engine was
+    /// started in (a root shell's `/root` failed every unit); podman and
+    /// docker keep the engine's.
+    #[test]
+    fn apptainer_starts_in_the_root_folder_and_the_others_where_they_are() {
+        let cli = |kind| Cli {
+            kind,
+            program: PathBuf::from("/bin/true"),
+            version: "1".into(),
+            gpu: None,
+        };
+        let i = inv(false);
+        let c = cli(Kind::Apptainer).command(&i);
+        assert_eq!(c.get_current_dir(), Some(Path::new("/")));
+        let c = cli(Kind::Podman).command(&i);
+        assert_eq!(c.get_current_dir(), None);
     }
 
     /// Record 49 A2: a leased card is the one card passed, by each runtime

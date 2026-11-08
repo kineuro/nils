@@ -60,6 +60,7 @@ mod grants;
 mod handover_doors;
 mod headers;
 mod intake;
+mod job_again;
 mod keys_doors;
 mod linkage_doors;
 mod login;
@@ -977,8 +978,9 @@ enum JobsCommand {
     },
     /// Ask a running job to stop at its next heartbeat, or drop a queued one
     Cancel { id: i64 },
-    /// Run a finished, failed or cancelled job again, from the command line
-    /// it recorded; every verb resumes, because nothing is in flight
+    /// Queue a finished, failed or cancelled job again, from the command
+    /// line it recorded, for the engine's worker to run; a pipeline run that
+    /// did not finish goes on where it stopped (`run --resume <run>`)
     Resume { id: i64 },
     /// Put a nils command line on the queue, to be run by a worker in its
     /// turn: `nils jobs enqueue -- digest /data --name x`
@@ -2512,7 +2514,7 @@ fn main() -> ExitCode {
         Command::Derivative { command } => derivatives::command(&home, command),
         Command::Contrast { command } => contrast::command(&home, command),
         Command::Pipeline { command } => pipelines::command(&home, command),
-        Command::Run(args) => pipelines::run_command(&home, *args),
+        Command::Run(args) => run_at_the_keyboard(&home, *args),
         Command::Tools { command } => tools::command(&home, command),
         Command::Software { command } => software::command(&home, command),
         Command::Workflow { command } => workflows::command(&home, command),
@@ -6680,6 +6682,24 @@ fn batch_report(registry: &mut Registry, id: i64, json: bool) -> Result<(), Exit
 
 /// Who runs the command, for the audit and the linkage rows: the OS user.
 /// Who is acting: the principal, `user@node` (Wave 4a section 9.2, C30).
+/// `nils run` as typed (UX round 3, 2026-11-08): beside an engine whose
+/// worker runs pipelines for this registry, a run is queued for it rather
+/// than run outside its session; a pre-flight starts nothing and is never
+/// refused, nor a worker's own run, nor one asked `--here`.
+fn run_at_the_keyboard(home: &Home, args: pipelines::RunArgs) -> Result<(), Exit> {
+    if !args.preflight && !args.here && !job_again::run_by_a_worker() {
+        let mut registry = open(home)?;
+        if let Some(w) = job_again::pipeline_worker(registry.store()) {
+            let own: Vec<String> = std::env::args().collect();
+            return Err(Exit {
+                code: BUSY,
+                message: job_again::foreground_refusal(&w, &own),
+            });
+        }
+    }
+    pipelines::run_command(home, args)
+}
+
 fn actor() -> String {
     nils_registry::principal::Principal::current().to_string()
 }
@@ -10604,51 +10624,43 @@ fn jobs_command(home: &Home, command: JobsCommand) -> Result<(), Exit> {
             }
         },
         JobsCommand::Resume { id } => {
-            let Some(j) = job::show(store, id).map_err(err)? else {
-                return Err(usage(format!("no job {id}")));
-            };
-            if !j.state.is_over() {
-                return Err(usage(format!(
-                    "job {id} is {}; a job resumes once it is over",
-                    j.state.name()
-                )));
-            }
-            let Some(mut argv) = j.argv().filter(|a| a.len() > 1) else {
-                return Err(usage(format!(
-                    "job {id} recorded no command line; it was made before this binary or by a door"
-                )));
-            };
-            // record 49 A1: a pipeline run that did not finish goes on where
-            // it stopped, with the units it finished kept, rather than
-            // starting a run of its own
-            if j.kind == "pipeline"
-                && let Some(run) = j.args["run"].as_i64()
-                && nils_registry::pipeline::run(store, run)
-                    .map_err(|e| fail(e.to_string()))?
-                    .is_some_and(|r| {
-                        matches!(r.status.as_str(), "running" | "cancelled" | "interrupted")
-                            || (r.status == "failed" && r.results_digest.is_none())
-                    })
-                && let Some(at) = argv.iter().position(|w| w == "run")
-            {
-                argv.truncate(at + 1);
-                argv.extend(["--resume".to_string(), run.to_string()]);
-            }
-            println!("running again: nils {}", argv[1..].join(" "));
-            let status = std::process::Command::new(
-                std::env::current_exe().map_err(|e| fail(e.to_string()))?,
+            // UX round 3 (2026-11-08): the job goes back on the queue and
+            // the engine's worker takes it, as `nils jobs enqueue` queues;
+            // nothing runs in this shell. A job that recorded no reach was
+            // started at the keyboard, and goes again with the keyboard's
+            // reach, as `jobs enqueue` records it.
+            let queued = job_again::requeue(
+                store,
+                id,
+                |_, mut extra| {
+                    if extra.get("detail").is_none() && extra.get("roles").is_none() {
+                        let reach = crate::grants::Access::keyboard(sealed::keyboard_reads());
+                        extra["detail"] = serde_json::json!(reach.detail.name());
+                        extra["grants"] = serde_json::json!(reach.list());
+                    }
+                    extra
+                },
+                &actor(),
             )
-            .args(&argv[1..])
-            .status()
-            .map_err(|e| fail(format!("could not run the job again: {e}")))?;
-            match status.code() {
-                Some(0) => Ok(()),
-                Some(c) => Err(Exit {
-                    code: u8::try_from(c).unwrap_or(FAILED),
-                    message: String::new(),
-                }),
-                None => Err(fail("the job was stopped by a signal")),
+            .map_err(|r| match r {
+                job_again::Refused::Registry(e) => fail(e),
+                other => usage(other.words()),
+            })?;
+            println!(
+                "queued as job {}: nils {}",
+                queued.job,
+                queued.words.join(" ")
+            );
+            match queued.worker {
+                Some(w) => println!(
+                    "  the engine's worker (job {w}) takes it in its turn; nils jobs show {} follows it",
+                    queued.job
+                ),
+                None => println!(
+                    "  no engine worker runs pipelines for this registry now: it waits until the engine's service, or nils jobs work, takes it"
+                ),
             }
+            Ok(())
         }
         JobsCommand::Prune { keep_days } => {
             let gone = job::prune(store, keep_days).map_err(err)?;

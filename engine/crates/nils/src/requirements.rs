@@ -36,6 +36,9 @@ pub(crate) struct Check {
     pub(crate) said: String,
     pub(crate) cause: Option<Cause>,
     pub(crate) extra: Value,
+    /// The fix in this check's own words, in place of its cause's (UX
+    /// round 3: a missing session bus is no missing runtime).
+    pub(crate) advice: Option<&'static str>,
 }
 
 impl Check {
@@ -47,6 +50,7 @@ impl Check {
             said,
             cause: None,
             extra,
+            advice: None,
         }
     }
 
@@ -59,6 +63,7 @@ impl Check {
             said,
             cause: None,
             extra,
+            advice: None,
         }
     }
 
@@ -70,6 +75,7 @@ impl Check {
             said,
             cause: Some(cause),
             extra,
+            advice: None,
         }
     }
 
@@ -92,6 +98,11 @@ impl Check {
             "said": self.said,
             "failure": self.cause.map_or(Value::Null, Cause::refusal_doc),
         });
+        if let Some(advice) = self.advice
+            && v["failure"].is_object()
+        {
+            v["failure"]["advice"] = json!(advice);
+        }
         if let Value::Object(more) = &self.extra {
             for (k, x) in more {
                 v[k] = x.clone();
@@ -107,7 +118,7 @@ impl Check {
         format!(
             "refused before it started: {}; {} {}",
             self.said,
-            cause.advice_before(),
+            self.advice.unwrap_or(cause.advice_before()),
             nils_pipeline::failure::mark(cause)
         )
     }
@@ -565,6 +576,10 @@ pub(crate) fn checks(registry: &mut Registry, home: &Path, a: &Asked<'_>) -> Vec
         a.descriptor,
         &detected,
     ));
+    // UX round 3: what apptainer needs of the session the run starts in
+    if let Some(c) = detected.runtime.as_ref().and_then(session_bus) {
+        out.push(c);
+    }
     out.extend(disk(registry, a.descriptor, a.units));
     // record 57 P5: the tool's terms and its site licence file (G9, G10)
     if let Some(c) =
@@ -573,6 +588,63 @@ pub(crate) fn checks(registry: &mut Registry, home: &Path, a: &Asked<'_>) -> Vec
         out.push(c);
     }
     out
+}
+
+/// The environment variable a test sets to stand for a machine whose
+/// apptainer can hold its containers to cores and memory, run by an
+/// account that is not root (`1`), or one that cannot (`0`).
+pub(crate) const LIMITS_VAR: &str = "NILS_TEST_APPTAINER_LIMITS";
+
+/// The words of a run apptainer cannot hold to its limits (UX round 3).
+pub(crate) const NO_SESSION_BUS: &str = "apptainer cannot apply this run's memory and thread limits \
+     without a user session bus (DBUS_SESSION_BUS_ADDRESS is not set)";
+
+/// What to do about it.
+const QUEUE_IT: &str = "queue it with nils jobs enqueue so the engine runs it, from its service, \
+     which has the session";
+
+/// UX round 3 (2026-11-08): apptainer, run by an account that is not root,
+/// applies a container's cores and memory through the user's systemd over
+/// the session bus; where the run would set those limits and no bus is
+/// named, every container fails to start ("cannot use cgroups"), so the
+/// run is refused before any unit starts, saying so.
+fn session_bus(rt: &runtime::Cli) -> Option<Check> {
+    if rt.kind != runtime::Kind::Apptainer {
+        return None;
+    }
+    let limited = match std::env::var(LIMITS_VAR).ok().as_deref() {
+        Some("1") => true,
+        Some(_) => false,
+        None => {
+            // root's cgroups are its own, and need no bus
+            let (cores, memory) = runtime::limits_here(rt);
+            (cores || memory) && !is_root()
+        }
+    };
+    let bus = std::env::var_os("DBUS_SESSION_BUS_ADDRESS").is_some_and(|v| !v.is_empty());
+    if !limited || bus {
+        return None;
+    }
+    let mut c = Check::failed(
+        "session-bus",
+        Cause::Runtime,
+        NO_SESSION_BUS.to_string(),
+        json!({}),
+    );
+    c.advice = Some(QUEUE_IT);
+    Some(c)
+}
+
+/// Whether this process runs as root.
+fn is_root() -> bool {
+    std::fs::read_to_string("/proc/self/status")
+        .ok()
+        .and_then(|s| {
+            s.lines()
+                .find_map(|l| l.strip_prefix("Uid:"))
+                .and_then(|l| l.split_whitespace().nth(1).map(|u| u == "0"))
+        })
+        .unwrap_or(false)
 }
 
 /// The first check that fails, which refuses the run.

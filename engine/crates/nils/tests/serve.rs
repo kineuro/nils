@@ -5353,7 +5353,7 @@ fn every_door_needs_its_grant_and_a_refusal_names_it() {
     ];
     // the rows twice, the jobs, then the cancels, the recorded detail, the
     // capabilities and the ceiling below
-    let requests = rows.len() * 2 + jobs.len() + 8;
+    let requests = rows.len() * 2 + jobs.len() + 11;
     let mut extra: Vec<String> = vec!["--auth".into(), "token".into()];
     for (name, list) in holds {
         extra.push("--token".into());
@@ -5402,6 +5402,27 @@ fn every_door_needs_its_grant_and_a_refusal_names_it() {
     );
     let (status, doc) = server.request("POST", &cancel, None, Some(&token("pipelines-work")));
     assert_eq!(status, 200, "{doc}");
+    // UX round 3: a job that is over goes again through the queue, under
+    // the grant of its verb, as the command line's `jobs resume` does
+    let resume = format!("/api/jobs/{}/resume", queued["job"]);
+    let (status, doc) = server.request("POST", &resume, None, Some(&token("data-work")));
+    assert_eq!(status, 403, "{doc}");
+    let (status, again) = server.request("POST", &resume, None, Some(&token("pipelines-work")));
+    assert_eq!(status, 202, "{again}");
+    assert_eq!(again["again_of"], queued["job"], "{again}");
+    assert_eq!(
+        again["command"],
+        serde_json::json!(["fingerprint"]),
+        "{again}"
+    );
+    assert_ne!(again["job"], queued["job"], "{again}");
+    let (status, doc) = server.request(
+        "POST",
+        "/api/jobs/99999/resume",
+        None,
+        Some(&token("pipelines-work")),
+    );
+    assert_eq!(status, 404, "{doc}");
     let (status, doc) = server.request(
         "POST",
         "/api/jobs/99999/cancel",

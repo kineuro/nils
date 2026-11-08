@@ -4401,6 +4401,53 @@ fn routed(
                 None => Err(Reply::error(404, format!("no job {id}"))),
             }
         }
+        ["api", "jobs", _, "resume"] if post => {
+            // UX round 3 (2026-11-08): `nils jobs resume`'s twin. The job
+            // goes back on the queue from the command line it recorded (a
+            // pipeline run that can go on as `run --resume <run>`), under
+            // the caller who asks, who needs the grant and detail of the
+            // job's verb as queuing it does
+            let id = id_at(2)?;
+            let Some(job) = nils_registry::job::show(registry.store(), id).map_err(job_err)? else {
+                return Err(Reply::error(404, format!("no job {id}")));
+            };
+            let (grant, detail) = job
+                .queued()
+                .as_deref()
+                .and_then(verb_needs)
+                .unwrap_or((cancel_needs(&job), Detail::Plain));
+            caller.allowed(path, Need::One(grant), detail)?;
+            let reach = queued_by(caller);
+            let principal = caller.principal.clone();
+            let queued = crate::job_again::requeue(
+                registry.store(),
+                id,
+                |_, mut extra| {
+                    // the caller's reach and name, never more than theirs
+                    for key in ["detail", "roles", "grants", "actor", "may_project_raw"] {
+                        if let Some(map) = extra.as_object_mut() {
+                            map.remove(key);
+                        }
+                    }
+                    if let (Some(map), Some(mine)) = (extra.as_object_mut(), reach.as_object()) {
+                        for (k, v) in mine {
+                            map.insert(k.clone(), v.clone());
+                        }
+                    }
+                    extra["principal"] = serde_json::json!(principal);
+                    extra
+                },
+                &caller.principal,
+            )
+            .map_err(|r| Reply::error(r.status(), r.words()))?;
+            Ok(Reply::accepted(serde_json::json!({
+                "job": queued.job,
+                "state": "queued",
+                "again_of": id,
+                "command": queued.words,
+                "worker": queued.worker,
+            })))
+        }
         ["api", "releases"] if get => {
             // record 43: a run's input releases only when asked for
             let runs = query.get("runs").is_some_and(|v| v == "true" || v == "1");
@@ -5987,7 +6034,7 @@ pub(crate) fn door(method: &str, segs: &[&str]) -> (Need, Detail) {
             (Need::One(nils_pipeline::failure::INSTALL_GRANT), Plain)
         }
         ("POST", ["api", "derivatives"]) => (Need::One("pipelines:work"), Plain),
-        ("POST", ["api", "jobs"]) | ("POST", ["api", "jobs", _, "cancel"]) => {
+        ("POST", ["api", "jobs"]) | ("POST", ["api", "jobs", _, "cancel" | "resume"]) => {
             (Need::AnyOf(JOB_GRANTS), Plain)
         }
         // the settings pages
@@ -6671,6 +6718,7 @@ pub(crate) fn doors_list() -> Vec<String> {
         "GET /api/jobs/{id}",
         "GET /api/jobs/{id}/log",
         "POST /api/jobs/{id}/cancel",
+        "POST /api/jobs/{id}/resume",
         "GET /api/releases",
         "POST /api/releases",
         "POST /api/handovers",
@@ -7437,6 +7485,16 @@ pub(crate) fn policy() -> Vec<serde_json::Value> {
             "one state",
             "Cancelling a job",
             "Cancelled a job",
+        ),
+        // UX round 3: a job that is over, queued again
+        row(
+            "POST /api/jobs/{id}/resume",
+            true,
+            false,
+            "job",
+            "one id",
+            "Queuing a job again",
+            "Queued a job again",
         ),
         row(
             "GET /api/releases",

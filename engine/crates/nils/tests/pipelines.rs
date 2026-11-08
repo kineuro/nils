@@ -32,6 +32,10 @@ use dicom_dictionary_std::tags;
 use nils_dicom::synth::{self, MetaFields, TempDir};
 use serde_json::{Value, json};
 
+/// UX round 3: a job's life beside the engine's service.
+#[path = "pipelines/jobs_lifecycle.rs"]
+mod jobs_lifecycle;
+
 fn nils() -> Command {
     Command::new(env!("CARGO_BIN_EXE_nils"))
 }
@@ -381,6 +385,9 @@ impl Lab {
             .env("PATH", path)
             .env("NILS_PACK_DIR", packs())
             .env("FAKE_PODMAN_ARGS", self.bin.path().join("args.log"))
+            // UX round 3: whatever this machine's cgroups and session, the
+            // stand-in apptainer needs no session bus
+            .env("NILS_TEST_APPTAINER_LIMITS", "0")
             .env_remove("NILS_DSN")
             .env_remove("NILS_JOB_ID")
             .env_remove("NILS_JOB_DETAIL");

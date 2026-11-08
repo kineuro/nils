@@ -593,6 +593,16 @@ paths:
         "200": {description: "{job, state}"}
         "403": {description: The caller does not hold the grant of the job's verb}
         "404": {description: No such job}
+  /api/jobs/{id}/resume:
+    post:
+      summary: Queue a job that is over again, for the engine's worker (nils jobs resume)
+      description: "Added in place, additively, on 2026-11-08 (UX round 3). The job's recorded command line goes back on the queue under the caller, who needs the grant and the detail of the job's verb as queuing it does; a pipeline run that did not finish goes on where it stopped as `run --resume <run>`, its finished units kept. Nothing runs in the engine's request. 202 {job, state: queued, again_of, command, worker}, `worker` being the job id of the worker that runs pipelines now, null where none runs and the job waits for one."
+      parameters: [{name: id, in: path, required: true, schema: {type: integer}}]
+      responses:
+        "202": {description: "{job, state, again_of, command, worker}"}
+        "403": {description: "The caller does not hold the grant of the job's verb, or its detail"}
+        "404": {description: No such job}
+        "409": {description: "The job is not over, recorded no command line, or the same command line is queued or running already as another job, the words naming it"}
   /api/releases:
     get:
       summary: The releases the registry holds, newest first (nils release --history)

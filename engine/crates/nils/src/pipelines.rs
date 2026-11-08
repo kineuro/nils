@@ -2679,6 +2679,11 @@ pub(crate) struct RunArgs {
     /// Machine-readable output
     #[arg(long)]
     pub(crate) json: bool,
+    /// Run in this shell even while the engine's worker runs pipelines for
+    /// this registry (UX round 3); without it such a run is refused with
+    /// the `nils jobs enqueue` line that queues it for the engine
+    #[arg(long)]
+    pub(crate) here: bool,
     /// The parts of a split run still to run after one of them was taken
     /// up again; never on the command line
     #[arg(skip)]
@@ -4019,6 +4024,42 @@ fn wait_beating(
             let _ = child.kill();
             let status = child.wait().map_err(|e| e.to_string())?;
             Ok((status, true))
+        }
+    }
+}
+
+/// UX round 3 (2026-11-08): wait for a child that leads a process group of
+/// its own (an image's pull and build), looking for a cancel every second;
+/// a cancel ends the child and every process of its group at once (the
+/// group this run made, by the child's recorded id), so a pull that
+/// fetches layers in processes of its own stops with it and not minutes
+/// later.
+fn wait_beating_group(
+    child: &mut std::process::Child,
+    store: &mut Store,
+    job_id: i64,
+    progress: &Value,
+) -> Result<(std::process::ExitStatus, bool), String> {
+    let waited = nils_proc::wait_with_tick(
+        child,
+        Duration::from_millis(100),
+        Duration::from_secs(1),
+        &mut || {
+            matches!(
+                job::beat(store, job_id, Some(progress)),
+                Ok(job::Asked::Cancel)
+            )
+        },
+    );
+    match waited {
+        Ok(Some(status)) => Ok((status, false)),
+        Ok(None) => Ok((
+            nils_proc::end_group(child).map_err(|e| e.to_string())?,
+            true,
+        )),
+        Err(e) => {
+            let _ = nils_proc::end_group(child);
+            Err(e.to_string())
         }
     }
 }
@@ -5762,7 +5803,16 @@ pub(crate) fn sweep_workdirs(store: &mut Store) -> Result<usize, String> {
 /// the job that ran it recorded: its principal, its detail and its actor.
 /// A run someone asked to stop is closed as cancelled instead. Answers how
 /// many were queued.
-pub(crate) fn take_up_interrupted(store: &mut Store) -> Result<usize, String> {
+///
+/// UX round 3 (2026-11-08): only a run whose engine went away is taken up
+/// by itself. `engine_since` is when the worker that looks started: a run
+/// whose job, of this host, was heard from after that ended while this
+/// engine ran (its process was killed by hand or by the system), and it is
+/// marked interrupted with the command that takes it up, never queued.
+pub(crate) fn take_up_interrupted(
+    store: &mut Store,
+    engine_since: Option<&str>,
+) -> Result<usize, String> {
     let err = |e: nils_registry::Error| e.to_string();
     let mut queued = 0;
     for r in rows::runs_in(store, "running").map_err(err)? {
@@ -5793,6 +5843,18 @@ pub(crate) fn take_up_interrupted(store: &mut Store) -> Result<usize, String> {
                 },
             )
             .map_err(err)?;
+            continue;
+        }
+        if let Some(j) = old
+            .as_ref()
+            .filter(|j| ended_beside_engine(j, engine_since))
+        {
+            let why = format!(
+                "its process (job {}) ended while the engine ran, stopped by hand or by the system; \
+                 nils jobs resume {} takes it up again where it stopped",
+                j.id, j.id
+            );
+            rows::interrupt(store, r.id, &why).map_err(err)?;
             continue;
         }
         let why = format!(
@@ -5862,6 +5924,21 @@ pub(crate) fn take_up_interrupted(store: &mut Store) -> Result<usize, String> {
         queued += 1;
     }
     Ok(queued)
+}
+
+/// Whether a run's job ended while the engine that looks was up (UX round
+/// 3): a job of this host last heard from after the engine started. The
+/// same second is the engine's own start, and is taken as the engine going
+/// away, as before.
+fn ended_beside_engine(j: &job::Job, engine_since: Option<&str>) -> bool {
+    let Some(since) = engine_since.and_then(nils_registry::time::secs_of) else {
+        return false;
+    };
+    if j.host.as_deref() != Some(job::hostname().as_str()) {
+        return false;
+    }
+    let heard = j.heartbeat_at.as_deref().unwrap_or(j.started_at.as_str());
+    nils_registry::time::secs_of(heard).is_some_and(|heard| heard > since)
 }
 
 /// `nils run`.
@@ -7327,6 +7404,7 @@ fn resume_command(home: &Home, args: &RunArgs, run_id: i64) -> Result<(), Exit> 
             go_on: Some(go_on),
             family: None,
             chain: args.chain.clone(),
+            here: args.here,
         },
     )
 }
@@ -10601,14 +10679,24 @@ fn ensure_image(
         x.job_id,
         Some(&json!({"run": x.run_id, "phase": "image", "image": x.pipeline.image})),
     );
-    let mut child = std::process::Command::new(&x.runtime.program)
+    let mut build = std::process::Command::new(&x.runtime.program);
+    build
         .args(runtime::build_argv(&x.pipeline.image, &part, form))
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::from(log))
-        .stderr(std::process::Stdio::from(err_log))
+        .stderr(std::process::Stdio::from(err_log));
+    // UX round 3: started in `/`, and leading a group of its own, so a
+    // cancel stops the whole pull at once
+    runtime::apptainer_starts_at_root(&mut build);
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        build.process_group(0);
+    }
+    let mut child = build
         .spawn()
         .map_err(|e| format!("apptainer could not start a build: {e}"))?;
-    let (status, stopped) = wait_beating(
+    let (status, stopped) = wait_beating_group(
         &mut child,
         registry.store(),
         x.job_id,
