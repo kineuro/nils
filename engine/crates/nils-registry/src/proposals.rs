@@ -1309,6 +1309,10 @@ pub struct Standing {
     pub runs: Vec<i64>,
     /// A campaign name no campaign has yet, for a campaign of the rest.
     pub name: String,
+    /// The median seconds an answer on this axis took in closed campaigns
+    /// (UX round 5), for the estimate of a campaign of the rest; none
+    /// where no closed campaign asked the axis.
+    pub pace_s: Option<f64>,
 }
 
 impl Standing {
@@ -1332,7 +1336,7 @@ impl Standing {
             "held": self.held.as_json(),
             "commit": self.commits().as_json(),
             "drifted": self.drifted,
-            "below": self.below.as_json(),
+            "below": {"groups": self.below.groups, "stacks": self.below.stacks, "pace_s": self.pace_s},
             "asked": self.asked.as_json(),
             "campaigns": self.campaigns.iter().map(|(id, name)| json!({"id": id, "name": name})).collect::<Vec<_>>(),
             "runs": self.runs,
@@ -1501,6 +1505,7 @@ pub fn standing(registry: &mut Registry) -> Result<Vec<Standing>, Error> {
                     campaigns: Vec::new(),
                     runs: Vec::new(),
                     name: String::new(),
+                    pace_s: None,
                 },
             );
         }
@@ -1557,6 +1562,7 @@ pub fn standing(registry: &mut Registry) -> Result<Vec<Standing>, Error> {
             s.campaigns.push((id, name));
         }
         s.name = free_name(registry.store(), &s.model, &s.axis)?;
+        s.pace_s = pace_s(registry.store(), &s.axis)?;
         out.push(s);
     }
     out.sort_by(|a, b| {
@@ -1568,10 +1574,107 @@ pub fn standing(registry: &mut Registry) -> Result<Vec<Standing>, Error> {
     Ok(out)
 }
 
+/// The pace a person answers the axis at (UX round 5, 2026-11-08): the
+/// median seconds from the claim to the answer over the raters' answers in
+/// closed campaigns whose question asks the axis, for what a campaign of
+/// the rest would take; none where no closed campaign asked it, or none
+/// of their answers was timed.
+pub fn pace_s(store: &mut Store, axis: &str) -> Result<Option<f64>, Error> {
+    let t = table("campaign");
+    let d = store.dialect();
+    let sql = format!(
+        "SELECT id, {} FROM {} WHERE status = 'closed'",
+        d.text_of(t.column("question").expect("question")),
+        store.qualified("campaign"),
+    );
+    let mut asked: Vec<i64> = Vec::new();
+    for r in store.query(&sql, &[])? {
+        let q: Value = r
+            .opt_text(1)?
+            .and_then(|t| serde_json::from_str(t).ok())
+            .unwrap_or(Value::Null);
+        let asks = q["axes"]
+            .as_array()
+            .is_some_and(|axes| axes.iter().any(|a| a.as_str() == Some(axis)))
+            || q["axis"].as_str() == Some(axis);
+        if asks {
+            asked.push(r.int(0)?);
+        }
+    }
+    if asked.is_empty() {
+        return Ok(None);
+    }
+    let mut seconds: Vec<f64> = Vec::new();
+    for chunk in asked.chunks(500) {
+        let sql = format!(
+            "SELECT seconds FROM {} WHERE campaign_id IN ({}) AND role = 'rater' AND seconds IS NOT NULL AND seconds > 0",
+            store.qualified("campaign_answer"),
+            in_list(chunk)
+        );
+        for r in store.query(&sql, &[])? {
+            if let Ok(Some(v)) = r.opt_double(0) {
+                seconds.push(v);
+            }
+        }
+    }
+    if seconds.is_empty() {
+        return Ok(None);
+    }
+    seconds.sort_by(f64::total_cmp);
+    let n = seconds.len();
+    let median = if n % 2 == 1 {
+        seconds[n / 2]
+    } else {
+        (seconds[n / 2 - 1] + seconds[n / 2]) / 2.0
+    };
+    Ok(Some((median * 10.0).round() / 10.0))
+}
+
+/// Which of a model's unsure proposals a campaign of the rest takes first
+/// (UX round 5): the least sure, the most sure, or a random draw by a seed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Order {
+    LeastSure,
+    MostSure,
+    Random,
+}
+
+impl Order {
+    pub fn parse(text: &str) -> Option<Order> {
+        match text.trim() {
+            "least_sure" | "least-sure" | "least" => Some(Order::LeastSure),
+            "most_sure" | "most-sure" | "most" => Some(Order::MostSure),
+            "random" => Some(Order::Random),
+            _ => None,
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Order::LeastSure => "least_sure",
+            Order::MostSure => "most_sure",
+            Order::Random => "random",
+        }
+    }
+}
+
+/// The words the order takes, for a refusal.
+pub const ORDERS: &str = "least_sure, most_sure or random";
+
+/// A draw's place for an item: the seed and the id mixed (splitmix64), the
+/// same on every machine.
+fn drawn(seed: u64, id: i64) -> u64 {
+    let mut z = seed ^ (id as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    z ^ (z >> 31)
+}
+
 /// A campaign of what one model proposed on one axis below its threshold
 /// (UX round 1, 2026-11-05): the person who makes it its one rater, held
 /// back none, the model's answer suggested on every item, closing into
-/// decisions in force.
+/// decisions in force. UX round 5: at most `limit` scans, taken in `order`,
+/// so that a campaign nobody can finish is not one move.
 #[derive(Debug, Clone)]
 pub struct RestCampaign<'a> {
     /// The model: its id, its digest or `name@version`.
@@ -1587,6 +1690,13 @@ pub struct RestCampaign<'a> {
     pub pack_version: Option<&'a str>,
     /// Every name a value goes by, in lower case, to its identity.
     pub names: &'a BTreeMap<String, String>,
+    /// At most this many scans; none for every one. An item is taken whole,
+    /// so a group's scans may reach past it where no scan came before.
+    pub limit: Option<i64>,
+    pub order: Order,
+    /// The seed of a random draw; one is made from the clock where none is
+    /// given and the order is random.
+    pub seed: Option<u64>,
 }
 
 /// What a campaign of the rest made.
@@ -1597,6 +1707,11 @@ pub struct MadeRest {
     pub adopted: Vec<i64>,
     /// The suggestions written, the model's answers.
     pub suggestions: crate::suggestion::Imported,
+    /// The scans the limit left out, for a later campaign.
+    pub left: i64,
+    pub limit: Option<i64>,
+    pub order: Order,
+    pub seed: Option<u64>,
 }
 
 impl MadeRest {
@@ -1605,6 +1720,10 @@ impl MadeRest {
             "campaign": {"id": self.campaign.id, "name": self.campaign.name},
             "adopted": self.adopted.len(),
             "suggestions": self.suggestions.as_json(),
+            "left": self.left,
+            "limit": self.limit,
+            "order": self.order.name(),
+            "seed": self.seed,
         })
     }
 }
@@ -1626,7 +1745,7 @@ pub fn campaign_of_rest(
         .ok_or_else(|| CErr::NotFound(format!("no registered model answers to {}", r.model)))?;
     let store = registry.store();
     let asked_by = c::held_review_items(store)?;
-    let items: Vec<Waiting> = waiting(store, Some(r.axis))?
+    let mut items: Vec<Waiting> = waiting(store, Some(r.axis))?
         .into_iter()
         .filter(|w| !w.staged && w.model == m.id && !asked_by.contains_key(&w.id))
         .collect();
@@ -1637,7 +1756,53 @@ pub fn campaign_of_rest(
             r.axis
         )));
     }
-    let adopted: Vec<i64> = items.iter().map(|w| w.id).collect();
+    // UX round 5: in the order asked, up to the limit of scans; the scans
+    // not decided yet of each item are what the campaign asks
+    let every: Vec<i64> = items.iter().map(|w| w.id).collect();
+    let open_of = member_counts(store, &every)?;
+    let open = |w: &Waiting| open_of.get(&w.id).map_or(0, |(_, open)| *open);
+    let sure = |w: &Waiting| {
+        w.evidence["confidence"]
+            .as_f64()
+            .or_else(|| w.evidence["mean_confidence"].as_f64())
+            .unwrap_or(0.0)
+    };
+    let seed = match r.order {
+        Order::Random => Some(r.seed.unwrap_or_else(|| {
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos() as u64)
+                .unwrap_or(1)
+                | 1
+        })),
+        _ => None,
+    };
+    match r.order {
+        Order::LeastSure => items.sort_by(|a, b| sure(a).total_cmp(&sure(b)).then(a.id.cmp(&b.id))),
+        Order::MostSure => items.sort_by(|a, b| sure(b).total_cmp(&sure(a)).then(a.id.cmp(&b.id))),
+        Order::Random => {
+            let s = seed.unwrap_or(1);
+            items.sort_by_key(|w| (drawn(s, w.id), w.id));
+        }
+    }
+    let wanted: i64 = items.iter().map(open).sum();
+    let mut taken = 0i64;
+    let mut adopted: Vec<i64> = Vec::new();
+    for w in &items {
+        let n = open(w);
+        if let Some(limit) = r.limit
+            && !adopted.is_empty()
+            && taken + n > limit
+        {
+            continue;
+        }
+        taken += n;
+        adopted.push(w.id);
+    }
+    let left = wanted - taken;
+    let adopted_set: BTreeSet<i64> = adopted.iter().copied().collect();
+    items.retain(|w| adopted_set.contains(&w.id));
+    adopted.sort_unstable();
     // each scan's own answer: the member's value and probabilities
     let t = table("review_member");
     let d = store.dialect();
@@ -1768,6 +1933,10 @@ pub fn campaign_of_rest(
         campaign: made,
         adopted,
         suggestions,
+        left,
+        limit: r.limit,
+        order: r.order,
+        seed,
     })
 }
 

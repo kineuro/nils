@@ -2100,6 +2100,47 @@ fn resort(
     (resort, picks)
 }
 
+/// The stacks a set of decisions reaches: a group's members, a stack's own
+/// (UX round 5, taken out of [`resort_committed`] for the queued re-sort).
+/// With them, how many decisions reached nothing readable.
+pub(crate) fn stacks_reached(
+    store: &mut nils_registry::store::Store,
+    decisions: &[i64],
+) -> Result<(BTreeSet<i64>, usize), String> {
+    let mut stacks: BTreeSet<i64> = BTreeSet::new();
+    let mut unreached = 0usize;
+    for chunk in decisions.chunks(500) {
+        let sql = format!(
+            "SELECT scope, ref FROM {} WHERE id IN ({})",
+            store.qualified("decision"),
+            chunk
+                .iter()
+                .map(i64::to_string)
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+        let refs: Vec<(String, String)> = store
+            .query(&sql, &[])
+            .map_err(|e| format!("the decisions could not be read: {e}"))?
+            .iter()
+            .filter_map(|r| Some((r.text(0).ok()?.to_string(), r.text(1).ok()?.to_string())))
+            .collect();
+        for (scope, reference) in refs {
+            match (scope.as_str(), reference.parse::<i64>()) {
+                ("group", Ok(item)) => match nils_registry::review::members(store, item) {
+                    Ok(members) => stacks.extend(members.into_iter().map(|m| m.stack_id)),
+                    Err(_) => unreached += 1,
+                },
+                ("stack", Ok(stack)) => {
+                    stacks.insert(stack);
+                }
+                _ => unreached += 1,
+            }
+        }
+    }
+    Ok((stacks, unreached))
+}
+
 /// Re-sort the scans the committed decisions reach (2026-11-05), as an
 /// answer at the questions door is followed by one ([`resort`]): a
 /// committed decision is in force, and every page reads the axis the sort
@@ -2107,7 +2148,8 @@ fn resort(
 /// decision until the next sort. A classify over those stacks alone, by
 /// the pack each was sorted with; a stack no sort has judged is left to the
 /// first sort. What was done, for the door's reply and the command line's
-/// words.
+/// words. Since UX round 5 the commit doors queue this as a job
+/// (`resort_job`); a campaign's close, a job already, still runs it here.
 pub(crate) fn resort_committed(
     registry: &mut Registry,
     pack_dir: Option<&std::path::Path>,
@@ -2117,49 +2159,14 @@ pub(crate) fn resort_committed(
     if decisions.is_empty() {
         return json!({"state": "done", "stacks": 0, "sorted": 0, "jobs": [], "words": "nothing committed"});
     }
-    // the stacks the decisions reach: a group's members, a stack's own
-    let mut stacks: BTreeSet<i64> = BTreeSet::new();
-    let mut unreached = 0usize;
-    {
-        let store = registry.store();
-        for chunk in decisions.chunks(500) {
-            let sql = format!(
-                "SELECT scope, ref FROM {} WHERE id IN ({})",
-                store.qualified("decision"),
-                chunk
-                    .iter()
-                    .map(i64::to_string)
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            );
-            let refs: Vec<(String, String)> = match store.query(&sql, &[]) {
-                Ok(rows) => rows
-                    .iter()
-                    .filter_map(|r| {
-                        Some((r.text(0).ok()?.to_string(), r.text(1).ok()?.to_string()))
-                    })
-                    .collect(),
-                Err(e) => {
-                    return json!({
-                        "state": "failed", "stacks": 0, "sorted": 0, "jobs": [],
-                        "words": format!("the decisions could not be read: {e}"),
-                    });
-                }
-            };
-            for (scope, reference) in refs {
-                match (scope.as_str(), reference.parse::<i64>()) {
-                    ("group", Ok(item)) => match nils_registry::review::members(store, item) {
-                        Ok(members) => stacks.extend(members.into_iter().map(|m| m.stack_id)),
-                        Err(_) => unreached += 1,
-                    },
-                    ("stack", Ok(stack)) => {
-                        stacks.insert(stack);
-                    }
-                    _ => unreached += 1,
-                }
-            }
+    let (stacks, unreached) = match stacks_reached(registry.store(), decisions) {
+        Ok(found) => found,
+        Err(words) => {
+            return json!({
+                "state": "failed", "stacks": 0, "sorted": 0, "jobs": [], "words": words,
+            });
         }
-    }
+    };
     if stacks.is_empty() {
         return json!({
             "state": "done", "stacks": 0, "sorted": 0, "jobs": [], "unreached": unreached,
@@ -2186,13 +2193,42 @@ pub(crate) fn resort_committed(
 /// the decisions in force reach the axis every page reads; a stack no sort
 /// has judged is left to the first sort. `label` is the job's label and
 /// `lead` the words its scope starts with. What was done, as `{state,
-/// stacks, sorted, jobs, words}`.
+/// stacks, sorted, jobs, words}`. Inline: a sort that holds the registry
+/// is waited for [`RESORT_WAIT`], and the stacks go in one classify.
 pub(crate) fn resort_stacks(
     registry: &mut Registry,
     pack_dir: Option<&std::path::Path>,
     label: &str,
     lead: &str,
     stacks: &BTreeSet<i64>,
+) -> Value {
+    resort_stacks_with(
+        registry,
+        pack_dir,
+        label,
+        lead,
+        stacks,
+        RESORT_WAIT,
+        usize::MAX,
+        &mut |_, _, _| true,
+    )
+}
+
+/// [`resort_stacks`] as a job runs it (UX round 5): a sort that holds the
+/// registry is waited for up to `wait`; the stacks go `chunk` at a time, and
+/// after each chunk (and while waiting) `progress(registry, done, of)` is
+/// told, with the registry to beat on, and stops the rest when it answers
+/// false (a cancel), which ends as `cancelled`.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn resort_stacks_with(
+    registry: &mut Registry,
+    pack_dir: Option<&std::path::Path>,
+    label: &str,
+    lead: &str,
+    stacks: &BTreeSet<i64>,
+    wait: std::time::Duration,
+    chunk: usize,
+    progress: &mut dyn FnMut(&mut Registry, usize, usize) -> bool,
 ) -> Value {
     let started = std::time::Instant::now();
     // the pack, its version and the overlay each stack was last sorted with
@@ -2232,12 +2268,14 @@ pub(crate) fn resort_stacks(
             }
         }
     }
-    let unsorted = stacks.len() - by_pack.values().map(Vec::len).sum::<usize>();
+    let of: usize = by_pack.values().map(Vec::len).sum();
+    let unsorted = stacks.len() - of;
     let mut jobs = Vec::new();
     let mut states = Vec::new();
     let mut why = Vec::new();
     let mut sorted = 0usize;
-    for ((name, version, overlay), list) in by_pack {
+    let mut stopped = false;
+    'groups: for ((name, version, overlay), list) in by_pack {
         let pack = match pack_as_sorted(pack_dir, registry, &name, &version, overlay.as_deref()) {
             Ok(p) => p,
             Err(refused) => {
@@ -2249,59 +2287,73 @@ pub(crate) fn resort_stacks(
                 continue;
             }
         };
-        let settings = nils_classify::Settings {
-            name: label.to_string(),
-            stacks: nils_classify::job::Stacks::Only(std::sync::Arc::new(
-                list.iter().copied().collect(),
-            )),
-            scope: vec![format!("{lead}: {} scans", list.len())],
-            ..nils_classify::Settings::default()
-        };
-        let cancel = nils_digest::Cancel::new();
-        let mut ran = nils_classify::classify::classify(registry, &pack, &settings, &cancel);
-        while matches!(ran, Err(nils_classify::Error::Busy { .. }))
-            && started.elapsed() < RESORT_WAIT
-        {
-            std::thread::sleep(std::time::Duration::from_millis(200));
-            ran = nils_classify::classify::classify(registry, &pack, &settings, &cancel);
-        }
-        match ran {
-            Ok(report) => {
-                jobs.push(report.job_id);
-                states.push(if report.cancelled {
-                    "cancelled"
-                } else {
-                    "done"
-                });
-                sorted += list.len();
+        for part in list.chunks(chunk.max(1)) {
+            let settings = nils_classify::Settings {
+                name: label.to_string(),
+                stacks: nils_classify::job::Stacks::Only(std::sync::Arc::new(
+                    part.iter().copied().collect(),
+                )),
+                scope: vec![format!("{lead}: {} scans", part.len())],
+                ..nils_classify::Settings::default()
+            };
+            let cancel = nils_digest::Cancel::new();
+            let mut ran = nils_classify::classify::classify(registry, &pack, &settings, &cancel);
+            while matches!(ran, Err(nils_classify::Error::Busy { .. })) && started.elapsed() < wait
+            {
+                std::thread::sleep(std::time::Duration::from_millis(200));
+                if !progress(registry, sorted, of) {
+                    stopped = true;
+                    break 'groups;
+                }
+                ran = nils_classify::classify::classify(registry, &pack, &settings, &cancel);
             }
-            Err(nils_classify::Error::Busy { job_id, .. }) => {
-                states.push("waiting");
-                why.push(format!(
-                    "sort job {job_id} holds the registry; the decisions stand, and the next sort re-sorts these scans"
-                ));
+            match ran {
+                Ok(report) => {
+                    jobs.push(report.job_id);
+                    states.push(if report.cancelled {
+                        "cancelled"
+                    } else {
+                        "done"
+                    });
+                    sorted += part.len();
+                }
+                Err(nils_classify::Error::Busy { job_id, .. }) => {
+                    states.push("waiting");
+                    why.push(format!(
+                        "sort job {job_id} holds the registry; the decisions stand, and the next sort re-sorts these scans"
+                    ));
+                    break;
+                }
+                Err(e) => {
+                    states.push("failed");
+                    why.push(format!("the re-sort failed: {e}; the decisions stand"));
+                    break;
+                }
             }
-            Err(e) => {
-                states.push("failed");
-                why.push(format!("the re-sort failed: {e}; the decisions stand"));
+            if !progress(registry, sorted, of) {
+                stopped = true;
+                break 'groups;
             }
         }
     }
     let state = if states.contains(&"failed") {
         "failed"
+    } else if stopped || states.contains(&"cancelled") {
+        "cancelled"
     } else if states.contains(&"waiting") || states.contains(&"refused") {
         "waiting"
     } else {
         "done"
     };
     let words = format!(
-        "{sorted} of {} scan(s) re-sorted{}{}",
+        "{sorted} of {} scan(s) re-sorted{}{}{}",
         stacks.len(),
         if unsorted > 0 {
             format!(", {unsorted} never sorted and left to the first sort")
         } else {
             String::new()
         },
+        if stopped { "; stopped on request" } else { "" },
         if why.is_empty() {
             String::new()
         } else {

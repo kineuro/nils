@@ -5027,8 +5027,9 @@ fn routed(
             )
             .map_err(review_err)?;
             // 2026-11-05: in force means every page reads it, so the scans
-            // the decision reaches are re-sorted at once, as after an answer
-            let resort = crate::review_questions::resort_committed(
+            // the decision reaches are re-sorted; UX round 5: as a queued
+            // job, so the door answers at once and the page follows it
+            let resort = crate::resort_job::queue_resort_committed(
                 registry,
                 doors.pack_dir.as_deref(),
                 principal,

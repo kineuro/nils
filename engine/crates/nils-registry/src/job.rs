@@ -813,6 +813,9 @@ pub fn kind_of(argv: &[String]) -> &str {
         // pipeline jobs of their own, which a running workflow job never
         // holds off (the claim looks only at jobs of its own kind)
         (Some("workflow"), Some("run")) => WORKFLOW,
+        // UX round 5: the re-sort a commit queues is a kind of its own, so
+        // that it never holds off the sorts it runs
+        (Some("review"), Some("resort")) => RESORT,
         (Some(verb), _) => verb,
         (None, _) => "",
     }
@@ -949,6 +952,10 @@ impl Lane {
 
 /// The kind of the pipeline lane's worker row.
 pub const PIPELINE_WORKER: &str = "pipeline-worker";
+
+/// The kind of the job a commit queues to sort the scans its decisions
+/// reach again (`nils review resort`, UX round 5): run by the main lane.
+pub const RESORT: &str = "resort";
 
 /// The kind of a `workflow run` job (Wave 7b A7): run by the pipelines
 /// lane, counted there, and not a pipeline job, so the steps' own claims
