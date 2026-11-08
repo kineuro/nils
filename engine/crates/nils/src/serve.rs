@@ -4703,6 +4703,25 @@ fn routed(
                     nils_registry::review::PIPELINE_QC_KIND,
                 );
             }
+            // UX round 5 (2026-11-08): the distinct scans the questions door
+            // asks per axis, from its own gathering, so the desk's axis cards
+            // count what their Answer opens; and the classifier kinds it
+            // does not ask, which the desk folds away
+            let (questions, not_questions) = crate::review_questions::summary_counts(
+                registry,
+                &caller.access,
+                query.get("dataset").map(String::as_str),
+                // a cohort scope reads the cohort's open memberships as the
+                // questions door does; a dataset and a cohort at once is the
+                // dataset's, as `by_kind` above is
+                if query.get("dataset").is_some_and(|d| !d.is_empty()) {
+                    None
+                } else {
+                    cohort
+                },
+            )?;
+            doc["questions"] = questions;
+            doc["not_questions"] = not_questions;
             Ok(Reply::ok(doc))
         }
         ["api", "review", _] if get => {

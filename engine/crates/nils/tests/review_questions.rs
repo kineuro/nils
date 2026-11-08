@@ -1110,6 +1110,172 @@ fn round(pg: Option<(String, String)>) {
         ("T2*w".to_string(), "decision".to_string())
     );
 
+    // --- UX round 5 (2026-11-08): a model's disagreement with a person's
+    // decision and a session pass's value are questions here too, keyed as
+    // the rules' pairs are, and the summary's `questions` counts per axis
+    // exactly what the door asks
+    let model_item = |stack: i64, decision: &str, value: &str| {
+        home.exec(&format!(
+            "INSERT INTO {{review_item}} (kind, scope, ref, evidence, status, created_at) \
+             VALUES ('base:decision', 'stack', '{{\"stack_id\": {stack}}}', \
+             '{{\"axis\": \"base\", \"decision\": \"{decision}\", \"source\": \"model\", \"model\": \"zz-base@1\", \
+             \"model_id\": 99, \"value\": \"{value}\", \"confidence\": 0.97}}', 'open', '2026-11-08T10:00:00Z')"
+        ));
+    };
+    // d: a decision T2*w a model disputes with PDw; e: a decision T2w the
+    // rules dispute already, and now a model too
+    model_item(d, "T2*w", "PDw");
+    model_item(e, "T2w", "PDw");
+    home.exec(&format!(
+        "INSERT INTO {{review_item}} (kind, scope, ref, evidence, status, created_at) \
+         VALUES ('base:session', 'stack', '{{\"stack_id\": {t1}}}', \
+         '{{\"axis\": \"base\", \"value\": \"T2w\", \"was\": [\"T1w\"], \"pass\": \"session-base\", \"rule\": \"sibling\", \"siblings\": []}}', \
+         'open', '2026-11-08T10:00:00Z')"
+    ));
+    let find = |doc: &Value, key: &str| {
+        doc["questions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|q| q["key"] == key)
+            .cloned()
+            .unwrap_or_else(|| panic!("no {key} in {doc}"))
+    };
+    let asked = server.get("/api/review/questions?dataset=other", OPS);
+    let q = find(&asked, "base:PDw|T2*w");
+    assert_eq!(
+        q["values"],
+        json!(["T2*w", "PDw"]),
+        "the decision kept is key 1: {q}"
+    );
+    assert_eq!(q["words"], "T2*w or PDw?", "{q}");
+    assert_eq!(
+        q["reason"], "A model says PDw; a person decided T2*w.",
+        "{q}"
+    );
+    assert_eq!(q["scans"], 1, "{q}");
+    assert_eq!(q["kinds"]["base:decision"], 1, "{q}");
+    // the shape is the rules' decision pair's: on e both ask under one key
+    let q = find(&asked, "base:PDw|T2w");
+    assert_eq!(q["values"], json!(["T2w", "PDw"]), "{q}");
+    assert_eq!(
+        q["reason"],
+        "A model says PDw; a person decided T2w. A person's answer differs from the rules.",
+        "{q}"
+    );
+    assert_eq!(q["scans"], 1, "one scan, two items: {q}");
+    let summary = server.get("/api/review/summary?dataset=other", OPS);
+    assert_eq!(summary["questions"]["base"], asked["scans"], "{summary}");
+    assert!(summary["not_questions"].is_object(), "{summary}");
+    assert!(
+        summary["by_kind"].is_object(),
+        "the old fields stay: {summary}"
+    );
+    let whole = server.get("/api/review/summary", OPS);
+    let all = server.get("/api/review/questions", OPS);
+    assert_eq!(whole["questions"]["base"], all["scans"], "{whole}");
+    // the session's value against the scan's own, the session's first
+    let asked_ds = server.get("/api/review/questions?dataset=ds", OPS);
+    let q = find(&asked_ds, "base:T1w|T2w");
+    assert_eq!(q["values"], json!(["T2w", "T1w"]), "{q}");
+    assert_eq!(q["words"], "T2w or T1w?", "{q}");
+    assert_eq!(
+        q["reason"], "The session says T2w; the scan alone said T1w.",
+        "{q}"
+    );
+    assert_eq!(q["kinds"]["base:session"], 1, "{q}");
+    let summary_ds = server.get("/api/review/summary?dataset=ds", OPS);
+    assert_eq!(
+        summary_ds["questions"]["base"], asked_ds["scans"],
+        "{summary_ds}"
+    );
+    // a page of the model's question shows the decision as NILS's answer
+    let page = server.get(
+        &format!(
+            "/api/review/questions/{}/scans?dataset=other",
+            key("base:PDw|T2*w")
+        ),
+        OPS,
+    );
+    assert_eq!(page["scans"][0]["stack"], d, "{page}");
+    assert_eq!(page["scans"][0]["nils"], "T2*w", "{page}");
+    assert_eq!(page["scans"][0]["other"], "PDw", "{page}");
+    // key 1 keeps the decision: a decision too, so the item closes and the
+    // scan is re-sorted; the question is gone
+    let open_items = || {
+        home.rows(
+            "SELECT COUNT(*) FROM {review_item} WHERE kind = 'base:decision' AND status = 'open'",
+        )[0][0]
+            .as_i64()
+            .unwrap()
+    };
+    let before = open_items();
+    let (status, done) = server.call(
+        "POST",
+        &format!("/api/review/questions/{}/answer", key("base:PDw|T2*w")),
+        Some(json!({"dataset": "other", "value": "T2*w"})),
+        OPS,
+    );
+    assert_eq!(status, 200, "{done}");
+    assert_eq!(done["answered"], 1, "{done}");
+    // the rules' value the person saw at their standing decision carries to
+    // the kept one, so the sort does not ask the rules' question again
+    let kept = home.rows(&format!(
+        "SELECT rules_in_view FROM {{decision}} WHERE ref = '{d}' AND withdrawn_at IS NULL"
+    ));
+    assert_eq!(kept[0][0], "PDw", "{kept:?}");
+    assert_eq!(done["left"], 0, "{done}");
+    assert_eq!(done["resort"]["state"], "done", "{done}");
+    assert_eq!(open_items(), before - 1, "the model's item closed");
+    assert_eq!(
+        base_of(&home, d).unwrap(),
+        ("T2*w".to_string(), "decision".to_string())
+    );
+    let left = server.get("/api/review/questions?dataset=other", OPS);
+    assert!(
+        left["questions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|q| q["key"] != "base:PDw|T2*w"),
+        "{left}"
+    );
+    // key 2 takes the model's value: both items on e close with it
+    let (status, done) = server.call(
+        "POST",
+        &format!("/api/review/questions/{}/answer", key("base:PDw|T2w")),
+        Some(json!({"dataset": "other", "value": "PDw"})),
+        OPS,
+    );
+    assert_eq!(status, 200, "{done}");
+    assert_eq!(done["answered"], 1, "{done}");
+    assert_eq!(done["resort"]["state"], "done", "{done}");
+    assert_eq!(
+        open_items(),
+        before - 3,
+        "the model's and the rules' items closed"
+    );
+    assert_eq!(
+        base_of(&home, e).unwrap(),
+        ("PDw".to_string(), "decision".to_string())
+    );
+    let left = server.get("/api/review/questions?dataset=other", OPS);
+    assert!(
+        left["questions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|q| q["key"] != "base:PDw|T2w"),
+        "{left}"
+    );
+    // nothing left on the axis: the summary names no base at all
+    let summary = server.get("/api/review/summary?dataset=other", OPS);
+    assert_eq!(
+        summary["questions"]["base"].as_i64().unwrap_or(0),
+        left["scans"].as_i64().unwrap(),
+        "{summary}"
+    );
+
     // the doors are listed, each with its grant
     let caps = server.get("/api/capabilities", REVIEWS);
     for door in [
