@@ -2255,3 +2255,182 @@ fn the_proposals_per_model_and_axis_commit_and_the_rest_becomes_a_campaign() {
         assert_eq!(holding.closes_into, "none", "{name}");
     }
 }
+
+/// 2026-11-08 (UX round 3), on both backends: a later run's units retire
+/// the failed and unreported items earlier runs of the same pipeline name
+/// left on them, a whole-run item once every unit of that run is done, and
+/// nothing else: a refused file, a breach, another pipeline's item, an item
+/// on a unit it did not do and a done run's item stay open.
+#[test]
+fn a_later_run_retires_what_earlier_runs_of_its_pipeline_left_failed() {
+    use nils_registry::pipeline as rows;
+    use std::collections::BTreeSet;
+    for mut l in labs() {
+        let store = l.registry.store();
+        let doc = serde_json::json!({});
+        let add = |store: &mut Store, name: &str, digest: &str| {
+            rows::add(
+                store,
+                &rows::New {
+                    name,
+                    tool_version: "1",
+                    descriptor: &doc,
+                    descriptor_digest: digest,
+                    image: "example.org/ret",
+                    image_digest: "sha256:00",
+                    layout: "stacks",
+                    level: "stack",
+                    added_by: "test",
+                    added_at: "2026-11-08T10:00:00Z",
+                    pack: None,
+                    pack_digest: None,
+                    version_digest: digest,
+                },
+            )
+            .unwrap()
+            .0
+        };
+        let v1 = add(store, "ret", "d1");
+        let v2 = add(store, "ret", "d2");
+        let other = add(store, "other", "d3");
+        assert_eq!(v2.version, 2, "{}", l.name);
+        let params = serde_json::json!({});
+        let start = |store: &mut Store, pipeline_id: i64| -> i64 {
+            rows::start(
+                store,
+                &rows::NewRun {
+                    pipeline_id,
+                    job_id: None,
+                    handle_id: None,
+                    selection: None,
+                    params: &params,
+                    runtime: "apptainer",
+                    runtime_version: "1",
+                    host: "h",
+                    device: "cpu",
+                    model_ids: &[],
+                    label_set_id: None,
+                    place_id: None,
+                    scratch_place_id: None,
+                    principal: "t",
+                    actor: None,
+                    started_at: "2026-11-08T10:00:00Z",
+                },
+            )
+            .unwrap()
+        };
+        let finish = |store: &mut Store, id: i64, status: &str| {
+            rows::finish(
+                store,
+                id,
+                &rows::Finish {
+                    status,
+                    finished_at: "2026-11-08T11:00:00Z",
+                    exit_code: None,
+                    results_digest: Some("sha256:r"),
+                    summary: &serde_json::json!({}),
+                    error: None,
+                    failure: None,
+                },
+            )
+            .unwrap();
+        };
+        let raise = |store: &mut Store, run: i64, label: &str, unit: &str, status: &str| {
+            review::raise_pipeline_qc(
+                store,
+                &review::PipelineQc {
+                    run_id: run,
+                    pipeline: label,
+                    unit,
+                    stack_id: None,
+                    subject_id: None,
+                    session_day: None,
+                    status,
+                    error: Some("why"),
+                    metrics: &json!({}),
+                    job_id: None,
+                },
+                "2026-11-08T11:00:00Z",
+            )
+            .unwrap()
+        };
+        let units = |n: &[&str]| n.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        // a run of version 1 that failed as a whole over stacks 1 and 2
+        let whole = start(store, v1.id);
+        rows::ensure_units(store, whole, &units(&["stack-1", "stack-2"])).unwrap();
+        finish(store, whole, "failed");
+        let i_whole = raise(store, whole, "ret@1", "run", "failed");
+        // a partial run of version 2: stack 1 failed, stack 2 refused a
+        // file, stack 3 breached a check, stack 9 unreported
+        let part = start(store, v2.id);
+        finish(store, part, "partial");
+        let i_failed = raise(store, part, "ret@2", "stack-1", "failed");
+        let i_refused = raise(store, part, "ret@2", "stack-2", "refused");
+        let i_breach = raise(store, part, "ret@2", "stack-3", "breach");
+        let i_elsewhere = raise(store, part, "ret@2", "stack-9", "unreported");
+        // a done run's breach, and another pipeline's failure on stack 1
+        let done = start(store, v2.id);
+        finish(store, done, "done");
+        let i_done = raise(store, done, "ret@2", "stack-1", "failed");
+        let o = start(store, other.id);
+        finish(store, o, "failed");
+        let i_other = raise(store, o, "other@1", "stack-1", "failed");
+
+        let later = start(store, v2.id);
+        let did: BTreeSet<String> = units(&["stack-1", "stack-2", "stack-3"])
+            .into_iter()
+            .collect();
+        let got =
+            review::retire_pipeline_qc(store, "ret", later, &did, "2026-11-08T12:00:00Z").unwrap();
+        let mut items = got.items.clone();
+        items.sort_unstable();
+        assert_eq!(items, vec![i_whole, i_failed], "{}", l.name);
+        assert_eq!(got.runs, vec![whole, part], "{}", l.name);
+        let status = |store: &mut Store, id: i64| -> (String, Option<String>) {
+            let r = store
+                .query_opt(
+                    &format!("SELECT status, actor FROM review_item WHERE id = {id}"),
+                    &[],
+                )
+                .unwrap()
+                .unwrap();
+            (
+                r.text(0).unwrap().to_string(),
+                r.opt_text(1).unwrap().map(str::to_string),
+            )
+        };
+        for id in [i_whole, i_failed] {
+            assert_eq!(
+                status(store, id),
+                ("superseded".to_string(), Some(format!("run:{later}"))),
+                "{}",
+                l.name
+            );
+        }
+        for id in [i_refused, i_breach, i_elsewhere, i_done, i_other] {
+            assert_eq!(status(store, id).0, "open", "{} item {id}", l.name);
+        }
+        assert_eq!(
+            review::pipeline_qc_fate(store, part).unwrap(),
+            (3, vec![(later, 1)]),
+            "{}",
+            l.name
+        );
+        assert_eq!(
+            review::pipeline_qc_fate(store, whole).unwrap(),
+            (0, vec![(later, 1)]),
+            "{}",
+            l.name
+        );
+        // a whole-run item waits for every unit that run had
+        let whole2 = start(store, v1.id);
+        rows::ensure_units(store, whole2, &units(&["stack-1", "stack-5"])).unwrap();
+        finish(store, whole2, "failed");
+        let i_whole2 = raise(store, whole2, "ret@1", "run", "failed");
+        let last = start(store, v1.id);
+        let got =
+            review::retire_pipeline_qc(store, "ret", last, &did, "2026-11-08T13:00:00Z").unwrap();
+        assert!(got.items.is_empty(), "{} {got:?}", l.name);
+        assert_eq!(status(store, i_whole2).0, "open", "{}", l.name);
+    }
+}
