@@ -5097,6 +5097,24 @@ fn every_door_needs_its_grant_and_a_refusal_names_it() {
             "review-work",
             "campaigns:work",
         ),
+        // UX round 5: a model's proposals read as a grid by a reviewer, and
+        // accepted in one move by one who works the review
+        (
+            "GET",
+            "/api/review/proposals/scans",
+            "",
+            "review-see",
+            "data-see",
+            "review:see",
+        ),
+        (
+            "POST",
+            "/api/review/proposals/accept",
+            "{}",
+            "review-work",
+            "review-see",
+            "review:work",
+        ),
         // record 56: rehearsing a rule change is the work of a reviewer
         // or of a pipeline's operator
         (

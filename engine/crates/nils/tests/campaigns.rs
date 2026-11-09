@@ -1247,15 +1247,33 @@ fn an_axes_campaign_at_the_door_is_held_to_the_pack_and_closes_axis_by_axis() {
         "{from}: {part}"
     );
     assert_eq!(part["left"], 12 - holding as i64, "{part}");
-    // 2026-11-05: in force means every page reads it: the commit re-sorted
-    // the scans the decisions reach, and each stack that held the old base
-    // now explains the committed one
-    assert_eq!(part["resort"]["state"], "done", "{part}");
-    assert_eq!(part["resort"]["sorted"], part["resort"]["stacks"], "{part}");
+    // 2026-11-05: in force means every page reads it: the commit re-sorts
+    // the scans the decisions reach; UX round 5: as a queued job the door
+    // answers with at once, which a worker runs, after which each stack
+    // that held the old base explains the committed one
+    assert_eq!(part["resort"]["state"], "queued", "{part}");
     assert!(
         part["resort"]["stacks"].as_u64().unwrap() >= holding as u64,
         "{part}"
     );
+    let resort_job = part["resort"]["job"].as_i64().expect("the re-sort's job");
+    let shown = server.ok("GET", &format!("/api/jobs/{resort_job}"), None, CURATOR);
+    assert_eq!(shown["state"], "queued", "{shown}");
+    assert_eq!(shown["kind"], "resort", "{shown}");
+    assert!(
+        shown["name"]
+            .as_str()
+            .is_some_and(|n| n.starts_with("re-sort after cleo@lab committed ")),
+        "{shown}"
+    );
+    cli(&home, "cleo@lab", &["jobs", "work", "--once"]);
+    let shown = server.ok("GET", &format!("/api/jobs/{resort_job}"), None, CURATOR);
+    assert_eq!(shown["state"], "done", "{shown}");
+    assert_eq!(
+        shown["progress"]["done"], shown["progress"]["of"],
+        "{shown}"
+    );
+    assert_eq!(shown["result"]["state"], "done", "{shown}");
     for s in 1..=4 {
         let e = server.ok("GET", &format!("/api/explain/{s}"), None, CURATOR);
         let base = e["axes"]
@@ -1459,7 +1477,20 @@ fn the_keyboard_asks_several_axes_and_commits_one_axis_of_them() {
         "{closed}"
     );
     assert_eq!(closed["staged"], true, "{closed}");
-    // the base axis's T1w part, and nothing else
+    // UX round 5: the closed campaign's timed answers give the axis a pace,
+    // for the estimate of a campaign of a model's unsure proposals
+    {
+        let mut reg = nils_registry::home::Home::new(home.path()).open().unwrap();
+        let base = nils_registry::proposals::pace_s(reg.store(), "base").unwrap();
+        // the answers of a test come within a second, so the pace may be 0
+        assert!(base.is_some_and(|p| p >= 0.0), "{base:?}");
+        assert_eq!(
+            nils_registry::proposals::pace_s(reg.store(), "post_contrast").unwrap(),
+            None
+        );
+    }
+    // the base axis's T1w part, and nothing else; the re-sort is queued for
+    // a worker, and the keyboard says so and returns where none runs
     let text = cli(
         &home,
         "cleo@lab",
@@ -1471,6 +1502,26 @@ fn the_keyboard_asks_several_axes_and_commits_one_axis_of_them() {
             && text.contains(&format!("{} left staged", 2 * n - t1)),
         "{text}"
     );
+    assert!(text.contains("to sort again, queued as job"), "{text}");
+    assert!(text.contains("waits for a worker"), "{text}");
+    let text = cli(
+        &home,
+        "cleo@lab",
+        &[
+            "review",
+            "commit",
+            "--axis",
+            "technique",
+            "--to",
+            "MPRAGE",
+            // the first commit moved the epoch (record 42 R6), so the
+            // decisions staged before it are committed knowingly
+            "--anyway",
+            "--no-wait",
+        ],
+    );
+    assert!(text.contains("to sort again, queued as job"), "{text}");
+    assert!(!text.contains("waits for a worker"), "{text}");
 }
 
 /// Record 45 for the rating workspace: a lease is renewed by the rater who
@@ -2429,13 +2480,18 @@ fn a_model_s_proposals_commit_by_model_and_axis_and_the_rest_becomes_the_caller_
     assert_eq!(row["axis"], "body_part", "{row}");
     assert_eq!(row["threshold"], 0.9, "{row}");
     assert_eq!(row["commit"], json!({"groups": 1, "stacks": 2}), "{row}");
-    assert_eq!(row["below"], json!({"groups": 2, "stacks": 2}), "{row}");
+    assert_eq!(row["below"]["groups"], 2, "{row}");
+    assert_eq!(row["below"]["stacks"], 2, "{row}");
     assert_eq!(row["name"], "bp-head-body_part-unsure", "{row}");
     // a rater reads none of it
     let (status, _) = server.call("GET", "/api/review/proposals", None, ANNA);
     assert_eq!(status, 403);
 
-    // the commit by the model and the axis, and the re-sort after it
+    // UX round 5: no closed campaign asked the axis, so no pace is known
+    assert!(row["below"]["pace_s"].is_null(), "{row}");
+
+    // the commit by the model and the axis, and the re-sort after it: since
+    // UX round 5 a queued job, so the door answers at once
     let done = server.ok(
         "POST",
         "/api/decisions/commit",
@@ -2443,7 +2499,35 @@ fn a_model_s_proposals_commit_by_model_and_axis_and_the_rest_becomes_the_caller_
         CURATOR,
     );
     assert_eq!(done["committed"].as_array().unwrap().len(), 1, "{done}");
-    assert_eq!(done["resort"]["state"], "done", "{done}");
+    assert_eq!(done["resort"]["state"], "queued", "{done}");
+    assert_eq!(done["resort"]["stacks"], 2, "{done}");
+    let resort_job = done["resort"]["job"].as_i64().expect("the re-sort's job");
+    let shown = server.ok("GET", &format!("/api/jobs/{resort_job}"), None, CURATOR);
+    assert_eq!(shown["state"], "queued", "{shown}");
+    assert_eq!(
+        shown["name"], "re-sort after cleo@lab committed 1 decision(s)",
+        "{shown}"
+    );
+    // the scans still hold what the sort gave them until the job ran
+    let body_part_of = |stack: i64| -> Option<(String, String)> {
+        let mut store =
+            nils_registry::Store::open_sqlite(&home.path().join("registry.db")).unwrap();
+        store
+            .query(
+                &format!(
+                    "SELECT COALESCE(value, ''), tier FROM classification_axis WHERE stack_id = {stack} AND axis = 'body_part'"
+                ),
+                &[],
+            )
+            .unwrap()
+            .first()
+            .map(|r| (r.text(0).unwrap().to_string(), r.text(1).unwrap().to_string()))
+    };
+    assert_ne!(
+        body_part_of(1).map(|v| v.1).as_deref(),
+        Some("decision"),
+        "not sorted yet"
+    );
     let row = &server.ok("GET", "/api/review/proposals", None, CURATOR)["proposals"][0];
     assert_eq!(row["commit"]["stacks"], 0, "{row}");
     assert_eq!(row["below"]["stacks"], 2, "{row}");
@@ -2481,18 +2565,75 @@ fn a_model_s_proposals_commit_by_model_and_axis_and_the_rest_becomes_the_caller_
         ANNA,
     );
     assert_eq!(status, 403, "{doc}");
+    // UX round 5: a cap and an order; what is not a count or an order is refused
+    for (body, says) in [
+        (
+            json!({"model": "bp-head@1", "axis": "body_part", "limit": 0}),
+            "limit:",
+        ),
+        (
+            json!({"model": "bp-head@1", "axis": "body_part", "limit": "many"}),
+            "limit:",
+        ),
+        (
+            json!({"model": "bp-head@1", "axis": "body_part", "order": "sideways"}),
+            "order:",
+        ),
+        (
+            json!({"model": "bp-head@1", "axis": "body_part", "seed": -1}),
+            "seed:",
+        ),
+    ] {
+        let (status, doc) = server.call(
+            "POST",
+            "/api/review/proposals/campaign",
+            Some(body.clone()),
+            CURATOR,
+        );
+        assert_eq!(status, 400, "{body}: {doc}");
+        assert!(doc.to_string().contains(says), "{body}: {doc}");
+    }
+    // one scan of the two, the least sure first: the neck at 0.5, the spine at 0.6 left
+    let first = server.ok(
+        "POST",
+        "/api/review/proposals/campaign",
+        Some(json!({"model": "bp-head@1", "axis": "body_part", "name": "least-first", "limit": 1})),
+        CURATOR,
+    );
+    assert_eq!(first["adopted"], 1, "{first}");
+    assert_eq!(first["left"], 1, "{first}");
+    assert_eq!(first["limit"], 1, "{first}");
+    assert_eq!(first["order"], "least_sure", "{first}");
+    assert!(first["seed"].is_null(), "{first}");
+    let first_id = first["campaign"]["id"].as_i64().unwrap();
+    let items = server.ok(
+        "GET",
+        &format!("/api/campaigns/{first_id}/suggestions?all=1"),
+        None,
+        CURATOR,
+    );
+    assert!(items.to_string().contains("neck"), "{items}");
+    assert!(!items.to_string().contains("spine"), "{items}");
+    let row = &server.ok("GET", "/api/review/proposals", None, CURATOR)["proposals"][0];
+    assert_eq!(row["below"]["stacks"], 1, "{row}");
+    assert_eq!(row["asked"]["stacks"], 1, "{row}");
+    // the rest, drawn at random by a seed, which the answer keeps
     let made = server.ok(
         "POST",
         "/api/review/proposals/campaign",
-        Some(json!({"model": "bp-head@1", "axis": "body_part"})),
+        Some(json!({"model": "bp-head@1", "axis": "body_part", "order": "random", "seed": 7})),
         CURATOR,
     );
     assert_eq!(
         made["campaign"]["name"], "bp-head-body_part-unsure",
         "{made}"
     );
-    assert_eq!(made["adopted"], 2, "{made}");
-    assert_eq!(made["suggestions"]["suggestions"], 2, "{made}");
+    assert_eq!(made["adopted"], 1, "{made}");
+    assert_eq!(made["left"], 0, "{made}");
+    assert_eq!(made["limit"], 500, "{made}");
+    assert_eq!(made["order"], "random", "{made}");
+    assert_eq!(made["seed"], 7, "{made}");
+    assert_eq!(made["suggestions"]["suggestions"], 1, "{made}");
     let id = made["campaign"]["id"].as_i64().unwrap();
     let c = server.ok("GET", &format!("/api/campaigns/{id}"), None, CURATOR);
     assert_eq!(c["question"]["kind"], "axes", "{c}");
@@ -2515,7 +2656,7 @@ fn a_model_s_proposals_commit_by_model_and_axis_and_the_rest_becomes_the_caller_
     assert_eq!(row["asked"]["stacks"], 2, "{row}");
     assert_eq!(
         row["campaigns"],
-        json!([{"id": id, "name": "bp-head-body_part-unsure"}]),
+        json!([{"id": id, "name": "bp-head-body_part-unsure"}, {"id": first_id, "name": "least-first"}]),
         "{row}"
     );
     // nothing is left to make a second of
@@ -2531,6 +2672,38 @@ fn a_model_s_proposals_commit_by_model_and_axis_and_the_rest_becomes_the_caller_
         "{doc}"
     );
     drop(server);
+
+    // the worker runs the queued re-sort: the committed scans read the
+    // model's value as a decision, and the job says how far it got
+    let out = cli(&home, "cleo@lab", &["jobs", "work", "--once"]);
+    assert!(out.contains("review resort"), "{out}");
+    for stack in [1, 2] {
+        assert_eq!(
+            body_part_of(stack),
+            Some(("brain".to_string(), "decision".to_string())),
+            "stack {stack} after the re-sort"
+        );
+    }
+    let jobs: Value = serde_json::from_str(&cli(
+        &home,
+        "cleo@lab",
+        &["jobs", "list", "--all", "--json"],
+    ))
+    .unwrap();
+    let job = jobs
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|j| j["id"] == resort_job)
+        .unwrap_or_else(|| panic!("job {resort_job} in {jobs}"));
+    assert_eq!(job["state"], "done", "{job}");
+    assert_eq!(job["kind"], "resort", "{job}");
+    assert_eq!(
+        job["progress"],
+        json!({"done": 2, "of": 2, "what": "scans"}),
+        "{job}"
+    );
+    assert_eq!(job["result"]["sorted"], 2, "{job}");
 
     // the keyboard says the same
     let out = nils()

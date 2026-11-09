@@ -2157,6 +2157,9 @@ fn the_proposals_per_model_and_axis_commit_and_the_rest_becomes_a_campaign() {
                 question: &q,
                 pack_version: None,
                 names: &names,
+                limit: None,
+                order: proposals::Order::LeastSure,
+                seed: None,
             },
         )
         .unwrap();
@@ -2212,6 +2215,9 @@ fn the_proposals_per_model_and_axis_commit_and_the_rest_becomes_a_campaign() {
                 question: &q,
                 pack_version: None,
                 names: &names,
+                limit: None,
+                order: proposals::Order::LeastSure,
+                seed: None,
             },
         )
         .unwrap_err();
@@ -2229,6 +2235,9 @@ fn the_proposals_per_model_and_axis_commit_and_the_rest_becomes_a_campaign() {
                 question: &q,
                 pack_version: None,
                 names: &names,
+                limit: None,
+                order: proposals::Order::LeastSure,
+                seed: None,
             },
         )
         .unwrap_err();

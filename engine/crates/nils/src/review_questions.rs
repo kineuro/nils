@@ -5,14 +5,20 @@
 //! questions the sort leaves to a person, each answered as a grid of its
 //! scans with one key and its exceptions.
 //!
-//! - **The questions** (`GET /api/review/questions`): the sort's own
-//!   questions that wait for a person, open or staged, by the one meaning of
-//!   need a look ([`crate::certainty`]), gathered into plain questions over a
-//!   dataset's, a cohort's or the registry's scans. A question is an axis
-//!   and what is in dispute on it: nothing the rules found
-//!   (`<axis>:missing`), two values (`<axis>:<a>|<b>`), or one answer in
-//!   doubt (`<axis>:<v>?`). Each counts distinct scans, never items or
-//!   memberships, and names the two answers its keys 1 and 2 give.
+//! - **The questions** (`GET /api/review/questions`): every question about
+//!   one axis of a scan that waits for a person, open or staged, gathered
+//!   into plain questions over a dataset's, a cohort's or the registry's
+//!   scans: the sort's own (the one meaning of need a look,
+//!   [`crate::certainty`]), an operation's about the axis it owns, a pass's
+//!   (a session's or a neighbour vote's value) and a model's disagreement
+//!   with a person's decision (UX round 5, 2026-11-08: what the summary
+//!   counts for an axis and what the door asks agree, so a card never counts
+//!   what its button cannot show). A question is an axis and what is in
+//!   dispute on it: nothing the rules found (`<axis>:missing`), two values
+//!   (`<axis>:<a>|<b>`), or one answer in doubt (`<axis>:<v>?`). Each counts
+//!   distinct scans, never items or memberships, and names the two answers
+//!   its keys 1 and 2 give. A model's proposals (`<axis>:model`) are not
+//!   questions here: they are committed or read at the proposals doors.
 //! - **A question's scans** (`GET /api/review/questions/{key}/scans`): a
 //!   page of them, each with its picture, NILS's answer, the rules' reason
 //!   with the rules it was decided over, System 1's answer and any staged
@@ -228,6 +234,32 @@ impl Asking {
     fn axis_why(&self) -> Option<(&str, &str)> {
         self.kind.split_once(':')
     }
+
+    /// A model's disagreement with a person's decision (record 51 R5): an
+    /// `<axis>:decision` whose evidence names a model as its source.
+    fn by_model(&self) -> bool {
+        self.axis_why().is_some_and(|(_, why)| why == "decision")
+            && self.evidence["source"] == "model"
+    }
+
+    /// A session pass's or a neighbour vote's value, asked about.
+    fn by_pass(&self) -> Option<&str> {
+        self.axis_why()
+            .map(|(_, why)| why)
+            .filter(|why| *why == "session" || *why == "vote")
+    }
+}
+
+/// A pass's values as its evidence lists them (`was`), joined as the axis
+/// stores several.
+fn listed_of(v: &Value) -> Option<String> {
+    match v {
+        Value::Array(items) => {
+            let words: Vec<String> = items.iter().filter_map(text_of).collect();
+            (!words.is_empty()).then(|| words.join(","))
+        }
+        other => text_of(other),
+    }
 }
 
 fn text_of(v: &Value) -> Option<String> {
@@ -257,8 +289,27 @@ fn key_of(a: &Asking) -> Option<Key> {
             text_of(&ev["rules"]["value"]).or_else(|| text_of(&ev["value"])),
             text_of(&ev["system1"]["value"]),
         ),
+        // a model's answer against a person's decision (record 51 R5): the
+        // decision kept is key 1, the model's value key 2; one the person
+        // decided nothing on is the model's value in doubt
+        "decision" if a.by_model() => match (text_of(&ev["decision"]), text_of(&ev["value"])) {
+            (Some(d), Some(m)) => Key::pair(axis, &d, &m),
+            (None, Some(m)) => Key::doubt(axis, &m),
+            (_, None) => return None,
+        },
         // a person's decision the rules differ from
         "decision" => pair(text_of(&ev["rule"]), text_of(&ev["decision"])),
+        // a session pass's value against what the scan alone said
+        // (record 53 R4), and a neighbour vote's value
+        "session" => match (text_of(&ev["value"]), listed_of(&ev["was"])) {
+            (Some(v), Some(was)) => Key::pair(axis, &v, &was),
+            (Some(v), None) => Key::doubt(axis, &v),
+            (None, _) => Key::missing(axis),
+        },
+        "vote" => match text_of(&ev["value"]) {
+            Some(v) => Key::doubt(axis, &v),
+            None => Key::missing(axis),
+        },
         // an older engine's conflict between two rules
         "conflict" => pair(text_of(&ev["value"]), text_of(&ev["other"])),
         // the gate's doubt, and a person's own threshold
@@ -426,12 +477,29 @@ fn decided_on(
     Ok(out)
 }
 
-/// The sort's waiting questions about the scans of a scope, one entry a
-/// question and scan: grouped questions through each member in the scope,
-/// questions about one stack through their reference.
+/// Whose questions the doors gather: the sort's, an operation's about its
+/// own axis, a pass's and a model's; never a pick run's border, an
+/// identity's or a pipeline's check. A model's proposals (`<axis>:model`)
+/// are taken out of the condition itself, since their groups hold many
+/// members and are committed or read at the proposals doors.
+fn asks_here(store: &mut Store) -> Result<Option<String>, StoreError> {
+    use crate::certainty::Asker;
+    let asks = crate::certainty::Asks::of(store, crate::certainty::WAITING, &|a| {
+        matches!(
+            a,
+            Asker::Sort | Asker::Operation(_) | Asker::Pass | Asker::Model
+        )
+    })?;
+    Ok(asks
+        .condition()
+        .map(|c| format!("{c} AND ri.kind NOT LIKE '%:model'")))
+}
+
+/// The waiting questions about the scans of a scope, one entry a question
+/// and scan: grouped questions through each member in the scope, questions
+/// about one stack through their reference.
 fn gather(store: &mut Store, access: &Access, scope: &Scope) -> Result<Vec<Asking>, Reply> {
-    let asks = crate::certainty::Asks::sort(store).map_err(failed)?;
-    let Some(cond) = asks.condition().map(str::to_string) else {
+    let Some(cond) = asks_here(store).map_err(failed)? else {
         return Ok(Vec::new());
     };
     let Some(holds) = scope.holds(store, access, "x", "xse") else {
@@ -541,6 +609,54 @@ struct Scan {
     /// ("" where they gave none): what the tile showed of the rules where a
     /// decision stands in the stored classification.
     rules_named: Option<String>,
+    /// A model asks against the person's decision: the decision in force
+    /// ("" where the person decided nothing on the axis).
+    model_decision: Option<String>,
+    /// The rules ask about the person's decision.
+    rules_decision: bool,
+    /// A session pass asks: the value it gave the scan.
+    session_value: Option<String>,
+    /// A neighbour vote asks.
+    vote: bool,
+}
+
+impl Scan {
+    /// The value key 1 keeps where a question has one: the person's
+    /// decision a model disagrees with, or the value a session pass gave.
+    fn keep(&self) -> Option<&str> {
+        self.model_decision
+            .as_deref()
+            .filter(|d| !d.is_empty())
+            .or(self.session_value.as_deref())
+    }
+}
+
+/// Who asks the question, read once from its scans, for its words.
+#[derive(Debug, Clone, Default, PartialEq)]
+struct Who {
+    /// A model, against a person's decision: the decision ("" for none).
+    model: Option<String>,
+    rules_decision: bool,
+    /// A session pass: the value it gave.
+    session: Option<String>,
+    vote: bool,
+}
+
+impl Who {
+    fn of<'a>(scans: impl Iterator<Item = &'a Scan>) -> Who {
+        let mut who = Who::default();
+        for s in scans {
+            if who.model.is_none() {
+                who.model = s.model_decision.clone();
+            }
+            who.rules_decision |= s.rules_decision;
+            if who.session.is_none() {
+                who.session = s.session_value.clone();
+            }
+            who.vote |= s.vote;
+        }
+        who
+    }
 }
 
 /// The questions of a scope, gathered: each key with its scans.
@@ -638,8 +754,23 @@ fn questions_of(
         if scan.staged.is_none() {
             scan.staged = on.staged.clone();
         }
-        if a.axis_why().is_some_and(|(_, why)| why == "decision") && scan.rules_named.is_none() {
-            scan.rules_named = Some(text_of(&a.evidence["rule"]).unwrap_or_default());
+        let why = a.axis_why().map(|(_, why)| why).unwrap_or_default();
+        if why == "decision" && a.by_model() {
+            if scan.model_decision.is_none() {
+                scan.model_decision = Some(text_of(&a.evidence["decision"]).unwrap_or_default());
+            }
+        } else if why == "decision" {
+            scan.rules_decision = true;
+            if scan.rules_named.is_none() {
+                scan.rules_named = Some(text_of(&a.evidence["rule"]).unwrap_or_default());
+            }
+        }
+        match a.by_pass() {
+            Some("session") if scan.session_value.is_none() => {
+                scan.session_value = text_of(&a.evidence["value"]);
+            }
+            Some("vote") => scan.vote = true,
+            _ => {}
         }
         // a question about the stack alone first: its decision closes the
         // stack's other questions on the axis with it
@@ -659,12 +790,21 @@ fn words_of(
     kinds: &BTreeMap<String, i64>,
     values: &[String],
     s1: bool,
+    who: &Who,
 ) -> (String, String) {
     let axis = axis_words(&key.axis);
     let why_of = |w: &str| {
         kinds
             .keys()
             .any(|k| k.split_once(':').is_some_and(|(_, x)| x == w))
+    };
+    // the value against the one kept, in a pair: the other of the two
+    let against = |kept: &str| -> String {
+        key.values
+            .iter()
+            .find(|v| v.as_str() != kept)
+            .cloned()
+            .unwrap_or_default()
     };
     match key.shape {
         Shape::Missing => (
@@ -678,29 +818,56 @@ fn words_of(
             };
             let mut why = Vec::new();
             if why_of("disagree") {
-                why.push("The rules and System 1 disagree.");
+                why.push("The rules and System 1 disagree.".to_string());
             }
-            if why_of("decision") {
-                why.push("A person's answer differs from the rules.");
+            if let Some(decided) = who.model.as_deref().filter(|d| !d.is_empty()) {
+                why.push(format!(
+                    "A model says {}; a person decided {decided}.",
+                    against(decided)
+                ));
+            }
+            if who.rules_decision {
+                why.push("A person's answer differs from the rules.".to_string());
             }
             if why_of("conflict") {
-                why.push("Two rules disagree.");
+                why.push("Two rules disagree.".to_string());
+            }
+            if let Some(session) = &who.session {
+                why.push(format!(
+                    "The session says {session}; the scan alone said {}.",
+                    against(session)
+                ));
             }
             (format!("{a} or {b}?"), why.join(" "))
         }
         Shape::Doubt => {
+            let value = key.values[0].as_str();
             let mut why = Vec::new();
             if why_of("unsure") {
-                why.push(if s1 {
-                    "System 1 agrees, below its threshold."
-                } else {
-                    "System 1 has no answer on these scans yet."
-                });
+                why.push(
+                    if s1 {
+                        "System 1 agrees, below its threshold."
+                    } else {
+                        "System 1 has no answer on these scans yet."
+                    }
+                    .to_string(),
+                );
             }
             if why_of("low_confidence") {
-                why.push("The rules are not sure.");
+                why.push("The rules are not sure.".to_string());
             }
-            (format!("{}?", key.values[0]), why.join(" "))
+            if who.model.as_deref() == Some("") {
+                why.push(format!("A model says {value}; a person decided nothing."));
+            }
+            if who.session.is_some() {
+                why.push(format!(
+                    "The session says {value}; the scan alone said nothing."
+                ));
+            }
+            if who.vote {
+                why.push(format!("The scan's neighbours say {value}."));
+            }
+            (format!("{value}?"), why.join(" "))
         }
     }
 }
@@ -816,8 +983,16 @@ fn keys_of(
                 .filter(|s| nils.get(s).cloned().flatten().as_deref() == Some(v))
                 .count()
         };
+        // the value kept first: a person's decision a model disagrees
+        // with, the value a session gave; then NILS's more frequent answer
+        let kept = |v: &str| scans.values().filter(|s| s.keep() == Some(v)).count();
         let mut pair = key.values.clone();
-        pair.sort_by(|a, b| count(b).cmp(&count(a)).then_with(|| a.cmp(b)));
+        pair.sort_by(|a, b| {
+            kept(b)
+                .cmp(&kept(a))
+                .then_with(|| count(b).cmp(&count(a)))
+                .then_with(|| a.cmp(b))
+        });
         return Ok(pair);
     }
     let mut out: Vec<String> = key.values.clone();
@@ -943,7 +1118,13 @@ fn row_of(
             *kinds.entry(k.clone()).or_insert(0) += 1;
         }
     }
-    let (words, reason) = words_of(key, &kinds, &values, model.is_some() && !s1.is_empty());
+    let (words, reason) = words_of(
+        key,
+        &kinds,
+        &values,
+        model.is_some() && !s1.is_empty(),
+        &Who::of(scans.values()),
+    );
     Ok(json!({
         "key": key.text(),
         "axis": key.axis,
@@ -1064,7 +1245,9 @@ fn tile_of(
 /// decision already stands in its place, the rules' value the question
 /// about that decision names (`named`). None where neither says it: the
 /// stack was never sorted, or a decision stands and no question names the
-/// rules' value.
+/// rules' value, unless the standing decision noted the rules' value its
+/// person saw: a model's disagreement with that decision (UX round 5) shows
+/// no new rules' value, so that one stands for what they have seen.
 pub(crate) fn rules_seen(
     store: &mut Store,
     stack: i64,
@@ -1095,13 +1278,63 @@ pub(crate) fn rules_seen(
     let mut values = Vec::new();
     for r in &rows {
         if r.text(1)? == "decision" {
-            return Ok(named.map(str::to_string));
+            if named.is_some() {
+                return Ok(named.map(str::to_string));
+            }
+            // UX round 5: a model's disagreement with the standing decision
+            // shows no new rules' value, so the rules' value its person saw
+            // when they made it stands for what they have seen
+            let standing = store.query_opt(
+                &format!(
+                    "SELECT rules_in_view FROM {} WHERE scope = 'stack' AND ref = {} AND axis = {} \
+                     AND withdrawn_at IS NULL AND (staged_at IS NULL OR committed_at IS NOT NULL) ORDER BY id DESC",
+                    store.qualified("decision"),
+                    d.param(1, Type::Text),
+                    d.param(2, Type::Text)
+                ),
+                &[Param::from(stack.to_string().as_str()), Param::from(axis)],
+            )?;
+            return Ok(standing.and_then(|r| r.opt_text(0).ok().flatten().map(str::to_string)));
         }
         if let Some(v) = r.opt_text(0)?.map(str::trim).filter(|v| !v.is_empty()) {
             values.push(v.to_string());
         }
     }
     Ok(Some(values.join(",")))
+}
+
+/// What the review summary says of the questions (UX round 5, 2026-11-08):
+/// `questions`, the distinct scans the questions door asks per axis of the
+/// scope a summary is read for, from the same gathering, so a card on the
+/// desk and the door never disagree; and `not_questions`, the waiting
+/// questions of a classifier kind the door does not ask (one about several
+/// axes at once, a broken constraint), by kind with their scans, which the
+/// desk folds away from the axis cards.
+pub(crate) fn summary_counts(
+    registry: &mut Registry,
+    access: &Access,
+    dataset: Option<&str>,
+    cohort: Option<&str>,
+) -> Result<(Value, Value), Reply> {
+    let scope = scope_of(registry, dataset, cohort)?;
+    let gathered = questions_of(registry, access, &scope)?;
+    let mut by_axis: BTreeMap<&str, BTreeSet<i64>> = BTreeMap::new();
+    for (key, scans) in &gathered.questions {
+        by_axis
+            .entry(key.axis.as_str())
+            .or_default()
+            .extend(scans.keys());
+    }
+    let questions: serde_json::Map<String, Value> = by_axis
+        .into_iter()
+        .map(|(axis, scans)| (axis.to_string(), json!(scans.len())))
+        .collect();
+    let not_questions: serde_json::Map<String, Value> = gathered
+        .elsewhere
+        .iter()
+        .map(|(kind, scans)| (kind.clone(), json!(scans.len())))
+        .collect();
+    Ok((Value::Object(questions), Value::Object(not_questions)))
 }
 
 /// `GET /api/review/questions`: the scope's questions, the most scans
@@ -1218,7 +1451,7 @@ fn list(
 
 /// The facts of each scan a tile shows: its subject, its visit and day,
 /// shaped below detail quasi as the dataset scans door shapes them.
-fn facts(
+pub(crate) fn facts(
     store: &mut Store,
     stacks: &[i64],
     quasi: bool,
@@ -2100,6 +2333,47 @@ fn resort(
     (resort, picks)
 }
 
+/// The stacks a set of decisions reaches: a group's members, a stack's own
+/// (UX round 5, taken out of [`resort_committed`] for the queued re-sort).
+/// With them, how many decisions reached nothing readable.
+pub(crate) fn stacks_reached(
+    store: &mut nils_registry::store::Store,
+    decisions: &[i64],
+) -> Result<(BTreeSet<i64>, usize), String> {
+    let mut stacks: BTreeSet<i64> = BTreeSet::new();
+    let mut unreached = 0usize;
+    for chunk in decisions.chunks(500) {
+        let sql = format!(
+            "SELECT scope, ref FROM {} WHERE id IN ({})",
+            store.qualified("decision"),
+            chunk
+                .iter()
+                .map(i64::to_string)
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+        let refs: Vec<(String, String)> = store
+            .query(&sql, &[])
+            .map_err(|e| format!("the decisions could not be read: {e}"))?
+            .iter()
+            .filter_map(|r| Some((r.text(0).ok()?.to_string(), r.text(1).ok()?.to_string())))
+            .collect();
+        for (scope, reference) in refs {
+            match (scope.as_str(), reference.parse::<i64>()) {
+                ("group", Ok(item)) => match nils_registry::review::members(store, item) {
+                    Ok(members) => stacks.extend(members.into_iter().map(|m| m.stack_id)),
+                    Err(_) => unreached += 1,
+                },
+                ("stack", Ok(stack)) => {
+                    stacks.insert(stack);
+                }
+                _ => unreached += 1,
+            }
+        }
+    }
+    Ok((stacks, unreached))
+}
+
 /// Re-sort the scans the committed decisions reach (2026-11-05), as an
 /// answer at the questions door is followed by one ([`resort`]): a
 /// committed decision is in force, and every page reads the axis the sort
@@ -2107,7 +2381,8 @@ fn resort(
 /// decision until the next sort. A classify over those stacks alone, by
 /// the pack each was sorted with; a stack no sort has judged is left to the
 /// first sort. What was done, for the door's reply and the command line's
-/// words.
+/// words. Since UX round 5 the commit doors queue this as a job
+/// (`resort_job`); a campaign's close, a job already, still runs it here.
 pub(crate) fn resort_committed(
     registry: &mut Registry,
     pack_dir: Option<&std::path::Path>,
@@ -2117,49 +2392,14 @@ pub(crate) fn resort_committed(
     if decisions.is_empty() {
         return json!({"state": "done", "stacks": 0, "sorted": 0, "jobs": [], "words": "nothing committed"});
     }
-    // the stacks the decisions reach: a group's members, a stack's own
-    let mut stacks: BTreeSet<i64> = BTreeSet::new();
-    let mut unreached = 0usize;
-    {
-        let store = registry.store();
-        for chunk in decisions.chunks(500) {
-            let sql = format!(
-                "SELECT scope, ref FROM {} WHERE id IN ({})",
-                store.qualified("decision"),
-                chunk
-                    .iter()
-                    .map(i64::to_string)
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            );
-            let refs: Vec<(String, String)> = match store.query(&sql, &[]) {
-                Ok(rows) => rows
-                    .iter()
-                    .filter_map(|r| {
-                        Some((r.text(0).ok()?.to_string(), r.text(1).ok()?.to_string()))
-                    })
-                    .collect(),
-                Err(e) => {
-                    return json!({
-                        "state": "failed", "stacks": 0, "sorted": 0, "jobs": [],
-                        "words": format!("the decisions could not be read: {e}"),
-                    });
-                }
-            };
-            for (scope, reference) in refs {
-                match (scope.as_str(), reference.parse::<i64>()) {
-                    ("group", Ok(item)) => match nils_registry::review::members(store, item) {
-                        Ok(members) => stacks.extend(members.into_iter().map(|m| m.stack_id)),
-                        Err(_) => unreached += 1,
-                    },
-                    ("stack", Ok(stack)) => {
-                        stacks.insert(stack);
-                    }
-                    _ => unreached += 1,
-                }
-            }
+    let (stacks, unreached) = match stacks_reached(registry.store(), decisions) {
+        Ok(found) => found,
+        Err(words) => {
+            return json!({
+                "state": "failed", "stacks": 0, "sorted": 0, "jobs": [], "words": words,
+            });
         }
-    }
+    };
     if stacks.is_empty() {
         return json!({
             "state": "done", "stacks": 0, "sorted": 0, "jobs": [], "unreached": unreached,
@@ -2186,13 +2426,42 @@ pub(crate) fn resort_committed(
 /// the decisions in force reach the axis every page reads; a stack no sort
 /// has judged is left to the first sort. `label` is the job's label and
 /// `lead` the words its scope starts with. What was done, as `{state,
-/// stacks, sorted, jobs, words}`.
+/// stacks, sorted, jobs, words}`. Inline: a sort that holds the registry
+/// is waited for [`RESORT_WAIT`], and the stacks go in one classify.
 pub(crate) fn resort_stacks(
     registry: &mut Registry,
     pack_dir: Option<&std::path::Path>,
     label: &str,
     lead: &str,
     stacks: &BTreeSet<i64>,
+) -> Value {
+    resort_stacks_with(
+        registry,
+        pack_dir,
+        label,
+        lead,
+        stacks,
+        RESORT_WAIT,
+        usize::MAX,
+        &mut |_, _, _| true,
+    )
+}
+
+/// [`resort_stacks`] as a job runs it (UX round 5): a sort that holds the
+/// registry is waited for up to `wait`; the stacks go `chunk` at a time, and
+/// after each chunk (and while waiting) `progress(registry, done, of)` is
+/// told, with the registry to beat on, and stops the rest when it answers
+/// false (a cancel), which ends as `cancelled`.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn resort_stacks_with(
+    registry: &mut Registry,
+    pack_dir: Option<&std::path::Path>,
+    label: &str,
+    lead: &str,
+    stacks: &BTreeSet<i64>,
+    wait: std::time::Duration,
+    chunk: usize,
+    progress: &mut dyn FnMut(&mut Registry, usize, usize) -> bool,
 ) -> Value {
     let started = std::time::Instant::now();
     // the pack, its version and the overlay each stack was last sorted with
@@ -2232,12 +2501,14 @@ pub(crate) fn resort_stacks(
             }
         }
     }
-    let unsorted = stacks.len() - by_pack.values().map(Vec::len).sum::<usize>();
+    let of: usize = by_pack.values().map(Vec::len).sum();
+    let unsorted = stacks.len() - of;
     let mut jobs = Vec::new();
     let mut states = Vec::new();
     let mut why = Vec::new();
     let mut sorted = 0usize;
-    for ((name, version, overlay), list) in by_pack {
+    let mut stopped = false;
+    'groups: for ((name, version, overlay), list) in by_pack {
         let pack = match pack_as_sorted(pack_dir, registry, &name, &version, overlay.as_deref()) {
             Ok(p) => p,
             Err(refused) => {
@@ -2249,59 +2520,73 @@ pub(crate) fn resort_stacks(
                 continue;
             }
         };
-        let settings = nils_classify::Settings {
-            name: label.to_string(),
-            stacks: nils_classify::job::Stacks::Only(std::sync::Arc::new(
-                list.iter().copied().collect(),
-            )),
-            scope: vec![format!("{lead}: {} scans", list.len())],
-            ..nils_classify::Settings::default()
-        };
-        let cancel = nils_digest::Cancel::new();
-        let mut ran = nils_classify::classify::classify(registry, &pack, &settings, &cancel);
-        while matches!(ran, Err(nils_classify::Error::Busy { .. }))
-            && started.elapsed() < RESORT_WAIT
-        {
-            std::thread::sleep(std::time::Duration::from_millis(200));
-            ran = nils_classify::classify::classify(registry, &pack, &settings, &cancel);
-        }
-        match ran {
-            Ok(report) => {
-                jobs.push(report.job_id);
-                states.push(if report.cancelled {
-                    "cancelled"
-                } else {
-                    "done"
-                });
-                sorted += list.len();
+        for part in list.chunks(chunk.max(1)) {
+            let settings = nils_classify::Settings {
+                name: label.to_string(),
+                stacks: nils_classify::job::Stacks::Only(std::sync::Arc::new(
+                    part.iter().copied().collect(),
+                )),
+                scope: vec![format!("{lead}: {} scans", part.len())],
+                ..nils_classify::Settings::default()
+            };
+            let cancel = nils_digest::Cancel::new();
+            let mut ran = nils_classify::classify::classify(registry, &pack, &settings, &cancel);
+            while matches!(ran, Err(nils_classify::Error::Busy { .. })) && started.elapsed() < wait
+            {
+                std::thread::sleep(std::time::Duration::from_millis(200));
+                if !progress(registry, sorted, of) {
+                    stopped = true;
+                    break 'groups;
+                }
+                ran = nils_classify::classify::classify(registry, &pack, &settings, &cancel);
             }
-            Err(nils_classify::Error::Busy { job_id, .. }) => {
-                states.push("waiting");
-                why.push(format!(
-                    "sort job {job_id} holds the registry; the decisions stand, and the next sort re-sorts these scans"
-                ));
+            match ran {
+                Ok(report) => {
+                    jobs.push(report.job_id);
+                    states.push(if report.cancelled {
+                        "cancelled"
+                    } else {
+                        "done"
+                    });
+                    sorted += part.len();
+                }
+                Err(nils_classify::Error::Busy { job_id, .. }) => {
+                    states.push("waiting");
+                    why.push(format!(
+                        "sort job {job_id} holds the registry; the decisions stand, and the next sort re-sorts these scans"
+                    ));
+                    break;
+                }
+                Err(e) => {
+                    states.push("failed");
+                    why.push(format!("the re-sort failed: {e}; the decisions stand"));
+                    break;
+                }
             }
-            Err(e) => {
-                states.push("failed");
-                why.push(format!("the re-sort failed: {e}; the decisions stand"));
+            if !progress(registry, sorted, of) {
+                stopped = true;
+                break 'groups;
             }
         }
     }
     let state = if states.contains(&"failed") {
         "failed"
+    } else if stopped || states.contains(&"cancelled") {
+        "cancelled"
     } else if states.contains(&"waiting") || states.contains(&"refused") {
         "waiting"
     } else {
         "done"
     };
     let words = format!(
-        "{sorted} of {} scan(s) re-sorted{}{}",
+        "{sorted} of {} scan(s) re-sorted{}{}{}",
         stacks.len(),
         if unsorted > 0 {
             format!(", {unsorted} never sorted and left to the first sort")
         } else {
             String::new()
         },
+        if stopped { "; stopped on request" } else { "" },
         if why.is_empty() {
             String::new()
         } else {
@@ -2692,6 +2977,45 @@ mod tests {
             key("base:decision", json!({"rule": "T2w", "decision": "FLAIR"})).as_deref(),
             Some("base:FLAIR|T2w")
         );
+        // a model's answer against a person's decision shares the pair's
+        // shape; one the person decided nothing on is the model's value in
+        // doubt (UX round 5)
+        assert_eq!(
+            key(
+                "body_part:decision",
+                json!({"source": "model", "model_id": 5, "decision": "neck", "value": "brain-neck"})
+            )
+            .as_deref(),
+            Some("body_part:brain-neck|neck")
+        );
+        assert_eq!(
+            key(
+                "body_part:decision",
+                json!({"source": "model", "model_id": 5, "decision": null, "value": "neck"})
+            )
+            .as_deref(),
+            Some("body_part:neck?")
+        );
+        // a session pass's value against what the scan alone said, and a
+        // neighbour vote's value
+        assert_eq!(
+            key("modifier:session", json!({"value": "fs", "was": ["none"]})).as_deref(),
+            Some("modifier:fs|none")
+        );
+        assert_eq!(
+            key("modifier:session", json!({"value": "fs", "was": []})).as_deref(),
+            Some("modifier:fs?")
+        );
+        assert_eq!(
+            key(
+                "body_part:vote",
+                json!({"value": "spine", "method": "majority"})
+            )
+            .as_deref(),
+            Some("body_part:spine?")
+        );
+        // a model's proposals are not questions here
+        assert_eq!(key("body_part:model", json!({"value": "spine"})), None);
         assert_eq!(
             key(
                 "body_part:conflict",
@@ -2712,7 +3036,7 @@ mod tests {
     #[test]
     fn the_words_say_the_question_and_why() {
         let kinds: BTreeMap<String, i64> = [("base:missing".to_string(), 7)].into_iter().collect();
-        let (w, r) = words_of(&Key::missing("base"), &kinds, &[], false);
+        let (w, r) = words_of(&Key::missing("base"), &kinds, &[], false, &Who::default());
         assert_eq!(w, "Which base?");
         assert_eq!(r, "The rules found no base for these scans.");
         let kinds: BTreeMap<String, i64> = [
@@ -2726,16 +3050,69 @@ mod tests {
             &kinds,
             &["T2w".into(), "FLAIR".into()],
             true,
+            &Who {
+                rules_decision: true,
+                ..Who::default()
+            },
         );
         assert_eq!(w, "T2w or FLAIR?");
         assert_eq!(
             r,
             "The rules and System 1 disagree. A person's answer differs from the rules."
         );
+        // a model against a person's decision: the decision kept is named
+        // as theirs, the model's value as the model's, whichever key is first
+        let kinds: BTreeMap<String, i64> = [("body_part:decision".to_string(), 14)]
+            .into_iter()
+            .collect();
+        let (w, r) = words_of(
+            &Key::pair("body_part", "brain-neck", "neck"),
+            &kinds,
+            &["neck".into(), "brain-neck".into()],
+            false,
+            &Who {
+                model: Some("neck".into()),
+                ..Who::default()
+            },
+        );
+        assert_eq!(w, "neck or brain-neck?");
+        assert_eq!(r, "A model says brain-neck; a person decided neck.");
+        let (_, r) = words_of(
+            &Key::doubt("body_part", "neck"),
+            &kinds,
+            &["neck".into()],
+            false,
+            &Who {
+                model: Some(String::new()),
+                ..Who::default()
+            },
+        );
+        assert_eq!(r, "A model says neck; a person decided nothing.");
+        // a session pass's value against the scan's own
+        let kinds: BTreeMap<String, i64> =
+            [("modifier:session".to_string(), 2)].into_iter().collect();
+        let (w, r) = words_of(
+            &Key::pair("modifier", "fs", "none"),
+            &kinds,
+            &["fs".into(), "none".into()],
+            false,
+            &Who {
+                session: Some("fs".into()),
+                ..Who::default()
+            },
+        );
+        assert_eq!(w, "fs or none?");
+        assert_eq!(r, "The session says fs; the scan alone said none.");
         let kinds: BTreeMap<String, i64> = [("body_part:conflict".to_string(), 1)]
             .into_iter()
             .collect();
-        let (w, _) = words_of(&Key::missing("body_part"), &kinds, &[], false);
+        let (w, _) = words_of(
+            &Key::missing("body_part"),
+            &kinds,
+            &[],
+            false,
+            &Who::default(),
+        );
         assert_eq!(w, "Which body part?");
     }
 }

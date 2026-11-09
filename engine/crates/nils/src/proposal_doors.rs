@@ -20,14 +20,19 @@
 //!   caller its one rater, held back none (a campaign that trains or
 //!   measures nothing, #569), the model's answer and probabilities
 //!   suggested on each scan and authored by the model, closing into
-//!   decisions in force. One transaction; only the name is the caller's.
+//!   decisions in force. One transaction; the name, how many scans at most
+//!   (`limit`, 500 by default) and which first (`order`: the least sure,
+//!   the most sure, or a random draw by a `seed`) are the caller's (UX
+//!   round 5, 2026-11-08: a campaign of 145,274 scans was one click away).
+//!   The answer says how many scans were `left` out. The standing says the
+//!   pace of the axis (`below.pace_s`) for the estimate.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use nils_registry::Registry;
 use nils_registry::home::Home;
-use nils_registry::proposals::{self, RestCampaign, Standing};
+use nils_registry::proposals::{self, Order, RestCampaign, Standing};
 use serde_json::{Value, json};
 
 use crate::grants::{Detail, Need};
@@ -135,8 +140,11 @@ fn names_of(
     names
 }
 
-/// What the caller may say of a campaign of the rest: the model, the axis
-/// and the name. The rest is the act's own.
+/// How many scans a campaign of the rest takes when the caller does not say.
+pub(crate) const DEFAULT_LIMIT: i64 = 500;
+
+/// What the caller may say of a campaign of the rest: the model, the axis,
+/// the name, the limit and the order. The rest is the act's own.
 const NOT_THE_CALLERS: [&str; 7] = [
     "question",
     "raters",
@@ -179,6 +187,43 @@ fn make(
         Value::String(s) => Some(s.as_str()),
         _ => return Err(Reply::error(400, "name: what the campaign is called")),
     };
+    let limit = match &doc["limit"] {
+        Value::Null => Some(DEFAULT_LIMIT),
+        Value::Number(n) if n.as_i64().is_some_and(|l| l >= 1) => n.as_i64(),
+        _ => {
+            return Err(Reply::error(
+                400,
+                format!(
+                    "limit: how many scans at most, a whole number of one or more ({DEFAULT_LIMIT} when left out)"
+                ),
+            ));
+        }
+    };
+    let order = match &doc["order"] {
+        Value::Null => Order::LeastSure,
+        Value::String(o) => Order::parse(o).ok_or_else(|| {
+            Reply::error(
+                400,
+                format!("order: which scans first, {}", proposals::ORDERS),
+            )
+        })?,
+        _ => {
+            return Err(Reply::error(
+                400,
+                format!("order: which scans first, {}", proposals::ORDERS),
+            ));
+        }
+    };
+    let seed = match &doc["seed"] {
+        Value::Null => None,
+        Value::Number(n) if n.as_u64().is_some() => n.as_u64(),
+        _ => {
+            return Err(Reply::error(
+                400,
+                "seed: a whole number, for a random order",
+            ));
+        }
+    };
     let pack = crate::reader::served_pack(doors.pack_dir.as_deref(), &doors.ask_pack);
     let question = question_of(pack.as_deref(), axis).map_err(|(s, m)| Reply::error(s, m))?;
     let names = names_of(&question, pack.as_deref(), axis);
@@ -193,6 +238,9 @@ fn make(
             question: &question,
             pack_version: pack_version.as_deref(),
             names: &names,
+            limit,
+            order,
+            seed,
         },
     )
     .map_err(crate::campaigns::campaign_err)?;
@@ -265,7 +313,8 @@ pub(crate) fn list_verb(registry: &mut Registry, json_out: bool) -> Result<(), E
 }
 
 /// `nils review proposals-campaign`: a campaign of what one model proposed
-/// on one axis below its threshold, with the one at the keyboard its rater.
+/// on one axis below its threshold, with the one at the keyboard its rater;
+/// at most `limit` scans (0 for every one), in `order`.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn campaign_verb(
     home: &Home,
@@ -273,10 +322,19 @@ pub(crate) fn campaign_verb(
     model: &str,
     axis: &str,
     name: Option<&str>,
+    limit: i64,
+    order: &str,
+    seed: Option<u64>,
     pack_dir: Option<PathBuf>,
     pack_name: &str,
     json_out: bool,
 ) -> Result<(), Exit> {
+    let order =
+        Order::parse(order).ok_or_else(|| usage(format!("--order: {}", proposals::ORDERS)))?;
+    if limit < 0 {
+        return Err(usage("--limit: how many scans at most, or 0 for every one"));
+    }
+    let limit = (limit > 0).then_some(limit);
     let pack = crate::pack_dir(home, pack_dir)
         .ok()
         .and_then(|d| nils_pack::load(&d.join(pack_name), None).ok());
@@ -294,6 +352,9 @@ pub(crate) fn campaign_verb(
             question: &question,
             pack_version: pack_version.as_deref(),
             names: &names,
+            limit,
+            order,
+            seed,
         },
     )
     .map_err(crate::campaigns::cerr)?;
@@ -308,10 +369,16 @@ pub(crate) fn campaign_verb(
         .map_err(crate::campaigns::cerr)?
         .len();
     println!(
-        "campaign {} {}   {items} scan(s) from {} item(s)   rater {principal}   held back none   {} suggestion(s) by the model   closes into decision",
+        "campaign {} {}   {items} scan(s) from {} item(s), {} first, {} left out   rater {principal}   held back none   {} suggestion(s) by the model   closes into decision",
         made.campaign.id,
         made.campaign.name,
         made.adopted.len(),
+        match made.order {
+            Order::LeastSure => "the least sure".to_string(),
+            Order::MostSure => "the most sure".to_string(),
+            Order::Random => format!("a random draw (seed {})", made.seed.unwrap_or(0)),
+        },
+        made.left,
         made.suggestions.suggestions,
     );
     Ok(())

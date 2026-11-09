@@ -2364,6 +2364,20 @@ fn routed(
     {
         return r;
     }
+    // UX round 5: a model's proposals as a grid, narrowed by value and by
+    // probability, accepted in one move
+    if let Some(r) = crate::proposal_grid::route(
+        doors,
+        registry,
+        caller,
+        quasi,
+        method.as_str(),
+        &segs,
+        query,
+        body,
+    ) {
+        return r;
+    }
     // UX round 2: where each axis label of a scan or a visit came from,
     // and the scans sorted again
     if let Some(r) = crate::origins::route(
@@ -4703,6 +4717,29 @@ fn routed(
                     nils_registry::review::PIPELINE_QC_KIND,
                 );
             }
+            // UX round 5 (2026-11-08): the distinct scans the questions door
+            // asks per axis, from its own gathering, so the desk's axis cards
+            // count what their Answer opens; and the classifier kinds it
+            // does not ask, which the desk folds away
+            let (questions, not_questions) = crate::review_questions::summary_counts(
+                registry,
+                &caller.access,
+                // an empty ?dataset= is no dataset, as `by_kind` above reads it
+                query
+                    .get("dataset")
+                    .map(String::as_str)
+                    .filter(|d| !d.is_empty()),
+                // a cohort scope reads the cohort's open memberships as the
+                // questions door does; a dataset and a cohort at once is the
+                // dataset's, as `by_kind` above is
+                if query.get("dataset").is_some_and(|d| !d.is_empty()) {
+                    None
+                } else {
+                    cohort
+                },
+            )?;
+            doc["questions"] = questions;
+            doc["not_questions"] = not_questions;
             Ok(Reply::ok(doc))
         }
         ["api", "review", _] if get => {
@@ -5027,8 +5064,9 @@ fn routed(
             )
             .map_err(review_err)?;
             // 2026-11-05: in force means every page reads it, so the scans
-            // the decision reaches are re-sorted at once, as after an answer
-            let resort = crate::review_questions::resort_committed(
+            // the decision reaches are re-sorted; UX round 5: as a queued
+            // job, so the door answers at once and the page follows it
+            let resort = crate::resort_job::queue_resort_committed(
                 registry,
                 doors.pack_dir.as_deref(),
                 principal,
@@ -5740,6 +5778,10 @@ pub(crate) fn door(method: &str, segs: &[&str]) -> (Need, Detail) {
     // UX round 1: what models proposed, per model and axis, before the
     // table's pattern for one item
     if let Some(n) = crate::proposal_doors::door(method, segs) {
+        return n;
+    }
+    // UX round 5: the batch accept grid of a model's proposals
+    if let Some(n) = crate::proposal_grid::door(method, segs) {
         return n;
     }
     // UX round 2: where a scan's labels came from, and its re-sort
@@ -6831,6 +6873,7 @@ pub(crate) fn doors_list() -> Vec<String> {
     .chain(crate::rule_changes::DOORS.iter())
     .chain(crate::review_questions::DOORS.iter())
     .chain(crate::proposal_doors::DOORS.iter())
+    .chain(crate::proposal_grid::DOORS.iter())
     .chain(crate::origins::DOORS.iter())
     .map(|d| (*d).to_string())
     .collect()
@@ -9106,6 +9149,7 @@ pub(crate) fn policy() -> Vec<serde_json::Value> {
             .chain(crate::rule_changes::POLICY.iter())
             .chain(crate::review_questions::POLICY.iter())
             .chain(crate::proposal_doors::POLICY.iter())
+            .chain(crate::proposal_grid::POLICY.iter())
             .chain(crate::origins::POLICY.iter())
             .chain(crate::participate::POLICY.iter())
             .map(|(door, writes, idem, cost, cap, now, then)| {
