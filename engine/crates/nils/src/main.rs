@@ -2100,11 +2100,20 @@ enum ReviewCommand {
         /// The scans set apart, not written, as ids joined by commas
         #[arg(long, value_name = "IDS", value_delimiter = ',')]
         except: Vec<i64>,
+        /// A scan seen that takes your value instead of the model's, as
+        /// STACK=VALUE; repeatable (UX round 6). The value is one the axis
+        /// takes in the pack
+        #[arg(long = "correct", value_name = "STACK=VALUE")]
+        correct: Vec<String>,
         /// A word on why, kept with each decision
         #[arg(long, value_name = "TEXT")]
         why: Option<String>,
         #[arg(long, value_name = "DIR")]
         pack_dir: Option<PathBuf>,
+        /// The pack a correction's value is held to, by name in the pack
+        /// directory
+        #[arg(long, default_value = "mri")]
+        pack: String,
         /// Machine-readable output
         #[arg(long)]
         json: bool,
@@ -7508,8 +7517,10 @@ fn review_command(home: &Home, command: ReviewCommand) -> Result<(), Exit> {
             max,
             seen,
             except,
+            correct,
             why,
             pack_dir,
+            pack,
             json,
         } => {
             return crate::proposal_grid::accept_verb(
@@ -7522,8 +7533,10 @@ fn review_command(home: &Home, command: ReviewCommand) -> Result<(), Exit> {
                 max.as_deref(),
                 seen,
                 except,
+                &correct,
                 why.as_deref(),
                 pack_dir,
+                &pack,
                 json,
             );
         }

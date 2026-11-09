@@ -16,8 +16,10 @@
 //!   by `value` and by the band `min` to `max`, the most sure first; each with its picture, the value proposed, its probability,
 //!   the value in force now and whether a person decided it; beside them
 //!   the counts a filter row and a histogram draw: each value's scans in
-//!   the band, and ten bands over the model's range for the value. A stack
-//!   of a sample sealed now is withheld.
+//!   the band, and ten bands over the model's range for the value; and
+//!   `legal`, the values the axis takes in the served pack, for a
+//!   correction to choose from (UX round 6). A stack of a sample sealed
+//!   now is withheld.
 //! - **The accept** (`POST /api/review/proposals/accept`, `nils review
 //!   proposals-accept`): one decision per scan seen and not set apart, in
 //!   the caller's name, in force, with the model's value, its probability
@@ -27,7 +29,12 @@
 //!   queues ([`crate::resort_job::queue_resort_committed`], `nils review
 //!   resort --decisions`), so the door answers at once. The scans set apart
 //!   are not written: they stay proposals. A scan a person decided meanwhile
-//!   is never overwritten here.
+//!   is never overwritten here. UX round 6: a scan seen may be *corrected*
+//!   instead, given the person's value in place of the model's; its
+//!   decision is written in the same transaction, in the same shape, with
+//!   the model's value, probability and run kept in its words
+//!   (`corrected bp-head@1's spine at 0.600 (run 41) to brain`), so what
+//!   the model proposed and what the person said stand side by side.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::PathBuf;
@@ -604,6 +611,9 @@ fn scans(
     )?;
     let (mut doc, _) = document(&asked, page, size);
     with_scans(doors, registry, caller, quasi, &asked.axis, &mut doc)?;
+    // UX round 6: the values the axis takes, for a correction to pick from
+    let pack = crate::reader::served_pack(doors.pack_dir.as_deref(), &doors.ask_pack);
+    doc["legal"] = json!(legal_values(pack.as_deref(), &asked.axis));
     Ok(Reply::ok(doc))
 }
 
@@ -646,7 +656,19 @@ struct Accepting<'a> {
     max: Option<&'a str>,
     seen: Vec<i64>,
     except: Vec<i64>,
+    /// UX round 6: (stack, value) for each scan seen that takes the person's
+    /// value in place of the model's, the value as given.
+    corrections: Vec<(i64, String)>,
     why: Option<&'a str>,
+}
+
+/// One decision an accept wrote.
+struct Written {
+    stack: i64,
+    decision: i64,
+    /// The value written: the model's, or the person's for a correction.
+    value: String,
+    corrected: bool,
 }
 
 /// What an accept wrote.
@@ -654,8 +676,7 @@ struct Accepted {
     model: Model,
     axis: String,
     value: String,
-    /// (stack, decision)
-    decisions: Vec<(i64, i64)>,
+    decisions: Vec<Written>,
     closed: BTreeSet<i64>,
     left_in_items: i64,
     kept_decided: usize,
@@ -663,15 +684,46 @@ struct Accepted {
     excepted: usize,
 }
 
+/// The corrected values and how many took each, the most first: `2 brain,
+/// 1 neck`.
+fn corrected_words(decisions: &[Written]) -> String {
+    let mut by: BTreeMap<&str, usize> = BTreeMap::new();
+    for w in decisions.iter().filter(|w| w.corrected) {
+        *by.entry(w.value.as_str()).or_insert(0) += 1;
+    }
+    let mut list: Vec<(&str, usize)> = by.into_iter().collect();
+    list.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(b.0)));
+    list.iter()
+        .map(|(v, n)| format!("{n} {v}"))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 impl Accepted {
+    /// The decisions written as the model's value.
+    fn accepted(&self) -> usize {
+        self.decisions.iter().filter(|w| !w.corrected).count()
+    }
+
+    /// The decisions written as the person's value instead.
+    fn corrected(&self) -> impl Iterator<Item = &Written> {
+        self.decisions.iter().filter(|w| w.corrected)
+    }
+
     fn as_json(&self) -> Value {
         json!({
             "model": self.model.named(),
             "label": self.model.label(),
             "axis": self.axis,
             "value": self.value,
-            "decided": self.decisions.len(),
-            "decisions": self.decisions.iter().map(|(s, d)| json!({"stack": s, "decision": d})).collect::<Vec<_>>(),
+            "decided": self.accepted(),
+            "corrected": self.corrected().count(),
+            "decisions": self.decisions.iter().map(|w| json!({
+                "stack": w.stack, "decision": w.decision, "value": w.value, "corrected": w.corrected,
+            })).collect::<Vec<_>>(),
+            "corrections": self.corrected().map(|w| json!({
+                "stack": w.stack, "decision": w.decision, "value": w.value,
+            })).collect::<Vec<_>>(),
             "closed": self.closed,
             "left_in_items": self.left_in_items,
             "kept_decided": self.kept_decided,
@@ -681,14 +733,123 @@ impl Accepted {
     }
 }
 
+/// The values the axis takes in the served pack, in the form the axis
+/// stores, in the pack's order; none where no pack is served or the pack
+/// has no such axis.
+fn legal_values(pack: Option<&nils_pack::Pack>, axis: &str) -> Option<Vec<String>> {
+    let a = pack?.axes.iter().find(|a| a.name == axis)?;
+    Some(
+        (0..a.values.len())
+            .map(|i| a.stored(i).to_string())
+            .collect(),
+    )
+}
+
+/// One `--correct STACK=VALUE` at the keyboard.
+fn correction_of(text: &str) -> Result<(i64, String), String> {
+    let bad = || format!("--correct takes STACK=VALUE, a scan id and the value it takes: {text}");
+    let (stack, value) = text.split_once('=').ok_or_else(bad)?;
+    let stack = stack.trim().parse::<i64>().map_err(|_| bad())?;
+    let value = value.trim();
+    if value.is_empty() {
+        return Err(bad());
+    }
+    Ok((stack, value.to_string()))
+}
+
+/// The corrections as the body gives them: `[{stack, value}]`.
+fn corrections_of(v: &Value) -> Result<Vec<(i64, String)>, Reply> {
+    let shape = || Reply::error(400, "corrections is a list of {stack, value}");
+    match v {
+        Value::Null => Ok(Vec::new()),
+        Value::Array(list) => list
+            .iter()
+            .map(|c| {
+                let stack = c["stack"].as_i64().ok_or_else(shape)?;
+                let value = c["value"]
+                    .as_str()
+                    .map(str::trim)
+                    .filter(|t| !t.is_empty())
+                    .ok_or_else(shape)?;
+                Ok((stack, value.to_string()))
+            })
+            .collect(),
+        _ => Err(shape()),
+    }
+}
+
+/// The corrections checked: each names a scan seen and not set apart, once,
+/// and a value the axis takes, which comes back in the form the axis
+/// stores. None stands without a served pack to check the value against.
+fn corrections_checked(
+    a: &Accepting<'_>,
+    pack: Option<&nils_pack::Pack>,
+) -> Result<BTreeMap<i64, String>, Reply> {
+    let mut out: BTreeMap<i64, String> = BTreeMap::new();
+    if a.corrections.is_empty() {
+        return Ok(out);
+    }
+    let pack = pack.ok_or_else(|| {
+        Reply::gated(
+            409,
+            "a correction is held to the axis's values, and no pack is served here",
+        )
+    })?;
+    let stranger: Vec<i64> = a
+        .corrections
+        .iter()
+        .map(|(s, _)| *s)
+        .filter(|s| !a.seen.contains(s))
+        .collect();
+    if !stranger.is_empty() {
+        return Err(Reply::error(
+            400,
+            format!(
+                "scan {} is corrected, but the page did not show it",
+                named(&stranger)
+            ),
+        ));
+    }
+    let apart: Vec<i64> = a
+        .corrections
+        .iter()
+        .map(|(s, _)| *s)
+        .filter(|s| a.except.contains(s))
+        .collect();
+    if !apart.is_empty() {
+        return Err(Reply::error(
+            400,
+            format!(
+                "scan {} is both set apart and corrected; a corrected scan is not in except",
+                named(&apart)
+            ),
+        ));
+    }
+    for (stack, given) in &a.corrections {
+        let stored = crate::review_questions::stored_value(pack, a.axis, given)
+            .ok_or_else(|| Reply::error(400, format!("{given} is not a value of {}", a.axis)))?;
+        if let Some(before) = out.insert(*stack, stored.clone())
+            && before != stored
+        {
+            return Err(Reply::error(
+                400,
+                format!("scan {stack} is corrected twice, to {before} and to {stored}"),
+            ));
+        }
+    }
+    Ok(out)
+}
+
 /// The decisions, one a scan seen and not set apart, in one transaction.
 /// `author` is the caller's kind, version and model as the door verified
-/// them; the keyboard's is a person's.
+/// them; the keyboard's is a person's. `pack` is the served pack, which a
+/// correction's value is held to.
 fn write(
     registry: &mut Registry,
     a: &Accepting<'_>,
     principal: &str,
     author: (&str, Option<&str>, Option<i64>),
+    pack: Option<&nils_pack::Pack>,
 ) -> Result<Accepted, Reply> {
     if a.seen.is_empty() {
         return Err(Reply::error(400, "seen: the scans the page showed, as ids"));
@@ -720,6 +881,7 @@ fn write(
             ),
         ));
     }
+    let corrections = corrections_checked(a, pack)?;
     // every scan seen still waits as the page showed it; one that moved on
     // (answered meanwhile, another value proposed since) is read again
     let gone: Vec<i64> = a
@@ -762,30 +924,49 @@ fn write(
         .collect();
     let (kind, version, model_author) = author;
     let mut closed: BTreeSet<i64> = BTreeSet::new();
-    let mut decisions: Vec<(i64, i64)> = Vec::new();
+    let mut decisions: Vec<Written> = Vec::new();
     let mut touched: BTreeSet<i64> = BTreeSet::new();
     registry.store().begin().map_err(failed)?;
     let written = (|| -> Result<(), Reply> {
         for c in &writing {
-            let why = format!(
-                "accepted {}'s {} at {:.3}{}{}",
-                asked.model.label(),
-                c.value,
-                c.p,
-                c.run.map(|r| format!(" (run {r})")).unwrap_or_default(),
-                a.why
-                    .map(str::trim)
-                    .filter(|w| !w.is_empty())
-                    .map(|w| format!(": {w}"))
-                    .unwrap_or_default()
-            );
+            let note = a
+                .why
+                .map(str::trim)
+                .filter(|w| !w.is_empty())
+                .map(|w| format!(": {w}"))
+                .unwrap_or_default();
+            let run = c.run.map(|r| format!(" (run {r})")).unwrap_or_default();
+            // the person's value where the scan is corrected, the model's
+            // where it is not; either way the model's value, probability
+            // and run stay in the decision's words beside it
+            let corrected = corrections.get(&c.stack);
+            let (value, why) = match corrected {
+                Some(v) => (
+                    v.as_str(),
+                    format!(
+                        "corrected {}'s {} at {:.3}{run} to {v}{note}",
+                        asked.model.label(),
+                        c.value,
+                        c.p,
+                    ),
+                ),
+                None => (
+                    c.value.as_str(),
+                    format!(
+                        "accepted {}'s {} at {:.3}{run}{note}",
+                        asked.model.label(),
+                        c.value,
+                        c.p,
+                    ),
+                ),
+            };
             let applied = nils_registry::review::apply_within(
                 registry,
                 &nils_registry::review::Apply {
                     item: c.item,
                     member: Some(c.stack),
                     scope: "stack",
-                    value: Some(c.value.as_str()),
+                    value: Some(value),
                     author: nils_registry::review::Author {
                         who: principal,
                         kind,
@@ -803,7 +984,12 @@ fn write(
                 other => Reply::error(500, other.to_string()),
             })?;
             closed.extend(applied.closed.iter().copied());
-            decisions.push((c.stack, applied.decision));
+            decisions.push(Written {
+                stack: c.stack,
+                decision: applied.decision,
+                value: value.to_string(),
+                corrected: corrected.is_some(),
+            });
             touched.insert(c.item);
         }
         Ok(())
@@ -879,15 +1065,17 @@ fn accept(
         max: max.as_deref(),
         seen: ids_of(&doc["seen"], "seen")?,
         except: ids_of(&doc["except"], "except")?,
+        corrections: corrections_of(&doc["corrections"])?,
         why: why.as_deref(),
     };
-    let done = write(registry, &a, &caller.principal, author)?;
+    let pack = crate::reader::served_pack(doors.pack_dir.as_deref(), &doors.ask_pack);
+    let done = write(registry, &a, &caller.principal, author, pack.as_deref())?;
     // record 58 P1 (spec §12.5): the person's account name, for Results
     nils_registry::names::note(registry.store(), &caller.principal, caller.account_name())
         .map_err(failed)?;
     // the decisions are in force, so the scans they reach are sorted again:
     // the same job a commit queues, with these decisions in its arguments
-    let decisions: Vec<i64> = done.decisions.iter().map(|(_, d)| *d).collect();
+    let decisions: Vec<i64> = done.decisions.iter().map(|w| w.decision).collect();
     let resort = crate::resort_job::queue_resort_committed(
         registry,
         doors.pack_dir.as_deref(),
@@ -997,11 +1185,18 @@ pub(crate) fn accept_verb(
     max: Option<&str>,
     seen: Vec<i64>,
     except: Vec<i64>,
+    correct: &[String],
     why: Option<&str>,
     pack_dir: Option<PathBuf>,
+    pack_name: &str,
     json_out: bool,
 ) -> Result<(), Exit> {
     let principal = crate::campaigns::who();
+    let corrections: Vec<(i64, String)> = correct
+        .iter()
+        .map(|c| correction_of(c))
+        .collect::<Result<_, _>>()
+        .map_err(usage)?;
     let a = Accepting {
         model,
         axis,
@@ -1010,11 +1205,22 @@ pub(crate) fn accept_verb(
         max,
         seen,
         except,
+        corrections,
         why,
     };
-    let done = write(registry, &a, &principal, ("person", None, None)).map_err(as_exit)?;
-    let stacks: BTreeSet<i64> = done.decisions.iter().map(|(s, _)| *s).collect();
     let pack_dir = crate::pack_dir(home, pack_dir).ok();
+    let pack = pack_dir
+        .as_ref()
+        .and_then(|d| nils_pack::load(&d.join(pack_name), None).ok());
+    let done = write(
+        registry,
+        &a,
+        &principal,
+        ("person", None, None),
+        pack.as_ref(),
+    )
+    .map_err(as_exit)?;
+    let stacks: BTreeSet<i64> = done.decisions.iter().map(|w| w.stack).collect();
     let resort = if stacks.is_empty() {
         json!({"state": "done", "stacks": 0, "sorted": 0, "jobs": [], "words": "nothing accepted"})
     } else {
@@ -1035,12 +1241,21 @@ pub(crate) fn accept_verb(
         println!("{out}");
         return Ok(());
     }
+    let corrected = done.corrected().count();
     println!(
-        "accepted {} scan(s) as {} of {} on {}   {} item(s) closed, {} scan(s) left in them   {} set apart{}{}   {}",
-        done.decisions.len(),
+        "accepted {} scan(s) as {} of {} on {}{}   {} item(s) closed, {} scan(s) left in them   {} set apart{}{}   {}",
+        done.accepted(),
         done.value,
         done.model.label(),
         done.axis,
+        if corrected > 0 {
+            format!(
+                ", corrected {corrected} ({})",
+                corrected_words(&done.decisions)
+            )
+        } else {
+            String::new()
+        },
         done.closed.len(),
         done.left_in_items,
         done.excepted,
@@ -1177,5 +1392,44 @@ mod tests {
         assert_eq!(paging(None, None).ok(), Some((1, SIZE)));
         assert_eq!(paging(Some("3"), Some("5000")).ok(), Some((3, SIZE_MOST)));
         assert!(paging(Some("0"), None).is_err());
+    }
+
+    #[test]
+    fn a_correction_at_the_keyboard_is_a_scan_and_its_value() {
+        assert_eq!(correction_of("12=brain").ok(), Some((12, "brain".into())));
+        assert_eq!(
+            correction_of(" 7 = brain-neck ").ok(),
+            Some((7, "brain-neck".into()))
+        );
+        assert!(correction_of("12").is_err());
+        assert!(correction_of("x=brain").is_err());
+        assert!(correction_of("12=").is_err());
+        // the body's shape
+        assert_eq!(
+            corrections_of(&json!([{"stack": 3, "value": "neck"}])).ok(),
+            Some(vec![(3, "neck".into())])
+        );
+        assert_eq!(corrections_of(&Value::Null).ok(), Some(Vec::new()));
+        assert!(corrections_of(&json!([{"stack": 3}])).is_err());
+        assert!(corrections_of(&json!([{"stack": "3", "value": "neck"}])).is_err());
+        assert!(corrections_of(&json!({"stack": 3})).is_err());
+    }
+
+    #[test]
+    fn the_corrected_words_count_each_value_the_most_first() {
+        let w = |stack: i64, value: &str, corrected: bool| Written {
+            stack,
+            decision: stack,
+            value: value.into(),
+            corrected,
+        };
+        let decisions = vec![
+            w(1, "spine", false),
+            w(2, "brain", true),
+            w(3, "neck", true),
+            w(4, "brain", true),
+        ];
+        assert_eq!(corrected_words(&decisions), "2 brain, 1 neck");
+        assert_eq!(corrected_words(&decisions[..1]), "");
     }
 }

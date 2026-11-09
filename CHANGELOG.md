@@ -4,6 +4,10 @@ All notable changes to NILS v1 are recorded here. The format follows [Keep a Cha
 
 ## [Unreleased]
 
+### Added
+
+- A set-apart scan on the proposals grid takes its right value in the same move (UX round 6, 2026-11-09). `GET /api/review/proposals/scans` says the values the axis takes in the served pack (`legal`), and `POST /api/review/proposals/accept` takes `corrections` (`[{stack, value}]`): scans among those seen that take the person's value in place of the model's, written in the one transaction with the accepted ones, each in the caller's name and in force, the model's value, probability and run kept in the decision's words beside the correction (`corrected bp-head@1's spine at 0.600 (run 41) to brain`). A value the axis does not take is refused with 400 naming it, as is a correction of a scan the page did not show or one also set apart; a corrected scan a person decided meanwhile keeps that decision. The answer adds `corrected` and lists each decision's value; `nils review proposals-accept` takes `--correct STACK=VALUE` (repeatable) and says the corrected count and values beside the accepted one. On a grid of ten scans proposed as spine, two brain and one neck among them could only be set apart and left as proposals.
+
 ## [1.0.0-beta.11] - 2026-11-09
 
 The eleventh engine beta is the fifth round of fixes from production use, the first evening on the desk's Review page with three model passes' proposals in hand. The questions door now gathers every waiting question about one axis of a scan, a model against a person's decision among them, and the summary counts them per axis, so a page that counts scans never sends a person to an empty list. A commit answers at once and the re-sort of what it put in force is a job that says how far it is; a campaign of what a model left unsure takes a cap and an order. And a model's unsure proposals can be read as a grid, filtered by value and confidence, and accepted in one move, the wrong ones set apart.
