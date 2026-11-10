@@ -1014,6 +1014,40 @@ paths:
         "403": {description: "A body that names an author other than the verified actor"}
         "404": {description: No registered model answers to the reference}
         "409": {description: "A scan seen that no longer waits as the page showed it, a decision of a higher rank on it, or corrections where no pack is served"}
+  /api/review/proposals/accept-band:
+    post:
+      summary: Accept every scan a band of one model's proposals holds, for one value, without a look at each picture, as a job the page follows (UX round 6; review:work; nils review proposals-accept-band)
+      description: "Added in place, additively, on 2026-11-10 (UX round 6). The body: `model`, `axis`, `value` (required: a band is accepted one value at a time, never across values), `min` and `max` (the band as the page shows it, the scans door's words: `min` inclusive, `max` exclusive, either or both left out), `count` (required: the number of scans the page said the band holds for the value, the guard that replaces the page accept's `seen`), `except` (ids of scans the band holds that stay proposals), `corrections` ([{stack, value}], scans the band holds that take the person's value in place of the model's, held to the served pack as the page accept holds them, not in `except`) and `why` (a word kept with each decision). The door checks what the page accept checks, holds `count` against the band now, and queues the accept as a job under the caller, the way a commit's re-sort is queued (`nils review proposals-accept-band ... --who <caller>`, kind accept-band, run by the main lane's worker, writing in the caller's name as a person); it answers at once with 202 {job, stacks (the band's scans less those set apart, what the job writes), model, label, axis, value, count, set_apart, corrections, words}. The job writes one decision per scan at the stack's scope, in force, in the caller's name, with the model's value, probability and run in its words (`accepted bp-head@1's neck at 0.812 (run 41)`; a corrected one `corrected bp-head@1's neck at 0.812 (run 41) to brain`), through the review spine in chunks of 500, each chunk its own transaction, with its progress on the row as `{done, of, what: accepted}` read through GET /api/jobs/{id}; a cancel asked through POST /api/jobs/{id}/cancel is honoured between chunks. A scan a person decided meanwhile keeps that decision (`kept_decided`); a stack of a sample sealed now takes none (`left_out_sealed`); a scan whose item no longer waits on it is not written. When the chunks are through (or the job stopped) the re-sort of what it wrote is queued as the job a commit queues (`nils review resort --decisions IDS`, the ids as runs `first-last`), and the job's result, read in GET /api/jobs/{id} under `result`, is {model, label, axis, value, state (done, cancelled or failed), stacks, done, decided, corrected, kept_decided, left_out_sealed, excepted, closed: [item ids], resort: {job, state, stacks, unreached, words}, words}. A chunk that fails ends the job failed with why; what was written stands, each decision right on its own, and the next band read shows what is left. Refused with 400 where the band holds no scan of the value now, where a scan set apart or corrected is one the band does not hold (named), or where a correction's value is not one the axis takes; with 403 where the caller is not a person (an agent or a model answers one scan at a time) or the body names another author; with 409 where `count` is not the band's count now (`bp-head@1 proposes neck on 41,208 scans in this band now, not 41,212: read the page again`: the registry moved, by a decision, a campaign or another run, and the page is read again) or where corrections are given and no pack is served."
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [model, axis, value, count]
+              properties:
+                model: {type: string}
+                axis: {type: string}
+                value: {type: string}
+                min: {type: number}
+                max: {type: number}
+                count: {type: integer}
+                except: {type: array, items: {type: integer}}
+                corrections:
+                  type: array
+                  items:
+                    type: object
+                    required: [stack, value]
+                    properties:
+                      stack: {type: integer}
+                      value: {type: string}
+                why: {type: string}
+      responses:
+        "202": {description: "{job, stacks, model, label, axis, value, count, set_apart, corrections, words}; the job's progress is {done, of, what: accepted} and its result {model, label, axis, value, state, stacks, done, decided, corrected, kept_decided, left_out_sealed, excepted, closed, resort: {job, state, stacks, unreached, words}, words}"}
+        "400": {description: "No model, axis, value or count, a probability not between 0 and 1, min at or above max, a band that holds no scan of the value, a scan set apart or corrected that the band does not hold, or a correction's value the axis does not take"}
+        "403": {description: "A caller that is not a person, or a body that names an author other than the verified actor"}
+        "404": {description: No registered model answers to the reference}
+        "409": {description: "count is not the band's count now (the page is read again), or corrections where no pack is served"}
   /api/origins:
     get:
       summary: Where each axis label of one scan or of one visit's scans came from (UX round 2; data:see or review:see; nils origins)

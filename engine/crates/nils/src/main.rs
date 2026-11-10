@@ -2118,12 +2118,66 @@ enum ReviewCommand {
         #[arg(long)]
         json: bool,
     },
+    /// Accept every scan a band of one model's proposals holds, for one
+    /// value, without a look at each picture (UX round 6): the decisions
+    /// written in chunks as a job with its progress, the scans set apart
+    /// kept as proposals, the corrected ones given your value, and the
+    /// re-sort queued at the end; the worker's verb, and the keyboard's
+    ProposalsAcceptBand {
+        /// The model: its id, its digest or name@version
+        #[arg(long, value_name = "MODEL")]
+        model: String,
+        /// The axis it proposed on
+        #[arg(long, value_name = "AXIS")]
+        axis: String,
+        /// The value proposed, which the accept writes
+        #[arg(long, value_name = "VALUE")]
+        value: String,
+        /// The band as the page shows it: at this probability or above
+        #[arg(long, value_name = "P")]
+        min: Option<String>,
+        /// The band as the page shows it: below this probability
+        #[arg(long, value_name = "P")]
+        max: Option<String>,
+        /// The scans the page said the band holds for the value; refused
+        /// when the band holds another number now
+        #[arg(long, value_name = "N")]
+        count: usize,
+        /// The scans set apart, not written, as ids joined by commas
+        #[arg(long, value_name = "IDS", value_delimiter = ',')]
+        except: Vec<i64>,
+        /// A scan of the band that takes your value instead of the model's,
+        /// as STACK=VALUE; repeatable. The value is one the axis takes in
+        /// the pack
+        #[arg(long = "correct", value_name = "STACK=VALUE")]
+        correct: Vec<String>,
+        /// A word on why, kept with each decision
+        #[arg(long, value_name = "TEXT")]
+        why: Option<String>,
+        /// Who asked for it, in whose name the decisions are written; the
+        /// door's job carries its caller here
+        #[arg(long, value_name = "WHO")]
+        who: Option<String>,
+        #[arg(long, value_name = "DIR")]
+        pack_dir: Option<PathBuf>,
+        /// The pack a correction's value is held to, by name in the pack
+        /// directory
+        #[arg(long, default_value = "mri")]
+        pack: String,
+        /// Print the re-sort's job and return, without following it
+        #[arg(long)]
+        no_wait: bool,
+        /// Machine-readable output
+        #[arg(long)]
+        json: bool,
+    },
     /// Sort the scans the committed decisions reach again, as the job a
     /// commit queues (UX round 5); run by the worker, or by hand
     Resort {
-        /// The decisions, as ids joined by commas
+        /// The decisions, as ids joined by commas, a run of consecutive ids
+        /// as first-last
         #[arg(long, value_name = "IDS", value_delimiter = ',', required = true)]
-        decisions: Vec<i64>,
+        decisions: Vec<String>,
         /// Who committed them, for the job's name
         #[arg(long, value_name = "WHO")]
         who: Option<String>,
@@ -7540,11 +7594,49 @@ fn review_command(home: &Home, command: ReviewCommand) -> Result<(), Exit> {
                 json,
             );
         }
+        ReviewCommand::ProposalsAcceptBand {
+            model,
+            axis,
+            value,
+            min,
+            max,
+            count,
+            except,
+            correct,
+            why,
+            who,
+            pack_dir,
+            pack,
+            no_wait,
+            json,
+        } => {
+            return crate::proposal_grid::accept_band_verb(
+                home,
+                &mut open(home)?,
+                crate::proposal_grid::BandArgs {
+                    model: &model,
+                    axis: &axis,
+                    value: &value,
+                    min: min.as_deref(),
+                    max: max.as_deref(),
+                    count,
+                    except,
+                    correct: &correct,
+                    why: why.as_deref(),
+                    who: who.as_deref(),
+                    pack_dir,
+                    pack_name: &pack,
+                    no_wait,
+                    json_out: json,
+                },
+            );
+        }
         ReviewCommand::Resort {
             decisions,
             who,
             pack_dir,
         } => {
+            let decisions = crate::resort_job::decision_ids(&decisions).map_err(usage)?;
             let dir = crate::pack_dir(home, pack_dir).ok();
             return crate::resort_job::run_verb(
                 &mut open(home)?,
@@ -7801,6 +7893,7 @@ fn review_command(home: &Home, command: ReviewCommand) -> Result<(), Exit> {
         | ReviewCommand::ProposalsCampaign { .. }
         | ReviewCommand::ProposalsScans { .. }
         | ReviewCommand::ProposalsAccept { .. }
+        | ReviewCommand::ProposalsAcceptBand { .. }
         | ReviewCommand::Resort { .. } => {
             unreachable!("answered before the registry opened")
         }

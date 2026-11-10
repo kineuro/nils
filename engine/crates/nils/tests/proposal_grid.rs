@@ -1040,3 +1040,441 @@ fn corrected(dsn: Option<&str>) {
         "{err}"
     );
 }
+
+const SCHEMA_BAND: &str = "nils_proposal_grid_band";
+
+#[test]
+fn a_whole_band_is_accepted_in_one_move_as_a_job() {
+    band(None);
+}
+
+#[test]
+fn a_whole_band_is_accepted_in_one_move_as_a_job_on_postgres_too() {
+    let Some(dsn) = std::env::var("NILS_TEST_POSTGRES_DSN")
+        .ok()
+        .filter(|d| !d.is_empty())
+    else {
+        eprintln!("NILS_TEST_POSTGRES_DSN is not set; the Postgres half is skipped");
+        return;
+    };
+    drop_schema(&dsn, SCHEMA_BAND);
+    band(Some(&dsn));
+    drop_schema(&dsn, SCHEMA_BAND);
+}
+
+/// The newest decision on the axis for a stack by `actor`: its author
+/// kind, words, value and whether in force.
+fn decision_by(
+    home: &TempDir,
+    stack: i64,
+    actor: &str,
+) -> Option<(String, String, Option<String>, i64)> {
+    let mut reg = nils_registry::home::Home::new(home.path()).open().unwrap();
+    let store = reg.store();
+    let d = store.dialect();
+    let sql = format!(
+        "SELECT author_kind, why, value, CASE WHEN committed_at IS NULL THEN 0 ELSE 1 END FROM {} \
+         WHERE scope = 'stack' AND axis = 'body_part' AND ref = {} AND actor = {} ORDER BY id DESC",
+        store.qualified("decision"),
+        d.param(1, nils_registry::schema::Type::Text),
+        d.param(2, nils_registry::schema::Type::Text),
+    );
+    let rows = store
+        .query(
+            &sql,
+            &[
+                nils_registry::store::Param::from(stack.to_string()),
+                nils_registry::store::Param::from(actor),
+            ],
+        )
+        .unwrap();
+    let row = rows.first()?;
+    Some((
+        row.text(0).unwrap().to_string(),
+        row.opt_text(1).unwrap().unwrap_or("").to_string(),
+        row.opt_text(2).unwrap().map(str::to_string),
+        row.int(3).unwrap(),
+    ))
+}
+
+/// A job read through the jobs door until it is over; its document.
+fn job_over(server: &Server, job: i64) -> Value {
+    let mut doc = Value::Null;
+    for _ in 0..240 {
+        doc = server.ok("GET", &format!("/api/jobs/{job}"), None, CURATOR);
+        let state = doc["state"].as_str().unwrap_or("");
+        if ["done", "failed", "cancelled"].contains(&state) {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(500));
+    }
+    doc
+}
+
+/// UX round 6, item 5: four neck proposals between 0.70 and 0.90, one
+/// spine below and one brain above the threshold; the band is accepted as
+/// a job with one scan set apart, one corrected and one a person decided
+/// meanwhile.
+fn band(dsn: Option<&str>) {
+    let home = registry(dsn, SCHEMA_BAND);
+    let ids = stacks_by_description(&home);
+    let [s1, s2, s3, s4, s5, s6] = ids[..] else {
+        unreachable!()
+    };
+    let model_id = model_proposing(
+        &home,
+        &[
+            (s1, "neck", 0.85),
+            (s2, "neck", 0.8),
+            (s3, "neck", 0.75),
+            (s4, "neck", 0.7),
+            (s5, "spine", 0.6),
+            (s6, "brain", 0.95),
+        ],
+    );
+    let server = Server::start(&home);
+    let at = |q: &str| format!("/api/review/proposals/scans?model={model_id}&axis=body_part{q}");
+    let door = "/api/review/proposals/accept-band";
+    let body = |value: &str, count: Value, except: Value, corrections: Value| {
+        json!({"model": model_id.to_string(), "axis": "body_part", "value": value,
+               "min": 0.7, "max": 0.9, "count": count, "except": except,
+               "corrections": corrections, "why": "band"})
+    };
+
+    // ------------------------------------------------ the door is listed
+    let caps = server.ok("GET", "/api/capabilities", None, CURATOR);
+    assert!(
+        caps.to_string()
+            .contains("POST /api/review/proposals/accept-band"),
+        "{caps}"
+    );
+    // the band as the page shows it: four neck
+    let page = server.ok("GET", &at("&value=neck&min=0.7&max=0.9"), None, CURATOR);
+    assert_eq!(page["total"], 4, "{page}");
+
+    // ------------------------------------------------ refusals
+    // a reader may not
+    let (status, _) = server.call(
+        "POST",
+        door,
+        Some(body("neck", json!(4), json!([]), json!([]))),
+        READER,
+    );
+    assert_eq!(status, 403);
+    // the registry moved: the count the page said is not the band's now
+    let (status, doc) = server.call(
+        "POST",
+        door,
+        Some(body("neck", json!(3), json!([]), json!([]))),
+        CURATOR,
+    );
+    assert_eq!(status, 409, "{doc}");
+    let words = doc["error"].as_str().unwrap_or("");
+    assert!(
+        words.contains("bp-head@1 proposes neck on 4 scans in this band now, not 3")
+            && words.contains("read the page again"),
+        "{doc}"
+    );
+    // no count at all
+    let (status, doc) = server.call(
+        "POST",
+        door,
+        Some(json!({"model": model_id.to_string(), "axis": "body_part", "value": "neck"})),
+        CURATOR,
+    );
+    assert_eq!(status, 400, "{doc}");
+    assert!(
+        doc["error"].as_str().unwrap_or("").contains("count"),
+        "{doc}"
+    );
+    // a band is accepted per value
+    let (status, doc) = server.call(
+        "POST",
+        door,
+        Some(json!({"model": model_id.to_string(), "axis": "body_part", "count": 4})),
+        CURATOR,
+    );
+    assert_eq!(status, 400, "{doc}");
+    assert!(
+        doc["error"].as_str().unwrap_or("").contains("value"),
+        "{doc}"
+    );
+    // a scan set apart that the band does not hold, named
+    let (status, doc) = server.call(
+        "POST",
+        door,
+        Some(body("neck", json!(4), json!([s5]), json!([]))),
+        CURATOR,
+    );
+    assert_eq!(status, 400, "{doc}");
+    assert!(
+        doc["error"].as_str().unwrap_or("").contains(&format!(
+            "scan {s5} is set apart, but the band does not hold it"
+        )),
+        "{doc}"
+    );
+    // a correction of a scan the band does not hold
+    let (status, doc) = server.call(
+        "POST",
+        door,
+        Some(body(
+            "neck",
+            json!(4),
+            json!([]),
+            json!([{"stack": s5, "value": "brain"}]),
+        )),
+        CURATOR,
+    );
+    assert_eq!(status, 400, "{doc}");
+    assert!(
+        doc["error"]
+            .as_str()
+            .unwrap_or("")
+            .contains("corrected, but the band does not hold it"),
+        "{doc}"
+    );
+    // a correction to a value the axis does not take
+    let (status, doc) = server.call(
+        "POST",
+        door,
+        Some(body(
+            "neck",
+            json!(4),
+            json!([]),
+            json!([{"stack": s1, "value": "torso"}]),
+        )),
+        CURATOR,
+    );
+    assert_eq!(status, 400, "{doc}");
+    assert!(
+        doc["error"]
+            .as_str()
+            .unwrap_or("")
+            .contains("torso is not a value of body_part"),
+        "{doc}"
+    );
+    // an empty band
+    let (status, doc) = server.call(
+        "POST",
+        door,
+        Some(json!({"model": model_id.to_string(), "axis": "body_part", "value": "spine", "min": 0.9, "count": 0})),
+        CURATOR,
+    );
+    assert_eq!(status, 400, "{doc}");
+    assert!(
+        doc["error"]
+            .as_str()
+            .unwrap_or("")
+            .contains("spine on no scan at 0.90 or above"),
+        "{doc}"
+    );
+    // nothing was queued or written by any of it
+    let jobs = server.ok("GET", "/api/jobs", None, CURATOR);
+    assert!(
+        !jobs.to_string().contains("accept-band"),
+        "no band job yet: {jobs}"
+    );
+    let page = server.ok("GET", &at("&value=neck&min=0.7&max=0.9"), None, CURATOR);
+    assert_eq!(page["total"], 4, "{page}");
+
+    // ------------------------------------------------ the band accepted
+    // a person decided s4 meanwhile, through another question: the band's
+    // count is unchanged (the member still waits), and the accept keeps
+    // that decision
+    {
+        let mut reg = nils_registry::home::Home::new(home.path()).open().unwrap();
+        let store = reg.store();
+        let d = store.dialect();
+        let sql = format!(
+            "INSERT INTO {} (scope, ref, axis, value, actor, author_kind, decided_at, committed_at, committed_by) VALUES ('stack', {}, 'body_part', 'chest', 'bo@lab', 'person', {}, {}, 'bo@lab')",
+            store.qualified("decision"),
+            d.param(1, nils_registry::schema::Type::Text),
+            d.param(2, nils_registry::schema::Type::Timestamp),
+            d.param(3, nils_registry::schema::Type::Timestamp),
+        );
+        store
+            .execute(
+                &sql,
+                &[
+                    nils_registry::store::Param::from(s4.to_string()),
+                    nils_registry::store::Param::from("2026-11-10T09:00:00Z"),
+                    nils_registry::store::Param::from("2026-11-10T09:00:00Z"),
+                ],
+            )
+            .unwrap();
+    }
+    // s3 set apart, s2 corrected to brain, the rest accepted as neck
+    let (status, queued) = server.call(
+        "POST",
+        door,
+        Some(body(
+            "neck",
+            json!("4"),
+            json!([s3]),
+            json!([{"stack": s2, "value": "brain"}]),
+        )),
+        CURATOR,
+    );
+    assert_eq!(status, 202, "{queued}");
+    let job = queued["job"].as_i64().expect("a job");
+    assert_eq!(queued["stacks"], 3, "{queued}");
+    assert_eq!(queued["set_apart"], 1, "{queued}");
+    assert_eq!(queued["corrections"], 1, "{queued}");
+    assert_eq!(queued["label"], "bp-head@1", "{queued}");
+    assert_eq!(queued["value"], "neck", "{queued}");
+    assert!(
+        queued["words"]
+            .as_str()
+            .unwrap_or("")
+            .contains(&format!("queued as job {job}")),
+        "{queued}"
+    );
+    // the worker runs it: its row, its progress and its result
+    let j = job_over(&server, job);
+    assert_eq!(j["state"], "done", "{j}");
+    assert_eq!(j["kind"], "accept-band", "{j}");
+    assert_eq!(j["args"]["principal"], "cleo@lab", "{j}");
+    assert_eq!(j["progress"]["done"], 3, "{j}");
+    assert_eq!(j["progress"]["of"], 3, "{j}");
+    assert_eq!(j["progress"]["what"], "accepted", "{j}");
+    let result = &j["result"];
+    assert_eq!(result["state"], "done", "{result}");
+    assert_eq!(result["stacks"], 3, "{result}");
+    assert_eq!(result["done"], 3, "{result}");
+    assert_eq!(result["decided"], 1, "{result}");
+    assert_eq!(result["corrected"], 1, "{result}");
+    assert_eq!(result["kept_decided"], 1, "{result}");
+    assert_eq!(result["left_out_sealed"], 0, "{result}");
+    assert_eq!(result["excepted"], 1, "{result}");
+    assert_eq!(result["closed"].as_array().unwrap().len(), 0, "{result}");
+    assert_eq!(result["resort"]["state"], "queued", "{result}");
+    assert_eq!(result["resort"]["stacks"], 2, "{result}");
+    let resort = result["resort"]["job"].as_i64().expect("the re-sort job");
+    assert!(
+        result["words"]
+            .as_str()
+            .unwrap_or("")
+            .contains("accepted 1 scan(s) as neck of bp-head@1 on body_part, corrected 1 (1 brain), 1 set apart, 1 kept a person's decision"),
+        "{result}"
+    );
+    // the decisions are the person's, in force, with the model's value,
+    // probability and run in their words
+    let (kind, why, value, in_force) = decision_by(&home, s1, "cleo@lab").expect("s1's decision");
+    assert_eq!(kind, "person");
+    assert_eq!(value.as_deref(), Some("neck"));
+    assert_eq!(in_force, 1);
+    assert!(
+        why.contains("accepted bp-head@1's neck at 0.850 (run 41): band"),
+        "{why}"
+    );
+    let (_, why, value, _) = decision_by(&home, s2, "cleo@lab").expect("s2's decision");
+    assert_eq!(value.as_deref(), Some("brain"));
+    assert!(
+        why.contains("corrected bp-head@1's neck at 0.800 (run 41) to brain: band"),
+        "{why}"
+    );
+    // the one set apart and the one a person decided took nothing
+    assert!(decision_by(&home, s3, "cleo@lab").is_none());
+    assert!(decision_by(&home, s4, "cleo@lab").is_none());
+    // nothing outside the band's value was touched
+    assert!(decision_by(&home, s5, "cleo@lab").is_none());
+    assert!(decision_by(&home, s6, "cleo@lab").is_none());
+    // the re-sort runs after it, and the corrected scan then reads brain
+    let r = job_over(&server, resort);
+    assert_eq!(r["state"], "done", "{r}");
+    let sorted = server.ok("GET", &format!("/api/origins?stack={s2}"), None, CURATOR);
+    let bp = sorted["stacks"][0]["axes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|a| a["axis"] == "body_part")
+        .cloned()
+        .unwrap_or(Value::Null);
+    assert_eq!(bp["values"], json!(["brain"]), "{sorted}");
+    // the band holds what is left: the scan set apart and the one a person
+    // decided, which still waits in its item
+    let page = server.ok("GET", &at("&value=neck&min=0.7&max=0.9"), None, CURATOR);
+    assert_eq!(page["total"], 2, "{page}");
+    let left: Vec<i64> = page["scans"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|s| s["stack"].as_i64().unwrap())
+        .collect();
+    assert_eq!(left, vec![s3, s4], "{page}");
+    let spine = server.ok("GET", &at("&value=spine"), None, CURATOR);
+    assert_eq!(spine["total"], 1, "{spine}");
+    drop(server);
+
+    // ------------------------------------------------ the keyboard
+    // the same guard
+    let (good, _, err) = run(
+        &home,
+        &[
+            "review",
+            "proposals-accept-band",
+            "--model",
+            "bp-head@1",
+            "--axis",
+            "body_part",
+            "--value",
+            "spine",
+            "--count",
+            "5",
+        ],
+        None,
+    );
+    assert!(
+        !good && err.contains("proposes spine on 1 scans in this band now, not 5"),
+        "{err}"
+    );
+    // the work, on a row of its own; no worker runs here, so the re-sort
+    // it queued waits and the command says so
+    let out = ok(
+        &home,
+        &[
+            "review",
+            "proposals-accept-band",
+            "--model",
+            "bp-head@1",
+            "--axis",
+            "body_part",
+            "--value",
+            "spine",
+            "--count",
+            "1",
+            "--pack-dir",
+            packs().to_str().unwrap(),
+            "--json",
+        ],
+        None,
+    );
+    let doc: Value = serde_json::from_str(out.lines().next().unwrap_or("").trim()).unwrap();
+    assert_eq!(doc["state"], "done", "{doc}");
+    assert_eq!(doc["decided"], 1, "{doc}");
+    assert_eq!(doc["closed"].as_array().unwrap().len(), 1, "{doc}");
+    assert_eq!(doc["resort"]["state"], "queued", "{doc}");
+    assert!(
+        out.contains("waits for a worker"),
+        "the re-sort is left to a worker: {out}"
+    );
+    {
+        let mut reg = nils_registry::home::Home::new(home.path()).open().unwrap();
+        let store = reg.store();
+        let sql = format!(
+            "SELECT kind, state, name FROM {} WHERE kind = 'accept-band' ORDER BY id DESC",
+            store.qualified("job"),
+        );
+        let rows = store.query(&sql, &[]).unwrap();
+        assert_eq!(rows.len(), 2, "the door's and the keyboard's");
+        assert_eq!(rows[0].text(1).unwrap(), "done");
+        assert!(
+            rows[0]
+                .text(2)
+                .unwrap()
+                .starts_with("accept 1 spine of bp-head@1 on body_part for "),
+            "{}",
+            rows[0].text(2).unwrap()
+        );
+    }
+}

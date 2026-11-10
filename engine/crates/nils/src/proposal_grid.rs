@@ -35,6 +35,18 @@
 //!   the model's value, probability and run kept in its words
 //!   (`corrected bp-head@1's spine at 0.600 (run 41) to brain`), so what
 //!   the model proposed and what the person said stand side by side.
+//! - **The band** (`POST /api/review/proposals/accept-band`, `nils review
+//!   proposals-accept-band`, UX round 6): every scan the band holds for one
+//!   value, accepted without a look at each picture, as a job the page
+//!   follows. The door checks what the page accept checks, holds `count`
+//!   (the number the page said the band holds) against the band now, and
+//!   queues the verb with `--who <principal>` as a commit's re-sort is
+//!   queued; the job writes the decisions in the page accept's shape, in
+//!   chunks of [`BAND_CHUNK`], each chunk its own transaction, with `done`
+//!   of `of` on its row, stops at a cancel between chunks, and queues the
+//!   re-sort of what it wrote at its end. A scan a person decided meanwhile
+//!   keeps that decision, a sealed stack takes none, and a chunk that fails
+//!   ends the job failed with why: what was written stands.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::PathBuf;
@@ -52,9 +64,10 @@ use crate::serve::{Caller, Doors, Reply, json_body};
 use crate::{Exit, fail, usage};
 
 /// The doors, as the capabilities list them.
-pub(crate) const DOORS: [&str; 2] = [
+pub(crate) const DOORS: [&str; 3] = [
     "GET /api/review/proposals/scans",
     "POST /api/review/proposals/accept",
+    "POST /api/review/proposals/accept-band",
 ];
 
 /// Each door's policy row, as `serve::policy` reads them.
@@ -77,6 +90,15 @@ pub(crate) const POLICY: &[(&str, bool, bool, &str, &str, &str, &str)] = &[
         "Accepting a model's proposals",
         "Accepted a model's proposals",
     ),
+    (
+        "POST /api/review/proposals/accept-band",
+        true,
+        false,
+        "bounded",
+        "one decision per scan the band holds, written by a job",
+        "Accepting a band of a model's proposals",
+        "Queued the accept of a band of a model's proposals",
+    ),
 ];
 
 /// A page's size when none is asked for, and the most a page holds.
@@ -86,13 +108,18 @@ const SIZE_MOST: usize = 1000;
 /// How many bands the histogram has over the model's range.
 const BANDS: usize = 10;
 
+/// How many decisions a band accept writes in one transaction: its
+/// progress moves at least this often, and a cancel is heard between.
+const BAND_CHUNK: usize = 500;
+
 /// What each door needs, read by `serve::door` before its own table.
 pub(crate) fn door(method: &str, segs: &[&str]) -> Option<(Need, Detail)> {
     Some(match (method, segs) {
         ("GET", ["api", "review", "proposals", "scans"]) => {
             (Need::One("review:see"), Detail::Plain)
         }
-        ("POST", ["api", "review", "proposals", "accept"]) => {
+        ("POST", ["api", "review", "proposals", "accept"])
+        | ("POST", ["api", "review", "proposals", "accept-band"]) => {
             (Need::One("review:work"), Detail::Plain)
         }
         _ => return None,
@@ -117,6 +144,9 @@ pub(crate) fn route(
             scans(doors, registry, caller, quasi, query)
         }
         ("POST", ["api", "review", "proposals", "accept"]) => accept(doors, registry, caller, body),
+        ("POST", ["api", "review", "proposals", "accept-band"]) => {
+            accept_band(doors, registry, caller, body)
+        }
         _ => return None,
     })
 }
@@ -778,15 +808,21 @@ fn corrections_of(v: &Value) -> Result<Vec<(i64, String)>, Reply> {
     }
 }
 
-/// The corrections checked: each names a scan seen and not set apart, once,
-/// and a value the axis takes, which comes back in the form the axis
-/// stores. None stands without a served pack to check the value against.
+/// The corrections checked: each names a scan the move covers (`covered`:
+/// seen on the page, or held by the band) and not set apart, once, and a
+/// value the axis takes, which comes back in the form the axis stores.
+/// None stands without a served pack to check the value against. A scan
+/// not covered is refused with `stranger_words` after its id.
 fn corrections_checked(
-    a: &Accepting<'_>,
+    axis: &str,
+    corrections: &[(i64, String)],
+    covered: &dyn Fn(i64) -> bool,
+    except: &[i64],
     pack: Option<&nils_pack::Pack>,
+    stranger_words: &str,
 ) -> Result<BTreeMap<i64, String>, Reply> {
     let mut out: BTreeMap<i64, String> = BTreeMap::new();
-    if a.corrections.is_empty() {
+    if corrections.is_empty() {
         return Ok(out);
     }
     let pack = pack.ok_or_else(|| {
@@ -795,26 +831,24 @@ fn corrections_checked(
             "a correction is held to the axis's values, and no pack is served here",
         )
     })?;
-    let stranger: Vec<i64> = a
-        .corrections
+    let stranger: Vec<i64> = corrections
         .iter()
         .map(|(s, _)| *s)
-        .filter(|s| !a.seen.contains(s))
+        .filter(|s| !covered(*s))
         .collect();
     if !stranger.is_empty() {
         return Err(Reply::error(
             400,
             format!(
-                "scan {} is corrected, but the page did not show it",
+                "scan {} is corrected, but {stranger_words}",
                 named(&stranger)
             ),
         ));
     }
-    let apart: Vec<i64> = a
-        .corrections
+    let apart: Vec<i64> = corrections
         .iter()
         .map(|(s, _)| *s)
-        .filter(|s| a.except.contains(s))
+        .filter(|s| except.contains(s))
         .collect();
     if !apart.is_empty() {
         return Err(Reply::error(
@@ -825,9 +859,9 @@ fn corrections_checked(
             ),
         ));
     }
-    for (stack, given) in &a.corrections {
-        let stored = crate::review_questions::stored_value(pack, a.axis, given)
-            .ok_or_else(|| Reply::error(400, format!("{given} is not a value of {}", a.axis)))?;
+    for (stack, given) in corrections {
+        let stored = crate::review_questions::stored_value(pack, axis, given)
+            .ok_or_else(|| Reply::error(400, format!("{given} is not a value of {axis}")))?;
         if let Some(before) = out.insert(*stack, stored.clone())
             && before != stored
         {
@@ -838,6 +872,80 @@ fn corrections_checked(
         }
     }
     Ok(out)
+}
+
+/// The value a decision takes and its words: the person's value where the
+/// scan is corrected, the model's where it is not; either way the model's
+/// value, probability and run stay in the words beside it, and `why`'s
+/// note after them.
+fn decision_words(
+    model: &Model,
+    c: &Candidate,
+    corrected: Option<&str>,
+    why: Option<&str>,
+) -> (String, String) {
+    let note = why
+        .map(str::trim)
+        .filter(|w| !w.is_empty())
+        .map(|w| format!(": {w}"))
+        .unwrap_or_default();
+    let run = c.run.map(|r| format!(" (run {r})")).unwrap_or_default();
+    match corrected {
+        Some(v) => (
+            v.to_string(),
+            format!(
+                "corrected {}'s {} at {:.3}{run} to {v}{note}",
+                model.label(),
+                c.value,
+                c.p,
+            ),
+        ),
+        None => (
+            c.value.clone(),
+            format!(
+                "accepted {}'s {} at {:.3}{run}{note}",
+                model.label(),
+                c.value,
+                c.p,
+            ),
+        ),
+    }
+}
+
+/// One decision at the stack's scope, in force, through the review spine,
+/// inside the transaction the caller holds.
+fn apply_one(
+    registry: &mut Registry,
+    c: &Candidate,
+    value: &str,
+    why: &str,
+    principal: &str,
+    author: (&str, Option<&str>, Option<i64>),
+) -> Result<nils_registry::review::Applied, Reply> {
+    let (kind, version, model) = author;
+    nils_registry::review::apply_within(
+        registry,
+        &nils_registry::review::Apply {
+            item: c.item,
+            member: Some(c.stack),
+            scope: "stack",
+            value: Some(value),
+            author: nils_registry::review::Author {
+                who: principal,
+                kind,
+                version,
+                model,
+            },
+            stage: false,
+            why: Some(why),
+            campaign: None,
+        },
+    )
+    .map_err(|e| match e {
+        nils_registry::review::Error::Refused(m) => Reply::gated(409, m),
+        nils_registry::review::Error::Forbidden(m) => Reply::error(403, m),
+        other => Reply::error(500, other.to_string()),
+    })
 }
 
 /// The decisions, one a scan seen and not set apart, in one transaction.
@@ -881,7 +989,14 @@ fn write(
             ),
         ));
     }
-    let corrections = corrections_checked(a, pack)?;
+    let corrections = corrections_checked(
+        a.axis,
+        &a.corrections,
+        &|s| a.seen.contains(&s),
+        &a.except,
+        pack,
+        "the page did not show it",
+    )?;
     // every scan seen still waits as the page showed it; one that moved on
     // (answered meanwhile, another value proposed since) is read again
     let gone: Vec<i64> = a
@@ -929,65 +1044,21 @@ fn write(
     registry.store().begin().map_err(failed)?;
     let written = (|| -> Result<(), Reply> {
         for c in &writing {
-            let note = a
-                .why
-                .map(str::trim)
-                .filter(|w| !w.is_empty())
-                .map(|w| format!(": {w}"))
-                .unwrap_or_default();
-            let run = c.run.map(|r| format!(" (run {r})")).unwrap_or_default();
-            // the person's value where the scan is corrected, the model's
-            // where it is not; either way the model's value, probability
-            // and run stay in the decision's words beside it
-            let corrected = corrections.get(&c.stack);
-            let (value, why) = match corrected {
-                Some(v) => (
-                    v.as_str(),
-                    format!(
-                        "corrected {}'s {} at {:.3}{run} to {v}{note}",
-                        asked.model.label(),
-                        c.value,
-                        c.p,
-                    ),
-                ),
-                None => (
-                    c.value.as_str(),
-                    format!(
-                        "accepted {}'s {} at {:.3}{run}{note}",
-                        asked.model.label(),
-                        c.value,
-                        c.p,
-                    ),
-                ),
-            };
-            let applied = nils_registry::review::apply_within(
+            let corrected = corrections.get(&c.stack).map(String::as_str);
+            let (value, why) = decision_words(&asked.model, c, corrected, a.why);
+            let applied = apply_one(
                 registry,
-                &nils_registry::review::Apply {
-                    item: c.item,
-                    member: Some(c.stack),
-                    scope: "stack",
-                    value: Some(value),
-                    author: nils_registry::review::Author {
-                        who: principal,
-                        kind,
-                        version,
-                        model: model_author,
-                    },
-                    stage: false,
-                    why: Some(why.as_str()),
-                    campaign: None,
-                },
-            )
-            .map_err(|e| match e {
-                nils_registry::review::Error::Refused(m) => Reply::gated(409, m),
-                nils_registry::review::Error::Forbidden(m) => Reply::error(403, m),
-                other => Reply::error(500, other.to_string()),
-            })?;
+                c,
+                &value,
+                &why,
+                principal,
+                (kind, version, model_author),
+            )?;
             closed.extend(applied.closed.iter().copied());
             decisions.push(Written {
                 stack: c.stack,
                 decision: applied.decision,
-                value: value.to_string(),
+                value,
                 corrected: corrected.is_some(),
             });
             touched.insert(c.item);
@@ -1085,6 +1156,486 @@ fn accept(
     let mut out = done.as_json();
     out["resort"] = resort;
     Ok(Reply::ok(out))
+}
+
+// ------------------------------------------------------------- the band
+
+/// What a band accept takes from its body or its command line (UX round 6).
+struct Banding<'a> {
+    model: &'a str,
+    axis: &'a str,
+    value: &'a str,
+    min: Option<&'a str>,
+    max: Option<&'a str>,
+    /// The number of scans the page said the band holds for the value: the
+    /// guard that replaces the page accept's `seen`.
+    count: usize,
+    except: Vec<i64>,
+    corrections: Vec<(i64, String)>,
+    why: Option<&'a str>,
+}
+
+/// The band read and checked: what the job writes.
+struct BandChecked {
+    model: Model,
+    axis: String,
+    value: String,
+    /// The band's scans of the value less those set apart, the most sure
+    /// first.
+    scans: Vec<Candidate>,
+    excepted: usize,
+    corrections: BTreeMap<i64, String>,
+}
+
+/// The band as the page shows it, in words: `between 0.80 and 0.90`,
+/// `below 0.90`, `at 0.80 or above`, or nothing for the whole range.
+fn band_words(b: Band) -> String {
+    match (b.min, b.max) {
+        (Some(lo), Some(hi)) => format!(" between {lo:.2} and {hi:.2}"),
+        (Some(lo), None) => format!(" at {lo:.2} or above"),
+        (None, Some(hi)) => format!(" below {hi:.2}"),
+        (None, None) => String::new(),
+    }
+}
+
+/// The band read as the page reads it and held to what the page said.
+/// `strict` is the door's and the keyboard's reading: `count` must be the
+/// band's count now, and a scan set apart or corrected that the band does
+/// not hold is refused. The job runs lenient: the door checked, and a scan
+/// that left the band meanwhile (decided, another value proposed since)
+/// is simply not written.
+fn band_checked(
+    registry: &mut Registry,
+    b: &Banding<'_>,
+    pack: Option<&nils_pack::Pack>,
+    strict: bool,
+) -> Result<BandChecked, Reply> {
+    let asked = asked_of(
+        registry,
+        Some(b.model),
+        Some(b.axis),
+        Some(b.value),
+        b.min,
+        b.max,
+    )?;
+    let value = asked.value.clone().ok_or_else(|| {
+        Reply::error(
+            400,
+            "value: the value proposed, which the band accept writes; a band is accepted one value at a time",
+        )
+    })?;
+    let mut held: Vec<Candidate> = asked
+        .gathered
+        .scans
+        .values()
+        .filter(|c| c.value == value && asked.band.holds(c.p))
+        .cloned()
+        .collect();
+    held.sort_by(|a, b| b.p.total_cmp(&a.p).then_with(|| a.stack.cmp(&b.stack)));
+    let label = asked.model.label();
+    if held.is_empty() {
+        return Err(Reply::error(
+            400,
+            format!(
+                "{label} proposes {value} on no scan{} now; nothing to accept",
+                band_words(asked.band)
+            ),
+        ));
+    }
+    if strict && held.len() != b.count {
+        return Err(Reply::gated(
+            409,
+            format!(
+                "{label} proposes {value} on {} scans in this band now, not {}: read the page again",
+                held.len(),
+                b.count
+            ),
+        ));
+    }
+    let in_band: BTreeSet<i64> = held.iter().map(|c| c.stack).collect();
+    let stranger: Vec<i64> = b
+        .except
+        .iter()
+        .copied()
+        .filter(|s| !in_band.contains(s))
+        .collect();
+    if strict && !stranger.is_empty() {
+        return Err(Reply::error(
+            400,
+            format!(
+                "scan {} is set apart, but the band does not hold it",
+                named(&stranger)
+            ),
+        ));
+    }
+    let corrections: Vec<(i64, String)> = if strict {
+        b.corrections.clone()
+    } else {
+        b.corrections
+            .iter()
+            .filter(|(s, _)| in_band.contains(s))
+            .cloned()
+            .collect()
+    };
+    let corrections = corrections_checked(
+        &asked.axis,
+        &corrections,
+        &|s| in_band.contains(&s),
+        &b.except,
+        pack,
+        "the band does not hold it",
+    )?;
+    let excepted = held.iter().filter(|c| b.except.contains(&c.stack)).count();
+    held.retain(|c| !b.except.contains(&c.stack));
+    Ok(BandChecked {
+        model: asked.model,
+        axis: asked.axis,
+        value,
+        scans: held,
+        excepted,
+        corrections,
+    })
+}
+
+/// The job's name on its row.
+fn band_name(checked: &BandChecked, who: &str) -> String {
+    format!(
+        "accept {} {} of {} on {} for {who}",
+        checked.scans.len(),
+        checked.value,
+        checked.model.label(),
+        checked.axis
+    )
+}
+
+/// `POST /api/review/proposals/accept-band`: the checks, then the verb
+/// queued under the caller as a commit's re-sort is queued, and the job
+/// said at once.
+fn accept_band(
+    doors: &Doors,
+    registry: &mut Registry,
+    caller: &Caller,
+    body: &str,
+) -> Result<Reply, Reply> {
+    let doc = json_body(body)?;
+    let text = |k: &str| -> Result<Option<String>, Reply> {
+        match &doc[k] {
+            Value::Null => Ok(None),
+            Value::String(s) => Ok(Some(s.clone())),
+            Value::Number(n) => Ok(Some(n.to_string())),
+            _ => Err(Reply::error(400, format!("{k}: text"))),
+        }
+    };
+    let model = text("model")?;
+    let axis = text("axis")?;
+    let value = text("value")?;
+    let min = text("min")?;
+    let max = text("max")?;
+    let why = text("why")?;
+    let count = match &doc["count"] {
+        Value::Number(n) => n.as_u64().map(|n| n as usize),
+        Value::String(s) => s.trim().parse::<usize>().ok(),
+        _ => None,
+    }
+    .ok_or_else(|| {
+        Reply::error(
+            400,
+            "count: the number of scans the page said the band holds, a whole number",
+        )
+    })?;
+    // the author is the verified actor, never the body; and a band without
+    // a look at each picture is a person's move
+    let (kind, _, _) = crate::serve::author_at_apply(registry, caller, &doc)?;
+    if kind != "person" {
+        return Err(Reply::error(
+            403,
+            "a band of proposals is accepted by a person; an agent or a model answers one scan at a time",
+        ));
+    }
+    let b = Banding {
+        model: model.as_deref().unwrap_or(""),
+        axis: axis.as_deref().unwrap_or(""),
+        value: value.as_deref().unwrap_or(""),
+        min: min.as_deref(),
+        max: max.as_deref(),
+        count,
+        except: ids_of(&doc["except"], "except")?,
+        corrections: corrections_of(&doc["corrections"])?,
+        why: why.as_deref(),
+    };
+    let pack = crate::reader::served_pack(doors.pack_dir.as_deref(), &doors.ask_pack);
+    let checked = band_checked(registry, &b, pack.as_deref(), true)?;
+    // record 58 P1 (spec §12.5): the person's account name, for Results
+    nils_registry::names::note(registry.store(), &caller.principal, caller.account_name())
+        .map_err(failed)?;
+    let who = caller.principal.as_str();
+    let mut argv: Vec<String> = vec![
+        "review".into(),
+        "proposals-accept-band".into(),
+        "--model".into(),
+        checked.model.id.to_string(),
+        "--axis".into(),
+        checked.axis.clone(),
+        "--value".into(),
+        checked.value.clone(),
+        "--count".into(),
+        count.to_string(),
+    ];
+    if let Some(lo) = b.min.map(str::trim).filter(|s| !s.is_empty()) {
+        argv.push("--min".into());
+        argv.push(lo.to_string());
+    }
+    if let Some(hi) = b.max.map(str::trim).filter(|s| !s.is_empty()) {
+        argv.push("--max".into());
+        argv.push(hi.to_string());
+    }
+    if !b.except.is_empty() {
+        argv.push("--except".into());
+        argv.push(
+            b.except
+                .iter()
+                .map(i64::to_string)
+                .collect::<Vec<_>>()
+                .join(","),
+        );
+    }
+    for (stack, value) in &checked.corrections {
+        argv.push("--correct".into());
+        argv.push(format!("{stack}={value}"));
+    }
+    if let Some(w) = b.why.map(str::trim).filter(|w| !w.is_empty()) {
+        argv.push("--why".into());
+        argv.push(w.to_string());
+    }
+    argv.push("--who".into());
+    argv.push(who.to_string());
+    if let Some(dir) = doors.pack_dir.as_deref() {
+        argv.push("--pack-dir".into());
+        argv.push(dir.display().to_string());
+    }
+    argv.push("--pack".into());
+    argv.push(doors.ask_pack.clone());
+    let name = band_name(&checked, who);
+    let job = nils_registry::job::enqueue(registry.store(), &argv, Some(&name), Some(who))
+        .map_err(|e| Reply::error(500, format!("the band accept could not be queued: {e}")))?;
+    crate::worker::wake();
+    let stacks = checked.scans.len();
+    Ok(Reply::accepted(json!({
+        "job": job,
+        "stacks": stacks,
+        "model": checked.model.named(),
+        "label": checked.model.label(),
+        "axis": checked.axis,
+        "value": checked.value,
+        "count": count,
+        "set_apart": checked.excepted,
+        "corrections": checked.corrections.len(),
+        "words": format!(
+            "accepting {stacks} scan(s) as {} of {} on {} in {who}'s name, queued as job {job}",
+            checked.value,
+            checked.model.label(),
+            checked.axis
+        ),
+    })))
+}
+
+/// What a band's job wrote, so far or in all.
+#[derive(Default)]
+struct BandDone {
+    decisions: Vec<Written>,
+    closed: BTreeSet<i64>,
+    /// The band's scans gone through, written or kept.
+    done: usize,
+    kept_decided: usize,
+    left_out_sealed: usize,
+    /// Why the job stopped, where a cancel was asked between chunks.
+    stopped: Option<String>,
+    /// Why a chunk failed, where one did; what was written before stands.
+    failed: Option<String>,
+}
+
+/// The members among these candidates that still wait (not decided in
+/// their item), by stack: a scan a campaign or another move decided
+/// meanwhile is not written.
+fn still_waiting(store: &mut Store, chunk: &[Candidate]) -> Result<BTreeSet<i64>, StoreError> {
+    let list = chunk
+        .iter()
+        .map(|c| c.stack.to_string())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let sql = format!(
+        "SELECT item_id, stack_id FROM {} WHERE stack_id IN ({list}) AND decided_at IS NULL",
+        store.qualified("review_member"),
+    );
+    let pairs: BTreeSet<(i64, i64)> = chunk.iter().map(|c| (c.item, c.stack)).collect();
+    let mut out = BTreeSet::new();
+    for r in store.query(&sql, &[])? {
+        let pair = (r.int(0)?, r.int(1)?);
+        if pairs.contains(&pair) {
+            out.insert(pair.1);
+        }
+    }
+    Ok(out)
+}
+
+/// The band's decisions, [`BAND_CHUNK`] at a time, each chunk its own
+/// transaction with the job's progress after it; a cancel heard at a
+/// heartbeat stops before the next chunk.
+fn write_band(
+    registry: &mut Registry,
+    checked: &BandChecked,
+    principal: &str,
+    author: (&str, Option<&str>, Option<i64>),
+    why: Option<&str>,
+    job_id: i64,
+) -> BandDone {
+    let of = checked.scans.len();
+    let mut done = BandDone::default();
+    let beat = |registry: &mut Registry, n: usize| -> nils_registry::job::Asked {
+        nils_registry::job::beat(
+            registry.store(),
+            job_id,
+            Some(&json!({"done": n, "of": of, "what": "accepted"})),
+        )
+        .unwrap_or(nils_registry::job::Asked::Nothing)
+    };
+    beat(registry, 0);
+    for chunk in checked.scans.chunks(BAND_CHUNK) {
+        let stacks: Vec<i64> = chunk.iter().map(|c| c.stack).collect();
+        // a scan a person decided meanwhile keeps that decision; a sealed
+        // stack takes none; one its item no longer waits on is not written
+        type Sets = (BTreeSet<i64>, BTreeSet<i64>, BTreeSet<i64>);
+        let read = (|| -> Result<Sets, Reply> {
+            let store = registry.store();
+            let decided = decided_by_person(store, &checked.axis, &stacks).map_err(failed)?;
+            let sealed = labels::sealed_for_writes(store, &stacks).map_err(failed)?;
+            let waiting = still_waiting(store, chunk).map_err(failed)?;
+            Ok((decided, sealed, waiting))
+        })();
+        let (decided, sealed, waiting) = match read {
+            Ok(r) => r,
+            Err(e) => {
+                done.failed = Some(e.body["error"].as_str().unwrap_or("").to_string());
+                break;
+            }
+        };
+        let mut wrote: Vec<Written> = Vec::new();
+        let mut closed: BTreeSet<i64> = BTreeSet::new();
+        let mut kept = 0usize;
+        let mut left_sealed = 0usize;
+        if let Err(e) = registry.store().begin() {
+            done.failed = Some(e.to_string());
+            break;
+        }
+        let written = (|| -> Result<(), Reply> {
+            for c in chunk {
+                if sealed.contains(&c.stack) {
+                    left_sealed += 1;
+                    continue;
+                }
+                if decided.contains(&c.stack) || !waiting.contains(&c.stack) {
+                    kept += 1;
+                    continue;
+                }
+                let corrected = checked.corrections.get(&c.stack).map(String::as_str);
+                let (value, words) = decision_words(&checked.model, c, corrected, why);
+                let applied = apply_one(registry, c, &value, &words, principal, author)?;
+                closed.extend(applied.closed.iter().copied());
+                wrote.push(Written {
+                    stack: c.stack,
+                    decision: applied.decision,
+                    value,
+                    corrected: corrected.is_some(),
+                });
+            }
+            Ok(())
+        })();
+        let committed = match written {
+            Ok(()) => registry.store().commit().map_err(failed),
+            Err(e) => Err(e),
+        };
+        if let Err(e) = committed {
+            registry.store().rollback().ok();
+            registry.refresh_meta().ok();
+            done.failed = Some(format!(
+                "a chunk of {} failed at scan {}: {}",
+                chunk.len(),
+                done.done + 1,
+                e.body["error"].as_str().unwrap_or("")
+            ));
+            break;
+        }
+        done.decisions.extend(wrote);
+        done.closed.extend(closed);
+        done.kept_decided += kept;
+        done.left_out_sealed += left_sealed;
+        done.done += chunk.len();
+        if beat(registry, done.done) == nils_registry::job::Asked::Cancel && done.done < of {
+            done.stopped = Some(format!(
+                "stopped as asked after {} of {of} scan(s); what was written stands",
+                done.done
+            ));
+            break;
+        }
+    }
+    done
+}
+
+/// The job's result as the desk reads it, and its words.
+fn band_result(checked: &BandChecked, done: &BandDone, resort: Value) -> Value {
+    let decided = done.decisions.iter().filter(|w| !w.corrected).count();
+    let corrected = done.decisions.iter().filter(|w| w.corrected).count();
+    let state = if done.failed.is_some() {
+        "failed"
+    } else if done.stopped.is_some() {
+        "cancelled"
+    } else {
+        "done"
+    };
+    let mut words = format!(
+        "accepted {decided} scan(s) as {} of {} on {}",
+        checked.value,
+        checked.model.label(),
+        checked.axis
+    );
+    if corrected > 0 {
+        words.push_str(&format!(
+            ", corrected {corrected} ({})",
+            corrected_words(&done.decisions)
+        ));
+    }
+    if checked.excepted > 0 {
+        words.push_str(&format!(", {} set apart", checked.excepted));
+    }
+    if done.kept_decided > 0 {
+        words.push_str(&format!(", {} kept a person's decision", done.kept_decided));
+    }
+    if done.left_out_sealed > 0 {
+        words.push_str(&format!(", {} sealed", done.left_out_sealed));
+    }
+    if let Some(why) = done.failed.as_deref().or(done.stopped.as_deref()) {
+        words.push_str(&format!("; {why}"));
+    }
+    if let Some(r) = resort["words"].as_str() {
+        words.push_str(&format!("; {r}"));
+    }
+    json!({
+        "model": checked.model.named(),
+        "label": checked.model.label(),
+        "axis": checked.axis,
+        "value": checked.value,
+        "state": state,
+        "stacks": checked.scans.len(),
+        "done": done.done,
+        "decided": decided,
+        "corrected": corrected,
+        "kept_decided": done.kept_decided,
+        "left_out_sealed": done.left_out_sealed,
+        "excepted": checked.excepted,
+        "closed": done.closed,
+        "resort": resort,
+        "words": words,
+    })
 }
 
 // ------------------------------------------------------- the keyboard
@@ -1274,6 +1825,126 @@ pub(crate) fn accept_verb(
     Ok(())
 }
 
+/// What `nils review proposals-accept-band` takes.
+pub(crate) struct BandArgs<'a> {
+    pub(crate) model: &'a str,
+    pub(crate) axis: &'a str,
+    pub(crate) value: &'a str,
+    pub(crate) min: Option<&'a str>,
+    pub(crate) max: Option<&'a str>,
+    pub(crate) count: usize,
+    pub(crate) except: Vec<i64>,
+    pub(crate) correct: &'a [String],
+    pub(crate) why: Option<&'a str>,
+    pub(crate) who: Option<&'a str>,
+    pub(crate) pack_dir: Option<PathBuf>,
+    pub(crate) pack_name: &'a str,
+    pub(crate) no_wait: bool,
+    pub(crate) json_out: bool,
+}
+
+/// `nils review proposals-accept-band`: the job's work, run by the worker
+/// on the row the door queued (adopted through the job id in its
+/// environment) or at the keyboard on a row of its own. The band is read
+/// and checked, the decisions written in chunks with the progress on the
+/// row, the re-sort queued at the end as a commit's is, and the result set
+/// on the row. At the keyboard the re-sort is followed unless `--no-wait`;
+/// under the worker it is left to the queue, which runs it next.
+pub(crate) fn accept_band_verb(
+    home: &Home,
+    registry: &mut Registry,
+    args: BandArgs<'_>,
+) -> Result<(), Exit> {
+    use nils_registry::job::{self, State};
+    let principal = args
+        .who
+        .map(str::trim)
+        .filter(|w| !w.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(crate::campaigns::who);
+    let corrections: Vec<(i64, String)> = args
+        .correct
+        .iter()
+        .map(|c| correction_of(c))
+        .collect::<Result<_, _>>()
+        .map_err(usage)?;
+    let b = Banding {
+        model: args.model,
+        axis: args.axis,
+        value: args.value,
+        min: args.min,
+        max: args.max,
+        count: args.count,
+        except: args.except,
+        corrections,
+        why: args.why,
+    };
+    let pack_dir = crate::pack_dir(home, args.pack_dir).ok();
+    let pack = pack_dir
+        .as_ref()
+        .and_then(|d| nils_pack::load(&d.join(args.pack_name), None).ok());
+    // the worker's run adopts the door's row and reads lenient: the door
+    // checked, and the registry may have moved since
+    let adopted = job::adopted_job().is_some();
+    let checked = band_checked(registry, &b, pack.as_ref(), !adopted).map_err(as_exit)?;
+    let name = band_name(&checked, &principal);
+    let job_id = job::claim(
+        registry.store(),
+        &job::Claim {
+            kind: job::ACCEPT_BAND,
+            name: &name,
+            args: json!({
+                "model": checked.model.label(), "axis": checked.axis, "value": checked.value,
+                "stacks": checked.scans.len(), "count": args.count, "who": principal,
+                "principal": principal,
+            }),
+        },
+    )
+    .map_err(|e| fail(e.to_string()))?;
+    let done = write_band(
+        registry,
+        &checked,
+        &principal,
+        ("person", None, None),
+        b.why,
+        job_id,
+    );
+    // what was written is in force, so its scans are sorted again: the
+    // job a commit queues, with these decisions in its arguments
+    let decisions: Vec<i64> = done.decisions.iter().map(|w| w.decision).collect();
+    let resort = crate::resort_job::queue_resort_committed(
+        registry,
+        pack_dir.as_deref(),
+        &principal,
+        &decisions,
+    );
+    let result = band_result(&checked, &done, resort);
+    let words = result["words"].as_str().unwrap_or("").to_string();
+    let _ = job::set_result(registry.store(), job_id, &result);
+    let state = match (&done.failed, &done.stopped) {
+        (Some(_), _) => State::Failed,
+        (None, Some(_)) => State::Cancelled,
+        (None, None) => State::Done,
+    };
+    job::finish(registry.store(), job_id, state, done.failed.as_deref())
+        .map_err(|e| fail(e.to_string()))?;
+    if args.json_out {
+        println!("{result}");
+    } else {
+        println!("{words}");
+    }
+    if let Some(why) = done.failed {
+        return Err(fail(format!("band accept: {why}")));
+    }
+    if adopted || args.no_wait {
+        return Ok(());
+    }
+    match result["resort"]["job"].as_i64() {
+        Some(job) => crate::resort_job::follow(registry, job),
+        None => Ok(()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1413,6 +2084,15 @@ mod tests {
         assert!(corrections_of(&json!([{"stack": 3}])).is_err());
         assert!(corrections_of(&json!([{"stack": "3", "value": "neck"}])).is_err());
         assert!(corrections_of(&json!({"stack": 3})).is_err());
+    }
+
+    #[test]
+    fn the_band_s_words_are_the_page_s() {
+        let b = |min: Option<f64>, max: Option<f64>| band_words(Band { min, max });
+        assert_eq!(b(Some(0.8), Some(0.9)), " between 0.80 and 0.90");
+        assert_eq!(b(None, Some(0.9)), " below 0.90");
+        assert_eq!(b(Some(0.8), None), " at 0.80 or above");
+        assert_eq!(b(None, None), "");
     }
 
     #[test]

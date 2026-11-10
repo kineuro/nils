@@ -6125,6 +6125,9 @@ pub(crate) fn verb_needs(command: &[String]) -> Option<(&'static str, Detail)> {
         // record 26 §9: a promotion is a cohort act, which is Data work
         ("ask", Some("promote")) => ("data:work", Detail::Plain),
         ("ask", Some("run")) => ("query:work", Detail::Plain),
+        // UX round 6: a band of a model's proposals accepted as a job is
+        // review work, and so is its cancel
+        ("review", Some("proposals-accept-band")) => ("review:work", Detail::Plain),
         // record 41: the vote matrix is a read that writes a file where it
         // is told, which no door queues
         ("classify", Some("votes")) => return None,
