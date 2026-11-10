@@ -79,11 +79,7 @@ pub(crate) fn queue_resort_committed(
         "review".to_string(),
         "resort".to_string(),
         "--decisions".to_string(),
-        decisions
-            .iter()
-            .map(i64::to_string)
-            .collect::<Vec<_>>()
-            .join(","),
+        compact(decisions),
         "--who".to_string(),
         who.to_string(),
     ];
@@ -108,6 +104,56 @@ pub(crate) fn queue_resort_committed(
             "words": format!("the re-sort could not be queued: {e}; the decisions stand, and the next sort re-sorts them"),
         }),
     }
+}
+
+/// The decisions as `--decisions` carries them: ids joined by commas, a run
+/// of consecutive ids as `first-last` (UX round 6: a band accept writes tens
+/// of thousands in a row, and one argument holds at most 128 KiB).
+pub(crate) fn compact(decisions: &[i64]) -> String {
+    let mut ids: Vec<i64> = decisions.to_vec();
+    ids.sort_unstable();
+    ids.dedup();
+    let mut words: Vec<String> = Vec::new();
+    let mut i = 0;
+    while i < ids.len() {
+        let first = ids[i];
+        let mut last = first;
+        while i + 1 < ids.len() && ids[i + 1] == last + 1 {
+            i += 1;
+            last = ids[i];
+        }
+        words.push(match last - first {
+            0 => first.to_string(),
+            1 => format!("{first},{last}"),
+            _ => format!("{first}-{last}"),
+        });
+        i += 1;
+    }
+    words.join(",")
+}
+
+/// The decisions `--decisions` names, each word an id or a run `first-last`.
+pub(crate) fn decision_ids(words: &[String]) -> Result<Vec<i64>, String> {
+    let bad = |w: &str| format!("--decisions takes ids joined by commas, a run as first-last: {w}");
+    let mut out: Vec<i64> = Vec::new();
+    for word in words.iter().flat_map(|w| w.split(',')) {
+        let word = word.trim();
+        if word.is_empty() {
+            continue;
+        }
+        match word.split_once('-') {
+            Some((a, b)) => {
+                let first: i64 = a.trim().parse().map_err(|_| bad(word))?;
+                let last: i64 = b.trim().parse().map_err(|_| bad(word))?;
+                if last < first || last - first > 10_000_000 {
+                    return Err(bad(word));
+                }
+                out.extend(first..=last);
+            }
+            None => out.push(word.parse().map_err(|_| bad(word))?),
+        }
+    }
+    Ok(out)
 }
 
 /// `nils review resort`: the job's work. Claims the row the worker handed
@@ -279,5 +325,26 @@ pub(crate) fn follow(registry: &mut Registry, job_id: i64) -> Result<(), Exit> {
             said_worker = true;
         }
         std::thread::sleep(FOLLOW_EVERY);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_decisions_travel_as_runs_and_come_back_whole() {
+        assert_eq!(compact(&[5, 3, 4, 9, 11, 12, 20]), "3-5,9,11,12,20");
+        assert_eq!(compact(&[7]), "7");
+        assert_eq!(compact(&[]), "");
+        let back = decision_ids(&["3-5,9".to_string(), "11,12".to_string(), "20".to_string()])
+            .ok()
+            .unwrap();
+        assert_eq!(back, vec![3, 4, 5, 9, 11, 12, 20]);
+        let many: Vec<i64> = (1000..42_000).collect();
+        assert_eq!(compact(&many), "1000-41999");
+        assert_eq!(decision_ids(&[compact(&many)]).ok().unwrap(), many);
+        assert!(decision_ids(&["x".to_string()]).is_err());
+        assert!(decision_ids(&["9-3".to_string()]).is_err());
     }
 }

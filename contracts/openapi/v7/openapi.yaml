@@ -967,7 +967,7 @@ paths:
   /api/review/proposals/scans:
     get:
       summary: One page of what one model proposed on one axis, narrowed by the value proposed and the probability band, the most sure first (UX round 5; review:see; nils review proposals-scans)
-      description: "Added in place, additively, on 2026-11-08. `model` (its id, digest or name@version) and `axis` are required; `value` keeps the scans it proposed that value for; `min` (inclusive) and `max` (exclusive) keep the scans whose probability of the value proposed is in the band; `page` from 1 and `size` (500 by default, 1000 at most). The scans are the members not decided yet of the model's open `<axis>:model` items (below its threshold; a staged item's members are the model's staged decision, which `POST /api/decisions/commit` puts in force) that no open campaign asks (`asked` counts those left out) and of no sample sealed now (`withheld_sealed`). Each scan: `stack`, `item`, `proposed`, `probability`, `run`, `now` (the value the sort holds on the axis, null for none), `decided` (a person's decision in force on it), its facts (subject, session, day, series_description), `name`, `bids`, `axes` and `picture` as the question grid gives them, with `pictures` {shown, why} beside. For the filter row and the histogram: `values` [{value, count}], each value's scans in the band, most first; `bands` [{from, to, count}], ten equal bands over the model's whole `range` {low, high} for the value asked, the last band closed at the top; `threshold` and `thresholds`; `total`, `page`, `pages`, `size`."
+      description: "Added in place, additively, on 2026-11-08. `model` (its id, digest or name@version) and `axis` are required; `value` keeps the scans it proposed that value for; `min` (inclusive) and `max` (exclusive) keep the scans whose probability of the value proposed is in the band; `page` from 1 and `size` (500 by default, 1000 at most). The scans are the members not decided yet of the model's open `<axis>:model` items (below its threshold; a staged item's members are the model's staged decision, which `POST /api/decisions/commit` puts in force) that no open campaign asks (`asked` counts those left out) and of no sample sealed now (`withheld_sealed`). Each scan: `stack`, `item`, `proposed`, `probability`, `run`, `now` (the value the sort holds on the axis, null for none), `decided` (a person's decision in force on it), its facts (subject, session, day, series_description), `name`, `bids`, `axes` and `picture` as the question grid gives them, with `pictures` {shown, why} beside. For the filter row and the histogram: `values` [{value, count}], each value's scans in the band, most first; `bands` [{from, to, count}], ten equal bands over the model's whole `range` {low, high} for the value asked, the last band closed at the top; `threshold` and `thresholds`; `total`, `page`, `pages`, `size`. Added in place, additively, on 2026-11-09 (UX round 6): `legal`, the values the axis takes in the served pack, in the form the axis stores and in the pack's order, for a correction at the accept door to choose from; null where no pack is served or the pack has no such axis, when a client offers no correction."
       parameters:
         - {name: model, in: query, required: true, schema: {type: string}}
         - {name: axis, in: query, required: true, schema: {type: string}}
@@ -977,13 +977,13 @@ paths:
         - {name: page, in: query, required: false, schema: {type: integer}}
         - {name: size, in: query, required: false, schema: {type: integer}}
       responses:
-        "200": {description: "{model, label, axis, value, min, max, threshold, thresholds, range: {low, high}, values: [{value, count}], bands: [{from, to, count}], total, page, pages, size, asked, withheld_sealed, scans: [{stack, item, proposed, probability, run, now, decided, subject, session, day, series_description, name, bids, axes, picture}], pictures: {shown, why}}"}
+        "200": {description: "{model, label, axis, value, min, max, threshold, thresholds, range: {low, high}, values: [{value, count}], bands: [{from, to, count}], legal: [value] | null, total, page, pages, size, asked, withheld_sealed, scans: [{stack, item, proposed, probability, run, now, decided, subject, session, day, series_description, name, bids, axes, picture}], pictures: {shown, why}}"}
         "400": {description: "No model or axis, a probability not between 0 and 1, min at or above max, or a page or size that is not a number from 1"}
         "404": {description: No registered model answers to the reference}
   /api/review/proposals/accept:
     post:
       summary: Accept what one model proposed on the scans seen but the ones set apart, one decision a scan in the caller's name with the model's probability kept beside it, then the re-sort queued as a job (UX round 5; review:work; nils review proposals-accept)
-      description: "Added in place, additively, on 2026-11-08. The body: `model`, `axis`, `value` (the value proposed, which the accept writes), `min` and `max` (the band the page was read in), `seen` (the scans the page showed, as ids), `except` (the scans set apart, a subset of seen, not written: they stay proposals) and `why` (a word kept with each decision). For each scan seen and not set apart, one decision at the stack's scope, in force, by the caller as the verified actor, whose words name the model, its value, its probability and its run (`accepted bp-head@1's neck at 0.731 (run 41)`), written through the review spine in one transaction; the item whose last member is decided closes as accepted. A scan a person decided meanwhile keeps that decision (`kept_decided`), and a stack of a sample sealed now takes none (`left_out_sealed`). The re-sort of the decided scans is queued as the job a commit queues (`nils review resort --decisions IDS`, kind resort, the decisions written in its arguments), run by the engine's worker, so the door answers at once: `resort` {job, state: queued, stacks, unreached, words}, or state done with no job where nothing was decided; the job's progress and end are read through GET /api/jobs/{id}. Refused with 409 where a scan seen no longer waits as the page showed it (decided meanwhile, another value proposed since, or out of the band): the page is read again."
+      description: "Added in place, additively, on 2026-11-08. The body: `model`, `axis`, `value` (the value proposed, which the accept writes), `min` and `max` (the band the page was read in), `seen` (the scans the page showed, as ids), `except` (the scans set apart, a subset of seen, not written: they stay proposals) and `why` (a word kept with each decision). For each scan seen and not set apart, one decision at the stack's scope, in force, by the caller as the verified actor, whose words name the model, its value, its probability and its run (`accepted bp-head@1's neck at 0.731 (run 41)`), written through the review spine in one transaction; the item whose last member is decided closes as accepted. A scan a person decided meanwhile keeps that decision (`kept_decided`), and a stack of a sample sealed now takes none (`left_out_sealed`). The re-sort of the decided scans is queued as the job a commit queues (`nils review resort --decisions IDS`, kind resort, the decisions written in its arguments), run by the engine's worker, so the door answers at once: `resort` {job, state: queued, stacks, unreached, words}, or state done with no job where nothing was decided; the job's progress and end are read through GET /api/jobs/{id}. Refused with 409 where a scan seen no longer waits as the page showed it (decided meanwhile, another value proposed since, or out of the band): the page is read again. Added in place, additively, on 2026-11-09 (UX round 6): `corrections` [{stack, value}], scans among `seen` that take the person's value in place of the model's; they are not in `except`. Each is written in the same transaction, in the same shape as the accepted ones (one decision at the stack's scope, in force, by the caller), with the person's value as the decision's value and the model's value, probability and run kept in its words, which mark the correction (`corrected bp-head@1's spine at 0.600 (run 41) to brain`); the value may be given as the axis stores it, by its name or by its label, and is written as stored. A correction whose value the axis does not take is refused with 400 naming it (`torso is not a value of body_part`); one of a scan not in `seen`, one of a scan also in `except`, and one scan corrected twice to two values are 400; corrections given where no pack is served are 409. A corrected scan a person decided meanwhile keeps that decision and counts under `kept_decided`, as before. The answer's `decided` counts the decisions written as the model's value and `corrected` those written as the person's; `decisions` lists every decision written with its `value` and `corrected`, and `corrections` [{stack, decision, value}] the corrected ones alone; the re-sort covers both."
       requestBody:
         required: true
         content:
@@ -999,13 +999,55 @@ paths:
                 max: {type: number}
                 seen: {type: array, items: {type: integer}}
                 except: {type: array, items: {type: integer}}
+                corrections:
+                  type: array
+                  items:
+                    type: object
+                    required: [stack, value]
+                    properties:
+                      stack: {type: integer}
+                      value: {type: string}
                 why: {type: string}
       responses:
-        "200": {description: "{model, label, axis, value, decided, decisions: [{stack, decision}], closed, left_in_items, kept_decided, left_out_sealed, set_apart, resort: {job, state, stacks}}"}
-        "400": {description: "No model, axis, value or seen, a probability not between 0 and 1, or a scan set apart the page did not show"}
+        "200": {description: "{model, label, axis, value, decided, corrected, decisions: [{stack, decision, value, corrected}], corrections: [{stack, decision, value}], closed, left_in_items, kept_decided, left_out_sealed, set_apart, resort: {job, state, stacks}}"}
+        "400": {description: "No model, axis, value or seen, a probability not between 0 and 1, a scan set apart the page did not show, or a correction of a scan the page did not show, of a scan set apart, of a scan twice, or to a value the axis does not take (named)"}
         "403": {description: "A body that names an author other than the verified actor"}
         "404": {description: No registered model answers to the reference}
-        "409": {description: "A scan seen that no longer waits as the page showed it, or a decision of a higher rank on it"}
+        "409": {description: "A scan seen that no longer waits as the page showed it, a decision of a higher rank on it, or corrections where no pack is served"}
+  /api/review/proposals/accept-band:
+    post:
+      summary: Accept every scan a band of one model's proposals holds, for one value, without a look at each picture, as a job the page follows (UX round 6; review:work; nils review proposals-accept-band)
+      description: "Added in place, additively, on 2026-11-10 (UX round 6). The body: `model`, `axis`, `value` (required: a band is accepted one value at a time, never across values), `min` and `max` (the band as the page shows it, the scans door's words: `min` inclusive, `max` exclusive, either or both left out), `count` (required: the number of scans the page said the band holds for the value, the guard that replaces the page accept's `seen`), `except` (ids of scans the band holds that stay proposals), `corrections` ([{stack, value}], scans the band holds that take the person's value in place of the model's, held to the served pack as the page accept holds them, not in `except`) and `why` (a word kept with each decision). The door checks what the page accept checks, holds `count` against the band now, and queues the accept as a job under the caller, the way a commit's re-sort is queued (`nils review proposals-accept-band ... --who <caller>`, kind accept-band, run by the main lane's worker, writing in the caller's name as a person); it answers at once with 202 {job, stacks (the band's scans less those set apart, what the job writes), model, label, axis, value, count, set_apart, corrections, words}. The job writes one decision per scan at the stack's scope, in force, in the caller's name, with the model's value, probability and run in its words (`accepted bp-head@1's neck at 0.812 (run 41)`; a corrected one `corrected bp-head@1's neck at 0.812 (run 41) to brain`), through the review spine in chunks of 500, each chunk its own transaction, with its progress on the row as `{done, of, what: accepted}` read through GET /api/jobs/{id}; a cancel asked through POST /api/jobs/{id}/cancel is honoured between chunks. A scan a person decided meanwhile keeps that decision (`kept_decided`); a stack of a sample sealed now takes none (`left_out_sealed`); a scan whose item no longer waits on it is not written. When the chunks are through (or the job stopped) the re-sort of what it wrote is queued as the job a commit queues (`nils review resort --decisions IDS`, the ids as runs `first-last`), and the job's result, read in GET /api/jobs/{id} under `result`, is {model, label, axis, value, state (done, cancelled or failed), stacks, done, decided, corrected, kept_decided, left_out_sealed, excepted, closed: [item ids], resort: {job, state, stacks, unreached, words}, words}. A chunk that fails ends the job failed with why; what was written stands, each decision right on its own, and the next band read shows what is left. Refused with 400 where the band holds no scan of the value now, where a scan set apart or corrected is one the band does not hold (named), or where a correction's value is not one the axis takes; with 403 where the caller is not a person (an agent or a model answers one scan at a time) or the body names another author; with 409 where `count` is not the band's count now (`bp-head@1 proposes neck on 41,208 scans in this band now, not 41,212: read the page again`: the registry moved, by a decision, a campaign or another run, and the page is read again) or where corrections are given and no pack is served."
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [model, axis, value, count]
+              properties:
+                model: {type: string}
+                axis: {type: string}
+                value: {type: string}
+                min: {type: number}
+                max: {type: number}
+                count: {type: integer}
+                except: {type: array, items: {type: integer}}
+                corrections:
+                  type: array
+                  items:
+                    type: object
+                    required: [stack, value]
+                    properties:
+                      stack: {type: integer}
+                      value: {type: string}
+                why: {type: string}
+      responses:
+        "202": {description: "{job, stacks, model, label, axis, value, count, set_apart, corrections, words}; the job's progress is {done, of, what: accepted} and its result {model, label, axis, value, state, stacks, done, decided, corrected, kept_decided, left_out_sealed, excepted, closed, resort: {job, state, stacks, unreached, words}, words}"}
+        "400": {description: "No model, axis, value or count, a probability not between 0 and 1, min at or above max, a band that holds no scan of the value, a scan set apart or corrected that the band does not hold, or a correction's value the axis does not take"}
+        "403": {description: "A caller that is not a person, or a body that names an author other than the verified actor"}
+        "404": {description: No registered model answers to the reference}
+        "409": {description: "count is not the band's count now (the page is read again), or corrections where no pack is served"}
   /api/origins:
     get:
       summary: Where each axis label of one scan or of one visit's scans came from (UX round 2; data:see or review:see; nils origins)

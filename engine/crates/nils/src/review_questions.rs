@@ -890,7 +890,7 @@ fn vocabulary(pack: Option<&nils_pack::Pack>, axis: &str) -> Vec<Value> {
 /// The form an axis stores a value in, from its stored form, its name or
 /// its label; none for a value the axis does not have. A multi-valued
 /// axis takes several, joined by commas.
-fn stored_value(pack: &nils_pack::Pack, axis: &str, given: &str) -> Option<String> {
+pub(crate) fn stored_value(pack: &nils_pack::Pack, axis: &str, given: &str) -> Option<String> {
     let a = pack.axes.iter().find(|a| a.name == axis)?;
     let one = |w: &str| -> Option<String> {
         let w = w.trim();

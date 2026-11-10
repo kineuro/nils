@@ -816,6 +816,9 @@ pub fn kind_of(argv: &[String]) -> &str {
         // UX round 5: the re-sort a commit queues is a kind of its own, so
         // that it never holds off the sorts it runs
         (Some("review"), Some("resort")) => RESORT,
+        // UX round 6: a band of a model's proposals accepted as a job is a
+        // kind of its own, beside the re-sort it queues at its end
+        (Some("review"), Some("proposals-accept-band")) => ACCEPT_BAND,
         (Some(verb), _) => verb,
         (None, _) => "",
     }
@@ -956,6 +959,11 @@ pub const PIPELINE_WORKER: &str = "pipeline-worker";
 /// The kind of the job a commit queues to sort the scans its decisions
 /// reach again (`nils review resort`, UX round 5): run by the main lane.
 pub const RESORT: &str = "resort";
+
+/// The kind of the job that accepts a whole band of a model's proposals
+/// (`nils review proposals-accept-band`, UX round 6): run by the main lane,
+/// writing the decisions in chunks and queuing the re-sort at its end.
+pub const ACCEPT_BAND: &str = "accept-band";
 
 /// The kind of a `workflow run` job (Wave 7b A7): run by the pipelines
 /// lane, counted there, and not a pipeline job, so the steps' own claims

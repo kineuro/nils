@@ -8,7 +8,9 @@
 //! probability beside it, closes the item whose scans are all decided,
 //! leaves the scans set apart as proposals, never overwrites a person's
 //! decision, and queues the re-sort as a job the engine's worker runs; a
-//! sealed sample's scans withheld; and the keyboard saying the same.
+//! sealed sample's scans withheld; and the keyboard saying the same. UX
+//! round 6: the page says the values the axis takes, and an accept corrects
+//! the few scans the person gives another value to, in the same move.
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
@@ -67,7 +69,7 @@ fn ok(home: &TempDir, args: &[&str], stdin: Option<&str>) -> String {
 }
 
 /// A registry of six stacks of three people, classified.
-fn registry(dsn: Option<&str>) -> TempDir {
+fn registry(dsn: Option<&str>, schema: &str) -> TempDir {
     let home = TempDir::new("pgrid-home");
     let dir = TempDir::new("pgrid-src");
     for (patient, study, sop, description) in [
@@ -102,7 +104,7 @@ fn registry(dsn: Option<&str>) -> TempDir {
                     "--dsn",
                     dsn,
                     "--schema",
-                    SCHEMA,
+                    schema,
                     "--key",
                     "k",
                 ],
@@ -228,11 +230,11 @@ impl Server {
     }
 }
 
-fn drop_schema(dsn: &str) {
-    let mut store = nils_registry::Store::connect_postgres(dsn, SCHEMA).expect("connect");
+fn drop_schema(dsn: &str, schema: &str) {
+    let mut store = nils_registry::Store::connect_postgres(dsn, schema).expect("connect");
     store
         .batch(&format!(
-            "DROP SCHEMA IF EXISTS {SCHEMA} CASCADE; DROP SCHEMA IF EXISTS {SCHEMA}_linkage CASCADE"
+            "DROP SCHEMA IF EXISTS {schema} CASCADE; DROP SCHEMA IF EXISTS {schema}_linkage CASCADE"
         ))
         .expect("drop");
 }
@@ -255,6 +257,59 @@ fn stacks_by_description(home: &TempDir) -> Vec<i64> {
         .collect()
 }
 
+/// A registered, admitted body-part model `bp-head@1` with threshold 0.9,
+/// and one run (41) that proposed the given value and probability on each
+/// stack. Answers the model's id.
+fn model_proposing(home: &TempDir, given: &[(i64, &str, f64)]) -> i64 {
+    let mut reg = nils_registry::home::Home::new(home.path()).open().unwrap();
+    let enc = nils_registry::embedding::register_encoder(
+        &mut reg,
+        &nils_registry::embedding::Encoder {
+            name: "biomedclip",
+            version: "9f2c1e",
+            weights_digest: &format!("sha256:{}", "b".repeat(64)),
+            image_digest: None,
+        },
+        "runner@lab",
+    )
+    .unwrap();
+    let card = json!({"name": "bp-head", "version": "1", "kind": "head",
+        "digest": format!("sha256:{}", "1".repeat(64)), "task": "axis:body_part",
+        "encoder": {"digest": enc.digest}, "threshold": 0.9});
+    let m = nils_registry::model::register(&mut reg, &card, "anna@lab").unwrap();
+    let passed =
+        json!({"suite": "heldout", "passed": true, "checks": [{"name": "ece", "passed": true}]});
+    let m = nils_registry::model::admit(&mut reg, m.id, &passed, "anna@lab").unwrap();
+    let proposals: Vec<nils_registry::proposals::Proposal> = given
+        .iter()
+        .map(|(stack, value, p)| nils_registry::proposals::Proposal {
+            stack_id: *stack,
+            axis: "body_part".into(),
+            value: (*value).into(),
+            probabilities: [(value.to_string(), *p), ("other".to_string(), 1.0 - p)]
+                .into_iter()
+                .collect(),
+            model_id: Some(m.id),
+            model_digest: None,
+            note: None,
+        })
+        .collect();
+    nils_registry::proposals::ingest(
+        &mut reg,
+        &nils_registry::proposals::Run {
+            id: 41,
+            job_id: None,
+            principal: "runner@lab",
+            stacks: None,
+            models: None,
+        },
+        &proposals,
+        None,
+    )
+    .unwrap();
+    m.id
+}
+
 #[test]
 fn a_model_s_proposals_are_read_as_a_grid_and_accepted_in_one_move() {
     grid(None);
@@ -269,13 +324,13 @@ fn a_model_s_proposals_are_read_as_a_grid_and_accepted_in_one_move_on_postgres_t
         eprintln!("NILS_TEST_POSTGRES_DSN is not set; the Postgres half is skipped");
         return;
     };
-    drop_schema(&dsn);
+    drop_schema(&dsn, SCHEMA);
     grid(Some(&dsn));
-    drop_schema(&dsn);
+    drop_schema(&dsn, SCHEMA);
 }
 
 fn grid(dsn: Option<&str>) {
-    let home = registry(dsn);
+    let home = registry(dsn, SCHEMA);
     let ids = stacks_by_description(&home);
     assert_eq!(ids.len(), 6, "{ids:?}");
     let [s1, s2, s3, s4, s5, s6] = ids[..] else {
@@ -283,61 +338,22 @@ fn grid(dsn: Option<&str>) {
     };
     // a body-part model: two sure of brain, three unsure (two neck, one
     // spine), one sealed before any of it is read
-    let model_id = {
+    let model_id = model_proposing(
+        &home,
+        &[
+            (s1, "brain", 0.97),
+            (s2, "brain", 0.95),
+            (s3, "spine", 0.6),
+            (s4, "neck", 0.5),
+            (s5, "neck", 0.7),
+            (s6, "neck", 0.65),
+        ],
+    );
+    // record 48: the sixth is of a sample sealed after the run proposed on it
+    {
         let mut reg = nils_registry::home::Home::new(home.path()).open().unwrap();
-        let enc = nils_registry::embedding::register_encoder(
-            &mut reg,
-            &nils_registry::embedding::Encoder {
-                name: "biomedclip",
-                version: "9f2c1e",
-                weights_digest: &format!("sha256:{}", "b".repeat(64)),
-                image_digest: None,
-            },
-            "runner@lab",
-        )
-        .unwrap();
-        let card = json!({"name": "bp-head", "version": "1", "kind": "head",
-            "digest": format!("sha256:{}", "1".repeat(64)), "task": "axis:body_part",
-            "encoder": {"digest": enc.digest}, "threshold": 0.9});
-        let m = nils_registry::model::register(&mut reg, &card, "anna@lab").unwrap();
-        let passed = json!({"suite": "heldout", "passed": true, "checks": [{"name": "ece", "passed": true}]});
-        let m = nils_registry::model::admit(&mut reg, m.id, &passed, "anna@lab").unwrap();
-        let p = |stack: i64, value: &str, p: f64| nils_registry::proposals::Proposal {
-            stack_id: stack,
-            axis: "body_part".into(),
-            value: value.into(),
-            probabilities: [(value.to_string(), p), ("other".to_string(), 1.0 - p)]
-                .into_iter()
-                .collect(),
-            model_id: Some(m.id),
-            model_digest: None,
-            note: None,
-        };
-        let given = [
-            p(s1, "brain", 0.97),
-            p(s2, "brain", 0.95),
-            p(s3, "spine", 0.6),
-            p(s4, "neck", 0.5),
-            p(s5, "neck", 0.7),
-            p(s6, "neck", 0.65),
-        ];
-        nils_registry::proposals::ingest(
-            &mut reg,
-            &nils_registry::proposals::Run {
-                id: 41,
-                job_id: None,
-                principal: "runner@lab",
-                stacks: None,
-                models: None,
-            },
-            &given,
-            None,
-        )
-        .unwrap();
-        // record 48: the sixth is of a sample sealed after the run proposed on it
         nils_registry::labels::seal(&mut reg, "cert-2", None, &[s6], "anna@lab").unwrap();
-        m.id
-    };
+    }
     let server = Server::start(&home);
     let at = |q: &str| format!("/api/review/proposals/scans?model={model_id}&axis=body_part{q}");
 
@@ -688,4 +704,777 @@ fn grid(dsn: Option<&str>) {
     assert!(out.contains("re-sort: 2 of 2 scan(s) re-sorted"), "{out}");
     let (good, _, err) = run(&home, &["review", "resort"], None);
     assert!(!good && err.contains("--decisions"), "{err}");
+}
+
+const SCHEMA_CORRECT: &str = "nils_proposal_grid_correct";
+
+#[test]
+fn the_few_scans_set_apart_take_the_person_s_value_in_the_same_accept() {
+    corrected(None);
+}
+
+#[test]
+fn the_few_scans_set_apart_take_the_person_s_value_in_the_same_accept_on_postgres_too() {
+    let Some(dsn) = std::env::var("NILS_TEST_POSTGRES_DSN")
+        .ok()
+        .filter(|d| !d.is_empty())
+    else {
+        eprintln!("NILS_TEST_POSTGRES_DSN is not set; the Postgres half is skipped");
+        return;
+    };
+    drop_schema(&dsn, SCHEMA_CORRECT);
+    corrected(Some(&dsn));
+    drop_schema(&dsn, SCHEMA_CORRECT);
+}
+
+/// The decision's actor, author kind, words, value and whether in force.
+fn decision_row(home: &TempDir, decision: i64) -> (String, String, String, Option<String>, i64) {
+    let mut reg = nils_registry::home::Home::new(home.path()).open().unwrap();
+    let store = reg.store();
+    let d = store.dialect();
+    let sql = format!(
+        "SELECT actor, author_kind, why, value, CASE WHEN committed_at IS NULL THEN 0 ELSE 1 END FROM {} WHERE id = {}",
+        store.qualified("decision"),
+        d.param(1, nils_registry::schema::Type::Int)
+    );
+    let row = store
+        .query_opt(&sql, &[nils_registry::store::Param::Int(decision)])
+        .unwrap()
+        .expect("the decision");
+    (
+        row.text(0).unwrap().to_string(),
+        row.text(1).unwrap().to_string(),
+        row.opt_text(2).unwrap().unwrap_or("").to_string(),
+        row.opt_text(3).unwrap().map(str::to_string),
+        row.int(4).unwrap(),
+    )
+}
+
+/// UX round 6: a page of five spine proposals; the person corrects two to
+/// brain and neck and accepts the rest in one move.
+fn corrected(dsn: Option<&str>) {
+    let home = registry(dsn, SCHEMA_CORRECT);
+    let ids = stacks_by_description(&home);
+    let [s1, s2, s3, s4, s5, s6] = ids[..] else {
+        unreachable!()
+    };
+    // five unsure spine proposals and one sure brain (the commit's)
+    let model_id = model_proposing(
+        &home,
+        &[
+            (s1, "spine", 0.7),
+            (s2, "spine", 0.65),
+            (s3, "spine", 0.6),
+            (s4, "spine", 0.55),
+            (s5, "spine", 0.5),
+            (s6, "brain", 0.95),
+        ],
+    );
+    let server = Server::start(&home);
+    let at = |q: &str| format!("/api/review/proposals/scans?model={model_id}&axis=body_part{q}");
+
+    // ------------------------------------------------ the page says the axis's values
+    let page = server.ok("GET", &at("&value=spine"), None, CURATOR);
+    assert_eq!(page["total"], 5, "{page}");
+    let legal: Vec<&str> = page["legal"]
+        .as_array()
+        .expect("legal: the axis's values")
+        .iter()
+        .filter_map(Value::as_str)
+        .collect();
+    for v in ["brain", "brain-neck", "chest", "neck", "spine", "other"] {
+        assert!(legal.contains(&v), "{v} among {legal:?}");
+    }
+    // the value chips with their counts are still `values`
+    assert_eq!(
+        page["values"],
+        json!([{"value": "spine", "count": 5}]),
+        "{page}"
+    );
+    let body = |corrections: Value, except: Value| {
+        json!({"model": model_id.to_string(), "axis": "body_part", "value": "spine",
+               "seen": [s1, s2, s3, s4], "except": except, "corrections": corrections, "why": "seen"})
+    };
+
+    // ------------------------------------------------ refusals
+    // a value the axis does not take, named
+    let (status, doc) = server.call(
+        "POST",
+        "/api/review/proposals/accept",
+        Some(body(json!([{"stack": s1, "value": "torso"}]), json!([]))),
+        CURATOR,
+    );
+    assert_eq!(status, 400, "{doc}");
+    assert!(
+        doc["error"]
+            .as_str()
+            .unwrap_or("")
+            .contains("torso is not a value of body_part"),
+        "{doc}"
+    );
+    // a correction of a scan the page did not show
+    let (status, doc) = server.call(
+        "POST",
+        "/api/review/proposals/accept",
+        Some(body(json!([{"stack": s5, "value": "brain"}]), json!([]))),
+        CURATOR,
+    );
+    assert_eq!(status, 400, "{doc}");
+    assert!(
+        doc["error"]
+            .as_str()
+            .unwrap_or("")
+            .contains("corrected, but the page did not show it"),
+        "{doc}"
+    );
+    // a scan both set apart and corrected
+    let (status, doc) = server.call(
+        "POST",
+        "/api/review/proposals/accept",
+        Some(body(json!([{"stack": s1, "value": "brain"}]), json!([s1]))),
+        CURATOR,
+    );
+    assert_eq!(status, 400, "{doc}");
+    assert!(
+        doc["error"]
+            .as_str()
+            .unwrap_or("")
+            .contains("both set apart and corrected"),
+        "{doc}"
+    );
+    // a malformed correction
+    let (status, doc) = server.call(
+        "POST",
+        "/api/review/proposals/accept",
+        Some(body(json!([{"stack": s1}]), json!([]))),
+        CURATOR,
+    );
+    assert_eq!(status, 400, "{doc}");
+    // nothing was written by any of it
+    let page = server.ok("GET", &at("&value=spine"), None, CURATOR);
+    assert_eq!(page["total"], 5, "{page}");
+
+    // ------------------------------------------------ the accept
+    // a person decided s4 meanwhile, through another question
+    {
+        let mut reg = nils_registry::home::Home::new(home.path()).open().unwrap();
+        let store = reg.store();
+        let d = store.dialect();
+        let sql = format!(
+            "INSERT INTO {} (scope, ref, axis, value, actor, author_kind, decided_at, committed_at, committed_by) VALUES ('stack', {}, 'body_part', 'neck', 'bo@lab', 'person', {}, {}, 'bo@lab')",
+            store.qualified("decision"),
+            d.param(1, nils_registry::schema::Type::Text),
+            d.param(2, nils_registry::schema::Type::Timestamp),
+            d.param(3, nils_registry::schema::Type::Timestamp),
+        );
+        store
+            .execute(
+                &sql,
+                &[
+                    nils_registry::store::Param::from(s4.to_string()),
+                    nils_registry::store::Param::from("2026-11-09T12:00:00Z"),
+                    nils_registry::store::Param::from("2026-11-09T12:00:00Z"),
+                ],
+            )
+            .unwrap();
+    }
+    // s1 to brain, s2 to neck, s4 corrected too but kept as the person
+    // decided it; s3 accepted as spine
+    let done = server.ok(
+        "POST",
+        "/api/review/proposals/accept",
+        Some(body(
+            json!([{"stack": s1, "value": "brain"}, {"stack": s2, "value": "neck"}, {"stack": s4, "value": "chest"}]),
+            json!([]),
+        )),
+        CURATOR,
+    );
+    assert_eq!(done["decided"], 1, "{done}");
+    assert_eq!(done["corrected"], 2, "{done}");
+    assert_eq!(done["kept_decided"], 1, "{done}");
+    assert_eq!(done["set_apart"], 0, "{done}");
+    assert_eq!(done["decisions"].as_array().unwrap().len(), 3, "{done}");
+    assert_eq!(done["corrections"].as_array().unwrap().len(), 2, "{done}");
+    assert_eq!(done["resort"]["state"], "queued", "{done}");
+    assert_eq!(done["resort"]["stacks"], 3, "{done}");
+    let job = done["resort"]["job"].as_i64().expect("a job");
+    let by_stack = |stack: i64| -> Value {
+        done["decisions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|d| d["stack"] == stack)
+            .cloned()
+            .unwrap_or(Value::Null)
+    };
+    // the corrected ones carry the person's value, in the person's name, in
+    // force, with the model's value, probability and run kept in the words
+    // and the correction marked
+    let one = by_stack(s1);
+    assert_eq!(one["value"], "brain", "{one}");
+    assert_eq!(one["corrected"], true, "{one}");
+    let (actor, kind, why, value, in_force) =
+        decision_row(&home, one["decision"].as_i64().unwrap());
+    assert_eq!(actor, "cleo@lab");
+    assert_eq!(kind, "person");
+    assert_eq!(value.as_deref(), Some("brain"));
+    assert_eq!(in_force, 1, "in force");
+    assert!(
+        why.contains("corrected bp-head@1's spine at 0.700 (run 41) to brain: seen"),
+        "{why}"
+    );
+    let two = by_stack(s2);
+    let (_, _, why, value, _) = decision_row(&home, two["decision"].as_i64().unwrap());
+    assert_eq!(value.as_deref(), Some("neck"));
+    assert!(
+        why.contains("corrected bp-head@1's spine at 0.650 (run 41) to neck"),
+        "{why}"
+    );
+    // the rest take the model's value, as before
+    let three = by_stack(s3);
+    assert_eq!(three["value"], "spine", "{three}");
+    assert_eq!(three["corrected"], false, "{three}");
+    let (_, _, why, value, _) = decision_row(&home, three["decision"].as_i64().unwrap());
+    assert_eq!(value.as_deref(), Some("spine"));
+    assert!(
+        why.contains("accepted bp-head@1's spine at 0.600 (run 41): seen"),
+        "{why}"
+    );
+    // the one decided meanwhile keeps the person's decision
+    assert!(by_stack(s4).is_null(), "{done}");
+    // the re-sort runs, and the corrected scan then reads brain
+    let mut state = String::new();
+    for _ in 0..120 {
+        let j = server.ok("GET", &format!("/api/jobs/{job}"), None, CURATOR);
+        state = j["state"].as_str().unwrap_or("").to_string();
+        if ["done", "failed", "cancelled"].contains(&state.as_str()) {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(500));
+    }
+    assert_eq!(state, "done", "the re-sort job {job}");
+    let sorted = server.ok("GET", &format!("/api/origins?stack={s1}"), None, CURATOR);
+    let bp = sorted["stacks"][0]["axes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|a| a["axis"] == "body_part")
+        .cloned()
+        .unwrap_or(Value::Null);
+    assert_eq!(bp["values"], json!(["brain"]), "{sorted}");
+    assert_eq!(bp["decided"]["kind"], "person", "{sorted}");
+    // the page offers the one scan left (and the decided one still waits)
+    let page = server.ok("GET", &at("&value=spine"), None, CURATOR);
+    assert_eq!(page["total"], 2, "{page}");
+    drop(server);
+
+    // ------------------------------------------------ the keyboard
+    let out = ok(
+        &home,
+        &[
+            "review",
+            "proposals-accept",
+            "--model",
+            "bp-head@1",
+            "--axis",
+            "body_part",
+            "--value",
+            "spine",
+            "--seen",
+            &s5.to_string(),
+            "--correct",
+            &format!("{s5}=brain-neck"),
+            "--pack-dir",
+            packs().to_str().unwrap(),
+        ],
+        None,
+    );
+    assert!(
+        out.contains(
+            "accepted 0 scan(s) as spine of bp-head@1 on body_part, corrected 1 (1 brain-neck)"
+        ),
+        "{out}"
+    );
+    // its refusals: a malformed pair, and a value the axis does not take
+    let (good, _, err) = run(
+        &home,
+        &[
+            "review",
+            "proposals-accept",
+            "--model",
+            "bp-head@1",
+            "--axis",
+            "body_part",
+            "--value",
+            "spine",
+            "--seen",
+            &s4.to_string(),
+            "--correct",
+            "brain",
+        ],
+        None,
+    );
+    assert!(!good && err.contains("STACK=VALUE"), "{err}");
+    let (good, _, err) = run(
+        &home,
+        &[
+            "review",
+            "proposals-accept",
+            "--model",
+            "bp-head@1",
+            "--axis",
+            "body_part",
+            "--value",
+            "spine",
+            "--seen",
+            &s4.to_string(),
+            "--correct",
+            &format!("{s4}=torso"),
+            "--pack-dir",
+            packs().to_str().unwrap(),
+        ],
+        None,
+    );
+    assert!(
+        !good && err.contains("torso is not a value of body_part"),
+        "{err}"
+    );
+}
+
+const SCHEMA_BAND: &str = "nils_proposal_grid_band";
+
+#[test]
+fn a_whole_band_is_accepted_in_one_move_as_a_job() {
+    band(None);
+}
+
+#[test]
+fn a_whole_band_is_accepted_in_one_move_as_a_job_on_postgres_too() {
+    let Some(dsn) = std::env::var("NILS_TEST_POSTGRES_DSN")
+        .ok()
+        .filter(|d| !d.is_empty())
+    else {
+        eprintln!("NILS_TEST_POSTGRES_DSN is not set; the Postgres half is skipped");
+        return;
+    };
+    drop_schema(&dsn, SCHEMA_BAND);
+    band(Some(&dsn));
+    drop_schema(&dsn, SCHEMA_BAND);
+}
+
+/// The newest decision on the axis for a stack by `actor`: its author
+/// kind, words, value and whether in force.
+fn decision_by(
+    home: &TempDir,
+    stack: i64,
+    actor: &str,
+) -> Option<(String, String, Option<String>, i64)> {
+    let mut reg = nils_registry::home::Home::new(home.path()).open().unwrap();
+    let store = reg.store();
+    let d = store.dialect();
+    let sql = format!(
+        "SELECT author_kind, why, value, CASE WHEN committed_at IS NULL THEN 0 ELSE 1 END FROM {} \
+         WHERE scope = 'stack' AND axis = 'body_part' AND ref = {} AND actor = {} ORDER BY id DESC",
+        store.qualified("decision"),
+        d.param(1, nils_registry::schema::Type::Text),
+        d.param(2, nils_registry::schema::Type::Text),
+    );
+    let rows = store
+        .query(
+            &sql,
+            &[
+                nils_registry::store::Param::from(stack.to_string()),
+                nils_registry::store::Param::from(actor),
+            ],
+        )
+        .unwrap();
+    let row = rows.first()?;
+    Some((
+        row.text(0).unwrap().to_string(),
+        row.opt_text(1).unwrap().unwrap_or("").to_string(),
+        row.opt_text(2).unwrap().map(str::to_string),
+        row.int(3).unwrap(),
+    ))
+}
+
+/// A job read through the jobs door until it is over; its document.
+fn job_over(server: &Server, job: i64) -> Value {
+    let mut doc = Value::Null;
+    for _ in 0..240 {
+        doc = server.ok("GET", &format!("/api/jobs/{job}"), None, CURATOR);
+        let state = doc["state"].as_str().unwrap_or("");
+        if ["done", "failed", "cancelled"].contains(&state) {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(500));
+    }
+    doc
+}
+
+/// UX round 6, item 5: four neck proposals between 0.70 and 0.90, one
+/// spine below and one brain above the threshold; the band is accepted as
+/// a job with one scan set apart, one corrected and one a person decided
+/// meanwhile.
+fn band(dsn: Option<&str>) {
+    let home = registry(dsn, SCHEMA_BAND);
+    let ids = stacks_by_description(&home);
+    let [s1, s2, s3, s4, s5, s6] = ids[..] else {
+        unreachable!()
+    };
+    let model_id = model_proposing(
+        &home,
+        &[
+            (s1, "neck", 0.85),
+            (s2, "neck", 0.8),
+            (s3, "neck", 0.75),
+            (s4, "neck", 0.7),
+            (s5, "spine", 0.6),
+            (s6, "brain", 0.95),
+        ],
+    );
+    let server = Server::start(&home);
+    let at = |q: &str| format!("/api/review/proposals/scans?model={model_id}&axis=body_part{q}");
+    let door = "/api/review/proposals/accept-band";
+    let body = |value: &str, count: Value, except: Value, corrections: Value| {
+        json!({"model": model_id.to_string(), "axis": "body_part", "value": value,
+               "min": 0.7, "max": 0.9, "count": count, "except": except,
+               "corrections": corrections, "why": "band"})
+    };
+
+    // ------------------------------------------------ the door is listed
+    let caps = server.ok("GET", "/api/capabilities", None, CURATOR);
+    assert!(
+        caps.to_string()
+            .contains("POST /api/review/proposals/accept-band"),
+        "{caps}"
+    );
+    // the band as the page shows it: four neck
+    let page = server.ok("GET", &at("&value=neck&min=0.7&max=0.9"), None, CURATOR);
+    assert_eq!(page["total"], 4, "{page}");
+
+    // ------------------------------------------------ refusals
+    // a reader may not
+    let (status, _) = server.call(
+        "POST",
+        door,
+        Some(body("neck", json!(4), json!([]), json!([]))),
+        READER,
+    );
+    assert_eq!(status, 403);
+    // the registry moved: the count the page said is not the band's now
+    let (status, doc) = server.call(
+        "POST",
+        door,
+        Some(body("neck", json!(3), json!([]), json!([]))),
+        CURATOR,
+    );
+    assert_eq!(status, 409, "{doc}");
+    let words = doc["error"].as_str().unwrap_or("");
+    assert!(
+        words.contains("bp-head@1 proposes neck on 4 scans in this band now, not 3")
+            && words.contains("read the page again"),
+        "{doc}"
+    );
+    // no count at all
+    let (status, doc) = server.call(
+        "POST",
+        door,
+        Some(json!({"model": model_id.to_string(), "axis": "body_part", "value": "neck"})),
+        CURATOR,
+    );
+    assert_eq!(status, 400, "{doc}");
+    assert!(
+        doc["error"].as_str().unwrap_or("").contains("count"),
+        "{doc}"
+    );
+    // a band is accepted per value
+    let (status, doc) = server.call(
+        "POST",
+        door,
+        Some(json!({"model": model_id.to_string(), "axis": "body_part", "count": 4})),
+        CURATOR,
+    );
+    assert_eq!(status, 400, "{doc}");
+    assert!(
+        doc["error"].as_str().unwrap_or("").contains("value"),
+        "{doc}"
+    );
+    // a scan set apart that the band does not hold, named
+    let (status, doc) = server.call(
+        "POST",
+        door,
+        Some(body("neck", json!(4), json!([s5]), json!([]))),
+        CURATOR,
+    );
+    assert_eq!(status, 400, "{doc}");
+    assert!(
+        doc["error"].as_str().unwrap_or("").contains(&format!(
+            "scan {s5} is set apart, but the band does not hold it"
+        )),
+        "{doc}"
+    );
+    // a correction of a scan the band does not hold
+    let (status, doc) = server.call(
+        "POST",
+        door,
+        Some(body(
+            "neck",
+            json!(4),
+            json!([]),
+            json!([{"stack": s5, "value": "brain"}]),
+        )),
+        CURATOR,
+    );
+    assert_eq!(status, 400, "{doc}");
+    assert!(
+        doc["error"]
+            .as_str()
+            .unwrap_or("")
+            .contains("corrected, but the band does not hold it"),
+        "{doc}"
+    );
+    // a correction to a value the axis does not take
+    let (status, doc) = server.call(
+        "POST",
+        door,
+        Some(body(
+            "neck",
+            json!(4),
+            json!([]),
+            json!([{"stack": s1, "value": "torso"}]),
+        )),
+        CURATOR,
+    );
+    assert_eq!(status, 400, "{doc}");
+    assert!(
+        doc["error"]
+            .as_str()
+            .unwrap_or("")
+            .contains("torso is not a value of body_part"),
+        "{doc}"
+    );
+    // an empty band
+    let (status, doc) = server.call(
+        "POST",
+        door,
+        Some(json!({"model": model_id.to_string(), "axis": "body_part", "value": "spine", "min": 0.9, "count": 0})),
+        CURATOR,
+    );
+    assert_eq!(status, 400, "{doc}");
+    assert!(
+        doc["error"]
+            .as_str()
+            .unwrap_or("")
+            .contains("spine on no scan at 0.90 or above"),
+        "{doc}"
+    );
+    // nothing was queued or written by any of it
+    let jobs = server.ok("GET", "/api/jobs", None, CURATOR);
+    assert!(
+        !jobs.to_string().contains("accept-band"),
+        "no band job yet: {jobs}"
+    );
+    let page = server.ok("GET", &at("&value=neck&min=0.7&max=0.9"), None, CURATOR);
+    assert_eq!(page["total"], 4, "{page}");
+
+    // ------------------------------------------------ the band accepted
+    // a person decided s4 meanwhile, through another question: the band's
+    // count is unchanged (the member still waits), and the accept keeps
+    // that decision
+    {
+        let mut reg = nils_registry::home::Home::new(home.path()).open().unwrap();
+        let store = reg.store();
+        let d = store.dialect();
+        let sql = format!(
+            "INSERT INTO {} (scope, ref, axis, value, actor, author_kind, decided_at, committed_at, committed_by) VALUES ('stack', {}, 'body_part', 'chest', 'bo@lab', 'person', {}, {}, 'bo@lab')",
+            store.qualified("decision"),
+            d.param(1, nils_registry::schema::Type::Text),
+            d.param(2, nils_registry::schema::Type::Timestamp),
+            d.param(3, nils_registry::schema::Type::Timestamp),
+        );
+        store
+            .execute(
+                &sql,
+                &[
+                    nils_registry::store::Param::from(s4.to_string()),
+                    nils_registry::store::Param::from("2026-11-10T09:00:00Z"),
+                    nils_registry::store::Param::from("2026-11-10T09:00:00Z"),
+                ],
+            )
+            .unwrap();
+    }
+    // s3 set apart, s2 corrected to brain, the rest accepted as neck
+    let (status, queued) = server.call(
+        "POST",
+        door,
+        Some(body(
+            "neck",
+            json!("4"),
+            json!([s3]),
+            json!([{"stack": s2, "value": "brain"}]),
+        )),
+        CURATOR,
+    );
+    assert_eq!(status, 202, "{queued}");
+    let job = queued["job"].as_i64().expect("a job");
+    assert_eq!(queued["stacks"], 3, "{queued}");
+    assert_eq!(queued["set_apart"], 1, "{queued}");
+    assert_eq!(queued["corrections"], 1, "{queued}");
+    assert_eq!(queued["label"], "bp-head@1", "{queued}");
+    assert_eq!(queued["value"], "neck", "{queued}");
+    assert!(
+        queued["words"]
+            .as_str()
+            .unwrap_or("")
+            .contains(&format!("queued as job {job}")),
+        "{queued}"
+    );
+    // the worker runs it: its row, its progress and its result
+    let j = job_over(&server, job);
+    assert_eq!(j["state"], "done", "{j}");
+    assert_eq!(j["kind"], "accept-band", "{j}");
+    assert_eq!(j["args"]["principal"], "cleo@lab", "{j}");
+    assert_eq!(j["progress"]["done"], 3, "{j}");
+    assert_eq!(j["progress"]["of"], 3, "{j}");
+    assert_eq!(j["progress"]["what"], "accepted", "{j}");
+    let result = &j["result"];
+    assert_eq!(result["state"], "done", "{result}");
+    assert_eq!(result["stacks"], 3, "{result}");
+    assert_eq!(result["done"], 3, "{result}");
+    assert_eq!(result["decided"], 1, "{result}");
+    assert_eq!(result["corrected"], 1, "{result}");
+    assert_eq!(result["kept_decided"], 1, "{result}");
+    assert_eq!(result["left_out_sealed"], 0, "{result}");
+    assert_eq!(result["excepted"], 1, "{result}");
+    assert_eq!(result["closed"].as_array().unwrap().len(), 0, "{result}");
+    assert_eq!(result["resort"]["state"], "queued", "{result}");
+    assert_eq!(result["resort"]["stacks"], 2, "{result}");
+    let resort = result["resort"]["job"].as_i64().expect("the re-sort job");
+    assert!(
+        result["words"]
+            .as_str()
+            .unwrap_or("")
+            .contains("accepted 1 scan(s) as neck of bp-head@1 on body_part, corrected 1 (1 brain), 1 set apart, 1 kept a person's decision"),
+        "{result}"
+    );
+    // the decisions are the person's, in force, with the model's value,
+    // probability and run in their words
+    let (kind, why, value, in_force) = decision_by(&home, s1, "cleo@lab").expect("s1's decision");
+    assert_eq!(kind, "person");
+    assert_eq!(value.as_deref(), Some("neck"));
+    assert_eq!(in_force, 1);
+    assert!(
+        why.contains("accepted bp-head@1's neck at 0.850 (run 41): band"),
+        "{why}"
+    );
+    let (_, why, value, _) = decision_by(&home, s2, "cleo@lab").expect("s2's decision");
+    assert_eq!(value.as_deref(), Some("brain"));
+    assert!(
+        why.contains("corrected bp-head@1's neck at 0.800 (run 41) to brain: band"),
+        "{why}"
+    );
+    // the one set apart and the one a person decided took nothing
+    assert!(decision_by(&home, s3, "cleo@lab").is_none());
+    assert!(decision_by(&home, s4, "cleo@lab").is_none());
+    // nothing outside the band's value was touched
+    assert!(decision_by(&home, s5, "cleo@lab").is_none());
+    assert!(decision_by(&home, s6, "cleo@lab").is_none());
+    // the re-sort runs after it, and the corrected scan then reads brain
+    let r = job_over(&server, resort);
+    assert_eq!(r["state"], "done", "{r}");
+    let sorted = server.ok("GET", &format!("/api/origins?stack={s2}"), None, CURATOR);
+    let bp = sorted["stacks"][0]["axes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|a| a["axis"] == "body_part")
+        .cloned()
+        .unwrap_or(Value::Null);
+    assert_eq!(bp["values"], json!(["brain"]), "{sorted}");
+    // the band holds what is left: the scan set apart and the one a person
+    // decided, which still waits in its item
+    let page = server.ok("GET", &at("&value=neck&min=0.7&max=0.9"), None, CURATOR);
+    assert_eq!(page["total"], 2, "{page}");
+    let left: Vec<i64> = page["scans"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|s| s["stack"].as_i64().unwrap())
+        .collect();
+    assert_eq!(left, vec![s3, s4], "{page}");
+    let spine = server.ok("GET", &at("&value=spine"), None, CURATOR);
+    assert_eq!(spine["total"], 1, "{spine}");
+    drop(server);
+
+    // ------------------------------------------------ the keyboard
+    // the same guard
+    let (good, _, err) = run(
+        &home,
+        &[
+            "review",
+            "proposals-accept-band",
+            "--model",
+            "bp-head@1",
+            "--axis",
+            "body_part",
+            "--value",
+            "spine",
+            "--count",
+            "5",
+        ],
+        None,
+    );
+    assert!(
+        !good && err.contains("proposes spine on 1 scans in this band now, not 5"),
+        "{err}"
+    );
+    // the work, on a row of its own; no worker runs here, so the re-sort
+    // it queued waits and the command says so
+    let out = ok(
+        &home,
+        &[
+            "review",
+            "proposals-accept-band",
+            "--model",
+            "bp-head@1",
+            "--axis",
+            "body_part",
+            "--value",
+            "spine",
+            "--count",
+            "1",
+            "--pack-dir",
+            packs().to_str().unwrap(),
+            "--json",
+        ],
+        None,
+    );
+    let doc: Value = serde_json::from_str(out.lines().next().unwrap_or("").trim()).unwrap();
+    assert_eq!(doc["state"], "done", "{doc}");
+    assert_eq!(doc["decided"], 1, "{doc}");
+    assert_eq!(doc["closed"].as_array().unwrap().len(), 1, "{doc}");
+    assert_eq!(doc["resort"]["state"], "queued", "{doc}");
+    assert!(
+        out.contains("waits for a worker"),
+        "the re-sort is left to a worker: {out}"
+    );
+    {
+        let mut reg = nils_registry::home::Home::new(home.path()).open().unwrap();
+        let store = reg.store();
+        let sql = format!(
+            "SELECT kind, state, name FROM {} WHERE kind = 'accept-band' ORDER BY id DESC",
+            store.qualified("job"),
+        );
+        let rows = store.query(&sql, &[]).unwrap();
+        assert_eq!(rows.len(), 2, "the door's and the keyboard's");
+        assert_eq!(rows[0].text(1).unwrap(), "done");
+        assert!(
+            rows[0]
+                .text(2)
+                .unwrap()
+                .starts_with("accept 1 spine of bp-head@1 on body_part for "),
+            "{}",
+            rows[0].text(2).unwrap()
+        );
+    }
 }
