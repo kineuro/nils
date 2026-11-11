@@ -8662,6 +8662,7 @@ fn custody_doc(home: &Home, registry: &mut Registry) -> Result<serde_json::Value
                 "quasi-identifying: birth dates, sex, study dates and times, station and institution names, study descriptions and comments, source paths",
                 "technical: everything else the catalogue declares, the series description and the protocol name among them",
                 "secret, sealed: a handover's password a person typed, under the registry's key and never in clear; a password NILS made for a handover is not kept, since it is derived again (record 55, ruling 35 (c))",
+                "an ID in clear, only where a release names its subjects by an ID type: the name each subject was written under, the ID's value cleaned to letters and digits, kept with the release beside the type it came from so that what comes back under the name is linked to its subject; the same name stands in the released tree and in a handover's rows",
             ],
             "counts": { "subjects": subjects, "studies": studies, "series": series, "instances": instances, "source_files": source_files },
             "kept": "until deleted; nothing expires on its own, and a run marks files that vanished as gone instead of deleting their rows; a stack or series that holds no instance, because every file of it was a duplicate, is removed",
