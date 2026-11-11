@@ -2212,6 +2212,87 @@ mod tests {
         .unwrap()
     }
 
+    /// 2026-11-11: a type says how many of its identifiers keep a value,
+    /// beside how many there are. A value shaped like a personnummer is
+    /// filed under any type as its lookup alone, so it counts as an
+    /// identifier and a subject and never as kept; and `subject-code` says
+    /// both of its uses.
+    #[test]
+    fn a_type_says_how_many_of_its_identifiers_keep_a_value() {
+        let dir = TempDir::new("linkage-doors");
+        let (home, mut registry) = registry(&dir);
+        let anna = caller("data:work");
+        let made = call(
+            &home,
+            &mut registry,
+            &anna,
+            "POST",
+            "/api/linkage/types",
+            r#"{"name": "study-id"}"#,
+        );
+        assert_eq!(made.status, 201, "{}", made.body);
+        assert_eq!(made.body["kept"], 0, "{}", made.body);
+        let keys = Subkeys::derive(b"nils-fixture-key");
+        let mut store = registry.open_linkage().unwrap();
+        let rows: Vec<linkage::ImportRow> = [
+            ("P1", "kept-0001"),
+            ("198501012382", "kept-0002"),
+            ("850101-2382", "kept-0003"),
+        ]
+        .iter()
+        .enumerate()
+        .map(|(i, (identifier, code))| linkage::ImportRow {
+            line: i + 2,
+            identifier: identifier.to_string(),
+            code: code.to_string(),
+        })
+        .collect();
+        linkage::import(registry.store(), &mut store, &keys, "patient-id", &rows).unwrap();
+        drop(store);
+        let r = call(&home, &mut registry, &anna, "GET", "/api/linkage/types", "");
+        assert_eq!(r.status, 200, "{}", r.body);
+        let of = |name: &str| {
+            r.body
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|t| t["name"] == name)
+                .cloned()
+                .unwrap()
+        };
+        let patient = of("patient-id");
+        assert_eq!(patient["identifiers"], 3, "{patient}");
+        assert_eq!(patient["subjects"], 3, "{patient}");
+        assert_eq!(patient["kept"], 1, "{patient}");
+        let study = of("study-id");
+        assert_eq!(
+            (&study["identifiers"], &study["subjects"], &study["kept"]),
+            (
+                &serde_json::json!(0),
+                &serde_json::json!(0),
+                &serde_json::json!(0)
+            ),
+            "{study}"
+        );
+        assert_eq!(of("personnummer")["kept"], 0);
+        assert_eq!(
+            of("subject-code")["description"],
+            "a subject code: the code of a subject merged into this one, or the subject's own \
+             code as a pseudonymised tree holds it"
+        );
+        // made again, the type answers what it holds
+        let again = call(
+            &home,
+            &mut registry,
+            &anna,
+            "POST",
+            "/api/linkage/types",
+            r#"{"name": "patient-id"}"#,
+        );
+        assert_eq!(again.status, 200, "{}", again.body);
+        assert_eq!(again.body["kept"], 1, "{}", again.body);
+    }
+
     #[test]
     fn types_are_listed_and_made_once() {
         let dir = TempDir::new("linkage-doors");

@@ -238,6 +238,37 @@ fn keys_and_identifiers_at_the_door_are_an_admins_acts_and_no_secret_is_kept() {
     map(&home, "patient-id", &[("198501012382", &first)]);
     map(&home, "study-id", &[("STUDY-0042", &first)]);
     map(&home, "personnummer", &[("198501012382", &second)]);
+    // 2026-11-11: no value shaped like a personnummer is kept under any
+    // type, so the hospital ID was filed by its lookup alone and the study's
+    // own ID is the one value the store keeps. The door's own guard is for a
+    // row sealed before that rule; one is put back as such a store held it
+    {
+        let mut linkage = Store::open_sqlite(&home.path().join("linkage.db")).unwrap();
+        let kept = |linkage: &mut Store| {
+            linkage
+                .query(
+                    "SELECT t.name FROM identity i JOIN id_type t ON t.id = i.id_type_id \
+                     WHERE i.ciphertext IS NOT NULL AND length(i.ciphertext) > 0 ORDER BY t.name",
+                    &[],
+                )
+                .unwrap()
+                .iter()
+                .map(|r| r.text(0).unwrap().to_string())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(kept(&mut linkage), ["study-id"]);
+        let sealed =
+            nils_registry::linkage::Subkeys::derive(REGISTRY_KEY.as_bytes()).seal("198501012382");
+        let changed = linkage
+            .execute(
+                "UPDATE identity SET ciphertext = ? \
+                 WHERE id_type_id = (SELECT id FROM id_type WHERE name = 'patient-id')",
+                &[nils_registry::Param::Bytes(sealed)],
+            )
+            .unwrap();
+        assert_eq!(changed, 1);
+        assert_eq!(kept(&mut linkage), ["patient-id", "study-id"]);
+    }
     let logs = TempDir::new("keys-doors-logs");
     let log = logs.path().join("serve.err");
     let server = Server::start(&home, &log);

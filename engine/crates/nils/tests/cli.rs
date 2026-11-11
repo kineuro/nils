@@ -4956,7 +4956,9 @@ fn a_dataset_s_originals_are_surveyed_then_vaulted_at_the_keyboard() {
             "--move-into",
             "originals",
             "--confirm-move",
+            "--identity",
         ])
+        .arg(common::patient_id_rule(&home))
         .output()
         .unwrap();
     assert!(added.status.success(), "{}", stderr(&added));
@@ -5107,6 +5109,8 @@ fn a_changed_original_refuses_a_purge_until_the_dataset_is_pseudonymised_again()
         "--confirm-move",
         "--unmapped",
         "code",
+        "--identity",
+        &common::patient_id_rule(&home),
     ]);
     go(&["pseudonymize", "@ds"]);
 
@@ -5272,6 +5276,8 @@ fn a_dataset_is_pseudonymised_at_the_keyboard_and_brought_in_as_a_chain() {
         "--confirm-move",
         "--unmapped",
         "code",
+        "--identity",
+        &common::patient_id_rule(&home),
     ]);
     run(&[
         "place",
@@ -6480,10 +6486,62 @@ fn a_root_s_datasets_say_what_they_are_and_nothing_unknown_is_read() {
         root.join("raw/derivatives/dcm-raw").is_dir(),
         "nothing renamed yet"
     );
+    // 2026-11-11: a folder that holds identified files is added with its
+    // identity rule, the one thing that says what PatientID holds; without
+    // one it is refused and nothing is written. A rule that names
+    // patient-id in so many words is a rule
+    let rule = common::patient_id_rule(&home);
+    let rule = rule.as_str();
+    for folder in ["both", "idf"] {
+        let refused = run(&["place", "add-dataset", "src", folder, "--json"]);
+        assert!(!refused.status.success(), "{folder}");
+        let why = stderr(&refused);
+        assert!(
+            why.contains("holds identified files (derivatives/dcm-original)")
+                && why.contains("nothing says what PatientID holds")
+                && why.contains("--identity FILE")
+                && why.contains("id_type is personnummer")
+                && why.contains("Nothing was written"),
+            "{folder}: {why}"
+        );
+        let refused = run(&[
+            "place",
+            "add-dataset",
+            "src",
+            folder,
+            "--no-identity",
+            "--json",
+        ]);
+        assert!(!refused.status.success(), "{folder}");
+        assert!(
+            stderr(&refused).contains("never taken away"),
+            "{folder}: {}",
+            stderr(&refused)
+        );
+    }
+    let listed = run(&["place", "list", "--json"]);
+    let rows: serde_json::Value = serde_json::from_slice(&listed.stdout).unwrap();
+    assert_eq!(rows.as_array().unwrap().len(), 1, "{rows}");
+    assert!(
+        root.join("both/derivatives/dcm-raw").is_dir(),
+        "a refused folder is not settled"
+    );
     // each data folder added by a person: only then is its structure read
     let mut added_sets = std::collections::BTreeMap::new();
     for folder in ["anon", "both", "idf", "loose", "mixed", "raw"] {
-        let out = run(&["place", "add-dataset", "src", folder, "--json"]);
+        let out = if ["both", "idf"].contains(&folder) {
+            run(&[
+                "place",
+                "add-dataset",
+                "src",
+                folder,
+                "--identity",
+                rule,
+                "--json",
+            ])
+        } else {
+            run(&["place", "add-dataset", "src", folder, "--json"])
+        };
         assert!(out.status.success(), "{folder}: {}", stderr(&out));
         let doc: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
         assert_eq!(doc["dataset"]["root"], "src", "{doc}");
@@ -6570,6 +6628,26 @@ fn a_root_s_datasets_say_what_they_are_and_nothing_unknown_is_read() {
         "{}",
         stderr(&refused)
     );
+    // entries that go into the originals make the dataset identified: it
+    // is asked for its identity rule before the question, and nothing moves
+    for confirm in [false, true] {
+        let mut args = vec!["place", "set", "loose", "--move-into", "originals"];
+        let id = id_of("loose");
+        args[2] = &id;
+        if confirm {
+            args.push("--confirm-move");
+        }
+        let refused = run(&args);
+        assert!(!refused.status.success());
+        assert!(
+            stderr(&refused).contains("nothing says what PatientID holds")
+                && stderr(&refused).contains("--identity FILE"),
+            "{}",
+            stderr(&refused)
+        );
+        assert!(root.join("loose/p1/IM_0005").is_file());
+        assert!(!root.join("loose/derivatives").exists());
+    }
     // an unknown dataset's entries: the tree named, refused without the word
     let asked = run(&[
         "place",
@@ -6577,6 +6655,8 @@ fn a_root_s_datasets_say_what_they_are_and_nothing_unknown_is_read() {
         &id_of("loose"),
         "--move-into",
         "originals",
+        "--identity",
+        rule,
         "--json",
     ]);
     assert!(!asked.status.success());
@@ -6599,16 +6679,101 @@ fn a_root_s_datasets_say_what_they_are_and_nothing_unknown_is_read() {
         "--move-into",
         "originals",
         "--confirm-move",
+        "--identity",
+        rule,
         "--json",
     ]);
     assert!(set.status.success(), "{}", stderr(&set));
     let doc: serde_json::Value = serde_json::from_slice(&set.stdout).unwrap();
     assert_eq!(doc["dataset"]["state"], "identified", "{doc}");
     assert_eq!(doc["dataset"]["root"], "src", "{doc}");
+    assert_eq!(doc["dataset"]["identity"]["id_type"], "patient-id", "{doc}");
     assert!(
         root.join("loose/derivatives/dcm-original/p1/IM_0005")
             .is_file()
     );
+    // its rule is replaced with another, never taken away; any other field
+    // changes with the rule in force
+    let refused = run(&["place", "set", &id_of("loose"), "--no-identity"]);
+    assert!(!refused.status.success());
+    assert!(
+        stderr(&refused).contains("never taken away"),
+        "{}",
+        stderr(&refused)
+    );
+    let set = run(&[
+        "place",
+        "set",
+        &id_of("loose"),
+        "--cohort",
+        "ward",
+        "--json",
+    ]);
+    assert!(set.status.success(), "{}", stderr(&set));
+    let doc: serde_json::Value = serde_json::from_slice(&set.stdout).unwrap();
+    assert_eq!(doc["dataset"]["identity"]["id_type"], "patient-id", "{doc}");
+
+    // a dataset declared before the guard, with no rule: nothing reads its
+    // originals. The pseudonymiser and bring-in refuse it with what to do,
+    // the layout says so, and it runs once the rule is given
+    {
+        let mut store =
+            nils_registry::Store::open_sqlite(&home.path().join("registry.db")).unwrap();
+        let changed = store
+            .execute(
+                "UPDATE place SET dataset = json_set(dataset, '$.identity', json('null')) \
+                 WHERE name = 'idf'",
+                &[],
+            )
+            .unwrap();
+        assert_eq!(changed, 1);
+    }
+    for verb in ["pseudonymize", "bring-in"] {
+        let refused = run(&[verb, "@idf"]);
+        assert!(!refused.status.success(), "{verb}");
+        let why = stderr(&refused);
+        assert!(
+            why.contains("the dataset idf holds identified files and has no identity rule")
+                && why.contains("nothing says what PatientID holds")
+                && why.contains(&format!("nils place set {} --identity FILE", id_of("idf")))
+                && why.contains("id_type is personnummer"),
+            "{verb}: {why}"
+        );
+    }
+    assert!(
+        std::fs::read_dir(root.join("idf/derivatives/dcm-anon"))
+            .unwrap()
+            .next()
+            .is_none(),
+        "nothing was pseudonymised"
+    );
+    let status = status_json(&home);
+    assert_eq!(status["jobs"].as_array().map(Vec::len), Some(0), "{status}");
+    let shown = run(&["place", "explore", "src"]);
+    assert!(shown.status.success(), "{}", stderr(&shown));
+    assert!(
+        stdout(&shown).contains("no identity rule: nothing says what PatientID holds"),
+        "{}",
+        stdout(&shown)
+    );
+    // a change to it is asked for the rule too
+    let refused = run(&["place", "set", &id_of("idf"), "--cohort", "ward"]);
+    assert!(!refused.status.success());
+    assert!(
+        stderr(&refused).contains("nothing says what PatientID holds"),
+        "{}",
+        stderr(&refused)
+    );
+    let set = run(&["place", "set", &id_of("idf"), "--identity", rule]);
+    assert!(set.status.success(), "{}", stderr(&set));
+    let shown = run(&["place", "explore", "src"]);
+    assert!(
+        !stdout(&shown).contains("no identity rule"),
+        "{}",
+        stdout(&shown)
+    );
+    let done = run(&["pseudonymize", "@idf", "--json"]);
+    assert!(done.status.success(), "{}", stderr(&done));
 
     // anonymised data is read once it says what PatientID holds and how
     // its subjects are found
@@ -6992,6 +7157,8 @@ fn an_unresolved_file_in_an_identified_dataset_s_tree_is_held() {
         dir.path().to_str().unwrap(),
         "--role",
         "source",
+        "--identity",
+        &common::patient_id_rule(&home),
         "--json",
     ]);
     assert!(added.status.success(), "{}", stderr(&added));

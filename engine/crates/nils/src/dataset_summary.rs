@@ -1103,6 +1103,10 @@ fn chain_state(open: Option<&Light>, newest: Option<&Light>, done: bool) -> &'st
     state_of(open, done)
 }
 
+/// The reason a pseudonymised step carries in its `refusal` where its
+/// dataset holds identified files and has no identity rule (2026-11-11).
+pub(crate) const NO_IDENTITY_RULE: &str = "no_identity_rule";
+
 /// One step: its name, state and counts, and the job that ran it last (or
 /// runs it now) with its times and its progress while it runs.
 fn step(name: &str, state: &str, job: Option<&Light>, counts: Value) -> Value {
@@ -2400,6 +2404,11 @@ pub(crate) fn document(
         // never made a large dataset's step done
         let (copy, done) = counts.step(held);
         let open = open_of(&["pseudonymize"]);
+        // 2026-11-11: what the step waits for where the dataset has no
+        // identity rule, as a step of an operation says why its run would
+        // be refused; the doors that would run it refuse in the same words
+        let refusal = place::no_identity_rule(dataset)
+            .map(|why| json!({"reason": NO_IDENTITY_RULE, "error": why}));
         steps.push(step(
             "pseudonymised",
             chain_state(open, newest_of(&["pseudonymize"]), done),
@@ -2410,6 +2419,7 @@ pub(crate) fn document(
                 "held": held,
                 "partial": copy.partial,
                 "waiting_partial": copy.waiting_partial,
+                "refusal": refusal,
             }),
         ));
     }

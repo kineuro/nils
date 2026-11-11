@@ -230,6 +230,14 @@ fn grow(bench: &Bench, files: i64) {
             Some("1.2.840.10008.5.1.4.1.1.11.1"),
         );
     }
+    // a dataset that holds identified files is declared with the rule that
+    // says what PatientID holds (2026-11-11)
+    let rule = bench.home.join("patient-id-rule.yml");
+    std::fs::write(
+        &rule,
+        "identity:\n  id_type: patient-id\n  from:\n    - field: PatientID\n",
+    )
+    .unwrap();
     bench.ok(&[
         "place",
         "add",
@@ -242,6 +250,8 @@ fn grow(bench: &Bench, files: i64) {
         "--confirm-move",
         "--unmapped",
         "code",
+        "--identity",
+        rule.to_str().unwrap(),
     ]);
     let work = bench.home.join("work");
     std::fs::create_dir_all(&work).unwrap();

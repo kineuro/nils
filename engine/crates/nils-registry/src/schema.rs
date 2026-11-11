@@ -3541,8 +3541,20 @@ fn build_linkage() -> Vec<Table> {
     ]
 }
 
-/// The id type a merge files the alias's code under (record 26 §6).
+/// The id type a subject code is filed under: the code of a subject merged
+/// into another, which the merge files on the canonical subject (record 26
+/// §6, source `merge`), and a subject's own code as a pseudonymised tree
+/// holds it in PatientID, which a digest of that tree files as the lookup
+/// that finds the subject again.
 pub const SUBJECT_CODE_TYPE: &str = "subject-code";
+
+/// What a person reads of that type: both of its uses.
+pub const SUBJECT_CODE_DESCRIPTION: &str = "a subject code: the code of a subject merged into this one, or the subject's own code as a pseudonymised tree holds it";
+
+/// What the type said before it named both uses; migration 116 rewrites a
+/// store's description only where it still reads so.
+pub const SUBJECT_CODE_DESCRIPTION_BEFORE: &str =
+    "the subject code of a subject merged into this one";
 
 /// The id types seeded at `nils init` (§7.2), the one a merge needs,
 /// which migration 39 adds to a store from before it, and the type of an
@@ -3570,10 +3582,7 @@ pub const ID_TYPES: [(&str, &str); 5] = [
         "study-instance-uid",
         "StudyInstanceUID, the fallback when PatientID is absent",
     ),
-    (
-        SUBJECT_CODE_TYPE,
-        "the subject code of a subject merged into this one",
-    ),
+    (SUBJECT_CODE_TYPE, SUBJECT_CODE_DESCRIPTION),
     (GENERATOR_ID_TYPE, GENERATOR_ID_DESCRIPTION),
     (RESERVE_ID_TYPE, RESERVE_ID_DESCRIPTION),
 ];

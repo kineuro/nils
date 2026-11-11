@@ -39,6 +39,10 @@ pub enum Action {
     /// Record 55, ruling 24: an ID type said to identify a person
     /// wherever it is met, or no longer to.
     LinkageTypeFlag,
+    /// The one pass after an update that blanked what a store from before
+    /// kept of a value shaped like a personnummer
+    /// ([`crate::shape_sweep`]): counts, never a value.
+    LinkageNeverKept,
     /// Wave 4c §6.5: an archive was written.
     Backup,
     /// Wave 4c §6.6: an overlay proposed as a registry object, and one
@@ -240,6 +244,7 @@ impl Action {
             Action::LinkageReveal => "linkage.reveal",
             Action::LinkageResolve => "linkage.resolve",
             Action::LinkageTypeFlag => "linkage.type.flag",
+            Action::LinkageNeverKept => "linkage.never_kept",
             Action::Backup => "backup",
             Action::OverlayPropose => "overlay.propose",
             Action::OverlayAdopt => "overlay.adopt",
@@ -332,6 +337,7 @@ impl Action {
                 | Action::LinkageReveal
                 | Action::LinkageResolve
                 | Action::LinkageTypeFlag
+                | Action::LinkageNeverKept
                 | Action::KeyAdd
                 | Action::KeyRemove
                 | Action::HandoverPassword

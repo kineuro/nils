@@ -1257,10 +1257,13 @@ struct DatasetFlags {
     /// with --confirm-move
     #[arg(long, value_name = "originals|anon")]
     move_into: Option<String>,
-    /// The identity rule its files are read under, as nils digest --identity-rule reads it
+    /// The identity rule its files are read under, as nils digest
+    /// --identity-rule reads it; a dataset that holds identified files needs
+    /// one, which says what its PatientID holds
     #[arg(long, value_name = "FILE")]
     identity: Option<PathBuf>,
-    /// Forget the identity rule
+    /// Forget the identity rule; refused on a dataset that holds identified
+    /// files
     #[arg(long, conflicts_with = "identity")]
     no_identity: bool,
     /// What an identifier the linkage store does not know does: hold its files, or code them
@@ -3758,9 +3761,16 @@ fn place_command(home: &Home, command: PlaceCommand) -> Result<(), Exit> {
                 if let Some(why) = dataset::id_types_refused(&registry, &asked).map_err(fail)? {
                     return Err(fail(why));
                 }
-                let (d, under) =
-                    dataset::shape_place(registry.store(), &name, &path, &asked, None, &g, true)
-                        .map_err(|r| refused(r, json))?;
+                let (d, under) = dataset::shape_place(
+                    registry.store(),
+                    &name,
+                    &path,
+                    &asked,
+                    None,
+                    &g,
+                    dataset::Asks::Person,
+                )
+                .map_err(|r| refused(r, json))?;
                 found = under;
                 (d.probed, d.dataset, d.layout)
             } else {
@@ -3844,7 +3854,7 @@ fn place_command(home: &Home, command: PlaceCommand) -> Result<(), Exit> {
                     &serde_json::json!({}),
                     Some(&p),
                     &p.guarantees,
-                    true,
+                    dataset::Asks::Again,
                 )
                 .map_err(|r| refused(r, json))?;
                 place::set(registry.store(), p.id, None, None, Some(&d.probed))
@@ -4079,7 +4089,7 @@ fn place_command(home: &Home, command: PlaceCommand) -> Result<(), Exit> {
                     &asked,
                     Some(&current),
                     &current.guarantees,
-                    true,
+                    dataset::Asks::Person,
                 )
                 .map_err(|r| refused(r, json))?;
                 found = under;

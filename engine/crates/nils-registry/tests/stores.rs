@@ -5330,3 +5330,465 @@ fn a_place_s_copied_and_set_aside_subjects_are_read_from_the_index_on_both_backe
         );
     }
 }
+
+/// 2026-11-11: a type is counted by what it keeps as well as by what it
+/// files, and a subject's alias is read by the source that filed it, on both
+/// backends. A value shaped like a personnummer is filed as its lookup
+/// alone under any type; a subject's own code, which the digest of a
+/// pseudonymised tree files under `subject-code`, is no alias.
+#[test]
+fn a_type_counts_what_it_keeps_and_an_alias_is_read_by_its_source_on_both_backends() {
+    use nils_registry::linkage::{self, NewIdentity, Subkeys};
+    for (name, _guard, mut registry, mut store) in store_pairs() {
+        migrate::migrate(&mut registry, Kind::Registry).unwrap();
+        migrate::migrate(&mut store, Kind::Linkage).unwrap();
+        let keys = Subkeys::derive(b"nils-fixture-key");
+        let type_id = |store: &mut Store, t: &str| linkage::id_type_id(store, t).unwrap().unwrap();
+        let (pid, code) = (
+            type_id(&mut store, "patient-id"),
+            type_id(&mut store, "subject-code"),
+        );
+        let row = |subject_id, id_type_id, t: &str, value: &str, source| NewIdentity {
+            subject_id,
+            id_type_id,
+            lookup: keys.lookup(t, value),
+            ciphertext: keys.seal_kept(t, value),
+            source,
+            first_batch_id: None,
+        };
+        linkage::insert_identities(
+            &mut store,
+            &[
+                row(1, pid, "patient-id", "P1", "dicom"),
+                // what a hospital wrote into PatientID: filed, never kept
+                row(2, pid, "patient-id", "198501012382", "dicom"),
+                row(3, pid, "patient-id", "19850101-2382", "csv"),
+                // the subject's own code, as a pseudonymised tree holds it
+                row(1, code, "subject-code", "own-0001", "dicom"),
+                row(2, code, "subject-code", "own-0002", "dicom"),
+                // and the code of a subject merged into the first
+                row(
+                    1,
+                    code,
+                    "subject-code",
+                    "gone-0009",
+                    linkage::FILED_BY_MERGE,
+                ),
+            ],
+        )
+        .unwrap();
+        let counts = linkage::id_type_counts(&mut store).unwrap();
+        let of = |t: &str| {
+            let c = counts.iter().find(|c| c.name == t).unwrap();
+            (c.identifiers, c.subjects, c.kept)
+        };
+        assert_eq!(of("patient-id"), (3, 3, 1), "{name}");
+        assert_eq!(of("subject-code"), (3, 2, 3), "{name}");
+        assert_eq!(of("personnummer"), (0, 0, 0), "{name}");
+        let doc = counts
+            .iter()
+            .find(|c| c.name == "patient-id")
+            .unwrap()
+            .as_json();
+        assert_eq!(doc["identifiers"], 3, "{name}: {doc}");
+        assert_eq!(doc["subjects"], 3, "{name}: {doc}");
+        assert_eq!(doc["kept"], 1, "{name}: {doc}");
+        // an identifier filed as its lookup alone still finds its subject
+        let found =
+            linkage::identities_by_lookup(&mut store, &[keys.lookup("patient-id", "198501012382")])
+                .unwrap();
+        assert_eq!((found.len(), found[0].subject_id), (1, 2), "{name}");
+        // every row of the type: the first a subject has
+        let all = linkage::values_of_type(&mut store, &keys, &[1, 2, 3], code, "tester", "a test")
+            .unwrap();
+        assert_eq!(all.get(&1).map(String::as_str), Some("own-0001"), "{name}");
+        assert_eq!(all.get(&2).map(String::as_str), Some("own-0002"), "{name}");
+        // the aliases alone: what a merge filed
+        let aliases = linkage::values_of_type_filed_by(
+            &mut store,
+            &keys,
+            &[1, 2, 3],
+            code,
+            Some(linkage::FILED_BY_MERGE),
+            "tester",
+            "a test",
+        )
+        .unwrap();
+        assert_eq!(aliases.len(), 1, "{name}: {aliases:?}");
+        assert_eq!(
+            aliases.get(&1).map(String::as_str),
+            Some("gone-0009"),
+            "{name}"
+        );
+        // a value that is not kept is no label, under any source
+        let shown = linkage::values_of_type(&mut store, &keys, &[1, 2, 3], pid, "tester", "a test")
+            .unwrap();
+        assert_eq!(shown.len(), 1, "{name}: {shown:?}");
+        assert_eq!(shown.get(&1).map(String::as_str), Some("P1"), "{name}");
+    }
+}
+
+/// 2026-11-11: a linkage store from before migration 116 learns that
+/// `subject-code` has two uses, on both backends, and only where its
+/// description still reads as the seed wrote it: one a person changed
+/// stays as the person wrote it.
+#[test]
+fn migration_116_says_both_uses_of_the_subject_code_type_on_both_backends() {
+    use nils_registry::linkage;
+    use nils_registry::schema::{
+        SUBJECT_CODE_DESCRIPTION, SUBJECT_CODE_DESCRIPTION_BEFORE, SUBJECT_CODE_TYPE,
+    };
+    for (name, _guard, mut registry, mut store) in store_pairs() {
+        migrate::migrate(&mut registry, Kind::Registry).unwrap();
+        migrate::migrate(&mut store, Kind::Linkage).unwrap();
+        let said = |store: &mut Store| {
+            linkage::id_type_named(store, SUBJECT_CODE_TYPE)
+                .unwrap()
+                .unwrap()
+                .description
+        };
+        // a store made now says both
+        assert_eq!(
+            said(&mut store).as_deref(),
+            Some(SUBJECT_CODE_DESCRIPTION),
+            "{name}"
+        );
+        assert!(SUBJECT_CODE_DESCRIPTION.contains("merged into this one"));
+        assert!(SUBJECT_CODE_DESCRIPTION.contains("own code"));
+        let (id_type, meta) = (store.qualified("id_type"), store.qualified("linkage_meta"));
+        let before = |store: &mut Store, description: &str| {
+            store
+                .batch(&format!(
+                    "UPDATE {id_type} SET description = '{description}' WHERE name = '{SUBJECT_CODE_TYPE}';\n\
+                     UPDATE {meta} SET value = '115' WHERE key = 'schema_version'"
+                ))
+                .unwrap();
+        };
+        // the store as it was before
+        before(&mut store, SUBJECT_CODE_DESCRIPTION_BEFORE);
+        assert_eq!(
+            migrate::migrate(&mut store, Kind::Linkage).unwrap(),
+            (116..=migrate::SCHEMA_VERSION).collect::<Vec<i64>>(),
+            "{name}"
+        );
+        assert_eq!(
+            said(&mut store).as_deref(),
+            Some(SUBJECT_CODE_DESCRIPTION),
+            "{name}"
+        );
+        // what a person wrote is the person's
+        before(&mut store, "the codes of the first trial");
+        migrate::migrate(&mut store, Kind::Linkage).unwrap();
+        assert_eq!(
+            said(&mut store).as_deref(),
+            Some("the codes of the first trial"),
+            "{name}"
+        );
+    }
+}
+
+/// 2026-11-11: a registry from before the rule that no value shaped like a
+/// personnummer is kept is swept once, at its first open, on both backends.
+/// The identities and the held files that kept such a value keep nothing of
+/// it, the lookups stand, every other value stands, a ciphertext the key
+/// does not open is counted and left, and what the pass leaves behind is
+/// counts: in the marker row and in one audit row, never a value. A later
+/// open does nothing, a registry with no key to read opens all the same and
+/// is swept once the key is back, and a registry made now is never swept.
+#[test]
+fn a_registry_from_before_is_swept_of_what_it_kept_by_shape_on_both_backends() {
+    use nils_registry::linkage::{self, NewIdentity, Subkeys};
+    use nils_registry::shape_sweep::{Counts, MARKER, Swept};
+    // what a hospital wrote into PatientID, in three written forms, and a
+    // coordination number under a hospital's own type
+    const SHAPED: [&str; 4] = [
+        "198501012382",
+        "850101-2382",
+        "19850101-2382",
+        "189001619809",
+    ];
+    for (name, _guard, dir, mut reg) in registries() {
+        let home = Home::new(dir.path());
+        let keys = Subkeys::derive(b"nils-fixture-key");
+        let marker = |reg: &mut nils_registry::Registry| -> Option<serde_json::Value> {
+            let meta = reg.store().qualified("registry_meta");
+            reg.store()
+                .query(
+                    &format!("SELECT value FROM {meta} WHERE key = '{MARKER}'"),
+                    &[],
+                )
+                .unwrap()
+                .first()
+                .map(|r| serde_json::from_str(r.text(0).unwrap()).unwrap())
+        };
+        let unmark = |reg: &mut nils_registry::Registry| {
+            let meta = reg.store().qualified("registry_meta");
+            reg.store()
+                .batch(&format!("DELETE FROM {meta} WHERE key = '{MARKER}'"))
+                .unwrap();
+        };
+        let audited = |reg: &mut nils_registry::Registry| -> Vec<String> {
+            let audit = reg.store().qualified("audit");
+            reg.store()
+                .query(
+                    &format!(
+                        "SELECT CAST(scope AS TEXT), CAST(details AS TEXT) FROM {audit} \
+                         WHERE action = 'linkage.never_kept' ORDER BY id"
+                    ),
+                    &[],
+                )
+                .unwrap()
+                .iter()
+                .map(|r| format!("{} {}", r.text(0).unwrap(), r.text(1).unwrap()))
+                .collect()
+        };
+        // a registry made now carries the marker and is never swept
+        assert_eq!(reg.swept(), None, "{name}");
+        assert_eq!(marker(&mut reg).unwrap()["fresh"], true, "{name}");
+        drop(reg);
+        let mut reg = home.open().unwrap();
+        assert_eq!(reg.swept(), None, "{name}");
+        assert!(audited(&mut reg).is_empty(), "{name}");
+
+        // ---- the registry as one from before: no marker, and values sealed
+        // whatever their shape
+        unmark(&mut reg);
+        let mut store = reg.open_linkage().unwrap();
+        let ward = linkage::add_id_type(&mut store, "ward-id", None)
+            .unwrap()
+            .id;
+        let type_id = |store: &mut Store, t: &str| linkage::id_type_id(store, t).unwrap().unwrap();
+        let (pid, pn) = (
+            type_id(&mut store, "patient-id"),
+            type_id(&mut store, "personnummer"),
+        );
+        let unreadable = vec![9u8; 48];
+        let sealed = |subject_id, id_type_id, t: &str, value: &str| NewIdentity {
+            subject_id,
+            id_type_id,
+            lookup: keys.lookup(t, value),
+            ciphertext: keys.seal(value),
+            source: "dicom",
+            first_batch_id: None,
+        };
+        let mut rows = vec![
+            sealed(1, pid, "patient-id", SHAPED[0]),
+            sealed(2, pid, "patient-id", SHAPED[1]),
+            sealed(3, pid, "patient-id", SHAPED[2]),
+            sealed(4, ward, "ward-id", SHAPED[3]),
+            // what stays: a hospital's own number, twelve digits that name
+            // no date, and a wrong check digit
+            sealed(5, pid, "patient-id", "P1"),
+            sealed(6, pid, "patient-id", "199913241234"),
+            sealed(7, ward, "ward-id", "198501012383"),
+            // a row the type never kept is not opened at all
+            sealed(8, pn, "personnummer", "198501012382"),
+        ];
+        // a ciphertext this key does not open
+        rows.push(NewIdentity {
+            subject_id: 9,
+            id_type_id: pid,
+            lookup: keys.lookup("patient-id", "P9"),
+            ciphertext: unreadable.clone(),
+            source: "dicom",
+            first_batch_id: None,
+        });
+        linkage::insert_identities(&mut store, &rows).unwrap();
+        drop(store);
+        // three held files: one shaped, one not, one with nothing sealed
+        let held = |path: &str, value: Option<&str>| {
+            vec![
+                Param::Int(1),
+                Param::from(path),
+                Param::Int(0),
+                Param::Int(0),
+                Param::from("held"),
+                Param::Bytes(keys.lookup("patient-id", value.unwrap_or("none"))),
+                value.map_or(Param::Null, |v| Param::Bytes(keys.seal(v))),
+                Param::from("patient-id"),
+                Param::from("2026-11-11T00:00:00Z"),
+                Param::Int(0),
+            ]
+        };
+        reg.store()
+            .insert(
+                &Insert::new(
+                    table("pseudonym_file"),
+                    &[
+                        "place_id",
+                        "path",
+                        "size",
+                        "mtime",
+                        "state",
+                        "lookup",
+                        "sealed",
+                        "id_type",
+                        "first_seen",
+                        "code_anyway",
+                    ],
+                ),
+                &[
+                    held("a/IM1", Some(SHAPED[0])),
+                    held("a/IM2", Some("P1")),
+                    held("a/IM3", None),
+                ],
+            )
+            .unwrap();
+        drop(reg);
+
+        // ---- the first open sweeps it, and says what it met in counts
+        let mut reg = home.open().unwrap();
+        let swept = Swept {
+            identities: Counts {
+                checked: 8,
+                blanked: 4,
+                unreadable: 1,
+            },
+            held_files: Counts {
+                checked: 2,
+                blanked: 1,
+                unreadable: 0,
+            },
+        };
+        assert_eq!(reg.swept(), Some(swept), "{name}");
+        let mut store = reg.open_linkage().unwrap();
+        let kept = |store: &mut Store, subject: i64| -> (bool, String) {
+            let shown = linkage::reveal(store, &keys, subject, "tester", None).unwrap();
+            assert_eq!(shown.len(), 1, "{name}: subject {subject}");
+            (shown[0].kept, shown[0].value.clone())
+        };
+        for subject in 1..=4 {
+            assert_eq!(
+                kept(&mut store, subject),
+                (false, String::new()),
+                "{name}: {subject}"
+            );
+        }
+        assert_eq!(kept(&mut store, 5), (true, "P1".to_string()), "{name}");
+        assert_eq!(
+            kept(&mut store, 6),
+            (true, "199913241234".to_string()),
+            "{name}"
+        );
+        assert_eq!(
+            kept(&mut store, 7),
+            (true, "198501012383".to_string()),
+            "{name}"
+        );
+        assert_eq!(kept(&mut store, 8), (false, String::new()), "{name}");
+        // the lookups stand: each identifier still finds its subject
+        for (subject, t, value) in [
+            (1, "patient-id", SHAPED[0]),
+            (2, "patient-id", SHAPED[1]),
+            (3, "patient-id", SHAPED[2]),
+            (4, "ward-id", SHAPED[3]),
+        ] {
+            let found =
+                linkage::identities_by_lookup(&mut store, &[keys.lookup(t, value)]).unwrap();
+            assert_eq!(
+                (found.len(), found[0].subject_id),
+                (1, subject),
+                "{name}: {subject}"
+            );
+        }
+        // the ciphertext nobody opens is as it was
+        let identity = store.qualified("identity");
+        let left = store
+            .query(
+                &format!("SELECT ciphertext FROM {identity} WHERE subject_id = 9"),
+                &[],
+            )
+            .unwrap();
+        assert_eq!(left[0].bytes(0).unwrap(), unreadable.as_slice(), "{name}");
+        drop(store);
+        let files = reg.store().qualified("pseudonym_file");
+        let files_now = |reg: &mut nils_registry::Registry| -> Vec<(String, Option<String>)> {
+            reg.store()
+                .query(
+                    &format!("SELECT path, sealed, lookup FROM {files} ORDER BY path"),
+                    &[],
+                )
+                .unwrap()
+                .iter()
+                .map(|r| {
+                    assert_eq!(r.bytes(2).unwrap().len(), 32, "{name}");
+                    (
+                        r.text(0).unwrap().to_string(),
+                        r.opt_bytes(1).unwrap().map(|b| keys.open(b).unwrap()),
+                    )
+                })
+                .collect()
+        };
+        assert_eq!(
+            files_now(&mut reg),
+            [
+                ("a/IM1".to_string(), None),
+                ("a/IM2".to_string(), Some("P1".to_string())),
+                ("a/IM3".to_string(), None),
+            ],
+            "{name}"
+        );
+        // what the pass left behind: counts and when, and no value
+        let row = marker(&mut reg).unwrap();
+        assert_eq!(row["identities"]["checked"], 8, "{name}: {row}");
+        assert_eq!(row["identities"]["blanked"], 4, "{name}: {row}");
+        assert_eq!(row["identities"]["unreadable"], 1, "{name}: {row}");
+        assert_eq!(row["held_files"]["checked"], 2, "{name}: {row}");
+        assert_eq!(row["held_files"]["blanked"], 1, "{name}: {row}");
+        assert!(row["at"].is_string(), "{name}: {row}");
+        assert!(row.get("fresh").is_none(), "{name}: {row}");
+        let audit = audited(&mut reg);
+        assert_eq!(audit.len(), 1, "{name}: {audit:?}");
+        for text in [row.to_string(), audit.join(" ")] {
+            for value in SHAPED {
+                assert!(!text.contains(value), "{name}: {text}");
+            }
+            assert!(
+                !text.contains("2382") && !text.contains("9809"),
+                "{name}: {text}"
+            );
+        }
+        assert!(audit[0].contains("\"blanked\""), "{name}: {audit:?}");
+        drop(reg);
+
+        // ---- a later open does nothing
+        let mut reg = home.open().unwrap();
+        assert_eq!(reg.swept(), None, "{name}");
+        assert_eq!(audited(&mut reg).len(), 1, "{name}");
+        assert_eq!(marker(&mut reg).unwrap(), row, "{name}");
+
+        // ---- a second pass finds nothing left to blank
+        unmark(&mut reg);
+        drop(reg);
+        let mut reg = home.open().unwrap();
+        let again = reg.swept().unwrap();
+        assert_eq!(
+            (again.identities.checked, again.identities.blanked),
+            (4, 0),
+            "{name}"
+        );
+        assert_eq!(again.identities.unreadable, 1, "{name}");
+        assert_eq!(
+            (again.held_files.checked, again.held_files.blanked),
+            (1, 0),
+            "{name}"
+        );
+        assert_eq!(audited(&mut reg).len(), 2, "{name}");
+
+        // ---- with no key to read, the registry opens and stays unmarked
+        unmark(&mut reg);
+        drop(reg);
+        home.keys(None).remove("k", None).unwrap();
+        let mut reg = home.open().unwrap();
+        assert_eq!(reg.swept(), None, "{name}");
+        assert_eq!(marker(&mut reg), None, "{name}");
+        assert_eq!(audited(&mut reg).len(), 2, "{name}");
+        drop(reg);
+        // and is swept at the first open after the key is back
+        home.keys(None).add("k", b"nils-fixture-key").unwrap();
+        let mut reg = home.open().unwrap();
+        assert!(reg.swept().is_some(), "{name}");
+        assert!(marker(&mut reg).is_some(), "{name}");
+        assert_eq!(audited(&mut reg).len(), 3, "{name}");
+    }
+}

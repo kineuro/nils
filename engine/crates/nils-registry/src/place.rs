@@ -756,6 +756,51 @@ pub fn incomplete(dataset: &Value) -> Option<String> {
     None
 }
 
+/// Whether a dataset's originals are in play with no identity rule
+/// (2026-11-11): it holds identified files (`trees.originals`) and nothing
+/// says what their PatientID holds. Such a dataset is refused where a person
+/// declares it, and one declared before that is never pseudonymised or
+/// brought in: read under a default rule its PatientID was filed as a
+/// `patient-id`, whatever it held, and where it held personnummer the
+/// linkage store kept them. A rule that says `id_type: patient-id` in so
+/// many words is a declaration, and is a rule. A dataset whose originals
+/// were vaulted or purged holds none to read ([`originals_gone`]), and is
+/// asked again once a vault's are back.
+pub fn lacks_identity_rule(dataset: &Value) -> bool {
+    dataset["trees"]["originals"].is_string()
+        && dataset["identity"].is_null()
+        && !originals_gone(dataset)
+}
+
+/// Whether a dataset's originals were vaulted or purged: its folder holds
+/// none any more.
+pub fn originals_gone(dataset: &Value) -> bool {
+    matches!(
+        dataset["originals_kept"].as_str(),
+        Some("vaulted" | "purged")
+    )
+}
+
+/// What an identity rule must say, for the refusals that ask for one.
+pub const IDENTITY_RULE_SAYS: &str = "a rule whose id_type is personnummer for an ID that is the same everywhere, or the hospital's or study's own type";
+
+/// Why nothing of a declared dataset's originals is read, where it has no
+/// identity rule ([`lacks_identity_rule`]), in the words every door that
+/// would read them refuses with; none where it has one or holds no
+/// originals.
+pub fn no_identity_rule(place: &Place) -> Option<String> {
+    lacks_identity_rule(&place.dataset).then(|| identity_rule_wanted(place))
+}
+
+/// The words of [`no_identity_rule`], for a caller that has found the rule
+/// missing itself.
+pub fn identity_rule_wanted(place: &Place) -> String {
+    format!(
+        "the dataset {} holds identified files and has no identity rule: nothing says what PatientID holds, so its originals are not read. Give it one with nils place set {} --identity FILE or in the desk's Data: {IDENTITY_RULE_SAYS}",
+        place.name, place.id
+    )
+}
+
 /// Why a dataset's subject codes cannot be made on this registry (the
 /// review of Wave 7a's merge, 2026-10-10): its declaration has the subject
 /// code generator make them (a personnummer rule, or subjects `generated`)
@@ -1645,6 +1690,43 @@ mod tests {
         )
         .unwrap();
         assert_eq!(d["patient_id"], "id-type:patient-id");
+    }
+
+    /// 2026-11-11: a dataset whose originals are in play with no identity
+    /// rule lacks one, whatever else it declares; a rule that names
+    /// `patient-id` in so many words is a rule; a dataset with no originals,
+    /// or whose originals were vaulted or purged, holds nothing to read
+    /// under a rule and is not asked.
+    #[test]
+    fn a_dataset_that_holds_originals_and_has_no_identity_rule_lacks_one() {
+        use super::{lacks_identity_rule, originals_gone};
+        let trees =
+            json!({"originals": "derivatives/dcm-original", "anon": "derivatives/dcm-anon"});
+        let ruleless =
+            json!({"kind": "dataset", "state": "identified", "trees": trees, "identity": null});
+        assert!(lacks_identity_rule(&ruleless));
+        // a declaration that never named the rule reads the same
+        assert!(lacks_identity_rule(
+            &json!({"kind": "dataset", "state": "both", "trees": trees})
+        ));
+        let mut ruled = ruleless.clone();
+        ruled["identity"] = json!({"id_type": "patient-id", "from": [{"field": "PatientID"}]});
+        assert!(!lacks_identity_rule(&ruled));
+        // no originals: an anonymised dataset, a root, a place of another role
+        for d in [
+            json!({"kind": "dataset", "state": "anonymised", "trees": {"originals": null, "anon": "derivatives/dcm-anon"}}),
+            json!({"kind": "root", "trees": {"originals": null, "anon": null}}),
+            json!(null),
+        ] {
+            assert!(!lacks_identity_rule(&d), "{d}");
+        }
+        // vaulted or purged: none to read; kept, or back from a vault, asked
+        for (kept, gone) in [("vaulted", true), ("purged", true), ("kept", false)] {
+            let mut d = ruleless.clone();
+            d["originals_kept"] = json!(kept);
+            assert_eq!(originals_gone(&d), gone, "{kept}");
+            assert_eq!(lacks_identity_rule(&d), !gone, "{kept}");
+        }
     }
 
     #[test]
