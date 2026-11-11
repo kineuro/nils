@@ -700,7 +700,7 @@ fn shown_by(registry: &mut Registry, show: Option<&String>) -> Result<Option<Sho
 
 /// Whether a caller may read identifiers: data:work at detail sensitive,
 /// as every door that reads one asks (record 26).
-fn reads_identifiers(access: &Access) -> bool {
+pub(crate) fn reads_identifiers(access: &Access) -> bool {
     access.holds("data:work") && access.detail >= Detail::Sensitive
 }
 

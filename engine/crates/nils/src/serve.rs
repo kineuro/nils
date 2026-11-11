@@ -4470,97 +4470,17 @@ fn routed(
         ["api", "releases"] if post => {
             // Heavy: a queued `nils release`, 202.
             let doc = json_body(body)?;
-            let mut command = vec!["release".to_string()];
-            let name = doc["name"]
-                .as_str()
-                .ok_or_else(|| Reply::error(400, "name is required"))?;
-            let out = doc["out"]
-                .as_str()
-                .ok_or_else(|| Reply::error(400, "out is required"))?;
-            // Wave 5 §10.2: a release writes only to an export place, refused
-            // at the door and not discovered on disk.
-            crate::places::require(
-                registry.store(),
-                nils_registry::place::Role::Export,
-                std::path::Path::new(out),
-            )
-            .map_err(|r| Reply::error(409, r.message))?;
-            // Record 38 S3: the date is the date. `keep`, which a desk from
-            // before may send, is passed on; anything else is refused here
-            // rather than by the job after it has queued.
-            match &doc["dates"] {
-                serde_json::Value::Null => {}
-                serde_json::Value::String(d) if d == "keep" => {}
-                other => {
-                    return Err(Reply::error(
-                        400,
-                        format!("dates {other}: {}", nils_registry::place::DATES_ARE_KEPT),
-                    ));
-                }
-            }
-            command.extend(["--name".into(), name.into(), "--out".into(), out.into()]);
-            for (flag, key) in [
-                ("--layout", "layout"),
-                ("--naming", "naming"),
-                ("--dates", "dates"),
-                ("--uids", "uids"),
-                ("--on-unknown", "on_unknown"),
-                ("--pack", "pack"),
-                ("--scheme-name", "scheme_name"),
-            ] {
-                if let Some(v) = doc[key].as_str() {
-                    command.extend([flag.to_string(), v.to_string()]);
-                }
-            }
-            // gate T31, step 13.8: the release form's expert options
-            command.extend(release_expert_flags(
-                &doc,
-                caller.access.holds(nils_pipeline::failure::INSTALL_GRANT),
-            )?);
-            if let Some(dir) = &doors.pack_dir {
-                command.extend(["--pack-dir".into(), dir.display().to_string()]);
-            }
-            for (flag, key) in [
-                ("--subject", "subjects"),
-                ("--session", "sessions"),
-                ("--cohort", "cohorts"),
-                // record 26 §13: a dataset as a selection
-                ("--dataset", "datasets"),
-                ("--axis", "axes"),
-                ("--observation", "observations"),
-            ] {
-                for v in doc[key].as_array().into_iter().flatten() {
-                    if let Some(v) = v.as_str() {
-                        command.extend([flag.to_string(), v.to_string()]);
-                    }
-                }
-            }
-            for v in doc["stacks"].as_array().into_iter().flatten() {
-                if let Some(n) = v.as_i64() {
-                    command.extend(["--stack".into(), n.to_string()]);
-                }
-            }
-            // Wave 5 §6.6: a handle as the source of a release is refused at
-            // the server when it is stale; a stack handle's keys become the
-            // stacks released.
-            if let Some(hid) = doc["handle"].as_i64() {
-                let h = nils_ask::handle::get(registry.store(), hid)?
-                    .ok_or_else(|| Reply::error(404, format!("no handle {hid}")))?;
-                if let Some(why) = crate::ask_doors::not_reproducible(registry, &h, "released")? {
-                    return Err(Reply::error(409, why));
-                }
-                if h.grain != nils_ask::ast::Grain::Stack {
-                    return Err(Reply::error(
-                        400,
-                        format!(
-                            "handle {hid} is at {} grain; a release from a handle takes a stack handle",
-                            h.grain.name()
-                        ),
-                    ));
-                }
-                for (key, _) in nils_ask::handle::keys(registry.store(), hid)? {
-                    command.extend(["--stack".into(), key.to_string()]);
-                }
+            let command = release_command(doors, registry, caller, &doc, false)?;
+            let name = doc["name"].as_str().unwrap_or_default();
+            // The names are rehearsed here, before anything queues: a
+            // subject that needs a choice, or a name two would share, is
+            // answered with the plan and not found by the job.
+            if let Some((plan, values)) = release_names(doors, registry, caller, &doc, &command)?
+                && let Some(why) = plan.refusal()
+            {
+                let mut refused = Reply::gated(409, why);
+                refused.body["names"] = plan.doc(values);
+                return Err(refused);
             }
             let id = nils_registry::job::enqueue_with(
                 registry.store(),
@@ -4573,6 +4493,15 @@ fn routed(
             Ok(Reply::accepted(
                 serde_json::json!({ "job": id, "state": "queued", "command": command }),
             ))
+        }
+        ["api", "releases", "names"] if post => {
+            // The rehearsal of a release's names: the body of the release,
+            // the plan answered, nothing written and nothing queued.
+            let doc = json_body(body)?;
+            let command = release_command(doors, registry, caller, &doc, true)?;
+            let names = release_names(doors, registry, caller, &doc, &command)?
+                .map(|(plan, values)| plan.doc(values));
+            Ok(Reply::ok(serde_json::json!({ "names": names })))
         }
         // record 55, ruling 35 (c): a handover's own password, made or
         // typed, or none for a reason; and the handovers listed
@@ -5973,6 +5902,10 @@ pub(crate) fn door(method: &str, segs: &[&str]) -> (Need, Detail) {
             (Need::One("release:see"), Plain)
         }
         ("POST", ["api", "releases" | "handovers"]) => (Need::One("release:work"), Plain),
+        // the rehearsal of a release's names is the work of whoever cuts it;
+        // the values in its answer are for a caller who reads identifiers,
+        // which the door itself decides
+        ("POST", ["api", "releases", "names"]) => (Need::One("release:work"), Plain),
         // the Pipelines page; a queued verb needs its own grant and a cancel
         // the grant of the job's verb, both checked at the door itself
         ("GET", ["api", "jobs"]) | ("GET", ["api", "jobs", _]) => {
@@ -6738,6 +6671,232 @@ fn pick_err(e: nils_classify::picking::PersonError) -> Reply {
     }
 }
 
+/// The `nils release` a body of the release door asks for, as the job runs
+/// it. A rehearsal reads the same body and writes nowhere, so it needs
+/// neither a name nor a place.
+fn release_command(
+    doors: &Doors,
+    registry: &mut Registry,
+    caller: &Caller,
+    doc: &serde_json::Value,
+    rehearsal: bool,
+) -> Result<Vec<String>, Reply> {
+    let mut command = vec!["release".to_string()];
+    if rehearsal {
+        // A rehearsal writes nowhere, so it needs no place; with the
+        // release's name it reads the choices that release keeps.
+        if let Some(name) = doc["name"].as_str() {
+            command.extend(["--name".into(), name.into()]);
+        }
+    } else {
+        let name = doc["name"]
+            .as_str()
+            .ok_or_else(|| Reply::error(400, "name is required"))?;
+        let out = doc["out"]
+            .as_str()
+            .ok_or_else(|| Reply::error(400, "out is required"))?;
+        // Wave 5 §10.2: a release writes only to an export place,
+        // refused at the door and not discovered on disk.
+        crate::places::require(
+            registry.store(),
+            nils_registry::place::Role::Export,
+            std::path::Path::new(out),
+        )
+        .map_err(|r| Reply::error(409, r.message))?;
+        command.extend(["--name".into(), name.into(), "--out".into(), out.into()]);
+    }
+    // Record 38 S3: the date is the date. `keep`, which a desk from
+    // before may send, is passed on; anything else is refused here
+    // rather than by the job after it has queued.
+    match &doc["dates"] {
+        serde_json::Value::Null => {}
+        serde_json::Value::String(d) if d == "keep" => {}
+        other => {
+            return Err(Reply::error(
+                400,
+                format!("dates {other}: {}", nils_registry::place::DATES_ARE_KEPT),
+            ));
+        }
+    }
+    for (flag, key) in [
+        ("--layout", "layout"),
+        ("--naming", "naming"),
+        ("--dates", "dates"),
+        ("--uids", "uids"),
+        ("--on-unknown", "on_unknown"),
+        ("--pack", "pack"),
+        ("--scheme-name", "scheme_name"),
+    ] {
+        if let Some(v) = doc[key].as_str() {
+            command.extend([flag.to_string(), v.to_string()]);
+        }
+    }
+    // gate T31, step 13.8: the release form's expert options
+    command.extend(release_expert_flags(
+        doc,
+        caller.access.holds(nils_pipeline::failure::INSTALL_GRANT),
+    )?);
+    command.extend(release_name_flags(doc)?);
+    if let Some(dir) = &doors.pack_dir {
+        command.extend(["--pack-dir".into(), dir.display().to_string()]);
+    }
+    for (flag, key) in [
+        ("--subject", "subjects"),
+        ("--session", "sessions"),
+        ("--cohort", "cohorts"),
+        // record 26 §13: a dataset as a selection
+        ("--dataset", "datasets"),
+        ("--axis", "axes"),
+        ("--observation", "observations"),
+    ] {
+        for v in doc[key].as_array().into_iter().flatten() {
+            if let Some(v) = v.as_str() {
+                command.extend([flag.to_string(), v.to_string()]);
+            }
+        }
+    }
+    for v in doc["stacks"].as_array().into_iter().flatten() {
+        if let Some(n) = v.as_i64() {
+            command.extend(["--stack".into(), n.to_string()]);
+        }
+    }
+    // Wave 5 §6.6: a handle as the source of a release is refused at
+    // the server when it is stale; a stack handle's keys become the
+    // stacks released.
+    if let Some(hid) = doc["handle"].as_i64() {
+        let h = nils_ask::handle::get(registry.store(), hid)?
+            .ok_or_else(|| Reply::error(404, format!("no handle {hid}")))?;
+        if let Some(why) = crate::ask_doors::not_reproducible(registry, &h, "released")? {
+            return Err(Reply::error(409, why));
+        }
+        if h.grain != nils_ask::ast::Grain::Stack {
+            return Err(Reply::error(
+                400,
+                format!(
+                    "handle {hid} is at {} grain; a release from a handle takes a stack handle",
+                    h.grain.name()
+                ),
+            ));
+        }
+        for (key, _) in nils_ask::handle::keys(registry.store(), hid)? {
+            command.extend(["--stack".into(), key.to_string()]);
+        }
+    }
+    Ok(command)
+}
+
+/// The flags of a release's names: the ID types it names its subjects by,
+/// in order, and the choices given with them. Each goes as one word with
+/// its flag, so a value that starts with a dash is still a value.
+fn release_name_flags(doc: &serde_json::Value) -> Result<Vec<String>, Reply> {
+    let by = release_name_by(doc)?;
+    let mut out: Vec<String> = by.iter().map(|t| format!("--name-by={t}")).collect();
+    let choices = match &doc["name_choices"] {
+        serde_json::Value::Null => &[][..],
+        serde_json::Value::Array(a) => a.as_slice(),
+        _ => return Err(Reply::error(400, NAME_CHOICES_ARE)),
+    };
+    if !choices.is_empty() && by.is_empty() {
+        return Err(Reply::error(
+            400,
+            "name_choices says which value names a subject, and the release names by no ID \
+             type: give name_by, or leave name_choices out. Nothing was written.",
+        ));
+    }
+    for c in choices {
+        let (Some(subject), Some(value)) = (c["subject"].as_str(), c["value"].as_str()) else {
+            return Err(Reply::error(400, NAME_CHOICES_ARE));
+        };
+        let (subject, value) = (subject.trim(), value.trim());
+        if subject.is_empty() || subject.contains('=') || value.is_empty() {
+            return Err(Reply::error(400, NAME_CHOICES_ARE));
+        }
+        out.push(format!("--name-choice={subject}={value}"));
+    }
+    Ok(out)
+}
+
+const NAME_CHOICES_ARE: &str = "name_choices is a list of {subject, value}: a subject code and the \
+                                value that names that subject. Nothing was written.";
+
+/// The ID types a body names its subjects by, in order: a list of names,
+/// or one word with commas between them.
+fn release_name_by(doc: &serde_json::Value) -> Result<Vec<String>, Reply> {
+    let are = || {
+        Reply::error(
+            400,
+            "name_by is a list of ID type names, in the order they are tried",
+        )
+    };
+    let words: Vec<String> = match &doc["name_by"] {
+        serde_json::Value::Null => Vec::new(),
+        serde_json::Value::Array(a) => a
+            .iter()
+            .map(|v| v.as_str().map(str::to_string).ok_or_else(are))
+            .collect::<Result<_, _>>()?,
+        serde_json::Value::String(s) => s.split(',').map(str::to_string).collect(),
+        _ => return Err(are()),
+    };
+    let words: Vec<String> = words
+        .into_iter()
+        .map(|w| w.trim().to_string())
+        .filter(|w| !w.is_empty())
+        .collect();
+    // a comma would split one name into two on the command line
+    if words.iter().any(|w| w.contains(',')) {
+        return Err(are());
+    }
+    Ok(words)
+}
+
+/// How the release a body asks for would name its subjects, and whether
+/// this caller may see the values in the answer; none where it names by no
+/// ID type. The types are checked first, so a list that cannot name is
+/// refused in words that carry no subject, and a type whose IDs identify a
+/// person names a release only for a caller who may read identifiers: the
+/// names are written into the tree, where whoever asked reads them.
+fn release_names(
+    doors: &Doors,
+    registry: &mut Registry,
+    caller: &Caller,
+    doc: &serde_json::Value,
+    command: &[String],
+) -> Result<Option<(nils_release::name_by::Plan, bool)>, Reply> {
+    let by = release_name_by(doc)?;
+    if by.is_empty() {
+        return Ok(None);
+    }
+    let refused = |e: nils_release::run::Error| match e {
+        nils_release::run::Error::Refused(m) => Reply::error(400, m),
+        other => Reply::error(500, other.to_string()),
+    };
+    let types = {
+        let mut link = registry
+            .open_linkage()
+            .map_err(|e| Reply::error(500, e.to_string()))?;
+        nils_release::name_by::types_of(&mut link, &by).map_err(refused)?
+    };
+    if types.iter().any(|t| t.identifying) {
+        caller.allowed(
+            "naming subjects by an ID type that identifies a person",
+            Need::One("data:work"),
+            Detail::Sensitive,
+        )?;
+    }
+    let packs = crate::pack_dir(&doors.home, doors.pack_dir.clone())?;
+    // What is refused from here on names a subject (a selection that does
+    // not resolve, a choice that does not fit), so it is gated.
+    let plan = crate::release_name_plan_of_command(registry, &packs, command, &caller.principal)
+        .map_err(|e| {
+            if e.code == crate::USAGE {
+                Reply::gated(400, e.message)
+            } else {
+                Reply::error(500, e.message)
+            }
+        })?;
+    Ok(plan.map(|p| (p, crate::viewer::reads_identifiers(&caller.access))))
+}
+
 /// A review refusal quotes what it refuses: a reference, a header value, a
 /// name, the person who decided; every one is gated.
 fn review_err(e: nils_registry::review::Error) -> Reply {
@@ -6766,6 +6925,7 @@ pub(crate) fn doors_list() -> Vec<String> {
         "POST /api/jobs/{id}/resume",
         "GET /api/releases",
         "POST /api/releases",
+        "POST /api/releases/names",
         "POST /api/handovers",
         "POST /api/select",
         "GET /api/review",
@@ -7572,6 +7732,15 @@ pub(crate) fn policy() -> Vec<serde_json::Value> {
             "one id",
             "Cutting a release",
             "Cut a release",
+        ),
+        row(
+            "POST /api/releases/names",
+            false,
+            false,
+            "bounded",
+            "one plan",
+            "Rehearsing a release's names",
+            "Rehearsed a release's names",
         ),
         row(
             "POST /api/handovers",

@@ -15,6 +15,7 @@ pub mod family;
 pub mod handover;
 pub mod lock;
 pub mod name;
+pub mod name_by;
 pub mod policy;
 pub mod run;
 pub mod scrub;
