@@ -9894,7 +9894,7 @@ fn declare_in(
                 &guarantees,
                 // setup looks and never writes: a v0 folder keeps the
                 // dcm-raw v0 reads (review of 2026-10-10)
-                false,
+                crate::dataset::Asks::Look,
             ) {
                 Ok(s) => Some(s),
                 Err(r) => {
@@ -9998,7 +9998,7 @@ fn shape_source(
         &serde_json::json!({}),
         Some(there),
         &there.guarantees,
-        false,
+        crate::dataset::Asks::Look,
     ) {
         Ok((d, found)) => {
             if place::set_dataset(registry.store(), there.id, &d.dataset).is_ok() {
@@ -26310,13 +26310,16 @@ mod tests {
                 path.display()
             );
         }
-        // added by a person, each says what it is
+        // added by a person, each says what it is; the one that holds
+        // identified files with the rule that says what PatientID holds
         let known = crate::dataset::add_dataset(
             registry.store(),
             &root,
             "known",
             None,
-            &serde_json::json!({}),
+            &serde_json::json!({
+                "identity": {"id_type": "patient-id", "from": [{"field": "PatientID"}]},
+            }),
         )
         .unwrap();
         assert_eq!(known.place.dataset["state"], "identified");

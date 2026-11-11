@@ -11,7 +11,7 @@ use crate::schema::{self, ID_TYPES, Table, linkage_tables, registry_tables};
 use crate::store::{Error, Param, Store};
 
 /// The version this binary writes.
-pub const SCHEMA_VERSION: i64 = 115;
+pub const SCHEMA_VERSION: i64 = 116;
 
 /// Which of the two stores a migration runs against.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -514,7 +514,42 @@ pub static MIGRATIONS: &[Migration] = &[
         version: 115,
         apply: a_site_takes_part_and_an_item_may_want_its_own_raters,
     },
+    Migration {
+        version: 116,
+        apply: the_subject_code_type_says_both_of_its_uses,
+    },
 ];
+
+/// The `subject-code` id type says what it holds (2026-11-11): the code of a
+/// subject merged into this one, which a merge files, and the subject's own
+/// code as a pseudonymised tree holds it, which a digest of that tree files
+/// as a lookup. Its description said the first alone, so a store whose
+/// subjects were all read from pseudonymised trees showed a type "of merged
+/// subjects" with a row for every subject and no merge. A fresh store has
+/// the new words from the seed; a store from before is rewritten only where
+/// the description still equals the old text, so words a site wrote itself
+/// stay. No identity row is touched.
+fn the_subject_code_type_says_both_of_its_uses(store: &mut Store, kind: Kind) -> Result<(), Error> {
+    if kind != Kind::Linkage {
+        return Ok(());
+    }
+    let d = store.dialect();
+    store.execute(
+        &format!(
+            "UPDATE {} SET description = {} WHERE name = {} AND description = {}",
+            store.qualified("id_type"),
+            d.param(1, schema::Type::Text),
+            d.param(2, schema::Type::Text),
+            d.param(3, schema::Type::Text)
+        ),
+        &[
+            Param::from(schema::SUBJECT_CODE_DESCRIPTION),
+            Param::from(schema::SUBJECT_CODE_TYPE),
+            Param::from(schema::SUBJECT_CODE_DESCRIPTION_BEFORE),
+        ],
+    )?;
+    Ok(())
+}
 
 /// Site participation (2026-11-01): the one row that says how this install
 /// takes part (`participation`), its sends (`participation_send`), and a

@@ -54,7 +54,12 @@ A dataset is unknown when entries holding DICOM sit beside `derivatives/`,
 or when it has no tree at all. Say which tree those entries go into, and
 they move only then: the answer of `add-dataset` says what would move, and `nils place set <id> --move-into originals --confirm-move`
 (identified data) or `--move-into anon --confirm-move` (already anonymised)
-moves them. An anonymised dataset also says what its PatientID holds and
+moves them. A dataset that holds identified files is added with its
+identity rule, the one thing that says what its PatientID holds: give
+`--identity FILE` on `add-dataset` or `place set`, a rule whose `id_type`
+is `personnummer` for an ID that is the same everywhere, or the hospital's
+or study's own type. Without one it is refused, and nothing reads the
+originals of a dataset that has none. An anonymised dataset also says what its PatientID holds and
 how its subjects are found, before anything reads it: `nils place set <id>
 --patient-id id-type:NAME --subjects map` (a map of subject codes to its
 ids) or `--subjects generated` (the subject code generator makes each code

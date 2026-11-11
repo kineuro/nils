@@ -67,6 +67,7 @@ pub mod round;
 pub mod rule_proposal;
 pub mod schema;
 pub mod session;
+pub mod shape_sweep;
 pub mod store;
 pub mod suggestion;
 pub mod time;

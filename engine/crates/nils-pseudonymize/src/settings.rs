@@ -166,8 +166,12 @@ impl Settings {
                     place.name
                 )
             })?;
+        // 2026-11-11: never a default rule. With none the originals were
+        // read as holding a `patient-id`, whatever their PatientID held, and
+        // a dataset whose PatientID held personnummer had them kept; the
+        // dataset says what PatientID holds, or nothing of it is read
         let mut identity = match &dataset["identity"] {
-            Value::Null => Rule::default(),
+            Value::Null => return Err(nils_registry::place::identity_rule_wanted(place)),
             rule => {
                 let mut rule = Rule::parse(&json!({"identity": rule}).to_string())
                     .map_err(|e| format!("the identity rule of the dataset {}: {e}", place.name))?;
@@ -321,14 +325,54 @@ mod tests {
                 .unwrap_err()
                 .contains("read in place")
         );
-        // the default rule where the dataset stores none
+        // a rule that says patient-id in so many words is a declaration,
+        // and the other settings take their defaults
         let plain = place(json!({
             "arrives": "identified",
             "trees": {"originals": "derivatives/dcm-original", "anon": "derivatives/dcm-anon"},
+            "identity": {"id_type": "patient-id", "from": [{"field": "PatientID"}]},
         }));
         let s = Settings::for_dataset(&plain).unwrap();
         assert_eq!(s.identity.id_type, "patient-id");
         assert_eq!(s.unmapped, Unmapped::Hold);
         assert_eq!(s.tags.keep.len(), 3);
+    }
+
+    /// 2026-11-11: a dataset declared with no identity rule is never read
+    /// under a default one. Its PatientID was filed as a `patient-id`,
+    /// whatever it held, and where it held personnummer they were kept; the
+    /// refusal says what is missing and how it is given, and names the
+    /// dataset by its name and its id.
+    #[test]
+    fn an_identified_dataset_with_no_identity_rule_is_refused() {
+        let ruleless = place(json!({
+            "arrives": "identified",
+            "trees": {"originals": "derivatives/dcm-original", "anon": "derivatives/dcm-anon"},
+        }));
+        let why = Settings::for_dataset(&ruleless).unwrap_err();
+        assert!(why.contains("has no identity rule"), "{why}");
+        assert!(why.contains("nothing says what PatientID holds"), "{why}");
+        assert!(
+            why.contains(&format!("nils place set {} --identity FILE", ruleless.id)),
+            "{why}"
+        );
+        assert!(why.contains("id_type is personnummer"), "{why}");
+        assert_eq!(
+            Some(why),
+            nils_registry::place::no_identity_rule(&ruleless),
+            "one refusal at every door"
+        );
+        // and with its copy beside it (state both) all the same
+        let both = place(json!({
+            "arrives": "identified",
+            "state": "both",
+            "trees": {"originals": "derivatives/dcm-original", "anon": "derivatives/dcm-anon"},
+            "identity": null,
+        }));
+        assert!(
+            Settings::for_dataset(&both)
+                .unwrap_err()
+                .contains("has no identity rule")
+        );
     }
 }

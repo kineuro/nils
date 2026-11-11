@@ -24,6 +24,13 @@
 //! is refused rather than hashed as read, so that the code it would have
 //! given is never mistaken for the person's.
 //!
+//! The type's name decides how a value is hashed, never whether it is kept:
+//! a value of any type that is shaped like a personnummer or a coordination
+//! number, one [`normalise`] takes, is filed as its keyed lookup alone and
+//! never sealed (`linkage::keeps_value`, 2026-11-11), since a source that
+//! names its PatientID another type may hold the number all the same. Its
+//! code and its lookup are still derived from the value as it was read.
+//!
 //! A hospital's reserve number, the number it gives a person who has no
 //! personnummer or whose personnummer it does not know, identifies the
 //! person as a personnummer does without being one: it is filed under

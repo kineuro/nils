@@ -719,6 +719,16 @@ pub(crate) fn would_write(layout: &Layout) -> Option<&'static str> {
     None
 }
 
+/// [`settle_where`] with nothing more to ask.
+#[cfg(test)]
+pub(crate) fn settle(
+    path: &Path,
+    move_into: Option<&str>,
+    confirm: bool,
+) -> Result<(State, Value, Layout), Refused> {
+    settle_where(path, move_into, confirm, &|_| Ok(()))
+}
+
 /// The one write the engine makes under a source place outside the
 /// pseudonymiser: settling a dataset's folder (Wave 7a). An unknown
 /// dataset's entries holding DICOM go into the tree a person names, and
@@ -728,10 +738,15 @@ pub(crate) fn would_write(layout: &Layout) -> Option<&'static str> {
 /// `dcm-anon` for the pseudonymiser to write into. Every move is a rename
 /// inside the folder, top-level entries only. The trees the dataset reads
 /// from now on come back with what the structure says and the layout.
-pub(crate) fn settle(
+///
+/// `allowed` has a say before anything is written or asked: it is given the
+/// layout as it would stand once settled (a move into a tree counted in),
+/// and its refusal leaves the folder as it was.
+pub(crate) fn settle_where(
     path: &Path,
     move_into: Option<&str>,
     confirm: bool,
+    allowed: &dyn Fn(&Layout) -> Result<(), Refused>,
 ) -> Result<(State, Value, Layout), Refused> {
     if !path.is_dir() {
         return Err(conflict(format!(
@@ -753,6 +768,14 @@ pub(crate) fn settle(
                 path.display()
             )));
         }
+        let mut settled = layout.clone();
+        settled.loose_dicom.clear();
+        if *tree == ORIGINALS_TREE {
+            settled.originals = true;
+        } else {
+            settled.anon = true;
+        }
+        allowed(&settled)?;
         if !confirm {
             let n = layout.loose_dicom.len();
             let mut refused = conflict(format!(
@@ -786,6 +809,8 @@ pub(crate) fn settle(
             layout.anon = true;
         }
         layout.moved = Some((tree, n));
+    } else {
+        allowed(&layout)?;
     }
     let state = layout.state();
     if state == State::Unknown {
@@ -891,13 +916,21 @@ pub(crate) fn id_types_refused(
 /// what the structure says stored as the dataset's arrival, state and
 /// trees. `arrives` is refused: the structure says it. A place that names
 /// a pseudonymised tree itself is settled as legacy, nothing written.
+///
+/// A person who declares a folder that holds identified files, or moves an
+/// unknown folder's entries into the originals, gives its identity rule with
+/// it, and may not take the rule away ([`needs_identity_rule`]); a look the
+/// engine takes by itself ([`Asks::Again`], [`Asks::Look`]) leaves a dataset
+/// from before as it was declared, and every door that would read its
+/// originals refuses it instead ([`place::no_identity_rule`]).
 pub(crate) fn declare(
     store: &mut Store,
     path: &Path,
     asked: &Value,
     current: Option<&Place>,
-    write: bool,
+    asks: Asks,
 ) -> Result<Declared, Refused> {
+    let write = asks != Asks::Look;
     if asked.get("arrives").is_some_and(|a| !a.is_null()) {
         return Err(bad(ARRIVES_IS_READ));
     }
@@ -972,7 +1005,11 @@ pub(crate) fn declare(
             layout,
         )
     } else {
-        let (state, trees, found) = settle(path, move_into, confirm)?;
+        let allowed = |settled: &Layout| match asks {
+            Asks::Person => needs_identity_rule(path, settled, asked, current),
+            Asks::Again | Asks::Look => Ok(()),
+        };
+        let (state, trees, found) = settle_where(path, move_into, confirm, &allowed)?;
         (
             json!({
                 "kind": "dataset",
@@ -1034,6 +1071,64 @@ pub(crate) fn declare(
     })
 }
 
+/// Who has a dataset's folder looked at.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Asks {
+    /// A person declares the dataset or changes it (`nils place add`,
+    /// `add-dataset` and `set`, and the doors that do the same): the folder
+    /// is settled, and one that holds identified files needs its identity
+    /// rule.
+    Person,
+    /// The engine looks at a dataset again (a refresh, an explore): the
+    /// folder is settled and the declaration stays as it was made.
+    Again,
+    /// Setup's look, which never writes under a source place.
+    Look,
+}
+
+/// 2026-11-11: a dataset whose originals are in play is declared with its
+/// identity rule, the one thing that says what their PatientID holds. A
+/// dataset was declared from the command line with no rule, its originals
+/// were read under the default one, which files PatientID as a `patient-id`
+/// and keeps it sealed, and their PatientID held personnummer. `settled` is
+/// the folder as the declaration would leave it, so an unknown folder whose
+/// entries go into the originals is asked the same; the rule is the one
+/// given, or the one the dataset has where none is given, and a rule given
+/// as null is taken away, which such a dataset refuses. Nothing is written
+/// before this answers.
+fn needs_identity_rule(
+    path: &Path,
+    settled: &Layout,
+    asked: &Value,
+    current: Option<&Place>,
+) -> Result<(), Refused> {
+    if !settled.originals || settled.state() == State::Unknown {
+        return Ok(());
+    }
+    // originals vaulted or purged: the tree's folder may stand, and holds
+    // nothing to read
+    if current.is_some_and(|c| place::originals_gone(&c.dataset)) {
+        return Ok(());
+    }
+    match asked.get("identity") {
+        Some(Value::Null) => Err(bad(format!(
+            "{} holds identified files, and its identity rule is what says what PatientID holds: the rule is replaced with another (--identity FILE, or identity in the body), never taken away. Nothing was written",
+            path.display()
+        ))),
+        // a rule that cannot be read is refused here too, before the folder
+        // is settled
+        Some(rule) => rule_of(rule)
+            .map(|_| ())
+            .map_err(|e| bad(format!("identity: {e}"))),
+        None if current.is_some_and(|c| !c.dataset["identity"].is_null()) => Ok(()),
+        None => Err(bad(format!(
+            "{} holds identified files ({ORIGINALS_TREE}) and nothing says what PatientID holds. Give an identity rule (--identity FILE, or identity in the body): {}. Nothing was written",
+            path.display(),
+            place::IDENTITY_RULE_SAYS
+        ))),
+    }
+}
+
 /// How many of a dataset's originals have a pseudonymised copy.
 fn pseudonymised_files(
     store: &mut Store,
@@ -1076,7 +1171,7 @@ pub(crate) fn shape_place(
     asked: &Value,
     current: Option<&Place>,
     _guarantees: &Value,
-    write: bool,
+    asks: Asks,
 ) -> Result<(Declared, Vec<Found>), Refused> {
     if asked.get("arrives").is_some_and(|a| !a.is_null()) {
         return Err(bad(ARRIVES_IS_READ));
@@ -1092,7 +1187,7 @@ pub(crate) fn shape_place(
                 && (c.dataset["state"] != "unknown" || !c.dataset["root"].is_null())
         });
     if one || shape_of(path) != Shape::Root {
-        return Ok((declare(store, path, asked, current, write)?, Vec::new()));
+        return Ok((declare(store, path, asked, current, asks)?, Vec::new()));
     }
     // a root is never a dataset's tree, nor inside one
     if let Some((other, tree)) =
@@ -1414,7 +1509,7 @@ pub(crate) fn add_dataset(
             }
         }
     };
-    let d = declare(store, &path, asked, None, true)?;
+    let d = declare(store, &path, asked, None, Asks::Person)?;
     let mut dataset = d.dataset;
     dataset["root"] = json!(root.name);
     let id = place::add(
@@ -1475,7 +1570,7 @@ pub(crate) fn refresh(store: &mut Store, only: Option<&str>) -> Result<Vec<Found
             continue;
         }
         let path = PathBuf::from(&p.path);
-        match declare(store, &path, &json!({}), Some(&p), true) {
+        match declare(store, &path, &json!({}), Some(&p), Asks::Again) {
             Ok(d) => {
                 place::set(store, p.id, None, None, Some(&d.probed)).map_err(failed)?;
                 let mut dataset = d.dataset;
@@ -1618,6 +1713,11 @@ pub(crate) fn layout_lines(id: i64, dataset: &Value, layout: &Value) -> Vec<Stri
             if let Some(why) = place::incomplete(dataset) {
                 out.push(format!("not read yet: {why}"));
             }
+            if place::lacks_identity_rule(dataset) {
+                out.push(format!(
+                    "no identity rule: nothing says what PatientID holds, so its originals are not pseudonymised; give it one with nils place set {id} --identity FILE"
+                ));
+            }
         }
     }
     out
@@ -1733,7 +1833,8 @@ pub(crate) fn not_read(store: &mut Store, path: &Path) -> Option<String> {
 /// Why a dataset may not be brought in, digested or pseudonymised: it is
 /// undeclared (Wave 7a §5.3), or its declaration is not whole (Wave 7a,
 /// Nima 2026-10-08: a de-identified or coded dataset says what PatientID
-/// holds and how its subjects are found).
+/// holds and how its subjects are found), or it holds identified files and
+/// has no identity rule (2026-11-11, [`place::no_identity_rule`]).
 pub(crate) fn undeclared_refusal(
     p: &Place,
     scheme: nils_registry::pseudonym::Scheme,
@@ -1743,6 +1844,9 @@ pub(crate) fn undeclared_refusal(
             "the dataset {} is undeclared: nothing in it is read until how its files arrive is declared, with nils place set {} --arrives identified|deidentified|coded or the desk's Add a dataset",
             p.name, p.id
         ));
+    }
+    if let Some(why) = place::no_identity_rule(p) {
+        return Some(why);
     }
     place::incomplete_on(&p.dataset, scheme).map(|why| {
         format!(
@@ -2224,6 +2328,226 @@ mod tests {
         assert!(!fields_given(&json!({"originals_kept": "purged"})));
     }
 
+    /// A declaration's identity rule, as a person gives it with a folder
+    /// that holds identified files.
+    fn a_rule() -> Value {
+        json!({"identity": {"id_type": "patient-id", "from": [{"field": "PatientID"}]}})
+    }
+
+    /// 2026-11-11: a folder that holds identified files is declared by a
+    /// person with its identity rule or not at all. A dataset was declared
+    /// with none, its originals were read under a default rule, and what
+    /// their PatientID held was filed and kept as a `patient-id`. The
+    /// refusal comes before anything is written or asked; a rule that says
+    /// `patient-id` in so many words is a declaration; the rule is replaced
+    /// and never taken away; an unknown folder whose entries go into the
+    /// originals is asked the same; and a look the engine takes by itself
+    /// leaves a dataset from before as it was declared.
+    #[test]
+    fn a_folder_of_identified_files_is_declared_with_its_identity_rule() {
+        let dir = TempDir::new("dataset-rule");
+        let mut store = Store::sqlite_in_memory().unwrap();
+        nils_registry::migrate::migrate(&mut store, nils_registry::migrate::Kind::Registry)
+            .unwrap();
+        dir.file("ida/derivatives/dcm-original/p1/IM_1", &dicom_bytes());
+        dir.file("before/derivatives/dcm-original/p1/IM_1", &dicom_bytes());
+        dir.file("both/derivatives/dcm-original/p1/IM_1", &dicom_bytes());
+        dir.file("both/derivatives/dcm-anon/s1/IM_1", &dicom_bytes());
+        dir.file("anona/derivatives/dcm-anon/s1/IM_1", &dicom_bytes());
+        dir.file("loose/p1/IM_1", &dicom_bytes());
+        let mut ask = |folder: &str, asked: Value, current: Option<&Place>, asks: Asks| {
+            let path = dir.path().join(folder);
+            shape_place(&mut store, folder, &path, &asked, current, &json!({}), asks).map(|d| d.0)
+        };
+        // a person, no rule: refused whole, and the folder is as it was
+        for folder in ["ida", "both"] {
+            let refused = ask(folder, json!({}), None, Asks::Person).err().unwrap();
+            assert_eq!(refused.status, 400, "{folder}");
+            for says in [
+                "holds identified files (derivatives/dcm-original)",
+                "nothing says what PatientID holds",
+                "--identity FILE",
+                "id_type is personnummer for an ID that is the same everywhere",
+                "the hospital's or study's own type",
+                "Nothing was written",
+            ] {
+                assert!(
+                    refused.message.contains(says),
+                    "{folder}: {}",
+                    refused.message
+                );
+            }
+        }
+        assert!(
+            !dir.path().join("ida").join(ANON_TREE).exists(),
+            "refused before the folder is settled"
+        );
+        // a rule given as null takes it away, which such a folder refuses,
+        // and a rule that cannot be read is refused before a write too
+        let refused = ask("ida", json!({"identity": null}), None, Asks::Person)
+            .err()
+            .unwrap();
+        assert_eq!(refused.status, 400);
+        assert!(
+            refused.message.contains("never taken away"),
+            "{}",
+            refused.message
+        );
+        let refused = ask(
+            "ida",
+            json!({"identity": {"id_type": 7}}),
+            None,
+            Asks::Person,
+        )
+        .err()
+        .unwrap();
+        assert_eq!(refused.status, 400);
+        assert!(
+            refused.message.starts_with("identity:"),
+            "{}",
+            refused.message
+        );
+        assert!(!dir.path().join("ida").join(ANON_TREE).exists());
+        // with its rule, patient-id in so many words: declared
+        let ida = ask("ida", a_rule(), None, Asks::Person).unwrap();
+        assert_eq!(ida.dataset["state"], "identified");
+        assert_eq!(ida.dataset["identity"]["id_type"], "patient-id");
+        assert!(dir.path().join("ida").join(ANON_TREE).is_dir());
+        assert!(!place::lacks_identity_rule(&ida.dataset));
+        let both = ask("both", a_rule(), None, Asks::Person).unwrap();
+        assert_eq!(both.dataset["state"], "both");
+        // a folder that holds none needs none
+        let anona = ask("anona", json!({}), None, Asks::Person).unwrap();
+        assert_eq!(anona.dataset["state"], "anonymised");
+        assert!(!place::lacks_identity_rule(&anona.dataset));
+        let loose = ask("loose", json!({}), None, Asks::Person).unwrap();
+        assert_eq!(loose.dataset["state"], "unknown");
+        // its entries into the originals: asked the rule before the
+        // question and before the move, confirmed or not
+        for confirm in [false, true] {
+            let refused = ask(
+                "loose",
+                json!({"move_into": "originals", "confirm_move": confirm}),
+                None,
+                Asks::Person,
+            )
+            .err()
+            .unwrap();
+            assert_eq!(refused.status, 400, "{}", refused.message);
+            assert!(
+                refused
+                    .message
+                    .contains("nothing says what PatientID holds"),
+                "{}",
+                refused.message
+            );
+            assert!(refused.layout.is_none(), "no question to confirm");
+            assert!(dir.path().join("loose/p1/IM_1").is_file(), "nothing moved");
+        }
+        // into the pseudonymised tree no rule is asked: the question as before
+        let asked = ask("loose", json!({"move_into": "anon"}), None, Asks::Person)
+            .err()
+            .unwrap();
+        assert_eq!(asked.status, 409);
+        // and with the rule: the question, then the move
+        let mut moving = a_rule();
+        moving["move_into"] = json!("originals");
+        let asked = ask("loose", moving.clone(), None, Asks::Person)
+            .err()
+            .unwrap();
+        assert_eq!(asked.status, 409);
+        assert!(dir.path().join("loose/p1/IM_1").is_file());
+        moving["confirm_move"] = json!(true);
+        let moved = ask("loose", moving, None, Asks::Person).unwrap();
+        assert_eq!(moved.dataset["state"], "identified");
+        assert!(
+            dir.path()
+                .join("loose")
+                .join(ORIGINALS_TREE)
+                .join("p1/IM_1")
+                .is_file()
+        );
+        // a dataset keeps its rule through a change that names none, and
+        // may not have it taken away
+        let place_of = |name: &str, dataset: &Value| Place {
+            id: 7,
+            name: name.into(),
+            role: Role::Source,
+            path: dir.path().join(name).to_string_lossy().into_owned(),
+            guarantees: json!({}),
+            probed: json!({}),
+            probed_at: None,
+            created_at: "2026-11-11T00:00:00Z".into(),
+            updated_at: None,
+            retired_at: None,
+            handling: Value::Null,
+            dataset: dataset.clone(),
+        };
+        let current = place_of("ida", &ida.dataset);
+        let changed = ask(
+            "ida",
+            json!({"unmapped": "code"}),
+            Some(&current),
+            Asks::Person,
+        )
+        .unwrap();
+        assert_eq!(changed.dataset["identity"]["id_type"], "patient-id");
+        assert_eq!(changed.dataset["unmapped"], "code");
+        let refused = ask(
+            "ida",
+            json!({"identity": null}),
+            Some(&current),
+            Asks::Person,
+        )
+        .err()
+        .unwrap();
+        assert!(
+            refused.message.contains("never taken away"),
+            "{}",
+            refused.message
+        );
+        // the engine's own look, a refresh or an explore, leaves a dataset
+        // from before as it was declared; its layout says what it lacks,
+        // and a person's next change gives the rule
+        let before = ask("before", json!({}), None, Asks::Again).unwrap();
+        assert_eq!(before.dataset["state"], "identified");
+        assert!(place::lacks_identity_rule(&before.dataset));
+        let lines = layout_lines(7, &before.dataset, &before.layout).join("; ");
+        assert!(
+            lines.contains("no identity rule")
+                && lines.contains("nils place set 7 --identity FILE"),
+            "{lines}"
+        );
+        let lines = layout_lines(7, &ida.dataset, &ida.layout).join("; ");
+        assert!(!lines.contains("no identity rule"), "{lines}");
+        let current = place_of("before", &before.dataset);
+        let again = ask("before", json!({}), Some(&current), Asks::Again).unwrap();
+        assert!(place::lacks_identity_rule(&again.dataset));
+        let refused = ask(
+            "before",
+            json!({"unmapped": "code"}),
+            Some(&current),
+            Asks::Person,
+        )
+        .err()
+        .unwrap();
+        assert_eq!(refused.status, 400);
+        let given = ask("before", a_rule(), Some(&current), Asks::Person).unwrap();
+        assert!(!place::lacks_identity_rule(&given.dataset));
+        // and every door that would read its originals refuses it meanwhile
+        let why =
+            undeclared_refusal(&current, nils_registry::pseudonym::Scheme::Blake2b32).unwrap();
+        assert!(why.contains("has no identity rule"), "{why}");
+        assert!(why.contains("nils place set 7 --identity FILE"), "{why}");
+        assert_eq!(
+            undeclared_refusal(
+                &place_of("ida", &ida.dataset),
+                nils_registry::pseudonym::Scheme::Blake2b32
+            ),
+            None
+        );
+    }
+
     fn names(dir: &Path) -> Vec<String> {
         let mut out: Vec<String> = std::fs::read_dir(dir)
             .map(|d| {
@@ -2447,7 +2771,7 @@ mod tests {
                 &json!({}),
                 None,
                 &json!({}),
-                false,
+                Asks::Look,
             )
             .unwrap();
             assert_eq!(d.dataset["state"], "unknown", "{folder}: {}", d.dataset);
@@ -2474,7 +2798,7 @@ mod tests {
             &json!({}),
             None,
             &json!({}),
-            true,
+            Asks::Person,
         )
         .unwrap();
         assert_eq!(d.dataset["state"], "anonymised", "{}", d.dataset);
@@ -2522,7 +2846,7 @@ mod tests {
             &json!({}),
             None,
             &json!({}),
-            true,
+            Asks::Person,
         )
         .unwrap();
         assert!(found.is_empty());
@@ -2582,10 +2906,28 @@ mod tests {
             "nothing renamed"
         );
         assert_eq!(place::list(&mut store).unwrap().len(), 1);
-        // each added: its structure read, every kind as it is
+        // each added: its structure read, every kind as it is; a folder
+        // that holds identified files with its identity rule (2026-11-11),
+        // and never without
         let mut states = Vec::new();
         for folder in ["anona", "both", "ida", "loose", "mixed", "rawb", "src"] {
-            let f = add_dataset(&mut store, &root, folder, None, &json!({})).unwrap();
+            let holds_originals = matches!(folder, "both" | "ida");
+            if holds_originals {
+                let refused = add_dataset(&mut store, &root, folder, None, &json!({}))
+                    .err()
+                    .unwrap();
+                assert_eq!(refused.status, 400, "{folder}: {}", refused.message);
+                assert!(
+                    refused
+                        .message
+                        .contains("nothing says what PatientID holds"),
+                    "{folder}: {}",
+                    refused.message
+                );
+                assert_eq!(place::list(&mut store).unwrap().len(), 1 + states.len());
+            }
+            let asked = if holds_originals { a_rule() } else { json!({}) };
+            let f = add_dataset(&mut store, &root, folder, None, &asked).unwrap();
             assert_eq!(f.place.dataset["root"], "src");
             states.push((
                 f.place.name.clone(),

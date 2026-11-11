@@ -80,6 +80,11 @@ pub struct Meta {
     /// Set when the registry was built by `nils synth`: the name of the
     /// builder. A desk shows a banner on it; real data never carries it.
     pub synthetic: Option<String>,
+    /// The row that says the pass over what a store from before kept of a
+    /// value shaped like a personnummer ran, or that the registry was made
+    /// after it ([`crate::shape_sweep`]); none on a registry it has yet to
+    /// run on.
+    pub never_kept_by_shape: Option<String>,
     /// The timezone the dates are read under, `UTC` or an IANA name, and
     /// the day a week starts on (Wave 5 section 12.6). Settings of the
     /// registry, never of a browser; `nils settings set` changes them.
@@ -362,12 +367,17 @@ impl Home {
             display_length: opts.display_length,
             session_scheme,
             synthetic: None,
+            // nothing here was sealed before the rule, so nothing is swept
+            never_kept_by_shape: Some(crate::shape_sweep::fresh_marker()),
             timezone: DEFAULT_TIMEZONE.to_string(),
             week_start: DEFAULT_WEEK_START.to_string(),
         };
         store.begin()?;
         for (k, v) in meta.rows() {
             set_meta(&mut store, k, &v)?;
+        }
+        if let Some(marker) = &meta.never_kept_by_shape {
+            set_meta(&mut store, crate::shape_sweep::MARKER, marker)?;
         }
         store.commit()?;
 
@@ -390,11 +400,15 @@ impl Home {
             store,
             meta,
             migrated: Vec::new(),
+            swept: None,
         })
     }
 
     /// Open the registry here, running any migration it is behind on and
-    /// refusing one that is ahead.
+    /// refusing one that is ahead. A registry from before the rule that no
+    /// value shaped like a personnummer is kept is swept once, here, where
+    /// the key is ([`crate::shape_sweep`]); a sweep that cannot run or fails
+    /// changes nothing about the open and is tried again at the next.
     pub fn open(&self) -> Result<Registry, HomeError> {
         let config = self.read_config()?;
         let mut store = self.open_store(&config, Kind::Registry)?;
@@ -414,13 +428,24 @@ impl Home {
             }
         };
         let meta = read_meta(&mut store)?;
-        Ok(Registry {
+        let mut registry = Registry {
             home: self.clone(),
             config,
             store,
             meta,
             migrated,
-        })
+            swept: None,
+        };
+        if registry.meta.never_kept_by_shape.is_none()
+            && let Ok(Some(swept)) = crate::shape_sweep::run(&mut registry)
+        {
+            registry.swept = Some(swept);
+            registry.meta.never_kept_by_shape =
+                get_meta(&mut registry.store, crate::shape_sweep::MARKER)
+                    .ok()
+                    .flatten();
+        }
+        Ok(registry)
     }
 
     /// The registry's store as it stands, for a reader that must change
@@ -556,6 +581,7 @@ fn read_meta(store: &mut Store) -> Result<Meta, HomeError> {
             .cloned()
             .unwrap_or_else(|| DEFAULT_SESSION_SCHEME.to_string()),
         synthetic: map.get("synthetic").cloned(),
+        never_kept_by_shape: map.get(crate::shape_sweep::MARKER).cloned(),
         timezone: map
             .get("timezone")
             .cloned()
@@ -574,6 +600,7 @@ pub struct Registry {
     store: Store,
     meta: Meta,
     migrated: Vec<i64>,
+    swept: Option<crate::shape_sweep::Swept>,
 }
 
 impl fmt::Debug for Registry {
@@ -608,6 +635,13 @@ impl Registry {
     /// The migrations `open` applied, oldest first; empty when none were.
     pub fn migrated(&self) -> &[i64] {
         &self.migrated
+    }
+
+    /// What this open's pass over the values a store from before kept
+    /// blanked ([`crate::shape_sweep`]), as counts; none when it did not run,
+    /// which is every open but the first after the update.
+    pub fn swept(&self) -> Option<crate::shape_sweep::Swept> {
+        self.swept
     }
 
     pub fn keys(&self) -> KeyStore {

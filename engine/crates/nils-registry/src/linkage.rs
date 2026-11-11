@@ -72,10 +72,11 @@ impl Subkeys {
     /// What an identity row keeps of its identifier (Wave 7a, Nima
     /// 2026-10-08: a personnummer is never saved anywhere in the registry):
     /// the identifier sealed, or nothing for a type the store never keeps
-    /// ([`keeps`]), whose identity is its keyed lookup alone and whose
+    /// and for a value shaped like a personnummer under any type
+    /// ([`keeps_value`]), whose identity is its keyed lookup alone and whose
     /// subject is shown by its code.
     pub fn seal_kept(&self, id_type: &str, value: &str) -> Vec<u8> {
-        if keeps(id_type) {
+        if keeps_value(id_type, value) {
             self.seal(value)
         } else {
             Vec::new()
@@ -141,6 +142,26 @@ pub struct IdType {
 /// lookup alone. Every identity row is filed by it ([`insert_identities`]).
 pub fn keeps(id_type: &str) -> bool {
     !crate::schema::NEVER_KEPT_ID_TYPES.contains(&id_type)
+}
+
+/// Whether the store keeps this identifier, sealed: its type is one the
+/// store keeps ([`keeps`]) and the value is not shaped like a personnummer
+/// or a coordination number ([`personnummer_shaped`]). The type's name alone
+/// does not decide: a dataset whose rule files PatientID under `patient-id`,
+/// or under a hospital's own type, may hold personnummer there all the same,
+/// and none is kept under any type. Every site that seals an identifier's
+/// value asks here, through [`Subkeys::seal_kept`]; the keyed lookup is not
+/// touched, so the identifier still finds its subject.
+pub fn keeps_value(id_type: &str, value: &str) -> bool {
+    keeps(id_type) && !personnummer_shaped(value)
+}
+
+/// Whether `value` reads as a valid personnummer or coordination number in
+/// any of its written forms ([`personnummer::normalise`]): ten or twelve
+/// digits with or without the separator, a date that is a date and a right
+/// check digit.
+pub fn personnummer_shaped(value: &str) -> bool {
+    personnummer::normalise(value).is_ok()
 }
 
 /// A name for an identifier type: lower case letters, digits and hyphens,
@@ -216,6 +237,9 @@ pub struct TypeCount {
     pub identifying: bool,
     pub identifiers: i64,
     pub subjects: i64,
+    /// How many of its identifiers keep a value (a ciphertext that is not
+    /// empty); the others are a keyed lookup alone.
+    pub kept: i64,
 }
 
 impl TypeCount {
@@ -231,6 +255,9 @@ impl TypeCount {
             "identifying": self.identifying,
             "identifiers": self.identifiers,
             "subjects": self.subjects,
+            // how many of the identifiers keep a value; a type that keeps
+            // none has nothing to show beside a subject
+            "kept": self.kept,
         })
     }
 }
@@ -283,23 +310,28 @@ pub fn set_identifying(store: &mut Store, name: &str, identifying: bool) -> Resu
     Ok(())
 }
 
-/// Every identifier type with how many identifiers and subjects it holds.
+/// The SQL that is true of an identity row that keeps a value: a
+/// ciphertext that is not empty, read the same way on both backends.
+pub const KEEPS_A_VALUE: &str = "ciphertext IS NOT NULL AND length(ciphertext) > 0";
+
+/// Every identifier type with how many identifiers and subjects it holds,
+/// and how many of the identifiers keep a value.
 pub fn id_type_counts(store: &mut Store) -> Result<Vec<TypeCount>, Error> {
     let identity = store.qualified("identity");
-    let counts: HashMap<i64, (i64, i64)> = store
+    let counts: HashMap<i64, (i64, i64, i64)> = store
         .query(
             &format!(
-                "SELECT id_type_id, COUNT(*), COUNT(DISTINCT subject_id) FROM {identity} GROUP BY id_type_id"
+                "SELECT id_type_id, COUNT(*), COUNT(DISTINCT subject_id), COUNT(CASE WHEN {KEEPS_A_VALUE} THEN 1 END) FROM {identity} GROUP BY id_type_id"
             ),
             &[],
         )?
         .iter()
-        .map(|r| Ok((r.int(0)?, (r.int(1)?, r.int(2)?))))
+        .map(|r| Ok((r.int(0)?, (r.int(1)?, r.int(2)?, r.int(3)?))))
         .collect::<Result<_, Error>>()?;
     Ok(id_types(store)?
         .into_iter()
         .map(|t| {
-            let (identifiers, subjects) = counts.get(&t.id).copied().unwrap_or((0, 0));
+            let (identifiers, subjects, kept) = counts.get(&t.id).copied().unwrap_or((0, 0, 0));
             TypeCount {
                 id: t.id,
                 name: t.name,
@@ -307,6 +339,7 @@ pub fn id_type_counts(store: &mut Store) -> Result<Vec<TypeCount>, Error> {
                 identifying: t.identifying,
                 identifiers,
                 subjects,
+                kept,
             }
         })
         .collect())
@@ -542,6 +575,26 @@ pub fn values_of_type(
     actor: &str,
     why: &str,
 ) -> Result<std::collections::HashMap<i64, String>, Error> {
+    values_of_type_filed_by(store, keys, subjects, id_type_id, None, actor, why)
+}
+
+/// The source of an identity a merge filed: the alias, the code of the
+/// subject merged away, under the `subject-code` type.
+pub const FILED_BY_MERGE: &str = "merge";
+
+/// [`values_of_type`] over the rows one source filed alone, where a source
+/// is given: `merge` reads a subject's alias, the code of a subject merged
+/// into it, and never the subject's own code, which a digest of a
+/// pseudonymised tree files under the same type as a lookup.
+pub fn values_of_type_filed_by(
+    store: &mut Store,
+    keys: &Subkeys,
+    subjects: &[i64],
+    id_type_id: i64,
+    source: Option<&str>,
+    actor: &str,
+    why: &str,
+) -> Result<std::collections::HashMap<i64, String>, Error> {
     let mut out = std::collections::HashMap::new();
     let mut audit: Vec<Vec<Param>> = Vec::new();
     let now = now_iso();
@@ -550,14 +603,24 @@ pub fn values_of_type(
         let marks: Vec<String> = (0..chunk.len())
             .map(|i| d.param(i + 2, crate::schema::Type::Int))
             .collect();
+        let filed_by = match source {
+            Some(_) => format!(
+                " AND source = {}",
+                d.param(chunk.len() + 2, crate::schema::Type::Text)
+            ),
+            None => String::new(),
+        };
         let sql = format!(
-            "SELECT id, subject_id, ciphertext FROM {} WHERE id_type_id = {} AND subject_id IN ({}) ORDER BY id",
+            "SELECT id, subject_id, ciphertext FROM {} WHERE id_type_id = {} AND subject_id IN ({}){filed_by} ORDER BY id",
             store.qualified("identity"),
             d.param(1, crate::schema::Type::Int),
             marks.join(", ")
         );
         let mut params = vec![Param::from(id_type_id)];
         params.extend(chunk.iter().map(|s| Param::from(*s)));
+        if let Some(source) = source {
+            params.push(Param::from(source));
+        }
         for r in store.query(&sql, &params)? {
             let subject = r.int(1)?;
             if out.contains_key(&subject) {
@@ -1232,6 +1295,58 @@ mod tests {
         );
         let found = identities_by_lookup(&mut store, std::slice::from_ref(&reserve)).unwrap();
         assert_eq!((found.len(), found[0].subject_id), (1, 7));
+    }
+
+    /// 2026-11-11: the type's name is not all that decides. A value shaped
+    /// like a personnummer or a coordination number is never kept, whatever
+    /// type a rule files it under and however it is written; the keyed
+    /// lookup is what it was, so the identifier still finds its subject.
+    #[test]
+    fn a_value_shaped_like_a_personnummer_is_never_kept_under_any_type() {
+        let keys = Subkeys::derive(KEY);
+        let shaped = [
+            "198501012382",
+            "19850101-2382",
+            "850101-2382",
+            "8501012382",
+            " 19850101 2382 ",
+            // a coordination number: the day plus sixty
+            "189001619809",
+        ];
+        for id_type in [
+            "patient-id",
+            "site-id",
+            "study-instance-uid",
+            "subject-code",
+        ] {
+            assert!(keeps(id_type), "{id_type}");
+            for value in shaped {
+                assert!(personnummer_shaped(value), "{value}");
+                assert!(!keeps_value(id_type, value), "{id_type} {value}");
+                assert!(
+                    keys.seal_kept(id_type, value).is_empty(),
+                    "{id_type} {value}"
+                );
+                // the lookup does not depend on what is kept
+                assert_eq!(keys.lookup(id_type, value).len(), 32, "{id_type} {value}");
+            }
+            // twelve digits that name no date, a wrong check digit, and
+            // what a hospital or a study writes: none has the shape
+            for value in ["199913241234", "198501012383", "P1", "TRIAL-0042", ""] {
+                assert!(!personnummer_shaped(value), "{value}");
+                assert!(keeps_value(id_type, value), "{id_type} {value}");
+                let sealed = keys.seal_kept(id_type, value);
+                assert_eq!(keys.open(&sealed).unwrap(), value, "{id_type} {value}");
+            }
+        }
+        // the two types never kept stay so for every value
+        for id_type in ["personnummer", "reserve-number"] {
+            assert!(!keeps_value(id_type, "P1"), "{id_type}");
+        }
+        assert_ne!(
+            keys.lookup("patient-id", "198501012382"),
+            keys.lookup("patient-id", "198501012383")
+        );
     }
 
     #[test]

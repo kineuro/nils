@@ -708,6 +708,9 @@ fn reads_identifiers(access: &Access) -> bool {
 /// opened and audited, as it is where this caller may see it and as its
 /// shape otherwise; a subject that holds none, or one whose value the store
 /// keeps nothing of (a personnummer, a reserve number), is not in the answer.
+/// By `subject-code` the label is the subject's alias, the code a merge
+/// filed, and never its own code, which a digest of a pseudonymised tree
+/// files under the same type (2026-11-11).
 fn labels_by_type(
     registry: &mut Registry,
     caller: &Caller,
@@ -720,11 +723,12 @@ fn labels_by_type(
     let key = registry.pseudonym_key().map_err(failed)?;
     let keys = Subkeys::derive(&key);
     let mut store = registry.open_linkage().map_err(failed)?;
-    let values = linkage::values_of_type(
+    let values = linkage::values_of_type_filed_by(
         &mut store,
         &keys,
         subjects,
         shown.id,
+        (shown.name == SUBJECT_CODE_TYPE).then_some(linkage::FILED_BY_MERGE),
         &caller.principal,
         WHY,
     )
@@ -761,8 +765,11 @@ fn found_by_identifier(registry: &mut Registry, text: &str) -> Result<HashSet<i6
         .collect())
 }
 
-/// The id types the scope's subjects hold that keep a value, with how many
-/// subjects hold each, most first; nothing is opened. Empty where the
+/// The id types the scope's subjects hold a kept value of, with how many
+/// subjects hold one of each, most first; nothing is opened. A type is
+/// offered by its values, never by its name alone (2026-11-11): a row that
+/// keeps nothing, a lookup, labels no subject, and `subject-code` counts the
+/// aliases a merge filed, never a subject's own code. Empty where the
 /// linkage store cannot be read: a facet is no reason to fail the door.
 fn id_type_facet(registry: &mut Registry, subjects: &[i64]) -> Vec<Value> {
     let Ok(mut store) = registry.open_linkage() else {
@@ -773,11 +780,23 @@ fn id_type_facet(registry: &mut Registry, subjects: &[i64]) -> Vec<Value> {
     };
     let mut held: HashMap<i64, BTreeSet<i64>> = HashMap::new();
     let identity = store.qualified("identity");
+    let aliases = types
+        .iter()
+        .find(|t| t.name == SUBJECT_CODE_TYPE)
+        .map(|t| {
+            format!(
+                " AND (id_type_id <> {} OR source = '{}')",
+                t.id,
+                linkage::FILED_BY_MERGE
+            )
+        })
+        .unwrap_or_default();
     for chunk in subjects.chunks(IN_CHUNKS) {
         let Ok(rows) = store.query(
             &format!(
-                "SELECT DISTINCT id_type_id, subject_id FROM {identity} WHERE subject_id IN ({})",
-                list(chunk)
+                "SELECT DISTINCT id_type_id, subject_id FROM {identity} WHERE subject_id IN ({}) AND {}{aliases}",
+                list(chunk),
+                linkage::KEEPS_A_VALUE
             ),
             &[],
         ) else {

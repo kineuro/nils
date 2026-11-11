@@ -2066,6 +2066,8 @@ fn a_dataset_is_probed_by_name_and_its_alike_subjects_are_named_at_quasi() {
             data.path().to_str().unwrap(),
             "--role",
             "source",
+            "--identity",
+            &common::patient_id_rule(&home),
         ],
         None,
     );
@@ -3594,7 +3596,7 @@ fn a_dataset_is_declared_on_a_source_place_and_named_by_its_name() {
     plain.file("sub-1/a.dcm", &dicom("1.2.3.E", "1.2.3.E.1.1"));
     loose.file("sub-9/a.dcm", &dicom("1.2.3.F", "1.2.3.F.1.1"));
     loose.file("sub-8/notes.txt", b"no dicom here");
-    const LIMIT: usize = 100;
+    const LIMIT: usize = 108;
     let used = std::cell::Cell::new(0usize);
     let server = Server::start(
         &home,
@@ -3735,6 +3737,34 @@ fn a_dataset_is_declared_on_a_source_place_and_named_by_its_name() {
             .contains("read from its folder"),
         "{refused}"
     );
+    // 2026-11-11: entries that would become a dataset's originals come with
+    // the identity rule, the one thing that says what PatientID holds. With
+    // no rule the door refuses before it asks anything, in so many words,
+    // and nothing is moved or written
+    for more in [
+        serde_json::json!({"move_into": "originals"}),
+        serde_json::json!({"move_into": "originals", "confirm_move": true}),
+    ] {
+        let (status, refused) = ask(
+            "POST",
+            "/api/places",
+            Some(&body("ds", "source", identified.path(), more)),
+            ops,
+        );
+        assert_eq!(status, 400, "{refused}");
+        let words = refused["error"].as_str().unwrap();
+        for part in [
+            "holds identified files (derivatives/dcm-original)",
+            "nothing says what PatientID holds",
+            "id_type is personnummer",
+            "Nothing was written",
+        ] {
+            assert!(words.contains(part), "{part}: {refused}");
+        }
+        assert!(refused.get("confirm").is_none(), "{refused}");
+        assert!(identified.path().join("sub-1").is_dir());
+        assert!(!identified.path().join("derivatives").exists());
+    }
     // T4: a dataset's entries move into the tree a person names only on the
     // person's word; named without it, the door answers the question,
     // naming the entries and the trees, and nothing is written
@@ -3745,7 +3775,10 @@ fn a_dataset_is_declared_on_a_source_place_and_named_by_its_name() {
             "ds",
             "source",
             identified.path(),
-            serde_json::json!({"move_into": "originals"}),
+            serde_json::json!({
+                "move_into": "originals",
+                "identity": common::patient_id_rule_json(),
+            }),
         )),
         ops,
     );
@@ -4173,14 +4206,60 @@ fn a_dataset_is_declared_on_a_source_place_and_named_by_its_name() {
     assert!(!identified.path().join("sub-1").exists());
 
     // a v0 cohort folder: its structure says both, identified with its
-    // anonymised copy; dcm-raw is renamed, shown, nothing else touched
-    let (status, old) = ask(
+    // anonymised copy. It holds originals, so it is declared with its
+    // identity rule (2026-11-11): without one it is refused and its dcm-raw
+    // is not renamed
+    let (status, refused) = ask(
         "POST",
         "/api/places",
         Some(&body("old", "source", v0.path(), serde_json::json!({}))),
         ops,
     );
+    assert_eq!(status, 400, "{refused}");
+    assert!(
+        refused["error"]
+            .as_str()
+            .unwrap()
+            .contains("nothing says what PatientID holds"),
+        "{refused}"
+    );
+    assert!(v0.path().join("derivatives/dcm-raw").is_dir());
+    assert!(!v0.path().join("derivatives/dcm-anon").exists());
+    // with its rule, dcm-raw is renamed, shown, nothing else touched
+    let (status, old) = ask(
+        "POST",
+        "/api/places",
+        Some(&body(
+            "old",
+            "source",
+            v0.path(),
+            serde_json::json!({"identity": common::patient_id_rule_json()}),
+        )),
+        ops,
+    );
     assert_eq!(status, 201, "{old}");
+    // and the rule is never taken away from a dataset that holds originals:
+    // the door refuses, and the dataset keeps it
+    let old_at = format!("/api/places/{}", old["id"].as_i64().unwrap());
+    let (status, refused) = ask("PUT", &old_at, Some(r#"{"identity": null}"#), ops);
+    assert_eq!(status, 400, "{refused}");
+    assert!(
+        refused["error"]
+            .as_str()
+            .unwrap()
+            .contains("never taken away"),
+        "{refused}"
+    );
+    let (status, kept) = ask("GET", "/api/places", None, ops);
+    assert_eq!(status, 200, "{kept}");
+    assert!(
+        kept["places"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|p| p["name"] == "old" && p["dataset"]["identity"]["id_type"] == "patient-id"),
+        "{kept}"
+    );
     assert_eq!(old["dataset"]["arrives"], "identified", "{old}");
     assert_eq!(old["dataset"]["state"], "both", "{old}");
     assert_eq!(old["layout"]["renamed"], true, "{old}");
@@ -4553,6 +4632,8 @@ fn the_originals_door_refuses_a_purge_when_an_original_changed_after_its_copy() 
             "--confirm-move",
             "--unmapped",
             "code",
+            "--identity",
+            &common::patient_id_rule(&home),
         ],
         None,
     );
@@ -5839,14 +5920,35 @@ fn a_chain_runs_through_the_jobs_door_and_a_refused_step_ends_it() {
             "--confirm-move",
             "--unmapped",
             "code",
+            "--identity",
+            &common::patient_id_rule(&home),
         ],
         None,
     );
+    // a dataset declared before a rule was asked for (2026-11-11) stands
+    // with none: the registry is written as such a declaration left it
+    let ds_id = {
+        let mut store =
+            nils_registry::Store::open_sqlite(&home.path().join("registry.db")).unwrap();
+        let changed = store
+            .execute(
+                "UPDATE place SET dataset = json_set(dataset, '$.identity', json('null')) \
+                 WHERE name = 'ds'",
+                &[],
+            )
+            .unwrap();
+        assert_eq!(changed, 1);
+        store
+            .query("SELECT id FROM place WHERE name = 'ds'", &[])
+            .unwrap()[0]
+            .int(0)
+            .unwrap()
+    };
     // The requests the door answers before the server stops. Waiting on a
     // job reads the registry from the command line and asks the door once,
-    // when the job is over, so the test asks the same 26 however slow the
+    // when the job is over, so the test asks the same 29 however slow the
     // runner is; the rest are capabilities at the end.
-    const LIMIT: usize = 32;
+    const LIMIT: usize = 35;
     let used = std::cell::Cell::new(0usize);
     let server = Server::start(
         &home,
@@ -5911,6 +6013,55 @@ fn a_chain_runs_through_the_jobs_door_and_a_refused_step_ends_it() {
         }
     };
     let after = |j: &serde_json::Value| j["chain"]["after"].clone();
+
+    // 2026-11-11: nothing of a dataset that holds identified files and has
+    // no identity rule is read. The door refuses the pseudonymiser and the
+    // bring-in before a job is queued, saying why and what to give, and the
+    // rule given at the places door opens both
+    // the jobs that are no worker of the server's own, which start in their
+    // own time
+    let queued = |home: &TempDir| {
+        serde_json::from_str::<serde_json::Value>(&run(
+            home,
+            &["jobs", "list", "--all", "--json"],
+            None,
+        ))
+        .unwrap()
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|j| !j["kind"].as_str().is_some_and(|k| k.ends_with("worker")))
+        .count()
+    };
+    let before = queued(&home);
+    for command in [
+        r#"{"command": ["pseudonymize", "@ds"]}"#,
+        r#"{"command": ["bring-in", "@ds"]}"#,
+    ] {
+        let (status, refused) = ask("POST", "/api/jobs", Some(command), ops);
+        assert_eq!(status, 409, "{refused}");
+        let words = refused["error"].as_str().unwrap();
+        for part in [
+            "the dataset ds holds identified files and has no identity rule",
+            "nothing says what PatientID holds",
+            "--identity FILE",
+            "id_type is personnummer",
+        ] {
+            assert!(words.contains(part), "{part}: {refused}");
+        }
+    }
+    assert_eq!(queued(&home), before, "no job was queued");
+    let (status, ruled) = ask(
+        "PUT",
+        &format!("/api/places/{ds_id}"),
+        Some(&serde_json::json!({"identity": common::patient_id_rule_json()}).to_string()),
+        ops,
+    );
+    assert_eq!(status, 200, "{ruled}");
+    assert_eq!(
+        ruled["dataset"]["identity"]["id_type"], "patient-id",
+        "{ruled}"
+    );
 
     // the originals are the pseudonymiser's: a digest of them is refused
     let (status, refused) = ask(
@@ -7238,6 +7389,8 @@ fn scans_sweep(dsn: Option<&str>) {
             only_originals.path().to_str().unwrap(),
             "--role",
             "source",
+            "--identity",
+            &common::patient_id_rule(&home),
         ],
         None,
     );
@@ -8158,6 +8311,40 @@ third|S-0003|1.2.9.G|1.2.9.G.1|20260701|t1 late|Philips";
         subject_of["mapped-0002"],
         subject_of["mapped-0003"],
     );
+    // 2026-11-11: the second subject also has an ID of a site's own type
+    // that is shaped like a personnummer, filed as its lookup alone, and its
+    // own code as a pseudonymised tree holds it, which no merge filed. The
+    // list offers neither: a type is offered by the values it keeps, and
+    // subject-code by the aliases alone
+    {
+        use nils_registry::linkage::{self, NewIdentity, Subkeys};
+        let mut store = match dsn {
+            Some(dsn) => {
+                nils_registry::Store::connect_postgres(dsn, &format!("{VIEWER_SCHEMA}_linkage"))
+                    .unwrap()
+            }
+            None => nils_registry::Store::open_sqlite(&home.path().join("linkage.db")).unwrap(),
+        };
+        let keys = Subkeys::derive(b"a serve test key");
+        let (site, _) = linkage::ensure_id_type(&mut store, "site-id", None).unwrap();
+        let code = linkage::id_type_id(&mut store, "subject-code")
+            .unwrap()
+            .unwrap();
+        let row = |id_type_id, t: &str, value: &str, source| NewIdentity {
+            subject_id: s2,
+            id_type_id,
+            lookup: keys.lookup(t, value),
+            ciphertext: keys.seal_kept(t, value),
+            source,
+            first_batch_id: None,
+        };
+        let rows = [
+            row(site.id, "site-id", "198501012382", "csv"),
+            row(code, "subject-code", "mapped-0002", "dicom"),
+        ];
+        assert!(rows[0].ciphertext.is_empty() && !rows[1].ciphertext.is_empty());
+        linkage::insert_identities(&mut store, &rows).unwrap();
+    }
 
     // what NILS says each scan is, the questions, the picks and a cohort
     {
@@ -8313,7 +8500,7 @@ third|S-0003|1.2.9.G|1.2.9.G.1|20260701|t1 late|Philips";
         }
     }
 
-    const LIMIT: usize = 72;
+    const LIMIT: usize = 73;
     let used = std::cell::Cell::new(0usize);
     let server = Server::start(
         &home,
@@ -8422,6 +8609,8 @@ third|S-0003|1.2.9.G|1.2.9.G.1|20260701|t1 late|Philips";
         vec!["flair", "t1w"],
         "{doc}"
     );
+    // by kept values: site-id keeps none and is not offered, and
+    // subject-code counts the one subject a merge gave an alias
     assert_eq!(
         doc["facets"]["id_types"],
         serde_json::json!([
@@ -8509,7 +8698,13 @@ third|S-0003|1.2.9.G|1.2.9.G.1|20260701|t1 late|Philips";
     let (status, d) = ask("/api/datasets/first/subjects?show=subject-code", reviewer);
     assert_eq!(status, 200, "{d}");
     assert_eq!(label_of(&d, s1), "mapped-0004", "{d}");
+    // the second's own code is no alias
     assert_eq!(label_of(&d, s2), serde_json::Value::Null, "{d}");
+    // a type that keeps no value has nothing to show
+    let (status, d) = ask("/api/datasets/first/subjects?show=site-id", operator);
+    assert_eq!(status, 200, "{d}");
+    assert_eq!(label_of(&d, s2), serde_json::Value::Null, "{d}");
+    assert!(!d.to_string().contains("198501012382"), "{d}");
     let (status, d) = ask("/api/datasets/first/subjects?show=subject-code", reader);
     assert_eq!(status, 200, "{d}");
     assert_eq!(label_of(&d, s1), "aaaaaa-9999", "{d}");

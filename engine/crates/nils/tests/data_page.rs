@@ -18,6 +18,8 @@ use nils_dicom::synth::{self, MetaFields, TempDir};
 use nils_registry::Store;
 use serde_json::{Value, json};
 
+mod common;
+
 fn nils() -> Command {
     Command::new(env!("CARGO_BIN_EXE_nils"))
 }
@@ -1141,6 +1143,8 @@ fn held_ids(pg: Option<(String, String)>) {
         ward.path().to_str().unwrap(),
         "--role",
         "source",
+        "--identity",
+        &common::patient_id_rule(&home.dir),
     ]);
     // every seventh identifier released by a map, every fifth of the rest
     // coded anyway; an identifier's files lie four hundred rows apart
@@ -2798,6 +2802,8 @@ fn folders(pg: Option<(String, String)>) {
             "--confirm-move",
             "--unmapped",
             "code",
+            "--identity",
+            &common::patient_id_rule(&home.dir),
         ]);
         home.ok(&["pseudonymize", &format!("@{name}")]);
         home.ok(&[
@@ -3310,6 +3316,8 @@ fn copy_counts(pg: Option<(String, String)>) {
         "--confirm-move",
         "--unmapped",
         "hold",
+        "--identity",
+        &common::patient_id_rule(&home.dir),
     ]);
     let bytes = bytes_under(&ids.path().join("derivatives/dcm-original"));
     let summary = |home: &Home| -> (Value, Value, Value) {
@@ -3325,6 +3333,60 @@ fn copy_counts(pg: Option<(String, String)>) {
             .unwrap_or_else(|| panic!("{sources}"));
         (step(&s, "found"), step(&s, "pseudonymised"), source)
     };
+
+    // 2026-11-11: a dataset declared before a rule was asked for stands
+    // with none, and its pseudonymise step says what it waits for, in the
+    // words the doors that would run it refuse with; the rule given, the
+    // step waits for nothing but its run
+    let identity = |home: &Home, rule: Value| {
+        let mut store = home.store();
+        let place = store.qualified("place");
+        let t = nils_registry::schema::table("place");
+        let text = store
+            .dialect()
+            .text_of(t.column("dataset").expect("dataset"));
+        let mut doc: Value = serde_json::from_str(
+            store
+                .query(
+                    &format!("SELECT {text} FROM {place} WHERE name = 'copied'"),
+                    &[],
+                )
+                .unwrap()[0]
+                .text(0)
+                .unwrap(),
+        )
+        .unwrap();
+        doc["identity"] = rule;
+        let d = store.dialect();
+        store
+            .execute(
+                &format!(
+                    "UPDATE {place} SET dataset = {} WHERE name = 'copied'",
+                    d.param(1, Type::Json)
+                ),
+                &[Param::from(doc.to_string())],
+            )
+            .unwrap();
+    };
+    let (_, copy, _) = summary(&home);
+    assert_eq!(copy["refusal"], Value::Null, "{copy}");
+    identity(&home, Value::Null);
+    let (_, copy, _) = summary(&home);
+    assert_eq!(copy["state"], "waiting", "{copy}");
+    assert_eq!(copy["refusal"]["reason"], "no_identity_rule", "{copy}");
+    let words = copy["refusal"]["error"].as_str().unwrap();
+    for part in [
+        "the dataset copied holds identified files and has no identity rule",
+        "nothing says what PatientID holds",
+        "id_type is personnummer",
+    ] {
+        assert!(words.contains(part), "{part}: {copy}");
+    }
+    let (ok, _, err) = home.run(&["pseudonymize", "@copied"], None);
+    assert!(!ok && err.contains(words), "{err}");
+    identity(&home, common::patient_id_rule_json());
+    let (_, copy, _) = summary(&home);
+    assert_eq!(copy["refusal"], Value::Null, "{copy}");
 
     // a whole run holds every image and refuses the note: nothing waits,
     // the held files are said apart and the refused one is final

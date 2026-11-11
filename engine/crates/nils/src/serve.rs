@@ -3493,7 +3493,7 @@ fn routed(
                     &serde_json::json!({}),
                     Some(&p),
                     &p.guarantees,
-                    true,
+                    crate::dataset::Asks::Again,
                 ) {
                     Ok((d, _)) => {
                         place::set(registry.store(), p.id, None, None, Some(&d.probed))?;
@@ -3673,7 +3673,7 @@ fn routed(
                     &asked,
                     None,
                     &guarantees,
-                    true,
+                    crate::dataset::Asks::Person,
                 )
                 .map_err(|r| declare_refused(r, &caller.access))?;
                 (d.probed, d.dataset, d.layout)
@@ -3805,7 +3805,7 @@ fn routed(
                     &asked,
                     Some(&current),
                     &current.guarantees,
-                    true,
+                    crate::dataset::Asks::Person,
                 )
                 .map_err(|r| declare_refused(r, &caller.access))?;
                 (Some(d.probed.clone()), Some(d))
@@ -7237,8 +7237,9 @@ fn located(doors: &Doors, store: &mut Store, command: Vec<String>) -> Result<Vec
     // record 26 §3 and §1: the pseudonymiser reads a dataset by its name,
     // both trees at once, and an act on a dataset's originals names it the
     // same way, so `@name` stays a name for them
-    let by_name = verb == "pseudonymize"
-        || (verb == "place" && command.get(1).is_some_and(|c| c == "originals"));
+    let pseudonymises = verb == "pseudonymize";
+    let by_name =
+        pseudonymises || (verb == "place" && command.get(1).is_some_and(|c| c == "originals"));
     let named = match command.get(1) {
         Some(second) if verb == "place" => format!("{verb} {second}"),
         _ => verb.to_string(),
@@ -7262,6 +7263,18 @@ fn located(doors: &Doors, store: &mut Store, command: Vec<String>) -> Result<Vec
                         400,
                         format!("{named} takes a dataset as @name; @{name} is not one"),
                     ));
+                }
+                // 2026-11-11: a dataset with no identity rule is refused
+                // here, before a job is queued, in the words the
+                // pseudonymiser itself refuses it with
+                if pseudonymises
+                    && let Some(p) = root
+                        .place
+                        .as_deref()
+                        .and_then(|n| nils_registry::place::by_name(store, n).ok().flatten())
+                    && let Some(why) = nils_registry::place::no_identity_rule(&p)
+                {
+                    return Err(Reply::error(409, why));
                 }
                 out.push(arg);
                 continue;

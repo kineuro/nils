@@ -376,8 +376,10 @@ pub fn merge_in(
                 subject_id: canonical.id,
                 id_type_id: type_id,
                 lookup,
-                ciphertext: keys.seal(&alias.code),
-                source: "merge",
+                // a code is kept as every identifier is: sealed, unless it
+                // is shaped like a personnummer, which no row keeps
+                ciphertext: keys.seal_kept(SUBJECT_CODE_TYPE, &alias.code),
+                source: crate::linkage::FILED_BY_MERGE,
                 first_batch_id: None,
             }],
         )?;

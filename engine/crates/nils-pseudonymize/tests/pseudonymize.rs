@@ -151,6 +151,13 @@ fn dataset() -> TempDir {
     dir
 }
 
+/// The identity rule these datasets are declared with: a dataset that holds
+/// originals says what PatientID holds, here the type `patient-id` in so many
+/// words, and with no rule nothing of it is read.
+fn patient_id_rule() -> Value {
+    json!({"id_type": "patient-id", "from": [{"field": "PatientID"}]})
+}
+
 fn declare(registry: &mut Registry, dir: &Path, tags: Value) -> place::Place {
     let store = registry.store();
     let id = place::add(
@@ -165,7 +172,7 @@ fn declare(registry: &mut Registry, dir: &Path, tags: Value) -> place::Place {
             dataset: json!({
                 "arrives": "identified",
                 "trees": {"originals": "derivatives/dcm-original", "anon": "derivatives/dcm-anon"},
-                "identity": null,
+                "identity": patient_id_rule(),
                 "unmapped": "hold",
                 "tags": tags,
             }),
@@ -625,7 +632,7 @@ fn a_dataset_is_pseudonymised_held_resumed_and_the_held_coded_anyway() {
         &json!({
             "arrives": "identified",
             "trees": {"originals": "derivatives/dcm-original", "anon": "derivatives/dcm-anon"},
-            "identity": null,
+            "identity": patient_id_rule(),
             "unmapped": "hold",
             "tags": {"keep_demographics": false, "remove": ["0018,1000"], "keep": ["0008,1010"]},
         }),
