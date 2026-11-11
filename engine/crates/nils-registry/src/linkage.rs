@@ -710,7 +710,7 @@ pub fn kept_values_of_type(
 /// a type whose rows are all lookups alone can name nobody.
 pub fn holds_kept_value(store: &mut Store, id_type_id: i64) -> Result<bool, Error> {
     let sql = format!(
-        "SELECT id FROM {} WHERE id_type_id = {} AND length(ciphertext) > 0 LIMIT 1",
+        "SELECT id FROM {} WHERE id_type_id = {} AND {KEEPS_A_VALUE} LIMIT 1",
         store.qualified("identity"),
         store.dialect().param(1, crate::schema::Type::Int),
     );

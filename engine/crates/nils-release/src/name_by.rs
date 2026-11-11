@@ -460,9 +460,7 @@ pub fn plan(
             let mut can: Vec<(String, String)> = Vec::new();
             for value in held.remove(id).unwrap_or_default() {
                 let cleaned = clean(&value);
-                if personnummer::normalise(&value).is_ok()
-                    || personnummer::normalise(&cleaned).is_ok()
-                {
+                if linkage::personnummer_shaped(&value) || linkage::personnummer_shaped(&cleaned) {
                     passed_over.insert(code.as_str());
                     continue;
                 }
