@@ -11,7 +11,7 @@ use crate::schema::{self, ID_TYPES, Table, linkage_tables, registry_tables};
 use crate::store::{Error, Param, Store};
 
 /// The version this binary writes.
-pub const SCHEMA_VERSION: i64 = 116;
+pub const SCHEMA_VERSION: i64 = 117;
 
 /// Which of the two stores a migration runs against.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -518,6 +518,10 @@ pub static MIGRATIONS: &[Migration] = &[
         version: 116,
         apply: the_subject_code_type_says_both_of_its_uses,
     },
+    Migration {
+        version: 117,
+        apply: a_release_names_its_subjects_by_an_id_type,
+    },
 ];
 
 /// The `subject-code` id type says what it holds (2026-11-11): the code of a
@@ -549,6 +553,18 @@ fn the_subject_code_type_says_both_of_its_uses(store: &mut Store, kind: Kind) ->
         ],
     )?;
     Ok(())
+}
+
+/// A release names its subjects by an ID type: the release row says the
+/// types it names by (`release.name_by`), and each version keeps what it
+/// called each subject (`release_name`). A column and a table are added
+/// and left empty: a release from before named every subject by its code.
+fn a_release_names_its_subjects_by_an_id_type(store: &mut Store, kind: Kind) -> Result<(), Error> {
+    if kind != Kind::Registry {
+        return Ok(());
+    }
+    add_tables(store, kind, &["release_name"])?;
+    add_columns(store, "release", &["name_by"])
 }
 
 /// Site participation (2026-11-01): the one row that says how this install

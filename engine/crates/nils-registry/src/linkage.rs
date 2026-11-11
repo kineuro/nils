@@ -651,6 +651,72 @@ pub fn values_of_type_filed_by(
     Ok(out)
 }
 
+/// Every kept value of one id type that each of `subjects` holds, opened,
+/// in the order they were filed, for a release that names its subjects by
+/// the type: a subject that holds several is asked about, never named by
+/// the first. A subject that holds none is not in the answer. Every value
+/// read is audited as [`reveal`] audits it, with `actor` and `why`.
+pub fn kept_values_of_type(
+    store: &mut Store,
+    keys: &Subkeys,
+    subjects: &[i64],
+    id_type_id: i64,
+    actor: &str,
+    why: &str,
+) -> Result<std::collections::HashMap<i64, Vec<String>>, Error> {
+    let mut out: std::collections::HashMap<i64, Vec<String>> = std::collections::HashMap::new();
+    let mut audit: Vec<Vec<Param>> = Vec::new();
+    let now = now_iso();
+    for chunk in subjects.chunks(crate::store::SQLITE_KEY_CHUNK) {
+        let d = store.dialect();
+        let marks: Vec<String> = (0..chunk.len())
+            .map(|i| d.param(i + 2, crate::schema::Type::Int))
+            .collect();
+        let sql = format!(
+            "SELECT id, subject_id, ciphertext FROM {} WHERE id_type_id = {} AND subject_id IN ({}) ORDER BY id",
+            store.qualified("identity"),
+            d.param(1, crate::schema::Type::Int),
+            marks.join(", ")
+        );
+        let mut params = vec![Param::from(id_type_id)];
+        params.extend(chunk.iter().map(|s| Param::from(*s)));
+        for r in store.query(&sql, &params)? {
+            let Some(value) = keys.open_kept(r.bytes(2)?)? else {
+                continue;
+            };
+            out.entry(r.int(1)?).or_default().push(value);
+            audit.push(vec![
+                Param::from(now.as_str()),
+                Param::from(actor),
+                Param::from(r.int(0)?),
+                Param::from(why),
+            ]);
+        }
+    }
+    if !audit.is_empty() {
+        store.begin()?;
+        match store.insert(&Insert::all(table("read_audit")), &audit) {
+            Ok(_) => store.commit()?,
+            Err(e) => {
+                let _ = store.rollback();
+                return Err(e);
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// Whether any subject holds a kept value of one id type, nothing opened:
+/// a type whose rows are all lookups alone can name nobody.
+pub fn holds_kept_value(store: &mut Store, id_type_id: i64) -> Result<bool, Error> {
+    let sql = format!(
+        "SELECT id FROM {} WHERE id_type_id = {} AND length(ciphertext) > 0 LIMIT 1",
+        store.qualified("identity"),
+        store.dialect().param(1, crate::schema::Type::Int),
+    );
+    Ok(store.query_opt(&sql, &[Param::from(id_type_id)])?.is_some())
+}
+
 /// Which of `subjects` hold a value of one id type, nothing opened.
 pub fn subjects_with_type(
     store: &mut Store,

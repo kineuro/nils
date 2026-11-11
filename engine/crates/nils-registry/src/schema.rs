@@ -2043,9 +2043,38 @@ fn build_registry() -> Vec<Table> {
                 // digest, sidecar}`. Null on a row from before, and on a
                 // row whose run has not closed it.
                 col("phases", Type::Json),
+                // The ID types the release names its subjects by, in order,
+                // as a JSON list of type names: for each subject the first
+                // type it holds a kept value of gives the name after `sub-`,
+                // and the subject code is the last fallback. Null on a
+                // release that names every subject by its code, which is
+                // every release from before.
+                col("name_by", Type::Json),
             ],
         )
         .index(&["name"]),
+        // What a release that names its subjects by an ID type called each
+        // of them: the subject, the name written after `sub-`, the type the
+        // name came from (null where the subject fell back to its code) and
+        // whether a person chose the value among several. One row a subject
+        // a version, written before any file is, so a result that comes back
+        // under a name is linked to its subject, and a later version of the
+        // same release reads the choices and does not ask again. A release
+        // that names by the code alone writes none. No pair is unique: two
+        // subjects merged after a release keep the two names it gave them.
+        Table::new(
+            "release_name",
+            vec![
+                col("id", Type::Id),
+                req("release_id", Type::Int),
+                req("subject_id", Type::Int),
+                req("name", Type::Text),
+                col("id_type", Type::Text),
+                req("chosen", Type::Bool),
+            ],
+        )
+        .index(&["release_id"])
+        .index(&["subject_id"]),
         // The **current state** of each stack of a dataset: one row per
         // stack, updated in place, whatever the number of versions (Wave 4a
         // §4). The history is `release_move`. "What is in the tree now" is a

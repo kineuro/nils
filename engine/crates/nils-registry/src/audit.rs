@@ -58,6 +58,10 @@ pub enum Action {
     RulesAdopt,
     RulesReject,
     Release,
+    /// A release that named its subjects by an ID type: the row names the
+    /// types and counts the subjects each named and those that fell back
+    /// to the code. Never a value, never a name.
+    ReleaseNames,
     Handover,
     ReleaseWithdraw,
     JobsPrune,
@@ -253,6 +257,7 @@ impl Action {
             Action::RulesAdopt => "rules.adopt",
             Action::RulesReject => "rules.reject",
             Action::Release => "release",
+            Action::ReleaseNames => "release.names",
             Action::Handover => "handover",
             Action::ReleaseWithdraw => "release.withdraw",
             Action::JobsPrune => "jobs.prune",
@@ -341,6 +346,7 @@ impl Action {
                 | Action::KeyAdd
                 | Action::KeyRemove
                 | Action::HandoverPassword
+                | Action::ReleaseNames
                 | Action::JobsPrune
                 | Action::Backup
                 | Action::OverlayPropose
