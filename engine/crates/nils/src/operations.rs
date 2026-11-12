@@ -3320,12 +3320,41 @@ mod runs_kept_tests {
         );
     }
 
+    /// Another test's write at a door lets go of what is kept for every
+    /// folder ([`forget_runs`]), these tests' folders too: a test that reads
+    /// what is kept is told again where a door wrote meanwhile, and fails
+    /// only for what it found with nothing let go of.
+    fn unless_forgotten(test: fn()) {
+        for _ in 0..50 {
+            let before = COVERS_FORGOTTEN.load(Ordering::SeqCst);
+            let told = std::panic::catch_unwind(test);
+            if COVERS_FORGOTTEN.load(Ordering::SeqCst) == before {
+                if let Err(panic) = told {
+                    std::panic::resume_unwind(panic);
+                }
+                return;
+            }
+        }
+        panic!("a door wrote at every telling");
+    }
+
     /// 2026-11-12: the memo is kept for each operation's pipelines, so a
     /// looking up again for one operation drops none of the others' handles.
     #[test]
     fn a_looking_up_again_for_one_operation_keeps_the_others_handles() {
+        unless_forgotten(two_operations);
+    }
+
+    fn two_operations() {
         use nils_registry::home::{Home, InitOptions};
         const TWO: &str = "9:a folder for two operations";
+        // nothing of an earlier telling
+        for pipelines in [[5], [6]] {
+            COVERS
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .remove(&covers_key(TWO, "71", &pipelines));
+        }
         let dir = nils_dicom::synth::TempDir::new("nils-runs-kept-two");
         let home = Home::new(dir.path().join("registry"));
         home.keys(None).add("k", b"nils-fixture-key").unwrap();
@@ -3393,6 +3422,10 @@ mod runs_kept_tests {
     /// looked up again.
     #[test]
     fn a_looking_up_that_panics_leaves_the_slot_free() {
+        unless_forgotten(a_panic);
+    }
+
+    fn a_panic() {
         const PANIC: &str = "10:a folder whose looking up panics";
         COVERS.lock().unwrap_or_else(|e| e.into_inner()).insert(
             PANIC.to_string(),
@@ -3409,7 +3442,11 @@ mod runs_kept_tests {
         })
         .join();
         assert!(thread.is_err());
-        let kept = COVERS.lock().unwrap_or_else(|e| e.into_inner());
-        assert!(!kept[PANIC].renewing);
+        let renewing = COVERS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(PANIC)
+            .map(|c| c.renewing);
+        assert_eq!(renewing, Some(false));
     }
 }
