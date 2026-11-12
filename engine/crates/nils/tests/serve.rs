@@ -549,6 +549,49 @@ fn the_door_serves_what_the_command_line_has() {
     server.finish();
 }
 
+/// The epoch the capabilities say is the registry's own, whichever worker
+/// answers. Each worker keeps its registry open with the meta it read at its
+/// opening, and a desk follows that number to know that something was
+/// written: a worker that did not take the write went on saying the epoch
+/// from before it (2026-11-12, the Data page read nothing again after a
+/// write from elsewhere).
+#[test]
+fn the_capabilities_say_the_epoch_a_write_on_another_worker_left() {
+    let home = registry();
+    const AT_ONCE: usize = 6;
+    const EACH: usize = 6;
+    let server = Server::start(&home, 2 * AT_ONCE * EACH + 1, &[], &[]);
+    // asked by several at once, so that every worker answers some of them
+    let epochs = |server: &Server| -> Vec<i64> {
+        std::thread::scope(|s| {
+            let asking: Vec<_> = (0..AT_ONCE)
+                .map(|_| {
+                    s.spawn(|| {
+                        (0..EACH)
+                            .map(|_| {
+                                let (status, caps) =
+                                    server.request("GET", "/api/capabilities", None, None);
+                                assert_eq!(status, 200, "{caps}");
+                                caps["registry"]["epoch"].as_i64().unwrap()
+                            })
+                            .collect::<Vec<i64>>()
+                    })
+                })
+                .collect();
+            asking.into_iter().flat_map(|a| a.join().unwrap()).collect()
+        })
+    };
+    let before = epochs(&server);
+    assert!(before.iter().all(|e| *e == before[0]), "{before:?}");
+    let (status, made) = server.request("POST", "/api/cohorts", Some(r#"{"name": "moved"}"#), None);
+    assert!(status == 200 || status == 201, "{status}: {made}");
+    let after = epochs(&server);
+    assert!(
+        after.iter().all(|e| *e > before[0]),
+        "a new cohort moves the epoch, and every worker says so: {before:?} then {after:?}"
+    );
+}
+
 #[test]
 fn under_token_auth_the_token_names_the_principal() {
     let home = registry();

@@ -7068,6 +7068,12 @@ fn capabilities(
     caller: &Caller,
     ask: &mut crate::ask_doors::AskState,
 ) -> serde_json::Value {
+    // a worker keeps its registry open with the meta it read at its opening,
+    // and a desk follows the epoch said here to know that something was
+    // written: read now, so that a worker that did not take the write does
+    // not say the epoch from before it. One that cannot be read says the one
+    // it holds.
+    registry.refresh_meta().ok();
     let meta = registry.meta().clone();
     let packs: Vec<serde_json::Value> = doors
         .pack_dir
