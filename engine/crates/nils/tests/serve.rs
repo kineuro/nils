@@ -8512,10 +8512,15 @@ third|S-0003|1.2.9.G|1.2.9.G.1|20260701|t1 late|Philips";
     }
 
     const LIMIT: usize = 76;
+    // the asks that wait for the subjects door to read its facts again
+    // (2026-11-12), outside the sweep's count: as many as it takes, this
+    // many at most
+    const WAITS: usize = 200;
     let used = std::cell::Cell::new(0usize);
+    let waited = std::cell::Cell::new(0usize);
     let server = Server::start(
         &home,
-        LIMIT,
+        LIMIT + WAITS,
         &[
             "--auth",
             "token",
@@ -9106,8 +9111,17 @@ third|S-0003|1.2.9.G|1.2.9.G.1|20260701|t1 late|Philips";
             )
             .unwrap();
     }
-    let (status, d) = ask("/api/datasets/first/subjects", reviewer);
+    // (2026-11-12: the door answers the facts it kept at once and says
+    // `counting` while it reads again what the sealing moved; the facts
+    // read here are the settled ones)
+    let (mut status, mut d) = ask("/api/datasets/first/subjects", reviewer);
+    while d["counting"] == true && waited.get() < WAITS {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        waited.set(waited.get() + 1);
+        (status, d) = server.request("GET", "/api/datasets/first/subjects", None, reviewer);
+    }
     assert_eq!(status, 200, "{d}");
+    assert_ne!(d["counting"], true, "{d}");
     assert_eq!(
         d["totals"],
         serde_json::json!({"subjects": 3, "visits": 4, "scans": 5, "look": 1}),
@@ -9146,7 +9160,7 @@ third|S-0003|1.2.9.G|1.2.9.G.1|20260701|t1 late|Philips";
     }
     // whatever was asked, the server ends: a miscount fails after it does
     let made = used.get();
-    while used.get() < LIMIT {
+    while used.get() + waited.get() < LIMIT + WAITS {
         let _ = ask("/api/status", reader);
     }
     server.finish();
