@@ -140,6 +140,10 @@ struct Gather;
 impl crate::kept::Reading<Value> for Gather {
     type Error = StoreError;
 
+    fn failure(error: &StoreError) -> String {
+        error.to_string()
+    }
+
     fn read(&mut self, registry: &mut Registry) -> Result<Value, StoreError> {
         Ok(Value::Array(cohort::list(registry.store())?))
     }
@@ -217,15 +221,24 @@ pub(crate) fn list(registry: &mut Registry) -> Result<Value, StoreError> {
     Ok(Value::Array(out))
 }
 
+/// Mark the kept list stale: it is gathered again at the next request,
+/// which it still answers.
+pub(crate) fn forget() {
+    KEPT.forget();
+}
+
 /// A door gave a cohort members or took some away: the cohort is read
 /// again by itself and put in the kept list before the door answers, so
 /// the very next list says its new counts, and the whole list is gathered
 /// again apart at that request. A gathering under way, which began before
 /// the door's write, is not kept.
+///
+/// It gathers nothing itself (2026-11-12): the registry's copy is taken
+/// over where this engine has not looked for it yet, and the next request
+/// gathers the whole list once, apart. Where nothing is kept there is
+/// nothing to put the cohort in, and the next request gathers in front.
 pub(crate) fn member_change(registry: &mut Registry, name: &str) -> Result<(), StoreError> {
-    // the registry's copy is taken over first where this engine has not
-    // looked for it yet, or there is no kept list to put the cohort in
-    list(registry)?;
+    KEPT.taken_over(registry, &slot_of(registry), STORED, KEEP, stored_read);
     let Some(c) = cohort::by_name(registry.store(), name)? else {
         return Ok(());
     };
@@ -424,6 +437,9 @@ mod tests {
         let before = m.reads();
         m.joined("second", &["sub-one", "sub-three"]);
         member_change(&mut m.registry, "second").unwrap();
+        // one change costs one gathering, the next request's: the door's
+        // own upkeep gathers nothing, which it would only throw away
+        assert_eq!(m.reads(), before, "the door gathers nothing");
         let next = m.list();
         let given = of(&next, "second");
         assert_eq!(given["subjects"], 2, "{given}");
