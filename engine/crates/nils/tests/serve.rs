@@ -6324,8 +6324,19 @@ fn a_chain_runs_through_the_jobs_door_and_a_refused_step_ends_it() {
     assert_eq!(status, 404);
 
     // the sources door: the pseudonymise step on the digest, the rates
-    let (status, sources) = ask("GET", "/api/sources", None, reader);
+    // (2026-11-12: the door answers the counts it kept at once and says
+    // `counting` while it counts again what the chain moved; the counts
+    // read here are the settled ones)
+    let (mut status, mut sources) = ask("GET", "/api/sources", None, reader);
+    for _ in 0..400 {
+        if sources["counting"] != true {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(25));
+        (status, sources) = ask("GET", "/api/sources", None, reader);
+    }
     assert_eq!(status, 200, "{sources}");
+    assert_ne!(sources["counting"], true, "{sources}");
     let source = sources["sources"]
         .as_array()
         .unwrap()
