@@ -101,10 +101,12 @@ pub(crate) fn roots(store: &mut Store) -> Result<Vec<(i64, String)>, StoreError>
 }
 
 pub(crate) fn ids_under(p: &Place, roots: &[(i64, String)]) -> Vec<i64> {
+    let held = p.holds_paths(roots.iter().map(|(_, root)| Path::new(root)));
     roots
         .iter()
-        .filter(|(_, root)| p.holds_path(Path::new(root)))
-        .map(|(id, _)| *id)
+        .zip(held)
+        .filter(|(_, held)| *held)
+        .map(|((id, _), _)| *id)
         .collect()
 }
 
@@ -150,12 +152,31 @@ fn stored_key(p: &Place, recent: usize) -> String {
 /// indexes and small tables, and whether a job or a batch runs now: the
 /// counting, what moves a dataset's summary ([`crate::dataset_summary::moved`]:
 /// the batches, the newest finished job that is no worker, the questions,
-/// the judgements, the merges, the labels and the session cache) and the
-/// newest pseudonymised file.
+/// the judgements, the merges, the labels and the session cache), the
+/// newest pseudonymised file, and how the batches ended: a tree's count is
+/// whole or partial by how its runs ended, and a run stopped after it
+/// ended moves neither the batches' number nor the newest of them.
 fn moved(store: &mut Store) -> Result<(String, bool), StoreError> {
     let (moved, busy) = crate::dataset_summary::moved(store)?;
+    let batch = store.qualified("ingest_batch");
+    let mut ended = Vec::new();
+    for r in store.query(
+        &format!("SELECT state, COUNT(*), MAX(id) FROM {batch} GROUP BY state ORDER BY state"),
+        &[],
+    )? {
+        ended.push(format!(
+            "{}:{}:{}",
+            r.text(0)?,
+            r.int(1)?,
+            r.opt_int(2)?.unwrap_or(0)
+        ));
+    }
     Ok((
-        format!("counting {COUNTING}|{moved}|{}", copies(store)?),
+        format!(
+            "counting {COUNTING}|{moved}|{}|{}",
+            copies(store)?,
+            ended.join(",")
+        ),
         busy,
     ))
 }

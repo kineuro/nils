@@ -3323,7 +3323,19 @@ fn copy_counts(pg: Option<(String, String)>) {
     let summary = |home: &Home| -> (Value, Value, Value) {
         let server = Worked::serve(home, false);
         let s = server.summary("/api/datasets/copied/summary", READS);
-        let sources = server.get("/api/sources", READS);
+        // 2026-11-12: the sources door answers the counts it kept at once,
+        // the registry's after a start, and says `counting` while it counts
+        // again what moved behind the doors: the counts read are the
+        // settled ones
+        let mut sources = server.get("/api/sources", READS);
+        for _ in 0..400 {
+            if sources["counting"] != true {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(25));
+            sources = server.get("/api/sources", READS);
+        }
+        assert_ne!(sources["counting"], true, "{sources}");
         let source = sources["sources"]
             .as_array()
             .unwrap()

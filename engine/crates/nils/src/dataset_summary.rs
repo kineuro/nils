@@ -250,16 +250,20 @@ fn seeds(
     store: &mut Store,
     sources: &[i64],
     sorts: Option<&BTreeSet<i64>>,
+    runs: Option<&crate::operations::Runs>,
 ) -> Result<BTreeSet<i64>, StoreError> {
     let mut out = BTreeSet::new();
     if sources.is_empty() {
         return Ok(out);
     }
     let ids = list(sources);
-    out.extend(crate::operations::run_jobs(
-        store,
-        crate::operations::Scope::Sources(&ids),
-    )?);
+    match runs {
+        Some(runs) => out.extend(runs.jobs()),
+        None => out.extend(crate::operations::run_jobs(
+            store,
+            crate::operations::Scope::Sources(&ids),
+        )?),
+    }
     for r in store.query(
         &format!(
             "SELECT DISTINCT job_id FROM {} WHERE source_id IN ({ids}) AND job_id IS NOT NULL",
@@ -341,7 +345,21 @@ fn jobs_sorted(
     sorts: Option<&BTreeSet<i64>>,
 ) -> Result<Vec<Light>, StoreError> {
     let sources = crate::sources::source_ids(store, dataset)?;
-    let mut related = seeds(store, &sources, sorts)?;
+    jobs_with(store, dataset, &sources, window, sorts, None)
+}
+
+/// [`jobs_sorted`], with the dataset's sources and the operations' runs
+/// over its scans read already for the request (2026-11-12: the summary
+/// read both twice).
+fn jobs_with(
+    store: &mut Store,
+    dataset: &Place,
+    sources: &[i64],
+    window: usize,
+    sorts: Option<&BTreeSet<i64>>,
+    runs: Option<&crate::operations::Runs>,
+) -> Result<Vec<Light>, StoreError> {
+    let mut related = seeds(store, sources, sorts, runs)?;
     // the folder as declared and as the disk resolves it, which a linked
     // tree makes two
     let mut folders = vec![dataset.path.trim_end_matches('/').to_string()];
@@ -360,7 +378,7 @@ fn jobs_sorted(
     let added_again = was_a_dataset_before(store, dataset, &folders)?;
     let mut jobs = newest(store, window)?;
     if sorts.is_some() {
-        let ids = list(&sources);
+        let ids = list(sources);
         for j in jobs.iter().filter(|j| j.open() && j.kind == "classify") {
             if !related.contains(&j.id) && sorted_by(store, &ids, j.id)? {
                 related.insert(j.id);
@@ -2063,6 +2081,7 @@ fn kept(
 /// after a write waited for the reading).
 pub(crate) fn forget() {
     KEPT.forget();
+    crate::operations::forget_runs();
 }
 
 /// Wait until no reading of the dataset's counts runs apart, for the tests.
@@ -2160,8 +2179,18 @@ pub(crate) fn document(
             "count": progress.unwrap_or_else(|| json!({"what": "scans", "place": null, "done": null, "since": null})),
         }));
     };
+    let sources = list(&ids);
+    // the operations' runs over its scans, read once for its log and its
+    // steps (2026-11-12)
+    let runs = crate::operations::Runs::over_sources(
+        registry,
+        &format!("{}:{}", dataset.id, dataset.path),
+        &sources,
+    )
+    .map_err(failed)?;
     let store = registry.store();
-    let jobs = jobs_sorted(store, dataset, WINDOW, Some(&c.sorts)).map_err(failed)?;
+    let jobs =
+        jobs_with(store, dataset, &ids, WINDOW, Some(&c.sorts), Some(&runs)).map_err(failed)?;
     let newest_of = |kinds: &[&str]| jobs.iter().find(|j| kinds.contains(&j.kind.as_str()));
     let open_of = |kinds: &[&str]| {
         jobs.iter()
@@ -2176,7 +2205,6 @@ pub(crate) fn document(
         ),
     )
     .map_err(failed)?;
-    let sources = list(&ids);
     // the reads of its tree: how many, and when the newest ran
     let (mut reads, mut last_digest) = (0, None);
     if !ids.is_empty() {
@@ -2335,6 +2363,7 @@ pub(crate) fn document(
             stacks,
             &plans,
             &c.operations,
+            Some(&runs),
         )
         .map_err(failed)?,
     );
