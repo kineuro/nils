@@ -8694,7 +8694,7 @@ fn custody_doc(home: &Home, registry: &mut Registry) -> Result<serde_json::Value
             },
             "kept": "until purged; a purged identifier is filed again only when its file is parsed again (changed, or new), not by a digest that finds the file unchanged",
             "commands": {
-                "read": ["nils linkage show <code> [--why <text>] (every read is audited)", "POST /api/linkage/show, an admin's: types and counts, and the kept values with a why, never one that reads as a personnummer (every read is audited)"],
+                "read": ["nils linkage show <code> [--why <text>] (every read is audited)", "POST /api/linkage/show, an admin's: types and counts, and the kept values with a why, never one that reads as a personnummer (every read is audited)", "a list of subjects shown by an ID type: the values of the page's subjects, each read audited; where the list is in the order of those values (`order=id`, for a caller who is shown them as they are), the values of the whole list are opened to compare them and none of them is answered, audited as one `linkage.sort` row of the registry's audit a request (who, the list, the type, how many subjects and how many values opened; no value)"],
                 "change": ["nils digest <root>", "nils linkage import <csv>", "nils linkage link | unlink | merge", "nils linkage id-type add", "POST /api/linkage/links and /links/{id}/unlink, an admin's"],
                 "export": ["none in Wave 1"],
                 "delete": "nils linkage purge --subject <code> | --all, or POST /api/linkage/purge with the code typed, an admin's (the read audit and the id types stay)",
