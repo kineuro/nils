@@ -1242,18 +1242,18 @@ impl Reading<Held> for Gathering {
 ///   sealed stacks, the labels and the session cache;
 /// - the scope: a dataset's `source` rows, a cohort's members, and whose
 ///   picks it reads ([`Scope::picks`]);
-/// - the picks: the newest pick and the newest picked stack, how many
-///   picks of a person were withdrawn, which writes no row and is told by
-///   the audit, and the rules they were made by and the runs of those;
+/// - the picks, as their resolver says what moves them
+///   ([`nils_registry::pick_truth::moved`]): the newest pick, the
+///   withdrawals, the rules they were made by and the runs of those;
 /// - the sealed stacks ever sealed and the newest, since one sealed and
 ///   one unsealed leave the number sealed now as it was;
 /// - the window of the newest session of the cache;
 /// - the identities and the ID types of the linkage store, for the ID type
 ///   facet.
 ///
-/// While a job or a batch runs, the picks it writes are not in it, as its
-/// questions and judgements are not in the summary's: the facts are read
-/// again every few seconds instead ([`KEEP_BUSY`]). A member of a waiting
+/// While a job or a batch runs, the picks are not in it, as its questions
+/// and judgements are not in the summary's: the facts are read again
+/// every few seconds instead ([`KEEP_BUSY`]). A member of a waiting
 /// question removed by itself, and a value or a pick rewritten in place by
 /// anything but the engine's own doors, move nothing here; [`KEEP`] bounds
 /// those, and a write at a door of a place or a dataset, or a commit of
@@ -1261,36 +1261,26 @@ impl Reading<Held> for Gathering {
 fn stamp_of(registry: &mut Registry, scope: &Scope) -> Result<(String, bool), Reply> {
     let store = registry.store();
     let (moved, busy) = crate::dataset_summary::moved(store).map_err(failed)?;
-    let q = |t: &str| store.qualified(t);
-    let (pick, pick_stack, rules, run) = (
-        q("pick"),
-        q("pick_stack"),
-        q("pick_rules"),
-        q("pick_rules_run"),
+    let picks = if busy {
+        "-".to_string()
+    } else {
+        nils_registry::pick_truth::moved(store).map_err(failed)?
+    };
+    let (sealed, session) = (
+        store.qualified("sealed_stack"),
+        store.qualified("session_cache"),
     );
-    let (sealed, session, audit) = (q("sealed_stack"), q("session_cache"), q("audit"));
-    let withdrawn = nils_registry::audit::Action::PickWithdraw.name();
     let r = &store
         .query(
             &format!(
-                "SELECT (SELECT MAX(id) FROM {pick}), (SELECT MAX(id) FROM {pick_stack}), \
-                 (SELECT COUNT(*) FROM {audit} WHERE action = '{withdrawn}'), \
-                 (SELECT MAX(id) FROM {rules}), (SELECT MAX(id) FROM {run}), \
-                 (SELECT COUNT(*) FROM {run} WHERE state = 'done'), \
-                 (SELECT COUNT(*) FROM {sealed}), (SELECT MAX(id) FROM {sealed}), \
+                "SELECT (SELECT COUNT(*) FROM {sealed}), (SELECT MAX(id) FROM {sealed}), \
                  (SELECT window_days FROM {session} ORDER BY id DESC LIMIT 1)"
             ),
             &[],
         )
         .map_err(failed)?[0];
     let n = |i: usize| -> Result<i64, Reply> { Ok(r.opt_int(i).map_err(failed)?.unwrap_or(0)) };
-    let picks = format!("{}:{}:{}", n(0)?, n(1)?, n(2)?);
-    let (rules, sealed) = (
-        format!("{}:{}:{}", n(3)?, n(4)?, n(5)?),
-        format!("{}:{}", n(6)?, n(7)?),
-    );
-    let window = n(8)?;
-    let picks = if busy { "-".to_string() } else { picks };
+    let (sealed, window) = (format!("{}:{}", n(0)?, n(1)?), n(2)?);
     let members = match scope {
         Scope::Cohort(c) => {
             let r = &store
@@ -1314,7 +1304,7 @@ fn stamp_of(registry: &mut Registry, scope: &Scope) -> Result<(String, bool), Re
     let identities = identities_moved(registry);
     Ok((
         format!(
-            "{COUNTING}|{moved}|{:?}|{members}|{rules}|{sealed}|{picks}|{window}|{identities}",
+            "{COUNTING}|{moved}|{:?}|{members}|{sealed}|{picks}|{window}|{identities}",
             scope.picks()
         ),
         busy,
