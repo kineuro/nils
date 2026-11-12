@@ -4,6 +4,15 @@ All notable changes to NILS v1 are recorded here. The format follows [Keep a Cha
 
 ## [Unreleased]
 
+## [1.0.0-beta.14] - 2026-11-12
+
+The fourteenth engine beta settles one point of release naming that 1.0.0-beta.13 left open: an ID type whose IDs identify a person never names a released folder, whoever asks.
+
+### Changed
+
+- An ID type whose IDs identify a person never names a release. `name_by` holding such a type (`patient-id`, or any type flagged identifying) is refused by name with a 400 that ends `Nothing was written.`, at `POST /api/releases` and `POST /api/releases/names` and by `nils release --name-by`, for every caller and before any subject is looked at. 1.0.0-beta.13 allowed it to a caller holding data:work at detail sensitive and answered 403 to the others; that 403 is gone. A plan's `types[].identifying` stays in the document and is always false.
+- The types a refusal lists for a name that is no ID type are the ones that can name: those that keep values and do not identify a person.
+
 ## [1.0.0-beta.13] - 2026-11-12
 
 The thirteenth engine beta carries two things. It closes one gap, met in production: a dataset of identified files could be declared with no identity rule, and its originals were then read under a default rule that files PatientID as a `patient-id` and keeps the value sealed, whatever the hospital had written there. A dataset that holds identified files now says what PatientID holds before anything of it is read, and no value shaped like a personnummer is kept under any ID type. And a release, which named every subject by its subject code, can name them by an ID type the registry keeps values of, so a tree leaves under the study's own subject labels. The contract is openapi v7 still, added to in place; a desk from before works as before.
