@@ -1066,8 +1066,8 @@ const KEEP_BUSY: Duration = Duration::from_secs(3);
 
 /// How many scopes' facts are kept at once, each sealed variant of a scope
 /// counted by itself: asked for one more, the keep lets go of the one
-/// asked for longest ago. A scope of 10,000 subjects weighs about 4 MB
-/// (the test `a_kept_scope_weighs_what_is_said`).
+/// asked for longest ago. A scope of 10,000 subjects weighs about 3.5 MB
+/// (the test `a_kept_scope_weighs_what_is_said`), sixteen under 60 MB.
 const HELD_MOST: usize = 16;
 
 /// The `registry_meta` key the keep looks under once for each slot. The
@@ -1179,6 +1179,14 @@ fn let_go(slots: &[String]) {
     }
 }
 
+/// Mark every scope's kept facts stale: a write at a door may have changed
+/// them in a way their stamp does not say (what a dataset's folder holds,
+/// how a place is read), so they are read again at the next request, which
+/// they still answer.
+pub(crate) fn forget() {
+    KEPT.forget();
+}
+
 /// One reading of a scope's facts. It carries the scope and the sealed
 /// variant, and nothing else of the caller who started it.
 struct Gathering {
@@ -1199,6 +1207,10 @@ impl Gathering {
 
 impl Reading<Held> for Gathering {
     type Error = Reply;
+
+    fn failure(error: &Reply) -> String {
+        format!("{}: {}", error.status, error.body)
+    }
 
     fn read(&mut self, registry: &mut Registry) -> Result<Held, Reply> {
         // a slot the keep let go of holds nothing again: not what a
@@ -1225,8 +1237,9 @@ impl Reading<Held> for Gathering {
 ///
 /// - the reading's own number ([`COUNTING`]);
 /// - what moves a dataset's summary ([`crate::dataset_summary::moved`]):
-///   the batches, the newest finished job, the questions, the judgements,
-///   the merges, the sealed stacks, the labels and the session cache;
+///   the batches, the newest finished job, the questions open and staged,
+///   which is what need-a-look counts, the judgements, the merges, the
+///   sealed stacks, the labels and the session cache;
 /// - the scope: a dataset's `source` rows, a cohort's members, and whose
 ///   picks it reads ([`Scope::picks`]);
 /// - the picks: the newest pick and the newest picked stack, how many
@@ -1234,18 +1247,17 @@ impl Reading<Held> for Gathering {
 ///   the audit, and the rules they were made by and the runs of those;
 /// - the sealed stacks ever sealed and the newest, since one sealed and
 ///   one unsealed leave the number sealed now as it was;
-/// - the questions waiting on a person, staged ones too, which is what
-///   need-a-look counts ([`crate::certainty::Asks::sort`]);
 /// - the window of the newest session of the cache;
 /// - the identities and the ID types of the linkage store, for the ID type
 ///   facet.
 ///
-/// While a job or a batch runs, the questions and the picks it writes are
-/// not in it, as its questions and judgements are not in the summary's:
-/// the facts are read again every few seconds instead ([`KEEP_BUSY`]).
-/// A member of a waiting question removed by itself, and a value or a pick
-/// rewritten in place by anything but the engine's own doors, move nothing
-/// here; [`KEEP`] bounds those.
+/// While a job or a batch runs, the picks it writes are not in it, as its
+/// questions and judgements are not in the summary's: the facts are read
+/// again every few seconds instead ([`KEEP_BUSY`]). A member of a waiting
+/// question removed by itself, and a value or a pick rewritten in place by
+/// anything but the engine's own doors, move nothing here; [`KEEP`] bounds
+/// those, and a write at a door of a place or a dataset, or a commit of
+/// staged decisions, has the facts read again at once ([`forget`]).
 fn stamp_of(registry: &mut Registry, scope: &Scope) -> Result<(String, bool), Reply> {
     let store = registry.store();
     let (moved, busy) = crate::dataset_summary::moved(store).map_err(failed)?;
@@ -1256,13 +1268,7 @@ fn stamp_of(registry: &mut Registry, scope: &Scope) -> Result<(String, bool), Re
         q("pick_rules"),
         q("pick_rules_run"),
     );
-    let (sealed, item, session, audit) = (
-        q("sealed_stack"),
-        q("review_item"),
-        q("session_cache"),
-        q("audit"),
-    );
-    let waiting = crate::certainty::WAITING;
+    let (sealed, session, audit) = (q("sealed_stack"), q("session_cache"), q("audit"));
     let withdrawn = nils_registry::audit::Action::PickWithdraw.name();
     let r = &store
         .query(
@@ -1272,7 +1278,6 @@ fn stamp_of(registry: &mut Registry, scope: &Scope) -> Result<(String, bool), Re
                  (SELECT MAX(id) FROM {rules}), (SELECT MAX(id) FROM {run}), \
                  (SELECT COUNT(*) FROM {run} WHERE state = 'done'), \
                  (SELECT COUNT(*) FROM {sealed}), (SELECT MAX(id) FROM {sealed}), \
-                 (SELECT COUNT(*) FROM {item} WHERE status IN ({waiting})), \
                  (SELECT window_days FROM {session} ORDER BY id DESC LIMIT 1)"
             ),
             &[],
@@ -1284,12 +1289,8 @@ fn stamp_of(registry: &mut Registry, scope: &Scope) -> Result<(String, bool), Re
         format!("{}:{}:{}", n(3)?, n(4)?, n(5)?),
         format!("{}:{}", n(6)?, n(7)?),
     );
-    let (waiting, window) = (n(8)?, n(9)?);
-    let moving = if busy {
-        "-".to_string()
-    } else {
-        format!("{picks}|{waiting}")
-    };
+    let window = n(8)?;
+    let picks = if busy { "-".to_string() } else { picks };
     let members = match scope {
         Scope::Cohort(c) => {
             let r = &store
@@ -1313,7 +1314,7 @@ fn stamp_of(registry: &mut Registry, scope: &Scope) -> Result<(String, bool), Re
     let identities = identities_moved(registry);
     Ok((
         format!(
-            "{COUNTING}|{moved}|{:?}|{members}|{rules}|{sealed}|{moving}|{window}|{identities}",
+            "{COUNTING}|{moved}|{:?}|{members}|{rules}|{sealed}|{picks}|{window}|{identities}",
             scope.picks()
         ),
         busy,

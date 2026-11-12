@@ -2185,6 +2185,7 @@ fn route(
         crate::dataset::forget_layouts();
         crate::sources::forget();
         crate::dataset_summary::forget();
+        crate::viewer::forget();
     }
     // 2026-11-12: a commit puts staged decisions in force, which changes
     // what waits for a person at the sources door and the summary; the
@@ -2193,6 +2194,7 @@ fn route(
     if commits_decisions(method, path) && (200..300).contains(&reply.status) {
         crate::sources::forget();
         crate::dataset_summary::forget();
+        crate::viewer::forget();
     }
     reply
 }
