@@ -17,14 +17,17 @@
 //! What counts a dataset is kept for each dataset ([`crate::kept`], as the
 //! dataset's summary keeps its counts), answered whatever its age and
 //! counted again apart, one count at a time for a dataset, and kept in
-//! `registry_meta` (`source_counts:<place>:<recent>`) for the next start
-//! of the engine.
+//! `registry_meta` (`source_counts:<place>`) for the next start of the
+//! engine. They are counted with [`RECENT`] digests in full: a request for
+//! no more is answered from them with the list cut, and one for more is
+//! counted in front and kept nowhere.
 //!
 //! What moves a dataset's stamp, so starts a count apart at the next
 //! request: a batch begun or ended (a read, a pseudonymise run), the
 //! newest finished job that is no worker (a sort, a pick, a model run, a
 //! purge of the originals run as a job), a question raised or closed, a
-//! judgement written, a merge of subjects, a label, the session cache
+//! judgement written, staged decisions put in force (2026-11-12: their
+//! items stay as they were but no longer wait), a merge of subjects, a label, the session cache
 //! rebuilt, a pseudonymised file recorded for the first time, the
 //! dataset's roots, any field of its place (what a probe keeps among
 //! them), and the number of the counting ([`COUNTING`]), never the engine's
@@ -42,7 +45,7 @@
 //! who reads a sealed sample), so one keep answers all.
 
 use std::path::Path;
-use std::sync::LazyLock;
+use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 
 use nils_registry::Registry;
@@ -51,7 +54,7 @@ use nils_registry::session::Scheme;
 use nils_registry::store::{Error as StoreError, Store};
 use serde_json::{Value, json};
 
-use crate::kept::{Ask, Keep, Restored};
+use crate::kept::{Answer, Ask, Keep, Reading, Restored};
 
 fn count(store: &mut Store, sql: &str) -> Result<i64, StoreError> {
     store.query(sql, &[])?[0].int(0)
@@ -133,19 +136,23 @@ const KEEP: Duration = Duration::from_secs(600);
 /// dataset whose count takes seconds is not counted without a pause.
 const KEEP_BUSY: Duration = Duration::from_secs(3);
 
-/// The counts kept, by dataset and by how many digests are shown in full
-/// ([`crate::kept`]).
+/// How many digests the door gives in full when the caller does not say,
+/// and so how many the kept counts hold (2026-11-12: one slot and one
+/// stored key for a dataset, whatever `recent` a request asks).
+pub const RECENT: usize = 12;
+
+/// The counts kept, by dataset ([`crate::kept`]).
 static KEPT: LazyLock<Keep<Value>> = LazyLock::new(Default::default);
 
 /// A dataset's slot in the keep.
-fn slot_of(p: &Place, recent: usize) -> String {
-    format!("{}:{recent}:{}", p.id, p.path)
+fn slot_of(p: &Place) -> String {
+    format!("{}:{}", p.id, p.path)
 }
 
 /// The `registry_meta` key a dataset's counts are kept under between
 /// starts of the engine.
-fn stored_key(p: &Place, recent: usize) -> String {
-    format!("source_counts:{}:{recent}", p.id)
+fn stored_key(p: &Place) -> String {
+    format!("source_counts:{}", p.id)
 }
 
 /// What every dataset's counts are read under, read on every request from
@@ -181,11 +188,10 @@ fn moved(store: &mut Store) -> Result<(String, bool), StoreError> {
     ))
 }
 
-/// What one dataset's counts are read under: what moves them all, how many
-/// digests are shown in full, its sources and its place's own fields (the
-/// probe's counts among them).
-fn stamp(moved: &str, p: &Place, ids: &[i64], recent: usize) -> String {
-    format!("{moved}|{recent}|{ids:?}|{}", p.as_json())
+/// What one dataset's counts are read under: what moves them all, its
+/// sources and its place's own fields (the probe's counts among them).
+fn stamp(moved: &str, p: &Place, ids: &[i64]) -> String {
+    format!("{moved}|{ids:?}|{}", p.as_json())
 }
 
 /// What the pseudonymised files say, read from an index in a millisecond
@@ -213,8 +219,12 @@ struct Count {
     recent: usize,
 }
 
-impl crate::kept::Reading<Value> for Count {
+impl Reading<Value> for Count {
     type Error = StoreError;
+
+    fn failure(error: &StoreError) -> String {
+        error.to_string()
+    }
 
     fn read(&mut self, registry: &mut Registry) -> Result<Value, StoreError> {
         let store = registry.store();
@@ -309,25 +319,44 @@ pub fn answer(
     let (mut counting, mut oldest, mut window) = (false, None::<String>, None::<i64>);
     for p in &places {
         let ids = ids_under(p, &roots);
-        let answer = KEPT.answer(
-            registry,
-            &Ask {
-                slot: &slot_of(p, recent),
-                stored: &stored_key(p, recent),
-                stamp: &stamp(&moved, p, &ids, recent),
-                ttl: if busy { KEEP_BUSY } else { KEEP },
-                paced: busy,
-                wait: !at_once,
-                fresh,
-            },
-            |text| stored_read(text, p),
-            || Count {
+        let answer = if recent > RECENT {
+            // more digests in full than the kept counts hold: counted in
+            // front, as before 2026-11-12, and kept nowhere
+            let mut count = Count {
                 place: p.clone(),
                 ids: ids.clone(),
                 recent,
-            },
-        )?;
+            };
+            Answer {
+                value: Some(Arc::new(count.read(registry)?)),
+                as_of: nils_registry::time::now_iso(),
+                counting: false,
+            }
+        } else {
+            KEPT.answer(
+                registry,
+                &Ask {
+                    slot: &slot_of(p),
+                    stored: &stored_key(p),
+                    stamp: &stamp(&moved, p, &ids),
+                    ttl: if busy { KEEP_BUSY } else { KEEP },
+                    paced: busy,
+                    wait: !at_once,
+                    fresh,
+                },
+                |text| stored_read(text, p),
+                || Count {
+                    place: p.clone(),
+                    ids: ids.clone(),
+                    recent: RECENT,
+                },
+            )?
+        };
         let mut doc = laid(p, ids.len(), answer.value.as_deref());
+        // the kept counts hold the newest RECENT digests in full, newest first
+        if let Some(shown) = doc["digests"]["recent"].as_array_mut() {
+            shown.truncate(recent);
+        }
         doc["counted"] = json!(answer.value.is_some());
         doc["counting"] = json!(answer.counting);
         doc["counts_as_of"] = match &answer.value {
@@ -783,7 +812,7 @@ mod tests {
         }
 
         fn slot(&mut self) -> String {
-            super::slot_of(&self.place(), 12)
+            super::slot_of(&self.place())
         }
 
         /// How many times the dataset was counted.
@@ -985,10 +1014,10 @@ mod tests {
         // update alone counts nothing again
         let place = m.place();
         let (moved, _) = super::moved(m.registry.store()).unwrap();
-        let stamp = super::stamp(&moved, &place, &[m.source], 12);
+        let stamp = super::stamp(&moved, &place, &[m.source]);
         assert!(stamp.starts_with("counting 1|"), "{stamp}");
         assert!(!stamp.contains(env!("CARGO_PKG_VERSION")), "{stamp}");
-        let key = super::stored_key(&place, 12);
+        let key = super::stored_key(&place);
         let text = nils_registry::home::get_meta(m.registry.store(), &key)
             .unwrap()
             .unwrap();
@@ -1044,7 +1073,7 @@ mod tests {
         let stamp = |m: &mut MadeUp| {
             let place = m.place();
             let (moved, _) = super::moved(m.registry.store()).unwrap();
-            super::stamp(&moved, &place, &[source], 12)
+            super::stamp(&moved, &place, &[source])
         };
         // a file as a run's flush records it: upserted on its place and path
         let record = |store: &mut Store, path: &str, state: &str| {
@@ -1111,6 +1140,94 @@ mod tests {
             )
             .unwrap();
         assert_ne!(stamp(&mut m), ended, "the place renamed");
+    }
+
+    /// 2026-11-12: committing staged decisions moves the stamp: their
+    /// items stop waiting for a person, though no item, question or
+    /// judgement is new, and a commit at the command line runs in another
+    /// process.
+    #[test]
+    fn the_stamp_moves_when_staged_decisions_are_put_in_force() {
+        let mut m = made_up("sources-commit");
+        let source = m.source;
+        let store = m.registry.store();
+        store
+            .execute(
+                "INSERT INTO review_item (kind, scope, status, created_at) \
+                 VALUES ('classify.asked', 'stack', 'staged', '2026-11-12T00:00:00Z')",
+                &[],
+            )
+            .unwrap();
+        let stamp = |m: &mut MadeUp| {
+            let place = m.place();
+            let (moved, _) = super::moved(m.registry.store()).unwrap();
+            super::stamp(&moved, &place, &[source])
+        };
+        let staged = stamp(&mut m);
+        // what commit does to the items: staged to accepted
+        m.registry
+            .store()
+            .execute(
+                "UPDATE review_item SET status = 'accepted' WHERE status = 'staged'",
+                &[],
+            )
+            .unwrap();
+        assert_ne!(stamp(&mut m), staged, "decisions put in force");
+    }
+
+    /// 2026-11-12: a dataset's counts are kept under one slot and one stored
+    /// key, counted with the door's default `recent`; a request for fewer
+    /// digests in full is answered from them with the list cut, and one for
+    /// more is counted in front and kept nowhere.
+    #[test]
+    fn a_request_for_other_recent_digests_makes_no_slot_of_its_own() {
+        let _one_at_a_time = KEPT_TESTS.lock().unwrap_or_else(|e| e.into_inner());
+        let mut m = made_up("sources-recent");
+        for _ in 0..3 {
+            m.batch("done");
+        }
+        let full = super::document_kept(&mut m.registry, super::RECENT).unwrap();
+        assert_eq!(
+            full["sources"][0]["digests"]["recent"]
+                .as_array()
+                .unwrap()
+                .len(),
+            3
+        );
+        assert_eq!(m.reads(), 1);
+        let cut = super::document_kept(&mut m.registry, 1).unwrap();
+        let digests = &cut["sources"][0]["digests"];
+        assert_eq!(digests["recent"].as_array().unwrap().len(), 1, "{digests}");
+        assert_eq!(
+            digests["recent"][0],
+            full["sources"][0]["digests"]["recent"][0]
+        );
+        assert_eq!(digests["count"], 3);
+        assert_eq!(cut["counting"], false);
+        assert_eq!(m.reads(), 1, "answered from the kept counts");
+        // more than the kept counts hold: counted in front, kept nowhere
+        let more = super::document_kept(&mut m.registry, 40).unwrap();
+        assert_eq!(
+            more["sources"][0]["digests"]["recent"]
+                .as_array()
+                .unwrap()
+                .len(),
+            3
+        );
+        assert_eq!(more["sources"][0]["counting"], false);
+        assert_eq!(m.reads(), 1, "and no slot of its own");
+        let key = super::stored_key(&m.place());
+        for other in [1, 40] {
+            let odd = format!("{key}:{other}");
+            assert!(
+                nils_registry::home::get_meta(m.registry.store(), &odd)
+                    .unwrap()
+                    .is_none()
+            );
+        }
+        // the whole document read now says the same as the cut one
+        let whole = super::document(&mut m.registry, 1).unwrap();
+        assert_eq!(counted_of(&cut), counted_of(&whole));
     }
 
     #[test]

@@ -1275,7 +1275,7 @@ pub fn serve(home: &Home, args: ServeArgs) -> Result<(), Exit> {
         let home = home.clone();
         std::thread::spawn(move || {
             if let Ok(mut registry) = home.open() {
-                let _ = crate::sources::document_kept(&mut registry, SOURCES_RECENT);
+                let _ = crate::sources::document_kept(&mut registry, crate::sources::RECENT);
                 // and the cohorts' list (2026-11-12): the registry's copy
                 // taken over, gathered again where it moved
                 let _ = crate::cohorts::list(&mut registry);
@@ -1735,10 +1735,6 @@ impl Watchdog {
     }
 }
 
-/// How many recent digests the desk's Data page asks the sources door for,
-/// which the engine reads once as it starts.
-const SOURCES_RECENT: usize = 12;
-
 /// Load every pack in the folder, each on a thread of its own, and the
 /// served one as the reader keeps it: a pack's load runs its whole corpus,
 /// a second or more, which the first request after a start paid before
@@ -2190,6 +2186,14 @@ fn route(
         crate::sources::forget();
         crate::dataset_summary::forget();
     }
+    // 2026-11-12: a commit puts staged decisions in force, which changes
+    // what waits for a person at the sources door and the summary; the
+    // stamp carries it too (a commit at the command line runs in another
+    // process), and this makes the very next request count again
+    if commits_decisions(method, path) && (200..300).contains(&reply.status) {
+        crate::sources::forget();
+        crate::dataset_summary::forget();
+    }
     reply
 }
 
@@ -2198,6 +2202,12 @@ fn writes_a_place(method: &Method, path: &str) -> bool {
     *method != Method::Get
         && *method != Method::Head
         && (path.starts_with("/api/places") || path.starts_with("/api/datasets"))
+}
+
+/// Whether a request is the door that puts staged decisions in force.
+fn commits_decisions(method: &Method, path: &str) -> bool {
+    let segs = segments(path);
+    *method == Method::Post && matches!(segs.as_slice(), ["api", "decisions", _, "commit"])
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2773,8 +2783,13 @@ fn routed(
             registry
                 .refresh_meta()
                 .map_err(|e| Reply::error(500, e.to_string()))?;
-            // the kept list says the cohort's new counts in its next answer
-            crate::cohorts::member_change(registry, name)?;
+            // the kept list says the cohort's new counts in its next answer;
+            // the members are in, so a failure of its upkeep is no failure
+            // of the door: it is said, and the list is gathered again
+            if let Err(e) = crate::cohorts::member_change(registry, name) {
+                eprintln!("nils serve: the kept list of cohorts could not be updated: {e}");
+                crate::cohorts::forget();
+            }
             let mut out = serde_json::json!({
                 "cohort": name,
                 "added": done.added,
@@ -3060,7 +3075,7 @@ fn routed(
             let recent = query
                 .get("recent")
                 .and_then(|l| l.parse::<usize>().ok())
-                .unwrap_or(12)
+                .unwrap_or(crate::sources::RECENT)
                 .clamp(1, 100);
             let probe = query.get("probe").is_some_and(|p| p == "1" || p == "true");
             if probe {
@@ -9571,7 +9586,7 @@ mod query_tests {
 
 #[cfg(test)]
 mod forgets {
-    use super::{Method, writes_a_place};
+    use super::{Method, commits_decisions, writes_a_place};
 
     /// The kept layouts and sources document are forgotten by the doors that
     /// write a place or a dataset, never by a read or another door's write.
@@ -9588,6 +9603,20 @@ mod forgets {
         assert!(!writes_a_place(&Method::Get, "/api/sources"));
         assert!(!writes_a_place(&Method::Post, "/api/picks/map"));
         assert!(!writes_a_place(&Method::Post, "/api/ask"));
+    }
+
+    /// 2026-11-12: the door that puts staged decisions in force marks the
+    /// sources' and the summary's kept counts stale, and no other door of
+    /// decisions does.
+    #[test]
+    fn only_a_commit_of_decisions_marks_the_kept_counts_stale() {
+        assert!(commits_decisions(&Method::Post, "/api/decisions/12/commit"));
+        assert!(!commits_decisions(&Method::Get, "/api/decisions/12/commit"));
+        assert!(!commits_decisions(
+            &Method::Post,
+            "/api/decisions/12/withdraw"
+        ));
+        assert!(!commits_decisions(&Method::Post, "/api/picks/map"));
     }
 }
 
