@@ -43,6 +43,12 @@ pub enum Action {
     /// kept of a value shaped like a personnummer
     /// ([`crate::shape_sweep`]): counts, never a value.
     LinkageNeverKept,
+    /// 2026-11-12: a list of subjects put in the order of their IDs of one
+    /// type, for a caller who may read them. One row for the request, where
+    /// a read audit row for each value would be one per subject of the
+    /// whole scope at every page: the row names the scope and the type and
+    /// counts the subjects and the values opened. Never a value.
+    LinkageSort,
     /// Wave 4c §6.5: an archive was written.
     Backup,
     /// Wave 4c §6.6: an overlay proposed as a registry object, and one
@@ -249,6 +255,7 @@ impl Action {
             Action::LinkageResolve => "linkage.resolve",
             Action::LinkageTypeFlag => "linkage.type.flag",
             Action::LinkageNeverKept => "linkage.never_kept",
+            Action::LinkageSort => "linkage.sort",
             Action::Backup => "backup",
             Action::OverlayPropose => "overlay.propose",
             Action::OverlayAdopt => "overlay.adopt",
@@ -343,6 +350,7 @@ impl Action {
                 | Action::LinkageResolve
                 | Action::LinkageTypeFlag
                 | Action::LinkageNeverKept
+                | Action::LinkageSort
                 | Action::KeyAdd
                 | Action::KeyRemove
                 | Action::HandoverPassword

@@ -8500,7 +8500,7 @@ third|S-0003|1.2.9.G|1.2.9.G.1|20260701|t1 late|Philips";
         }
     }
 
-    const LIMIT: usize = 73;
+    const LIMIT: usize = 76;
     let used = std::cell::Cell::new(0usize);
     let server = Server::start(
         &home,
@@ -8518,9 +8518,12 @@ third|S-0003|1.2.9.G|1.2.9.G.1|20260701|t1 late|Philips";
             "an-operator-token-of-len=op@lab:operator",
             "--token",
             "a-places-token-of-length=pl@lab:places:see",
+            "--token",
+            "an-auditor-token-of-len=aud@lab:audit:see",
         ],
         &[],
     );
+    let auditor = Some("an-auditor-token-of-len");
     let reader = Some("a-reader-token-of-length");
     let reviewer = Some("a-reviewer-token-of-len");
     let works = Some("a-reviewer-who-works-tok");
@@ -8710,6 +8713,56 @@ third|S-0003|1.2.9.G|1.2.9.G.1|20260701|t1 late|Philips";
     assert_eq!(label_of(&d, s1), "aaaaaa-9999", "{d}");
     let (status, refused) = ask("/api/datasets/first/subjects?show=no-such-type", reviewer);
     assert_eq!(status, 400, "{refused}");
+
+    // 2026-11-12, the order of what the subjects are shown by: asked for by
+    // name it is not the default's (the third has more to look at than the
+    // second), and an order the door does not know is refused with the list
+    let (status, d) = ask(
+        "/api/datasets/first/subjects?order=id&show=patient-id",
+        operator,
+    );
+    assert_eq!(status, 200, "{d}");
+    assert_eq!(d["order"], "id", "{d}");
+    assert_eq!(ids(&d), vec![s1, s2, s3], "{d}");
+    assert_ne!(ids(&d), ids(&doc), "{d}");
+    let (status, refused) = ask("/api/datasets/first/subjects?order=nonsense", reviewer);
+    assert_eq!(status, 400, "{refused}");
+    assert_eq!(
+        refused["error"], "order: nonsense is not look, code, id, visits or scans",
+        "{refused}"
+    );
+    // every request above that was answered in an order by values left one
+    // audit row, with how many values it opened and none of them: the
+    // operator's by patient-id (the default order breaks its ties by it),
+    // the reviewer's by the alias, the operator's by a type whose values
+    // here keep nothing, and the operator's again, served by the kept order
+    let (status, audit) = ask("/api/audit?action=linkage.sort", auditor);
+    assert_eq!(status, 200, "{audit}");
+    let mut sorts: Vec<(String, String, i64, i64)> = audit["rows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| {
+            (
+                r["principal"].as_str().unwrap().to_string(),
+                r["scope"]["id_type"].as_str().unwrap().to_string(),
+                r["details"]["subjects"].as_i64().unwrap(),
+                r["details"]["opened"].as_i64().unwrap(),
+            )
+        })
+        .collect();
+    sorts.sort();
+    assert_eq!(
+        sorts,
+        vec![
+            ("op@lab".to_string(), "patient-id".to_string(), 3, 0),
+            ("op@lab".to_string(), "patient-id".to_string(), 3, 3),
+            ("op@lab".to_string(), "site-id".to_string(), 3, 0),
+            ("rev@lab".to_string(), "subject-code".to_string(), 3, 1),
+        ],
+        "{audit}"
+    );
+    assert!(!audit.to_string().contains("S-000"), "{audit}");
 
     // at plain the code is its shape, so its value is not found by it
     let (status, plain) = ask("/api/datasets/first/subjects", reader);
