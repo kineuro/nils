@@ -1575,7 +1575,12 @@ fn browse_and_picks(pg: Option<(String, String)>) {
     drop(store);
     assert_eq!(ok("/api/scans?limit=1", OPS)["total"], stacks - 1);
     assert_eq!(ok("/api/scans?limit=1", SEALED)["total"], stacks);
-    assert_eq!(ok("/api/subjects", OPS)["totals"]["scans"], stacks - 1);
+    // (2026-11-12: the door answers the facts it kept at once and says
+    // `counting` while it reads again what the sealing moved; the facts
+    // read here are the settled ones)
+    let (status, settled) = server.summary("/api/subjects", OPS);
+    assert_eq!(status, 200, "{settled}");
+    assert_eq!(settled["totals"]["scans"], stacks - 1);
 
     // ------------------------------------------------ a cohort's picks
     let doc = ok("/api/cohorts/quad/picks", CURATOR);
