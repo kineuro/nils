@@ -1822,13 +1822,20 @@ pub(crate) fn moved(store: &mut Store) -> Result<(String, bool), StoreError> {
          (SELECT COUNT(*) FROM {subject} WHERE merged_into IS NOT NULL), \
          (SELECT COUNT(*) FROM {sealed} WHERE unsealed_at IS NULL), \
          (SELECT MAX(id) FROM {label}), (SELECT MAX(id) FROM {set}), \
-         (SELECT MAX(id) FROM {session}), (SELECT COUNT(*) FROM {session})"
+         (SELECT MAX(id) FROM {session}), (SELECT COUNT(*) FROM {session}), \
+         (SELECT COUNT(*) FROM {item} WHERE status = 'staged')"
     );
     let r = &store.query(&sql, &[])?[0];
     let n = |i: usize| -> Result<i64, StoreError> { Ok(r.opt_int(i)?.unwrap_or(0)) };
     let (batches, last_batch, running, finished, open) = (n(0)?, n(1)?, n(2)?, n(3)?, n(4)?);
     let (question, open_questions, judged, merged) = (n(5)?, n(6)?, n(7)?, n(8)?);
     let (sealed, labels, sets, sessions, visits) = (n(9)?, n(10)?, n(11)?, n(12)?, n(13)?);
+    // 2026-11-12: a commit puts staged decisions in force and leaves every
+    // number above as it was (its items go from staged to accepted, which
+    // is no new item, no question opened or closed and no judgement), yet a
+    // staged item still waits for a person and an accepted one no longer
+    // does; the staged items are counted from the status index
+    let staged = n(14)?;
     // while a run goes on, the questions it raises and the judgements it
     // writes are read again every few seconds, and at once when it ends
     let busy = running > 0 || open > 0;
@@ -1837,9 +1844,18 @@ pub(crate) fn moved(store: &mut Store) -> Result<(String, bool), StoreError> {
     } else {
         format!("{question}|{open_questions}|{judged}")
     };
+    // said only where any wait, so that a stamp written before 2026-11-12
+    // (by an engine that did not count them) is still the stamp of a
+    // registry where none waits, and its kept counts are taken over as
+    // they are instead of every dataset being counted again after the update
+    let waiting = if staged > 0 {
+        format!("|staged {staged}")
+    } else {
+        String::new()
+    };
     let key = format!(
         "{batches}|{last_batch}|{running}|{finished}|{moving}|{merged}|{sealed}|{labels}|{sets}|\
-         {sessions}:{visits}"
+         {sessions}:{visits}{waiting}"
     );
     Ok((key, busy))
 }
@@ -1856,6 +1872,10 @@ struct Asked {
 
 impl crate::kept::Reading<Counts> for Asked {
     type Error = Reply;
+
+    fn failure(error: &Reply) -> String {
+        format!("{}: {}", error.status, error.body)
+    }
 
     fn read(&mut self, registry: &mut Registry) -> Result<Counts, Reply> {
         // how far it gets, for the requests that ask meanwhile

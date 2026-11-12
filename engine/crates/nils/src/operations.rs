@@ -1201,13 +1201,23 @@ fn covering(
     Ok((over, looked_up))
 }
 
+/// A dataset's memo of one operation's handles (2026-11-12): by the
+/// operation's pipelines too, since a looking up again covers the runs of
+/// one operation, and would drop the handles of the others kept in the
+/// same entry.
+fn covers_key(slot: &str, sources: &str, pipelines: &[i64]) -> String {
+    format!("{slot}:{sources}:{pipelines:?}")
+}
+
 /// Look up again, apart, which handles hold a scan of the dataset, and
 /// keep it unless a door wrote meanwhile.
 fn renew_covers(home: nils_registry::Home, pipelines: Vec<i64>, slot: String, sources: String) {
     let forgotten = COVERS_FORGOTTEN.load(Ordering::SeqCst);
+    let renewing = Renewing(slot.clone());
     let apart = {
         let slot = slot.clone();
         move || {
+            let _renewing = renewing;
             let looked_up = home.open().ok().and_then(|mut registry| {
                 let store = registry.store();
                 let (all, under, _) = runs_and_batches(store, &pipelines).ok()?;
@@ -1218,23 +1228,29 @@ fn renew_covers(home: nils_registry::Home, pipelines: Vec<i64>, slot: String, so
             if COVERS_FORGOTTEN.load(Ordering::SeqCst) != forgotten {
                 return;
             }
-            if let Some(c) = kept.get_mut(&slot) {
-                c.renewing = false;
-                if let Some((under, of)) = looked_up {
-                    c.under = under;
-                    c.of = of;
-                    c.since = Instant::now();
-                }
+            if let Some(c) = kept.get_mut(&slot)
+                && let Some((under, of)) = looked_up
+            {
+                c.under = under;
+                c.of = of;
+                c.since = Instant::now();
             }
         }
     };
-    if std::thread::Builder::new()
+    // where no thread starts, the closure is dropped with its guard
+    let _ = std::thread::Builder::new()
         .name("kept-runs".to_string())
-        .spawn(apart)
-        .is_err()
-    {
+        .spawn(apart);
+}
+
+/// A looking up apart under way: whatever becomes of it, a panic and a
+/// thread that never starts included, the slot may be looked up again.
+struct Renewing(String);
+
+impl Drop for Renewing {
+    fn drop(&mut self) {
         let mut kept = COVERS.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(c) = kept.get_mut(&slot) {
+        if let Some(c) = kept.get_mut(&self.0) {
             c.renewing = false;
         }
     }
@@ -1259,7 +1275,7 @@ fn runs_kept(
     if all.is_empty() {
         return Ok(Vec::new());
     }
-    let slot = format!("{slot}:{sources}");
+    let slot = covers_key(slot, sources, pipelines);
     let keep = if reading {
         COVERS_KEPT_BUSY
     } else {
@@ -3283,7 +3299,7 @@ mod runs_kept_tests {
             "INSERT INTO ingest_batch (source_id, name, config, started_at, state, kind) \
              VALUES (71, 'b', '{}', '2026-11-12T00:00:00Z', 'running', 'digest')",
         );
-        let slot = format!("{APART}:71");
+        let slot = covers_key(APART, "71", &[5]);
         let mut renewed = false;
         for _ in 0..200 {
             runs_kept(s, Some(&home), &[5], APART, "71").unwrap();
@@ -3302,5 +3318,98 @@ mod runs_kept_tests {
             runs_kept(s, Some(&home), &[5], APART, "71").unwrap().len(),
             3
         );
+    }
+
+    /// 2026-11-12: the memo is kept for each operation's pipelines, so a
+    /// looking up again for one operation drops none of the others' handles.
+    #[test]
+    fn a_looking_up_again_for_one_operation_keeps_the_others_handles() {
+        use nils_registry::home::{Home, InitOptions};
+        const TWO: &str = "9:a folder for two operations";
+        let dir = nils_dicom::synth::TempDir::new("nils-runs-kept-two");
+        let home = Home::new(dir.path().join("registry"));
+        home.keys(None).add("k", b"nils-fixture-key").unwrap();
+        let mut registry = home
+            .init(&InitOptions {
+                backend: nils_registry::Backend::Sqlite,
+                dsn: None,
+                schema: None,
+                scheme: nils_registry::pseudonym::Scheme::Blake2b32,
+                key: "k".to_string(),
+                display_length: nils_registry::pseudonym::DEFAULT_DISPLAY_LENGTH,
+                session_scheme: None,
+            })
+            .unwrap();
+        let s = registry.store();
+        filled(s);
+        // a run of another operation's pipeline over a handle of the first scan
+        exec(
+            s,
+            "INSERT INTO handle_member (handle_id, position, key) VALUES (910, 0, 1)",
+        );
+        exec(
+            s,
+            "INSERT INTO pipeline_run (id, pipeline_id, job_id, handle_id, params, runtime, \
+             runtime_version, host, device, model_ids, status, started_at, principal) \
+             VALUES (10, 6, 50, 910, '{}', 'r', '1', 'h', 'd', '[]', 'running', \
+             '2026-11-12T00:00:00Z', 'anna@lab')",
+        );
+        assert_eq!(runs_kept(s, Some(&home), &[5], TWO, "71").unwrap().len(), 2);
+        assert_eq!(runs_kept(s, Some(&home), &[6], TWO, "71").unwrap().len(), 1);
+        let (five, six) = (covers_key(TWO, "71", &[5]), covers_key(TWO, "71", &[6]));
+        let known = |key: &str| -> usize {
+            COVERS
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .get(key)
+                .map_or(0, |c| c.of.len())
+        };
+        assert_eq!(known(&six), 1);
+        // a batch begins: the first operation to ask renews its own
+        exec(
+            s,
+            "INSERT INTO ingest_batch (source_id, name, config, started_at, state, kind) \
+             VALUES (71, 'b', '{}', '2026-11-12T00:00:00Z', 'running', 'digest')",
+        );
+        let mut renewed = false;
+        for _ in 0..200 {
+            runs_kept(s, Some(&home), &[5], TWO, "71").unwrap();
+            renewed = COVERS
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .get(&five)
+                .is_some_and(|c| c.under.ends_with("|1") && !c.renewing);
+            if renewed {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        assert!(renewed, "looked up again under the batch that began");
+        assert_eq!(known(&six), 1, "the other operation's handles");
+        assert_eq!(runs_kept(s, Some(&home), &[6], TWO, "71").unwrap().len(), 1);
+    }
+
+    /// 2026-11-12: a looking up apart that panics leaves its slot free to be
+    /// looked up again.
+    #[test]
+    fn a_looking_up_that_panics_leaves_the_slot_free() {
+        const PANIC: &str = "10:a folder whose looking up panics";
+        COVERS.lock().unwrap_or_else(|e| e.into_inner()).insert(
+            PANIC.to_string(),
+            Covers {
+                under: String::new(),
+                since: Instant::now(),
+                of: HashMap::new(),
+                renewing: true,
+            },
+        );
+        let thread = std::thread::spawn(|| {
+            let _renewing = Renewing(PANIC.to_string());
+            panic!("a looking up that panics");
+        })
+        .join();
+        assert!(thread.is_err());
+        let kept = COVERS.lock().unwrap_or_else(|e| e.into_inner());
+        assert!(!kept[PANIC].renewing);
     }
 }
