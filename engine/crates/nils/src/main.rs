@@ -42,6 +42,7 @@ mod chain;
 mod checks;
 mod clinical_doors;
 mod cohort_picks;
+mod cohorts;
 mod contrast;
 mod dataset;
 mod dataset_summary;

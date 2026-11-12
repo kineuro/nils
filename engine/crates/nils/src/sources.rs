@@ -135,10 +135,6 @@ const KEEP_BUSY: Duration = Duration::from_secs(3);
 /// ([`crate::kept`]).
 static KEPT: LazyLock<Keep<Value>> = LazyLock::new(Default::default);
 
-/// How many times a dataset's counts were read from the registry rather
-/// than answered from the kept ones, for the tests.
-static READS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-
 /// A dataset's slot in the keep.
 fn slot_of(p: &Place, recent: usize) -> String {
     format!("{}:{recent}:{}", p.id, p.path)
@@ -200,7 +196,6 @@ impl crate::kept::Reading<Value> for Count {
     type Error = StoreError;
 
     fn read(&mut self, registry: &mut Registry) -> Result<Value, StoreError> {
-        READS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let store = registry.store();
         let window = window(store)?;
         let asks = crate::certainty::Asks::sort(store)?;
@@ -358,15 +353,10 @@ pub fn forget() {
     KEPT.forget();
 }
 
-/// How many times a dataset's counts were read from the registry.
-#[cfg(test)]
-pub fn reads() -> usize {
-    READS.load(std::sync::atomic::Ordering::SeqCst)
-}
-
 /// The sources document read whole now, nothing kept: each active source
 /// place with its digests, the newest `recent` of them in full, and its
-/// totals.
+/// totals. What the tests compare the kept answer with.
+#[cfg(test)]
 pub fn document(registry: &mut Registry, recent: usize) -> Result<Value, StoreError> {
     let store = registry.store();
     let window = window(store)?;

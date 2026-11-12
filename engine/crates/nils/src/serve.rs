@@ -1276,6 +1276,9 @@ pub fn serve(home: &Home, args: ServeArgs) -> Result<(), Exit> {
         std::thread::spawn(move || {
             if let Ok(mut registry) = home.open() {
                 let _ = crate::sources::document_kept(&mut registry, SOURCES_RECENT);
+                // and the cohorts' list (2026-11-12): the registry's copy
+                // taken over, gathered again where it moved
+                let _ = crate::cohorts::list(&mut registry);
             }
         });
     }
@@ -2672,9 +2675,9 @@ fn routed(
             )?))
         }
         // record 26 §9: the cohort doors, Data work
-        ["api", "cohorts"] if get => Ok(Reply::ok(serde_json::Value::Array(
-            nils_registry::cohort::list(registry.store())?,
-        ))),
+        // 2026-11-12: the list is answered at once from the kept one, the
+        // cohorts' own rows as they are now, and gathered again apart
+        ["api", "cohorts"] if get => Ok(Reply::ok(crate::cohorts::list(registry)?)),
         ["api", "cohorts", name] if get => {
             match nils_registry::cohort::show(registry.store(), name)? {
                 Some(mut doc) => {
@@ -2770,6 +2773,8 @@ fn routed(
             registry
                 .refresh_meta()
                 .map_err(|e| Reply::error(500, e.to_string()))?;
+            // the kept list says the cohort's new counts in its next answer
+            crate::cohorts::member_change(registry, name)?;
             let mut out = serde_json::json!({
                 "cohort": name,
                 "added": done.added,

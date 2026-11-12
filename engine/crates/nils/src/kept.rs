@@ -62,6 +62,9 @@ struct Slot<T> {
     /// start of the engine, and whether a request is looking now.
     loaded: bool,
     loading: bool,
+    /// How many times a door put its own reading in the slot
+    /// ([`Keep::amend`]): a reading that began before is not kept at all.
+    renewed: u64,
 }
 
 impl<T> Default for Slot<T> {
@@ -72,6 +75,7 @@ impl<T> Default for Slot<T> {
             reads: 0,
             loaded: false,
             loading: false,
+            renewed: 0,
         }
     }
 }
@@ -85,9 +89,6 @@ pub(crate) struct Keep<T> {
     /// before a door wrote may have read what the write changed, so what
     /// it read is kept stale, answered and read again at the next request.
     forgotten: AtomicU64,
-    /// How many times kept counts were let go ([`Keep::renew`]): a reading
-    /// that began before is not kept at all.
-    renewed: AtomicU64,
 }
 
 impl<T> Default for Keep<T> {
@@ -96,7 +97,6 @@ impl<T> Default for Keep<T> {
             slots: Mutex::new(HashMap::new()),
             over: Condvar::new(),
             forgotten: AtomicU64::new(0),
-            renewed: AtomicU64::new(0),
         }
     }
 }
@@ -191,7 +191,7 @@ impl<T: Send + Sync + 'static> Keep<T> {
     ) -> Result<Answer<T>, R::Error> {
         let as_of = nils_registry::time::now_iso();
         let forgotten = self.forgotten.load(Ordering::SeqCst);
-        let renewed = self.renewed.load(Ordering::SeqCst);
+        let renewed = self.renewed_of(&under.slot);
         let began = Instant::now();
         let value = Arc::new(reading.read(registry)?);
         let took = began.elapsed();
@@ -202,12 +202,14 @@ impl<T: Send + Sync + 'static> Keep<T> {
         };
         {
             let mut held = self.slots.lock().unwrap_or_else(|e| e.into_inner());
-            // let go meanwhile: what this reading read may be from before
-            // the write, and the next request reads again
-            if self.renewed.load(Ordering::SeqCst) != renewed {
+            // a door put its own reading there meanwhile: what this reading
+            // read may be from before the door's write, and the next
+            // request reads again
+            let slot = held.entry(under.slot.clone()).or_default();
+            if slot.renewed != renewed {
                 return Ok(answer);
             }
-            held.entry(under.slot.clone()).or_default().kept = Some(Kept {
+            slot.kept = Some(Kept {
                 stamp: under.stamp.clone(),
                 at: Instant::now(),
                 as_of: as_of.clone(),
@@ -381,17 +383,25 @@ impl<T: Send + Sync + 'static> Keep<T> {
         }
     }
 
-    /// Let a slot's kept counts go: a door changed what they count and its
-    /// caller reads the new counts next (a cohort's members changed), so
-    /// the next request waits for a reading as for a thing never counted.
-    /// The registry's copy is not looked for again, and a reading under
-    /// way, which began before the write, is not kept.
-    pub(crate) fn renew(&self, slot: &str) {
+    /// How many times a door wrote the slot itself.
+    fn renewed_of(&self, slot: &str) -> u64 {
+        let held = self.slots.lock().unwrap_or_else(|e| e.into_inner());
+        held.get(slot).map_or(0, |s| s.renewed)
+    }
+
+    /// Put a door's own reading in a slot's kept counts: the door changed
+    /// a part of what they count and read that part again, so the next
+    /// request answers it while the whole is read again apart. A reading
+    /// under way, which began before the write, is not kept. Nothing where
+    /// the slot keeps no counts.
+    pub(crate) fn amend(&self, slot: &str, with: impl FnOnce(&T) -> T) {
         let mut held = self.slots.lock().unwrap_or_else(|e| e.into_inner());
-        self.renewed.fetch_add(1, Ordering::SeqCst);
         let slot = held.entry(slot.to_string()).or_default();
-        slot.kept = None;
-        slot.loaded = true;
+        slot.renewed += 1;
+        if let Some(k) = &mut slot.kept {
+            k.value = Arc::new(with(&k.value));
+            k.stale = true;
+        }
     }
 
     /// Wait until no reading of the slot runs, for the tests.
