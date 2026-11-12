@@ -549,6 +549,49 @@ fn the_door_serves_what_the_command_line_has() {
     server.finish();
 }
 
+/// The epoch the capabilities say is the registry's own, whichever worker
+/// answers. Each worker keeps its registry open with the meta it read at its
+/// opening, and a desk follows that number to know that something was
+/// written: a worker that did not take the write went on saying the epoch
+/// from before it (2026-11-12, the Data page read nothing again after a
+/// write from elsewhere).
+#[test]
+fn the_capabilities_say_the_epoch_a_write_on_another_worker_left() {
+    let home = registry();
+    const AT_ONCE: usize = 6;
+    const EACH: usize = 6;
+    let server = Server::start(&home, 2 * AT_ONCE * EACH + 1, &[], &[]);
+    // asked by several at once, so that every worker answers some of them
+    let epochs = |server: &Server| -> Vec<i64> {
+        std::thread::scope(|s| {
+            let asking: Vec<_> = (0..AT_ONCE)
+                .map(|_| {
+                    s.spawn(|| {
+                        (0..EACH)
+                            .map(|_| {
+                                let (status, caps) =
+                                    server.request("GET", "/api/capabilities", None, None);
+                                assert_eq!(status, 200, "{caps}");
+                                caps["registry"]["epoch"].as_i64().unwrap()
+                            })
+                            .collect::<Vec<i64>>()
+                    })
+                })
+                .collect();
+            asking.into_iter().flat_map(|a| a.join().unwrap()).collect()
+        })
+    };
+    let before = epochs(&server);
+    assert!(before.iter().all(|e| *e == before[0]), "{before:?}");
+    let (status, made) = server.request("POST", "/api/cohorts", Some(r#"{"name": "moved"}"#), None);
+    assert!(status == 200 || status == 201, "{status}: {made}");
+    let after = epochs(&server);
+    assert!(
+        after.iter().all(|e| *e > before[0]),
+        "a new cohort moves the epoch, and every worker says so: {before:?} then {after:?}"
+    );
+}
+
 #[test]
 fn under_token_auth_the_token_names_the_principal() {
     let home = registry();
@@ -6324,8 +6367,19 @@ fn a_chain_runs_through_the_jobs_door_and_a_refused_step_ends_it() {
     assert_eq!(status, 404);
 
     // the sources door: the pseudonymise step on the digest, the rates
-    let (status, sources) = ask("GET", "/api/sources", None, reader);
+    // (2026-11-12: the door answers the counts it kept at once and says
+    // `counting` while it counts again what the chain moved; the counts
+    // read here are the settled ones)
+    let (mut status, mut sources) = ask("GET", "/api/sources", None, reader);
+    for _ in 0..400 {
+        if sources["counting"] != true {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(25));
+        (status, sources) = ask("GET", "/api/sources", None, reader);
+    }
     assert_eq!(status, 200, "{sources}");
+    assert_ne!(sources["counting"], true, "{sources}");
     let source = sources["sources"]
         .as_array()
         .unwrap()
@@ -8500,11 +8554,16 @@ third|S-0003|1.2.9.G|1.2.9.G.1|20260701|t1 late|Philips";
         }
     }
 
-    const LIMIT: usize = 73;
+    const LIMIT: usize = 76;
+    // the asks that wait for the subjects door to read its facts again
+    // (2026-11-12), outside the sweep's count: as many as it takes, this
+    // many at most
+    const WAITS: usize = 200;
     let used = std::cell::Cell::new(0usize);
+    let waited = std::cell::Cell::new(0usize);
     let server = Server::start(
         &home,
-        LIMIT,
+        LIMIT + WAITS,
         &[
             "--auth",
             "token",
@@ -8518,9 +8577,12 @@ third|S-0003|1.2.9.G|1.2.9.G.1|20260701|t1 late|Philips";
             "an-operator-token-of-len=op@lab:operator",
             "--token",
             "a-places-token-of-length=pl@lab:places:see",
+            "--token",
+            "an-auditor-token-of-len=aud@lab:audit:see",
         ],
         &[],
     );
+    let auditor = Some("an-auditor-token-of-len");
     let reader = Some("a-reader-token-of-length");
     let reviewer = Some("a-reviewer-token-of-len");
     let works = Some("a-reviewer-who-works-tok");
@@ -8710,6 +8772,56 @@ third|S-0003|1.2.9.G|1.2.9.G.1|20260701|t1 late|Philips";
     assert_eq!(label_of(&d, s1), "aaaaaa-9999", "{d}");
     let (status, refused) = ask("/api/datasets/first/subjects?show=no-such-type", reviewer);
     assert_eq!(status, 400, "{refused}");
+
+    // 2026-11-12, the order of what the subjects are shown by: asked for by
+    // name it is not the default's (the third has more to look at than the
+    // second), and an order the door does not know is refused with the list
+    let (status, d) = ask(
+        "/api/datasets/first/subjects?order=id&show=patient-id",
+        operator,
+    );
+    assert_eq!(status, 200, "{d}");
+    assert_eq!(d["order"], "id", "{d}");
+    assert_eq!(ids(&d), vec![s1, s2, s3], "{d}");
+    assert_ne!(ids(&d), ids(&doc), "{d}");
+    let (status, refused) = ask("/api/datasets/first/subjects?order=nonsense", reviewer);
+    assert_eq!(status, 400, "{refused}");
+    assert_eq!(
+        refused["error"], "order: nonsense is not look, code, id, visits or scans",
+        "{refused}"
+    );
+    // every request above that was answered in an order by values left one
+    // audit row, with how many values it opened and none of them: the
+    // operator's by patient-id (the default order breaks its ties by it),
+    // the reviewer's by the alias, the operator's by a type whose values
+    // here keep nothing, and the operator's again, served by the kept order
+    let (status, audit) = ask("/api/audit?action=linkage.sort", auditor);
+    assert_eq!(status, 200, "{audit}");
+    let mut sorts: Vec<(String, String, i64, i64)> = audit["rows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| {
+            (
+                r["principal"].as_str().unwrap().to_string(),
+                r["scope"]["id_type"].as_str().unwrap().to_string(),
+                r["details"]["subjects"].as_i64().unwrap(),
+                r["details"]["opened"].as_i64().unwrap(),
+            )
+        })
+        .collect();
+    sorts.sort();
+    assert_eq!(
+        sorts,
+        vec![
+            ("op@lab".to_string(), "patient-id".to_string(), 3, 0),
+            ("op@lab".to_string(), "patient-id".to_string(), 3, 3),
+            ("op@lab".to_string(), "site-id".to_string(), 3, 0),
+            ("rev@lab".to_string(), "subject-code".to_string(), 3, 1),
+        ],
+        "{audit}"
+    );
+    assert!(!audit.to_string().contains("S-000"), "{audit}");
 
     // at plain the code is its shape, so its value is not found by it
     let (status, plain) = ask("/api/datasets/first/subjects", reader);
@@ -9042,8 +9154,17 @@ third|S-0003|1.2.9.G|1.2.9.G.1|20260701|t1 late|Philips";
             )
             .unwrap();
     }
-    let (status, d) = ask("/api/datasets/first/subjects", reviewer);
+    // (2026-11-12: the door answers the facts it kept at once and says
+    // `counting` while it reads again what the sealing moved; the facts
+    // read here are the settled ones)
+    let (mut status, mut d) = ask("/api/datasets/first/subjects", reviewer);
+    while d["counting"] == true && waited.get() < WAITS {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        waited.set(waited.get() + 1);
+        (status, d) = server.request("GET", "/api/datasets/first/subjects", None, reviewer);
+    }
     assert_eq!(status, 200, "{d}");
+    assert_ne!(d["counting"], true, "{d}");
     assert_eq!(
         d["totals"],
         serde_json::json!({"subjects": 3, "visits": 4, "scans": 5, "look": 1}),
@@ -9082,7 +9203,7 @@ third|S-0003|1.2.9.G|1.2.9.G.1|20260701|t1 late|Philips";
     }
     // whatever was asked, the server ends: a miscount fails after it does
     let made = used.get();
-    while used.get() < LIMIT {
+    while used.get() + waited.get() < LIMIT + WAITS {
         let _ = ask("/api/status", reader);
     }
     server.finish();

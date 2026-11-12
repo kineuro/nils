@@ -549,6 +549,43 @@ impl Of {
     }
 }
 
+/// What moves the picks every reader reads, for a door that keeps what it
+/// read of them and must know when to read again (2026-11-12): the newest
+/// pick and the newest picked stack; how many picks of a person were
+/// withdrawn, which writes no row and restores the run's pick in place, so
+/// that it is told by the audit alone; the newest rules, the newest run of
+/// them and how many runs ended. Each is read from an index, and none
+/// reads a pick: a pick rewritten in place by anything but the engine is
+/// not in it.
+pub fn moved(store: &mut Store) -> Result<String, StoreError> {
+    let (pick, pick_stack) = (store.qualified("pick"), store.qualified("pick_stack"));
+    let (rules, run) = (
+        store.qualified("pick_rules"),
+        store.qualified("pick_rules_run"),
+    );
+    let audit = store.qualified("audit");
+    let withdrawn = crate::audit::Action::PickWithdraw.name();
+    let r = &store.query(
+        &format!(
+            "SELECT (SELECT MAX(id) FROM {pick}), (SELECT MAX(id) FROM {pick_stack}), \
+             (SELECT COUNT(*) FROM {audit} WHERE action = '{withdrawn}'), \
+             (SELECT MAX(id) FROM {rules}), (SELECT MAX(id) FROM {run}), \
+             (SELECT COUNT(*) FROM {run} WHERE state = 'done')"
+        ),
+        &[],
+    )?[0];
+    let n = |i: usize| -> Result<i64, StoreError> { Ok(r.opt_int(i)?.unwrap_or(0)) };
+    Ok(format!(
+        "{}:{}:{}:{}:{}:{}",
+        n(0)?,
+        n(1)?,
+        n(2)?,
+        n(3)?,
+        n(4)?,
+        n(5)?
+    ))
+}
+
 /// What a release reads of the picks and records of them (the main-scans
 /// study, section 4, as ruled on 2026-10-11): a release of one cohort reads
 /// that cohort's; else of one dataset, that dataset's; else each subject's
@@ -1132,7 +1169,11 @@ mod tests {
                 || line.contains("JOIN pick ")
         };
         const EXCEPTIONS: [(&str, usize, &str); 9] = [
-            ("nils-registry/src/pick_truth.rs", 3, "the resolver"),
+            (
+                "nils-registry/src/pick_truth.rs",
+                4,
+                "the resolver, and what moves the picks: their newest id",
+            ),
             (
                 "nils-registry/src/pick_rules.rs",
                 2,

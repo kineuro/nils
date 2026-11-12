@@ -4,6 +4,25 @@ All notable changes to NILS v1 are recorded here. The format follows [Keep a Cha
 
 ## [Unreleased]
 
+### Added
+
+- The subjects doors take `order=id`: subjects come in the order of what they are shown by, the subject code's or, to a caller answered ID values as they are, the values of the ID type `show` names, numbers within a value read as numbers (`S2` before `S10`) and a subject with no such ID last, by its code. A caller who is answered only the shape of an ID gets the subject code's order. An order by an ID type leaves one audit row with the type and the number of subjects, no value. `GET /api/datasets/{name}/subjects`, `GET /api/cohorts/{name}/subjects` and `GET /api/subjects`.
+- `GET /api/sources` takes `at_once=1` and then never waits for a first count: a dataset never counted is answered at once with its place and dataset fields, `counted: false`, `counting: true` and `counts_as_of: null`, while its first count runs apart. Every source says `counted`, `counting` and `counts_as_of`; a count that failed says so in a sentence on its source.
+- The three subjects doors say `counting` and `counts_as_of`: whether the facts answered are being read again, and when the ones answered were read.
+
+### Changed
+
+- The pages of Data answer from what the engine kept. The sources door keeps each dataset's counts by themselves and counts a dataset again, apart from the request, only when something of that dataset moved; before, the whole list was counted again once a minute and the request that met it waited (7 to 17 s on a registry of 900,000 files). The cohorts' list is kept the same way; before, every request gathered every cohort again (2 to 6 s). The subjects doors keep a scope's subjects with their visits, scans, regions, makers and main roles, and filter, search, order and page from them; before, every request, every page and every filter read the whole scope again (6 to 8 s on 900,000 scans, now about 20 ms). A request that finds the kept facts older than what moved is answered with them at once, `counting: true`, and they are read again apart. The first request for a scope after the engine starts still reads it.
+- What a caller may see is applied on every request, as before: the kept facts are the same for every caller but for a holder of `sealed:see`, and detail, the right to read IDs and the audit rows are the request's own.
+- An update no longer counts every dataset again: the summary's stamp names the way of counting, not the engine's version. Counts kept by 1.0.0-beta.12 to 1.0.0-beta.14 are taken over.
+- Committing staged decisions makes the kept counts and subjects be read again; decisions that wait to be committed are part of what moves a dataset's counts.
+- At most two counts run apart at a time, and a count that failed is tried again after 30 seconds, not on every request.
+- A dataset's summary reads the operations' runs once for all its steps, and which pipeline handles hold a dataset's scans is kept between requests.
+
+### Fixed
+
+- The capabilities say the registry's epoch as it is now, on every worker. Each worker that had not taken a write answered the epoch from before it once, so a desk that follows the number could miss a write.
+
 ## [1.0.0-beta.14] - 2026-11-12
 
 The fourteenth engine beta settles one point of release naming that 1.0.0-beta.13 left open: an ID type whose IDs identify a person never names a released folder, whoever asks.

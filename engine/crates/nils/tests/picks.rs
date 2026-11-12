@@ -1873,9 +1873,20 @@ fn after_sort_round(pg: Option<(String, String)>) {
         &packs,
     ]);
 
-    // the card: N scans, N sure, N need a look, N not sorted
-    let (status, sources) = server.call("GET", "/api/sources", None, OPS);
+    // the card: N scans, N sure, N need a look, N not sorted (2026-11-12:
+    // the door answers the counts it kept at once and says `counting`
+    // while it counts again what the runs moved; the card read here is the
+    // settled one)
+    let (mut status, mut sources) = server.call("GET", "/api/sources", None, OPS);
+    for _ in 0..400 {
+        if sources["counting"] != true {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(25));
+        (status, sources) = server.call("GET", "/api/sources", None, OPS);
+    }
     assert_eq!(status, 200, "{sources}");
+    assert_ne!(sources["counting"], true, "{sources}");
     let ds = sources["sources"]
         .as_array()
         .unwrap()

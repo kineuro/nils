@@ -1626,6 +1626,39 @@ pub fn list(store: &mut Store) -> Result<Vec<Value>, StoreError> {
         .collect()
 }
 
+/// One cohort's document as the list has it, read now (2026-11-12): what
+/// a door answers of a cohort the kept list does not hold yet, or whose
+/// members the door just changed. The open review items are read only
+/// where the cohort has an open member they could be about.
+pub fn listed(store: &mut Store, cohort: &Cohort) -> Result<Value, StoreError> {
+    let places = place::active(store)?;
+    let gathered = Gathered::read(store, Some(cohort.id))?;
+    let members = gathered
+        .intervals
+        .get(&cohort.id)
+        .is_some_and(|all| all.iter().any(|i| i.left_at.is_none()));
+    let items = if members {
+        open_items(store)?
+    } else {
+        Vec::new()
+    };
+    let mut cache = HashMap::new();
+    document(store, &mut cache, &places, &items, &gathered, cohort, false)
+}
+
+/// Lay a cohort's own row and the datasets feeding it, as they are now,
+/// over a document of it read earlier (2026-11-12): what is cheap to read
+/// on every request, so that a cohort renamed, described or retired shows
+/// at once in a list whose counts are kept.
+pub fn laid_now(doc: &mut Value, places: &[place::Place], cohort: &Cohort) {
+    doc["name"] = json!(cohort.name);
+    doc["owner"] = json!(cohort.owner);
+    doc["description"] = json!(cohort.description);
+    doc["created_at"] = json!(cohort.created_at);
+    doc["retired_at"] = json!(cohort.retired_at);
+    doc["feeds"] = json!(feeds_of(places, &cohort.name));
+}
+
 /// One cohort in full (`GET /api/cohorts/{name}`): the list's fields, the
 /// joins, the sources holding the members and the releases naming it.
 pub fn show(store: &mut Store, name: &str) -> Result<Option<Value>, StoreError> {

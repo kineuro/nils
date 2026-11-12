@@ -216,6 +216,18 @@ impl Place {
         self.depth_holding(&canonical_prefix(path)).is_some()
     }
 
+    /// Which of the paths lie under this place, as [`Place::holds_path`]
+    /// says of each, its folder and its trees resolved once for all of them
+    /// (2026-11-12: a dataset's sources were found by resolving the place
+    /// once for every root of the registry, on every request of a door).
+    pub fn holds_paths<'a>(&self, paths: impl IntoIterator<Item = &'a Path>) -> Vec<bool> {
+        let mine = self.resolved();
+        paths
+            .into_iter()
+            .map(|path| depth_under(&mine, &canonical_prefix(path)).is_some())
+            .collect()
+    }
+
     /// How closely this place holds a path already resolved: the depth of
     /// the deepest of its folder and its trees the path lies under, none
     /// where it lies under neither. [`Place::holds_path`] asks the same.
