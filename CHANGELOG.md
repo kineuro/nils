@@ -4,6 +4,35 @@ All notable changes to NILS v1 are recorded here. The format follows [Keep a Cha
 
 ## [Unreleased]
 
+## [1.0.0-beta.13] - 2026-11-12
+
+The thirteenth engine beta carries two things. It closes one gap, met in production: a dataset of identified files could be declared with no identity rule, and its originals were then read under a default rule that files PatientID as a `patient-id` and keeps the value sealed, whatever the hospital had written there. A dataset that holds identified files now says what PatientID holds before anything of it is read, and no value shaped like a personnummer is kept under any ID type. And a release, which named every subject by its subject code, can name them by an ID type the registry keeps values of, so a tree leaves under the study's own subject labels. The contract is openapi v7 still, added to in place; a desk from before works as before.
+
+> **On update.** The first open of the registry after this update blanks, once, every kept identifier value and every held file's sealed identifier that is shaped like a valid personnummer or coordination number, whatever its type. The pass says nothing on screen: it leaves one row in the audit log (`linkage.never_kept`) with counts and no value. A 10 or 12 digit ID of another kind that passes the date and the check digit is blanked too; its subject is still found by it, and only the value is no longer shown. Backups made before the update keep the old values until they rotate. A dataset that holds identified files and has no identity rule is refused pseudonymising, bring-in and any change of its dataset fields until the rule is given (`nils place set ID --identity FILE`, or the desk's Data page from desk 1.0.0-beta.12).
+
+### Added
+
+- A release names its subjects by ID types. `name_by` on `POST /api/releases` (`--name-by` on `nils release`) is an ordered list of ID types: each subject is named by its kept value of the first type it holds one of, cleaned to letters and digits (`AB_01` is written `AB01`), and by its subject code only where it holds none. A release without `name_by`, and every subject that falls back to its code, is written exactly as before, byte for byte.
+- A subject that holds several values of the type that would name it is never named silently: the release is refused with the list until a choice says which value names it (`name_choices`, `--name-choice CODE=VALUE`, `--name-choices FILE`). A choice is kept with the release, so its next version does not ask again.
+- Two subjects that would share a name, compared without regard to case, are refused with the list. A type that keeps no value (`personnummer`) is refused by name, and a value shaped like a personnummer never names a subject: it is passed over and counted.
+- `POST /api/releases/names` (`nils release --name-plan`) rehearses the names and writes nothing: how many subjects each type names, how many keep their subject code, who needs a choice and which names collide. Values are shown only to a caller who may read identifiers, and a type whose IDs identify a person names a release only for such a caller.
+- Where an ID names a subject, the name stands wherever the code stood: folders, file names, the participants, sessions and scans tables, the PatientID of released DICOM and a handover's archive names and manifest. The registry keeps which name is which subject, per version (`release_name`, migration 117), and one `release.names` audit row records the types and the counts, never a value.
+- `GET /api/releases` and `nils release --history` say what each release named its subjects by, as counts.
+- The types door says how many of a type's identifiers keep a value: `GET /api/linkage/types` and `nils linkage types` carry `kept` per type beside `identifiers` and `subjects`. The rest are a keyed lookup alone.
+- The dataset summary's pseudonymised step says why it waits where the dataset has no identity rule: `refusal: {reason: "no_identity_rule", error}`, the words the doors that would run it refuse with, and `null` otherwise.
+
+### Changed
+
+- A dataset whose originals are in play is declared with an identity rule. `nils place add`, `nils place add-dataset`, `nils place set`, `POST /api/places` and `PUT /api/places/{id}` refuse an identified dataset (or one that holds both trees, or an unknown folder whose entries go into the originals) that has no rule and is given none, with a 400 that says what to give and that nothing was written, before any folder is settled or any entry moved. The rule of such a dataset is replaced, never taken away (`--no-identity` and `identity: null` are refused). A rule that names `patient-id` in so many words is a rule.
+- A dataset declared before, with identified files and no rule, is not read: `nils pseudonymize` and `nils bring-in` refuse it before anything is read, and the jobs door refuses both with a 409 before a job is queued, each saying what to give and where. The pseudonymiser no longer falls back to a default rule. `nils place explore` says so on the dataset's lines.
+- No value shaped like a valid personnummer or coordination number is kept, under any ID type: such an identifier is filed by its keyed lookup alone, as the `personnummer` type always was, from a DICOM header, a map, a merge's alias or a held file. The lookup is unchanged, so the identifier still finds its subject.
+- The `subject-code` ID type says both of its uses in its description (the subject code of a subject merged into this one, and a subject's own code as a pseudonymised copy holds it); a store from before learns it where the description still reads as it was seeded. The subjects door's ID type facet counts `subject-code` by the aliases a merge filed, and the labels shown by it are those aliases alone.
+- The subjects door's ID type facet counts the subjects with an identifier that keeps a value, so a type that keeps none is not offered as a way to show subjects.
+
+### Fixed
+
+- A registry that kept personnummer-shaped values under another ID type is swept of them at its first open with the pseudonym key in hand (see On update). A registry with no key to read, or one where a statement fails, opens all the same and is tried again at the next open; a registry made now is never swept.
+
 ## [1.0.0-beta.12] - 2026-11-10
 
 The twelfth engine beta is the engine's half of the sixth UX round, from the first days on the proposals grid in production. A scan set apart on the grid takes its right value in the same accept: the page says the values the axis takes in the served pack, and the accept writes the person's value on the corrected scans beside the model's on the rest, each in the person's name with the model's value, probability and run kept in the decision's words. And a whole band of one value is accepted in one move, without a look at each picture: the door holds the number the page showed against the band now, answers at once, and the accept runs as a job that writes in chunks of 500, says how far it is, hears a cancel between chunks and queues the re-sort at its end. The contract is openapi v7 still, added to in place; a desk from before these doors works as before.
