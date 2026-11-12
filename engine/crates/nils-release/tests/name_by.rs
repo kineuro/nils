@@ -656,11 +656,15 @@ fn a_type_that_keeps_no_value_is_refused_by_name() {
         // A type nobody holds a value of.
         let mut link = reg.open_linkage().unwrap();
         linkage::add_id_type(&mut link, "empty-id", None).unwrap();
+        // A type whose IDs identify a person, by a person's word.
+        linkage::add_id_type(&mut link, "ward-id", None).unwrap();
+        linkage::set_identifying(&mut link, "ward-id", true).unwrap();
     }
+    file(&mut reg, who[0].0, "ward-id", "W17");
 
     let policy = Policy::default();
     let scheme = SessionScheme::default();
-    let cases: [(&[&str], &[&str]); 5] = [
+    let cases: [(&[&str], &[&str]); 8] = [
         (
             &["personnummer"],
             &["name by personnummer", "a personnummer is never kept"],
@@ -677,6 +681,20 @@ fn a_type_that_keeps_no_value_is_refused_by_name() {
         (
             &["no-such-id"],
             &["name by no-such-id", "no ID type is named so", "study-id"],
+        ),
+        // A type whose IDs identify a person names nothing: one flagged by
+        // a person, one seeded so, and wherever it stands in the list.
+        (
+            &["ward-id"],
+            &["name by ward-id", "identifies a person", "never named"],
+        ),
+        (
+            &["study-id", "ward-id"],
+            &["name by ward-id", "identifies a person"],
+        ),
+        (
+            &["patient-id"],
+            &["name by patient-id", "identifies a person"],
         ),
         (&["study-id", "study-id"], &["in the list twice"]),
     ];

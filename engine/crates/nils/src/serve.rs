@@ -6851,10 +6851,9 @@ fn release_name_by(doc: &serde_json::Value) -> Result<Vec<String>, Reply> {
 
 /// How the release a body asks for would name its subjects, and whether
 /// this caller may see the values in the answer; none where it names by no
-/// ID type. The types are checked first, so a list that cannot name is
-/// refused in words that carry no subject, and a type whose IDs identify a
-/// person names a release only for a caller who may read identifiers: the
-/// names are written into the tree, where whoever asked reads them.
+/// ID type. The types are checked first, so a list that cannot name (a type
+/// whose IDs identify a person among them, whoever the caller is) is refused
+/// in words that carry no subject.
 fn release_names(
     doors: &Doors,
     registry: &mut Registry,
@@ -6870,18 +6869,11 @@ fn release_names(
         nils_release::run::Error::Refused(m) => Reply::error(400, m),
         other => Reply::error(500, other.to_string()),
     };
-    let types = {
+    {
         let mut link = registry
             .open_linkage()
             .map_err(|e| Reply::error(500, e.to_string()))?;
-        nils_release::name_by::types_of(&mut link, &by).map_err(refused)?
-    };
-    if types.iter().any(|t| t.identifying) {
-        caller.allowed(
-            "naming subjects by an ID type that identifies a person",
-            Need::One("data:work"),
-            Detail::Sensitive,
-        )?;
+        nils_release::name_by::types_of(&mut link, &by).map_err(refused)?;
     }
     let packs = crate::pack_dir(&doors.home, doors.pack_dir.clone())?;
     // What is refused from here on names a subject (a selection that does

@@ -13,6 +13,10 @@
 //! person to say which. Two subjects whose names would be equal would share
 //! a folder. And a type that keeps no value can name nobody, so asking for
 //! it is refused by name.
+//!
+//! A type whose IDs identify a person names nothing, whoever asks: a
+//! release is what leaves, and its folder names are read by whoever receives
+//! it. Such a type is refused by name before any subject is looked at.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
@@ -99,6 +103,8 @@ pub struct Named {
 pub struct TypeCount {
     pub name: String,
     /// Whether an ID of the type identifies a person wherever it is met.
+    /// Never true in a plan, since such a type is refused before one is
+    /// made; kept so the plan's document reads as it did.
     pub identifying: bool,
     pub subjects: i64,
 }
@@ -304,8 +310,9 @@ fn refused(words: String) -> Error {
 }
 
 /// The types of the list, each checked: named once, a type the store keeps
-/// values of, known to the store, and held by somebody. A type that never
-/// keeps a value is refused by its name whatever the store holds.
+/// values of, known to the store, not one whose IDs identify a person, and
+/// held by somebody. A type that never keeps a value is refused by its name
+/// whatever the store holds.
 pub fn types_of(store: &mut Store, by: &[String]) -> Result<Vec<linkage::IdType>, Error> {
     let mut seen = BTreeSet::new();
     for name in by {
@@ -333,14 +340,21 @@ pub fn types_of(store: &mut Store, by: &[String]) -> Result<Vec<linkage::IdType>
         let Some(t) = known.iter().find(|t| &t.name == name) else {
             let kept: Vec<&str> = known
                 .iter()
-                .filter(|t| linkage::keeps(&t.name))
+                .filter(|t| linkage::keeps(&t.name) && !t.identifying)
                 .map(|t| t.name.as_str())
                 .collect();
             return Err(refused(format!(
-                "name by {name}: no ID type is named so. The types that keep values are {}.",
+                "name by {name}: no ID type is named so. The types that can name are {}.",
                 kept.join(", ")
             )));
         };
+        if t.identifying {
+            return Err(refused(format!(
+                "name by {name}: an ID of the type {name} identifies a person, and a released \
+                 folder is never named by one. Take the type out of the list; the subjects \
+                 it would have named keep the next type's value, or their subject code."
+            )));
+        }
         if !linkage::holds_kept_value(store, t.id)? {
             return Err(refused(format!(
                 "name by {name}: no subject holds a kept value of {name}, so it would name \

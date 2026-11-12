@@ -610,8 +610,9 @@ struct ReleaseArgs {
     /// code: the first type in the list the subject holds a kept value of,
     /// cleaned to letters and digits, and the subject code only where it
     /// holds none. Repeatable or comma-separated, in the order the types
-    /// are tried. Where an ID names a subject its code is nowhere in the
-    /// tree; the registry keeps which name is which subject
+    /// are tried. A type whose IDs identify a person is refused. Where an
+    /// ID names a subject its code is nowhere in the tree; the registry
+    /// keeps which name is which subject
     #[arg(long = "name-by", value_name = "ID-TYPE", value_delimiter = ',')]
     name_by: Vec<String>,
     /// With --name-by: which value names a subject that holds several of

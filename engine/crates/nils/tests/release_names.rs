@@ -5,8 +5,8 @@
 //! otherwise; the release door rehearses before it queues and answers a
 //! plan that is not ready with 409 and no job; a type that keeps no value,
 //! a type nobody holds and a type that is not one are refused in words; a
-//! type whose IDs identify a person names a release only for a caller who
-//! may read identifiers. The released tree spells the names and never the
+//! type whose IDs identify a person names no release, whoever asks. The
+//! released tree spells the names and never the
 //! codes they stand for, the releases list and the history show the types
 //! and the counts, and the choice a person made is kept for the release's
 //! next version.
@@ -417,21 +417,36 @@ fn a_release_is_named_by_an_id_type_through_the_doors_and_the_command_line() {
         "{said}"
     );
 
-    // --- a type whose IDs identify a person names a release only for a
-    // caller who may read identifiers
+    // --- a type whose IDs identify a person names no release, whoever
+    // asks: both doors refuse it by name, and nothing is queued
     let identifying = json!({"name": "w", "out": out_text, "name_by": ["ward-id"]});
     for door in ["/api/releases/names", "/api/releases"] {
-        let (status, body) = server.post(door, identifying.clone(), RELEASER);
-        assert_eq!(status, 403, "{door}: {body}");
-        assert!(
-            body["error"].as_str().unwrap().contains("data:work"),
-            "{body}"
-        );
+        for who in [RELEASER, ADMIN] {
+            let (status, body) = server.post(door, identifying.clone(), who);
+            assert_eq!(status, 400, "{door}: {body}");
+            let said = body["error"].as_str().unwrap();
+            assert!(
+                said.contains("name by ward-id") && said.contains("identifies a person"),
+                "{door}: {said}"
+            );
+            assert!(!said.contains("W-17") && !said.contains("W17"), "{said}");
+            assert!(body.get("job").is_none(), "{door}: {body}");
+        }
     }
-    let (status, body) = server.post("/api/releases/names", identifying, ADMIN);
-    assert_eq!(status, 200, "{body}");
-    assert_eq!(body["names"]["types"][0]["identifying"], true, "{body}");
-    assert_eq!(body["names"]["ready"], true, "{body}");
+    // PatientID as written is such a type from the start
+    let (status, body) = server.post(
+        "/api/releases/names",
+        json!({"name": "w", "name_by": ["study-id", "patient-id"]}),
+        ADMIN,
+    );
+    assert_eq!(status, 400, "{body}");
+    assert!(
+        body["error"]
+            .as_str()
+            .unwrap()
+            .contains("name by patient-id"),
+        "{body}"
+    );
 
     // --- the release door rehearses before it queues: a plan that is not
     // ready is 409 with the plan, and no job
