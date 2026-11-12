@@ -4,8 +4,10 @@
 //! §7.4): the only store with identifying data. An identifier is filed as
 //! a keyed lookup and a ciphertext, both under subkeys of the registry's one
 //! key, so a copied file needs the key; every read of a ciphertext writes a
-//! `read_audit` row. Everything here works on both backends through the
-//! store, and the import is validate-then-apply.
+//! `read_audit` row, but for the one that tells an order and returns no
+//! value ([`order_by_type`]), which its caller audits as one act.
+//! Everything here works on both backends through the store, and the import
+//! is validate-then-apply.
 
 use std::collections::HashMap;
 use std::fmt;
@@ -595,9 +597,54 @@ pub fn values_of_type_filed_by(
     actor: &str,
     why: &str,
 ) -> Result<std::collections::HashMap<i64, String>, Error> {
-    let mut out = std::collections::HashMap::new();
-    let mut audit: Vec<Vec<Param>> = Vec::new();
+    let first = first_kept(store, keys, subjects, id_type_id, source)?;
     let now = now_iso();
+    let audit: Vec<Vec<Param>> = first
+        .iter()
+        .map(|f| {
+            vec![
+                Param::from(now.as_str()),
+                Param::from(actor),
+                Param::from(f.identity_id),
+                Param::from(why),
+            ]
+        })
+        .collect();
+    if !audit.is_empty() {
+        store.begin()?;
+        match store.insert(&Insert::all(table("read_audit")), &audit) {
+            Ok(_) => store.commit()?,
+            Err(e) => {
+                let _ = store.rollback();
+                return Err(e);
+            }
+        }
+    }
+    Ok(first.into_iter().map(|f| (f.subject_id, f.value)).collect())
+}
+
+/// The value a subject is shown by under a type: the first it was filed
+/// with that keeps one.
+struct FirstKept {
+    identity_id: i64,
+    subject_id: i64,
+    value: String,
+}
+
+/// For each of `subjects` that holds a kept value of the type, the first one
+/// filed, opened: the one pick [`values_of_type_filed_by`] answers and
+/// [`order_by_type`] sorts by, so a page and its order never differ in which
+/// value stands for a subject. Nothing is audited here; both callers say
+/// how their read is.
+fn first_kept(
+    store: &mut Store,
+    keys: &Subkeys,
+    subjects: &[i64],
+    id_type_id: i64,
+    source: Option<&str>,
+) -> Result<Vec<FirstKept>, Error> {
+    let mut out = Vec::new();
+    let mut seen = std::collections::HashSet::new();
     for chunk in subjects.chunks(crate::store::SQLITE_KEY_CHUNK) {
         let d = store.dialect();
         let marks: Vec<String> = (0..chunk.len())
@@ -622,33 +669,123 @@ pub fn values_of_type_filed_by(
             params.push(Param::from(source));
         }
         for r in store.query(&sql, &params)? {
-            let subject = r.int(1)?;
-            if out.contains_key(&subject) {
+            let subject_id = r.int(1)?;
+            if seen.contains(&subject_id) {
                 continue;
             }
             let Some(value) = keys.open_kept(r.bytes(2)?)? else {
                 continue;
             };
-            out.insert(subject, value);
-            audit.push(vec![
-                Param::from(now.as_str()),
-                Param::from(actor),
-                Param::from(r.int(0)?),
-                Param::from(why),
-            ]);
-        }
-    }
-    if !audit.is_empty() {
-        store.begin()?;
-        match store.insert(&Insert::all(table("read_audit")), &audit) {
-            Ok(_) => store.commit()?,
-            Err(e) => {
-                let _ = store.rollback();
-                return Err(e);
-            }
+            seen.insert(subject_id);
+            out.push(FirstKept {
+                identity_id: r.int(0)?,
+                subject_id,
+                value,
+            });
         }
     }
     Ok(out)
+}
+
+/// The order of subjects by their value of one id type.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct OrderByType {
+    /// Each subject that holds a kept value, with its place in the order,
+    /// from 0; two subjects whose values compare equal share a place, and
+    /// a subject that holds none is not here.
+    pub places: std::collections::HashMap<i64, usize>,
+    /// How many values were opened to tell the order.
+    pub opened: usize,
+}
+
+/// The order of `subjects` by the value each is shown by under one id type
+/// (the first filed that keeps one, as [`values_of_type_filed_by`] answers
+/// it), in natural order ([`natural_cmp`]), for a list that shows its
+/// subjects by the type and reads in order (2026-11-12).
+///
+/// The values are opened to compare them and none leaves this function:
+/// the answer is subject ids and places. It writes no `read_audit` row,
+/// which would be one per subject of a whole scope at every page of a
+/// list; the caller records the act instead, once, as one row of the
+/// registry's audit ([`crate::audit::Action::LinkageSort`]) with the type
+/// and `opened`. An order tells how the values compare, so it is for a
+/// caller who may read the values and for no other.
+pub fn order_by_type(
+    store: &mut Store,
+    keys: &Subkeys,
+    subjects: &[i64],
+    id_type_id: i64,
+    source: Option<&str>,
+) -> Result<OrderByType, Error> {
+    let mut first = first_kept(store, keys, subjects, id_type_id, source)?;
+    let opened = first.len();
+    first.sort_by(|a, b| natural_cmp(&a.value, &b.value));
+    let mut places = std::collections::HashMap::with_capacity(opened);
+    let mut place = 0;
+    for (i, f) in first.iter().enumerate() {
+        if i > 0 && natural_cmp(&first[i - 1].value, &f.value) != std::cmp::Ordering::Equal {
+            place += 1;
+        }
+        places.insert(f.subject_id, place);
+    }
+    Ok(OrderByType { places, opened })
+}
+
+/// Two labels in the order a person reads them: a run of digits compares as
+/// the number it writes, however long and whatever zeros lead it, and any
+/// other character without regard to case, so `S2` stands before `S10` and
+/// `7` before `12`. A number stands before a letter, and a label before a
+/// longer one it begins. Labels that differ only in case or in leading
+/// zeros compare equal; the caller breaks that tie.
+pub fn natural_cmp(a: &str, b: &str) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+    let (a, b): (Vec<char>, Vec<char>) = (a.chars().collect(), b.chars().collect());
+    let (mut i, mut j) = (0, 0);
+    while i < a.len() && j < b.len() {
+        if a[i].is_ascii_digit() && b[j].is_ascii_digit() {
+            let run = |s: &[char], from: usize| {
+                let end = from + s[from..].iter().take_while(|c| c.is_ascii_digit()).count();
+                let zeros = s[from..end].iter().take_while(|c| **c == '0').count();
+                (from + zeros, end)
+            };
+            let (a0, a1) = run(&a, i);
+            let (b0, b1) = run(&b, j);
+            let by = (a1 - a0)
+                .cmp(&(b1 - b0))
+                .then_with(|| a[a0..a1].cmp(&b[b0..b1]));
+            if by != Ordering::Equal {
+                return by;
+            }
+            (i, j) = (a1, b1);
+        } else {
+            let by = a[i].to_lowercase().cmp(b[j].to_lowercase());
+            if by != Ordering::Equal {
+                return by;
+            }
+            (i, j) = (i + 1, j + 1);
+        }
+    }
+    (a.len() - i).cmp(&(b.len() - j))
+}
+
+/// A stamp of the identities of one type, which moves when one is filed or
+/// removed, moved to another subject (a merge) or blanked (a value no
+/// longer kept): how many there are, the newest, and the sums of their
+/// subjects and of what each keeps. An order kept in memory
+/// ([`order_by_type`]) is dropped when it moves. A value rewritten in place
+/// at the same length under the same subject would not move it, which
+/// nothing in the engine does; whoever keeps an order keeps it for a short
+/// time for that reason.
+pub fn stamp_of_type(store: &mut Store, id_type_id: i64) -> Result<[i64; 4], Error> {
+    let sql = format!(
+        "SELECT COUNT(*), COALESCE(MAX(id), 0), CAST(COALESCE(SUM(subject_id), 0) AS BIGINT), \
+         CAST(COALESCE(SUM(LENGTH(ciphertext)), 0) AS BIGINT) FROM {} WHERE id_type_id = {}",
+        store.qualified("identity"),
+        store.dialect().param(1, crate::schema::Type::Int)
+    );
+    let rows = store.query(&sql, &[Param::from(id_type_id)])?;
+    let r = &rows[0];
+    Ok([r.int(0)?, r.int(1)?, r.int(2)?, r.int(3)?])
 }
 
 /// Every kept value of one id type that each of `subjects` holds, opened,
@@ -1601,5 +1738,126 @@ mod tests {
         let shown = reveal(&mut linkage, &keys, 2, "tester", None).unwrap();
         assert_eq!(shown.len(), 3);
         assert_eq!(shown[2].id_type, "personal-number");
+    }
+
+    /// 2026-11-12: labels in the order a person reads them: digits as the
+    /// number they write, letters whatever their case.
+    #[test]
+    fn labels_compare_in_natural_order() {
+        use std::cmp::Ordering::{Equal, Greater, Less};
+        for (a, b, want) in [
+            ("S2", "S10", Less),
+            ("7", "12", Less),
+            ("s2", "S10", Less),
+            ("S10", "s2", Greater),
+            ("a12", "A7", Greater),
+            ("7", "A7", Less),
+            ("S2", "S2b", Less),
+            ("S2-3", "S2-12", Less),
+            ("S02", "s2", Equal),
+            ("S2", "S2", Equal),
+            ("", "0", Less),
+            (
+                "x99999999999999999999999999",
+                "x100000000000000000000000000",
+                Less,
+            ),
+            ("ab", "aC", Less),
+        ] {
+            assert_eq!(natural_cmp(a, b), want, "{a} against {b}");
+            assert_eq!(natural_cmp(b, a), want.reverse(), "{b} against {a}");
+        }
+        let mut labels = vec!["S10", "s2", "12", "A7", "S3", "7", "a12", "S1"];
+        labels.sort_by(|a, b| natural_cmp(a, b));
+        assert_eq!(labels, ["7", "12", "A7", "a12", "S1", "s2", "S3", "S10"]);
+    }
+
+    /// 2026-11-12: the order by a type is told by the value each subject is
+    /// shown by, the first filed that keeps one; it answers places and no
+    /// value, writes no read audit row, and the stamp of the type moves
+    /// with every change that could move the order.
+    #[test]
+    fn subjects_are_ordered_by_a_type_with_nothing_read_out() {
+        let mut store = Store::sqlite_in_memory().unwrap();
+        migrate::migrate(&mut store, Kind::Linkage).unwrap();
+        let keys = Subkeys::derive(KEY);
+        let study = add_id_type(&mut store, "study-id", None).unwrap().id;
+        let other = add_id_type(&mut store, "site-label", None).unwrap().id;
+        let filed = |subject_id: i64, id_type_id: i64, name: &str, value: &str| NewIdentity {
+            subject_id,
+            id_type_id,
+            lookup: keys.lookup(name, value),
+            ciphertext: keys.seal_kept(name, value),
+            source: "csv",
+            first_batch_id: None,
+        };
+        let empty = stamp_of_type(&mut store, study).unwrap();
+        insert_identities(
+            &mut store,
+            &[
+                filed(1, study, "study-id", "S10"),
+                filed(2, study, "study-id", "s2"),
+                // two values: shown by the first filed
+                filed(3, study, "study-id", "S3"),
+                filed(3, study, "study-id", "S0"),
+                filed(4, study, "study-id", "S02"),
+                // a value shaped like a personnummer keeps nothing, so the
+                // subject is shown by the next
+                filed(5, study, "study-id", "198501012382"),
+                filed(5, study, "study-id", "7"),
+                // of another type alone
+                filed(6, other, "site-label", "A1"),
+            ],
+        )
+        .unwrap();
+        let stamp = stamp_of_type(&mut store, study).unwrap();
+        assert_ne!(stamp, empty);
+        let told = order_by_type(&mut store, &keys, &[1, 2, 3, 4, 5, 6, 7], study, None).unwrap();
+        assert_eq!(told.opened, 5);
+        // 7, then s2 and S02 together, S3, S10; nothing for 6 and 7
+        let want: std::collections::HashMap<i64, usize> = [(5, 0), (2, 1), (4, 1), (3, 2), (1, 3)]
+            .into_iter()
+            .collect();
+        assert_eq!(told.places, want);
+        // the page's read picks the same value, and audits it
+        let shown =
+            values_of_type_filed_by(&mut store, &keys, &[3, 5], study, None, "tester", "a test")
+                .unwrap();
+        assert_eq!(shown[&3], "S3");
+        assert_eq!(shown[&5], "7");
+        let audited = store.query("SELECT COUNT(*) FROM read_audit", &[]).unwrap()[0]
+            .int(0)
+            .unwrap();
+        assert_eq!(audited, 2, "the order wrote no read audit row");
+        // only the asked subjects, and only the source asked for
+        let some = order_by_type(&mut store, &keys, &[1, 2], study, None).unwrap();
+        assert_eq!(some.opened, 2);
+        assert_eq!(some.places.len(), 2);
+        let none = order_by_type(&mut store, &keys, &[1, 2], study, Some(FILED_BY_MERGE)).unwrap();
+        assert_eq!(none, OrderByType::default());
+        // the stamp stands while nothing changes, and moves with an
+        // identity filed, moved to another subject, blanked and removed
+        assert_eq!(stamp_of_type(&mut store, study).unwrap(), stamp);
+        insert_identities(&mut store, &[filed(6, study, "study-id", "S4")]).unwrap();
+        let after_filed = stamp_of_type(&mut store, study).unwrap();
+        assert_ne!(after_filed, stamp);
+        store
+            .execute(
+                "UPDATE identity SET subject_id = 2 WHERE subject_id = 1",
+                &[],
+            )
+            .unwrap();
+        let after_moved = stamp_of_type(&mut store, study).unwrap();
+        assert_ne!(after_moved, after_filed);
+        store
+            .execute(
+                "UPDATE identity SET ciphertext = x'' WHERE subject_id = 4",
+                &[],
+            )
+            .unwrap();
+        let after_blanked = stamp_of_type(&mut store, study).unwrap();
+        assert_ne!(after_blanked, after_moved);
+        purge(&mut store, Some(6)).unwrap();
+        assert_ne!(stamp_of_type(&mut store, study).unwrap(), after_blanked);
     }
 }

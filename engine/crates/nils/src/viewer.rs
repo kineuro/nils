@@ -30,14 +30,27 @@
 //! is worked out from dates (the days from the first visit, a label made of
 //! a date or of days, a span) come back as their shapes; ids, counts, visit
 //! numbers, roles, regions, makers and kinds never do. The order is the same
-//! at every detail. An identifier of a type the person chooses to show
-//! subjects by is opened only for the page's subjects, each read audited;
-//! it is shown as it is to a caller who may read identifiers (data:work at
-//! detail sensitive, record 26) and as its shape to any other, but for the
-//! alias a merge files (`subject-code`), which is a code and is shown as
-//! codes are.
+//! at every detail, but where it is told by an id type's values. An
+//! identifier of a type the person chooses to show subjects by is opened
+//! for the page's subjects, each read audited; it is shown as it is to a
+//! caller who may read identifiers (data:work at detail sensitive, record
+//! 26) and as its shape to any other, but for the alias a merge files
+//! (`subject-code`), which is a code and is shown as codes are.
+//!
+//! The order of what subjects are shown by (2026-11-12, `order=id`, and the
+//! tie-break of every other order but `code`): by the code, or by the
+//! shown type's values in natural order for a caller who is shown them as
+//! they are. A caller who is shown shapes is answered in code order, since
+//! an order by values they may not read would tell them how the values
+//! compare. Telling that order opens the value of every subject of the
+//! scope, not the page's alone; it is audited as one `linkage.sort` row a
+//! request, with the type and the counts and no value, and the order, as
+//! subject ids, is kept in memory for a short time so that a person paging
+//! through a scope does not open it whole at every page ([`Orders`]).
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::sync::{Arc, LazyLock, Mutex};
+use std::time::{Duration, Instant};
 
 use nils_registry::Registry;
 use nils_registry::cohort::Cohort;
@@ -62,6 +75,16 @@ pub(crate) const VISIT_STUDIES_MOST: usize = 100;
 
 /// Why a read of an identifier happened, in the audit.
 const WHY: &str = "the dataset viewer";
+
+/// Why the values of a whole scope were opened to tell an order, in the
+/// audit.
+const WHY_SORTED: &str = "the dataset viewer, sorting subjects by an ID type";
+
+/// How long an order by an id type is kept in memory.
+const ORDER_KEPT: Duration = Duration::from_secs(300);
+
+/// How many such orders are kept at once.
+const ORDERS_MOST: usize = 32;
 
 /// How many ids one `IN` list holds.
 const IN_CHUNKS: usize = 500;
@@ -733,12 +756,128 @@ fn labels_by_type(
         WHY,
     )
     .map_err(failed)?;
-    let clear = reads_identifiers(&caller.access)
-        || (shown.name == SUBJECT_CODE_TYPE && caller.access.detail >= Detail::Quasi);
+    let clear = reads_shown(&caller.access, shown);
     Ok(values
         .into_iter()
         .map(|(s, v)| (s, if clear { v } else { shape(&v) }))
         .collect())
+}
+
+/// Whether a caller is shown the values of this type as they are: one who
+/// may read identifiers, and at detail quasi the alias a merge files, which
+/// is a code. Any other caller is shown shapes, and no order by the values.
+fn reads_shown(access: &Access, shown: &Shown) -> bool {
+    reads_identifiers(access) || (shown.name == SUBJECT_CODE_TYPE && access.detail >= Detail::Quasi)
+}
+
+/// An order by an id type, as told over the subjects of one scope.
+struct KeptOrder {
+    /// The identities of the type as they stood ([`linkage::stamp_of_type`]).
+    stamp: [i64; 4],
+    told: Instant,
+    /// The subjects it was told over, with or without a value.
+    over: HashSet<i64>,
+    /// The place of each subject that holds a value; never a value.
+    places: HashMap<i64, usize>,
+}
+
+/// The orders kept in memory, by the registry, the scope (its kind and id)
+/// and the id type: subject ids and places only, so nothing here is an
+/// identifier. One is used again while the type's identities stand as they
+/// stood, it is no older than [`ORDER_KEPT`] and it was told over every
+/// subject asked about; a scope a caller sees less of (a sealed sample) is
+/// served by the order told over more. Only a caller who is shown the
+/// values reaches it ([`reads_shown`]), so an entry is never an order a
+/// caller could not have been told.
+type Orders = HashMap<(String, &'static str, i64, i64), Arc<KeptOrder>>;
+
+static ORDERS: LazyLock<Mutex<Orders>> = LazyLock::new(|| Mutex::new(Orders::new()));
+
+/// The place of each of the scope's subjects in the order of the values
+/// they are shown by, for a caller who is shown them as they are; none for
+/// any other caller, for a type whose values are not kept and for a scope
+/// with no subject, where the order is the code's.
+///
+/// Every request that is answered in this order writes one `linkage.sort`
+/// row: who, the scope, the type, how many subjects were put in order and
+/// how many values were opened for it, which is none where a kept order
+/// served. The page's own labels are audited one by one as before
+/// ([`labels_by_type`]).
+fn order_by_shown(
+    registry: &mut Registry,
+    caller: &Caller,
+    scope: &Scope,
+    shown: &Shown,
+    everyone: &[i64],
+) -> Result<Option<Arc<KeptOrder>>, Reply> {
+    if everyone.is_empty() || !linkage::keeps(&shown.name) || !reads_shown(&caller.access, shown) {
+        return Ok(None);
+    }
+    let mut store = registry.open_linkage().map_err(failed)?;
+    let stamp = linkage::stamp_of_type(&mut store, shown.id).map_err(failed)?;
+    let key = (
+        registry.meta().registry_id.clone(),
+        scope.kind(),
+        scope.id(),
+        shown.id,
+    );
+    let kept = ORDERS
+        .lock()
+        .ok()
+        .and_then(|orders| orders.get(&key).cloned())
+        .filter(|k| {
+            k.stamp == stamp
+                && k.told.elapsed() < ORDER_KEPT
+                && everyone.iter().all(|s| k.over.contains(s))
+        });
+    let (order, opened) = match kept {
+        Some(k) => (k, 0),
+        None => {
+            let key_bytes = registry.pseudonym_key().map_err(failed)?;
+            let told = linkage::order_by_type(
+                &mut store,
+                &Subkeys::derive(&key_bytes),
+                everyone,
+                shown.id,
+                (shown.name == SUBJECT_CODE_TYPE).then_some(linkage::FILED_BY_MERGE),
+            )
+            .map_err(failed)?;
+            let order = Arc::new(KeptOrder {
+                stamp,
+                told: Instant::now(),
+                over: everyone.iter().copied().collect(),
+                places: told.places,
+            });
+            if let Ok(mut orders) = ORDERS.lock() {
+                orders.retain(|_, k| k.told.elapsed() < ORDER_KEPT);
+                if orders.len() >= ORDERS_MOST {
+                    orders.clear();
+                }
+                orders.insert(key, order.clone());
+            }
+            (order, told.opened)
+        }
+    };
+    drop(store);
+    let mut about = scope.as_json();
+    about["id_type"] = json!(shown.name);
+    nils_registry::audit::record(
+        registry,
+        &nils_registry::audit::Entry {
+            principal: &caller.principal,
+            action: nils_registry::audit::Action::LinkageSort,
+            scope: about,
+            policy: None,
+            job_id: None,
+            details: Some(json!({
+                "why": WHY_SORTED,
+                "subjects": everyone.len(),
+                "opened": opened,
+            })),
+        },
+    )
+    .map_err(failed)?;
+    Ok(Some(order))
 }
 
 /// The subjects holding an identifier, of any type, equal to `text`: found
@@ -860,11 +999,11 @@ pub(crate) fn subjects(
         .filter(|o| !o.is_empty())
     {
         None => "look",
-        Some(o @ ("look" | "code" | "visits" | "scans")) => o,
+        Some(o @ ("look" | "code" | "id" | "visits" | "scans")) => o,
         Some(o) => {
             return Err(Reply::error(
                 400,
-                format!("order: {o} is not look, code, visits or scans"),
+                format!("order: {o} is not look, code, id, visits or scans"),
             ));
         }
     };
@@ -1073,6 +1212,21 @@ pub(crate) fn subjects(
         .filter(|(_, f)| filters.any_of("region", &f.regions))
         .filter(|(_, f)| filters.any_of("maker", &f.makers))
         .collect();
+    // the order of what the subjects are shown by: `id` is that order, and
+    // every other order but `code`, which is the code's as it always was,
+    // breaks its ties by it. A subject with no value of the shown type
+    // stands after those with one. Told over the whole scope, whatever `q`
+    // and `filter` keep, so one kept order serves every narrowing of it.
+    let shown_order = match &shown {
+        Some(s) if order != "code" => order_by_shown(registry, caller, scope, s, &everyone)?,
+        _ => None,
+    };
+    let place = |id: &i64| {
+        shown_order
+            .as_ref()
+            .and_then(|o| o.places.get(id).copied())
+            .unwrap_or(usize::MAX)
+    };
     kept.sort_by(|(ia, a), (ib, b)| {
         let by = match order {
             "look" => b.look.cmp(&a.look),
@@ -1080,7 +1234,8 @@ pub(crate) fn subjects(
             "scans" => b.scans.cmp(&a.scans),
             _ => std::cmp::Ordering::Equal,
         };
-        by.then_with(|| a.code.cmp(&b.code))
+        by.then_with(|| place(ia).cmp(&place(ib)))
+            .then_with(|| a.code.cmp(&b.code))
             .then_with(|| ia.cmp(ib))
     });
     let matched = kept.len();
@@ -1965,6 +2120,575 @@ mod tests {
                 Filters::parse(Some(&bad.to_string()), &["look"], &["region", "maker"]).is_err(),
                 "{bad}"
             );
+        }
+    }
+
+    /// A registry in `dir`, on SQLite or, with a DSN, in a schema of its own.
+    fn registry(dir: &std::path::Path, postgres: Option<(&str, &str)>) -> Registry {
+        use nils_registry::{Backend, Home, InitOptions, Scheme};
+        let home = Home::new(dir);
+        home.keys(None).add("nils", b"a test passphrase").unwrap();
+        home.init(&InitOptions {
+            backend: if postgres.is_some() {
+                Backend::Postgres
+            } else {
+                Backend::Sqlite
+            },
+            dsn: postgres.map(|(dsn, _)| dsn.to_string()),
+            schema: postgres.map(|(_, schema)| schema.to_string()),
+            scheme: Scheme::DEFAULT,
+            key: "nils".into(),
+            display_length: 12,
+            session_scheme: None,
+        })
+        .unwrap()
+    }
+
+    /// A caller with these grants, a detail among them.
+    fn caller(list: &str) -> Caller {
+        let mut access = Access::default();
+        for word in list.split(',') {
+            match Detail::parse(word) {
+                Some(d) => access.detail = d,
+                None => access.add(&Access::of_list(word).unwrap()),
+            }
+        }
+        Caller {
+            principal: "reader@lab".to_string(),
+            access,
+            display: None,
+            name: None,
+            email: None,
+            actor: nils_registry::actor::absent(),
+            ceiling: None,
+            idempotency_key: None,
+        }
+    }
+
+    /// A registry of a test's own with one cohort, `viewed`, and nothing
+    /// in it yet; the directory and, on Postgres, the schema are named
+    /// after the test and dropped by [`Bed::done`].
+    struct Bed {
+        registry: Registry,
+        dir: std::path::PathBuf,
+        postgres: Option<(String, String)>,
+        cohort: i64,
+    }
+
+    impl Bed {
+        fn new(name: &str, postgres: Option<&str>) -> Bed {
+            let dir = std::env::temp_dir().join(format!(
+                "nils-viewer-{name}-{}-{}",
+                postgres.is_some(),
+                std::process::id()
+            ));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            let schema = format!("nils_viewer_{name}");
+            let mut bed = Bed {
+                registry: registry(
+                    &dir.join("reg"),
+                    postgres.map(|d| {
+                        Bed::drop_schemas(d, &schema);
+                        (d, schema.as_str())
+                    }),
+                ),
+                dir,
+                postgres: postgres.map(|d| (d.to_string(), schema.clone())),
+                cohort: 0,
+            };
+            bed.cohort = nils_registry::cohort::create(
+                &mut bed.registry,
+                "viewed",
+                "owner@lab",
+                None,
+                "test",
+            )
+            .unwrap()
+            .id;
+            bed
+        }
+
+        fn drop_schemas(dsn: &str, schema: &str) {
+            Store::connect_postgres(dsn, schema)
+                .unwrap()
+                .batch(&format!(
+                    "DROP SCHEMA IF EXISTS {schema} CASCADE; DROP SCHEMA IF EXISTS {schema}_linkage CASCADE"
+                ))
+                .unwrap();
+        }
+
+        fn keys(&self) -> Subkeys {
+            Subkeys::derive(&self.registry.pseudonym_key().unwrap())
+        }
+
+        /// File these `(identifier, code)` pairs under an id type, which is
+        /// added where the store has none of the name; a code that names no
+        /// subject yet makes one, and every subject named joins the cohort.
+        fn file(&mut self, id_type: &str, rows: &[(String, String)]) {
+            let keys = self.keys();
+            let mut store = self.registry.open_linkage().unwrap();
+            if linkage::id_type_id(&mut store, id_type).unwrap().is_none() {
+                linkage::add_id_type(&mut store, id_type, None).unwrap();
+            }
+            let rows: Vec<linkage::ImportRow> = rows
+                .iter()
+                .enumerate()
+                .map(|(i, (identifier, code))| linkage::ImportRow {
+                    line: i + 1,
+                    identifier: identifier.clone(),
+                    code: code.clone(),
+                })
+                .collect();
+            if let Err(e) =
+                linkage::import(self.registry.store(), &mut store, &keys, id_type, &rows)
+            {
+                panic!("{e}");
+            }
+            let codes: Vec<String> = rows.iter().map(|r| r.code.clone()).collect();
+            let subjects: Vec<i64> = linkage::subjects_by_code(self.registry.store(), &codes)
+                .unwrap()
+                .iter()
+                .map(|s| s.id)
+                .collect();
+            nils_registry::cohort::join(
+                self.registry.store(),
+                self.cohort,
+                &subjects,
+                "test",
+                &nils_registry::cohort::Opened {
+                    source: "manual",
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        }
+
+        /// The cohort's subjects door as this caller asks it.
+        fn asked(&mut self, who: &Caller, query: &[(&str, &str)]) -> Result<Value, Reply> {
+            let scope = Scope::cohort(&mut self.registry, "viewed")?;
+            let query: HashMap<String, String> = query
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect();
+            subjects(&mut self.registry, who, &scope, &query)
+        }
+
+        /// The door's answer, where it must answer.
+        fn ask(&mut self, who: &Caller, query: &[(&str, &str)]) -> Value {
+            match self.asked(who, query) {
+                Ok(answer) => answer,
+                Err(refused) => panic!("{query:?}: {} {}", refused.status, refused.body),
+            }
+        }
+
+        /// The codes of an answer's subjects, in its order.
+        fn codes(&mut self, answer: &Value) -> Vec<String> {
+            let ids: Vec<i64> = answer["subjects"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|s| s["id"].as_i64().unwrap())
+                .collect();
+            let by_id: HashMap<i64, String> = linkage::subjects_by_id(self.registry.store(), &ids)
+                .unwrap()
+                .into_iter()
+                .map(|s| (s.id, s.code))
+                .collect();
+            ids.iter().map(|id| by_id[id].clone()).collect()
+        }
+
+        /// The `linkage.sort` rows of the audit, their details, oldest first.
+        fn sorts(&mut self) -> Vec<Value> {
+            let store = self.registry.store();
+            let audit = store.qualified("audit");
+            store
+                .query(
+                    &format!(
+                        "SELECT principal, scope, details FROM {audit} \
+                         WHERE action = 'linkage.sort' ORDER BY id"
+                    ),
+                    &[],
+                )
+                .unwrap()
+                .iter()
+                .map(|r| {
+                    json!({
+                        "principal": r.text(0).unwrap(),
+                        "scope": serde_json::from_str::<Value>(r.text(1).unwrap()).unwrap(),
+                        "details": serde_json::from_str::<Value>(r.text(2).unwrap()).unwrap(),
+                    })
+                })
+                .collect()
+        }
+
+        /// How many values the linkage store's read audit says were opened.
+        fn reads(&mut self) -> i64 {
+            let mut store = self.registry.open_linkage().unwrap();
+            let read_audit = store.qualified("read_audit");
+            store
+                .query(&format!("SELECT COUNT(*) FROM {read_audit}"), &[])
+                .unwrap()[0]
+                .int(0)
+                .unwrap()
+        }
+
+        fn done(self) {
+            let Bed {
+                registry,
+                dir,
+                postgres,
+                ..
+            } = self;
+            drop(registry);
+            if let Some((dsn, schema)) = postgres {
+                Bed::drop_schemas(&dsn, &schema);
+            }
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
+
+    fn pairs(rows: &[(&str, &str)]) -> Vec<(String, String)> {
+        rows.iter()
+            .map(|(i, c)| (i.to_string(), c.to_string()))
+            .collect()
+    }
+
+    fn strings(words: &[&str]) -> Vec<String> {
+        words.iter().map(|w| w.to_string()).collect()
+    }
+
+    /// The test's Postgres, where the environment names one.
+    fn postgres_dsn(test: &str) -> Option<String> {
+        let dsn = std::env::var("NILS_TEST_POSTGRES_DSN").ok();
+        if dsn.is_none() {
+            eprintln!("NILS_TEST_POSTGRES_DSN is not set: {test} skipped");
+        }
+        dsn
+    }
+
+    /// 2026-11-12, `order=id`: subjects in the order of what they are shown
+    /// by. Ten subjects of a cohort, eight with a value of a made-up type
+    /// (one with two, two whose values differ in case and a leading zero
+    /// alone) and two with none.
+    fn subjects_are_ordered_by_what_they_are_shown_by(postgres: Option<&str>) {
+        let mut bed = Bed::new("order", postgres);
+        bed.file(
+            "study-id",
+            &pairs(&[
+                ("S10", "c-01"),
+                ("s2", "c-02"),
+                ("S3", "c-03"),
+                ("12", "c-04"),
+                ("7", "c-05"),
+                ("a12", "c-06"),
+                ("A7", "c-07"),
+                ("S02", "c-10"),
+            ]),
+        );
+        // a second value of the third, filed later: the page shows the first
+        bed.file("study-id", &pairs(&[("A1", "c-03")]));
+        // two that hold no value of the type
+        bed.file("site-label", &pairs(&[("zz", "c-08"), ("aa", "c-09")]));
+        let by_code = strings(&[
+            "c-01", "c-02", "c-03", "c-04", "c-05", "c-06", "c-07", "c-08", "c-09", "c-10",
+        ]);
+        // 7, 12, A7, a12, s2 and S02 (equal, so by code), S3, S10, then
+        // those with none by code
+        let by_id = strings(&[
+            "c-05", "c-04", "c-07", "c-06", "c-02", "c-10", "c-03", "c-01", "c-08", "c-09",
+        ]);
+        let reads = caller("data:work,sensitive");
+        let shapes = caller("data:work,quasi");
+
+        // shown by the code, the id order is the code's, as `code` is
+        for query in [
+            vec![("order", "id")],
+            vec![("order", "id"), ("show", "code")],
+            vec![("order", "code")],
+            vec![("order", "code"), ("show", "study-id")],
+        ] {
+            let d = bed.ask(&reads, &query);
+            assert_eq!(bed.codes(&d), by_code, "{query:?}: {d}");
+            assert_eq!(d["order"], query[0].1, "{d}");
+        }
+        assert_eq!(
+            bed.sorts(),
+            Vec::<Value>::new(),
+            "nothing was sorted by a value yet"
+        );
+
+        // shown by the type, to a caller who may read its values: their
+        // natural order
+        let before = bed.reads();
+        let d = bed.ask(&reads, &[("order", "id"), ("show", "study-id")]);
+        assert_eq!(bed.codes(&d), by_id, "{d}");
+        assert_eq!(d["order"], "id", "{d}");
+        assert_eq!(d["show"], "study-id", "{d}");
+        assert_eq!(d["subjects"][0]["label"], "7", "{d}");
+        assert_eq!(d["subjects"][6]["label"], "S3", "{d}");
+        assert_eq!(d["subjects"][8]["label"], Value::Null, "{d}");
+        assert_eq!(d["next"], Value::Null, "{d}");
+        // the audit of that one request: a row for each label of the page,
+        // as before, and one row for the sort with no value in it
+        assert_eq!(bed.reads() - before, 8);
+        let sorts = bed.sorts();
+        assert_eq!(sorts.len(), 1, "{sorts:?}");
+        assert_eq!(
+            sorts[0],
+            json!({
+                "principal": "reader@lab",
+                "scope": {"kind": "cohort", "name": "viewed", "id": bed.cohort, "id_type": "study-id"},
+                "details": {"why": WHY_SORTED, "subjects": 10, "opened": 8},
+            })
+        );
+
+        // every other order keeps its meaning and breaks its ties in the
+        // same order: no subject here has a scan, so every one is a tie.
+        // The order is kept, so nothing more is opened for it.
+        for order in [None, Some("look"), Some("visits"), Some("scans")] {
+            let before = bed.reads();
+            let mut query = vec![("show", "study-id"), ("limit", "3")];
+            if let Some(o) = order {
+                query.push(("order", o));
+            }
+            let d = bed.ask(&reads, &query);
+            assert_eq!(bed.codes(&d), by_id[..3], "{order:?}: {d}");
+            assert_eq!(d["order"], order.unwrap_or("look"), "{d}");
+            assert_eq!(bed.reads() - before, 3, "the page's labels alone");
+        }
+        let sorts = bed.sorts();
+        assert_eq!(sorts.len(), 5, "one row a request: {sorts:?}");
+        assert!(
+            sorts[1..].iter().all(|s| s["details"]["opened"] == 0),
+            "{sorts:?}"
+        );
+
+        // a caller who is shown shapes is answered in code order, and
+        // nothing is opened or kept for it
+        let before = bed.reads();
+        for query in [
+            vec![("order", "id"), ("show", "study-id")],
+            vec![("show", "study-id")],
+        ] {
+            let d = bed.ask(&shapes, &query);
+            assert_eq!(bed.codes(&d), by_code, "{query:?}: {d}");
+            assert_eq!(d["subjects"][0]["label"], "A99", "{d}");
+            assert_eq!(d["subjects"][4]["label"], "9", "{d}");
+            assert!(!d.to_string().contains("S10"), "{d}");
+        }
+        assert_eq!(bed.reads() - before, 16, "the two pages' labels alone");
+        assert_eq!(bed.sorts().len(), 5);
+
+        // a page at a time: every subject once, in the order, and what
+        // carries the place is a subject's id, never a value
+        let values = ["S10", "s2", "S3", "12", "a12", "A7", "S02", "A1"];
+        let mut seen = Vec::new();
+        let mut after: Option<String> = None;
+        loop {
+            let mut query = vec![("order", "id"), ("show", "study-id"), ("limit", "3")];
+            if let Some(a) = &after {
+                query.push(("after", a));
+            }
+            let d = bed.ask(&reads, &query);
+            seen.extend(bed.codes(&d));
+            let Some(next) = d["next"].as_i64() else {
+                assert_eq!(d["next"], Value::Null, "{d}");
+                break;
+            };
+            assert_eq!(d["subjects"][2]["id"], next, "{d}");
+            let next = next.to_string();
+            assert!(!values.contains(&next.as_str()), "{next}");
+            after = Some(next);
+        }
+        assert_eq!(seen, by_id);
+        assert_eq!(bed.sorts().len(), 9, "four pages, four rows");
+
+        // an identity filed moves the order, which is told again
+        bed.file("study-id", &pairs(&[("S1", "c-09")]));
+        let d = bed.ask(&reads, &[("order", "id"), ("show", "study-id")]);
+        let moved = strings(&[
+            "c-05", "c-04", "c-07", "c-06", "c-09", "c-02", "c-10", "c-03", "c-01", "c-08",
+        ]);
+        assert_eq!(bed.codes(&d), moved, "{d}");
+        let sorts = bed.sorts();
+        assert_eq!(sorts[9]["details"]["opened"], 9, "{sorts:?}");
+        // and a search or a filter narrows the same order
+        let d = bed.ask(
+            &reads,
+            &[("order", "id"), ("show", "study-id"), ("q", "c-0")],
+        );
+        assert_eq!(bed.codes(&d), [&moved[..6], &moved[7..]].concat(), "{d}");
+
+        // an order the door does not know is refused, with the list
+        for who in [&reads, &shapes] {
+            let Err(refused) = bed.asked(who, &[("order", "nonsense"), ("show", "study-id")])
+            else {
+                panic!("an unknown order is refused");
+            };
+            assert_eq!(refused.status, 400);
+            assert_eq!(
+                refused.body["error"],
+                "order: nonsense is not look, code, id, visits or scans"
+            );
+        }
+        assert_eq!(bed.sorts().len(), 11);
+        bed.done();
+    }
+
+    #[test]
+    fn subjects_are_ordered_by_what_they_are_shown_by_on_sqlite() {
+        subjects_are_ordered_by_what_they_are_shown_by(None);
+    }
+
+    #[test]
+    fn subjects_are_ordered_by_what_they_are_shown_by_on_postgres() {
+        if let Some(dsn) = postgres_dsn("the order by what subjects are shown by") {
+            subjects_are_ordered_by_what_they_are_shown_by(Some(&dsn));
+        }
+    }
+
+    /// The alias a merge files is a code: its order is told to a caller at
+    /// detail quasi, who is shown it as it is, and not below.
+    fn the_alias_orders_for_a_caller_who_reads_codes(postgres: Option<&str>) {
+        let mut bed = Bed::new("alias", postgres);
+        bed.file(
+            "study-id",
+            &pairs(&[
+                ("x1", "c-01"),
+                ("x2", "c-02"),
+                ("x3", "c-03"),
+                ("x4", "c-04"),
+            ]),
+        );
+        let ids: HashMap<String, i64> = linkage::subjects_by_code(
+            bed.registry.store(),
+            &strings(&["c-01", "c-02", "c-03", "c-04"]),
+        )
+        .unwrap()
+        .into_iter()
+        .map(|s| (s.code, s.id))
+        .collect();
+        let keys = bed.keys();
+        let mut store = bed.registry.open_linkage().unwrap();
+        let alias = match linkage::id_type_id(&mut store, SUBJECT_CODE_TYPE).unwrap() {
+            Some(id) => id,
+            None => {
+                linkage::add_id_type(&mut store, SUBJECT_CODE_TYPE, None)
+                    .unwrap()
+                    .id
+            }
+        };
+        let filed = |code: &str, value: &str, source: &'static str| linkage::NewIdentity {
+            subject_id: ids[code],
+            id_type_id: alias,
+            lookup: keys.lookup(SUBJECT_CODE_TYPE, value),
+            ciphertext: keys.seal_kept(SUBJECT_CODE_TYPE, value),
+            source,
+            first_batch_id: None,
+        };
+        linkage::insert_identities(
+            &mut store,
+            &[
+                filed("c-04", "old-9", linkage::FILED_BY_MERGE),
+                filed("c-03", "old-10", linkage::FILED_BY_MERGE),
+                // a code filed any other way is no alias
+                filed("c-02", "old-1", "csv"),
+            ],
+        )
+        .unwrap();
+        drop(store);
+        let query = [("order", "id"), ("show", SUBJECT_CODE_TYPE)];
+        let d = bed.ask(&caller("data:see,quasi"), &query);
+        assert_eq!(
+            bed.codes(&d),
+            strings(&["c-04", "c-03", "c-01", "c-02"]),
+            "{d}"
+        );
+        assert_eq!(d["subjects"][0]["label"], "old-9", "{d}");
+        let sorts = bed.sorts();
+        assert_eq!(sorts.len(), 1, "{sorts:?}");
+        assert_eq!(sorts[0]["details"]["opened"], 2, "{sorts:?}");
+        let d = bed.ask(&caller("data:see,plain"), &query);
+        assert_eq!(
+            bed.codes(&d),
+            strings(&["c-01", "c-02", "c-03", "c-04"]),
+            "{d}"
+        );
+        assert!(!d.to_string().contains("old-"), "{d}");
+        assert_eq!(bed.sorts().len(), 1);
+        bed.done();
+    }
+
+    #[test]
+    fn the_alias_orders_for_a_caller_who_reads_codes_on_sqlite() {
+        the_alias_orders_for_a_caller_who_reads_codes(None);
+    }
+
+    #[test]
+    fn the_alias_orders_for_a_caller_who_reads_codes_on_postgres() {
+        if let Some(dsn) = postgres_dsn("the order by the alias") {
+            the_alias_orders_for_a_caller_who_reads_codes(Some(&dsn));
+        }
+    }
+
+    /// What an order over a few thousand subjects costs (2026-11-12): the
+    /// first request opens a value a subject once and writes one audit row
+    /// for the sort; every page after it opens the page's labels alone.
+    /// The times are printed, not asserted.
+    fn an_order_over_thousands_is_told_once(postgres: Option<&str>) {
+        const SUBJECTS: usize = 4000;
+        let mut bed = Bed::new("thousands", postgres);
+        // values that run against the codes, so the order is not the code's
+        let rows: Vec<(String, String)> = (0..SUBJECTS)
+            .map(|i| (format!("P{}", SUBJECTS - i), format!("c-{i:05}")))
+            .collect();
+        bed.file("study-id", &rows);
+        let reads = caller("data:work,sensitive");
+        let query = [("order", "id"), ("show", "study-id")];
+        let asked = |bed: &mut Bed, query: &[(&str, &str)]| {
+            let (reads_before, at) = (bed.reads(), Instant::now());
+            let d = bed.ask(&reads, query);
+            (d, at.elapsed(), bed.reads() - reads_before)
+        };
+        let (plain, by_code, _) = asked(&mut bed, &[("order", "code"), ("show", "study-id")]);
+        assert_eq!(plain["subjects"][0]["code"], "c-00000", "{plain}");
+        let (first, cold, read_cold) = asked(&mut bed, &query);
+        assert_eq!(first["subjects"][0]["label"], "P1", "{first}");
+        assert_eq!(first["subjects"][59]["label"], "P60", "{first}");
+        assert_eq!(first["count"], SUBJECTS_PAGE, "{first}");
+        let after = first["next"].as_i64().unwrap().to_string();
+        let (second, warm, read_warm) = asked(&mut bed, &[query[0], query[1], ("after", &after)]);
+        assert_eq!(second["subjects"][0]["label"], "P61", "{second}");
+        // the page's labels, one read audit row each, whatever the sort did
+        assert_eq!((read_cold, read_warm), (60, 60));
+        let sorts = bed.sorts();
+        assert_eq!(sorts.len(), 2, "{sorts:?}");
+        assert_eq!(sorts[0]["details"]["opened"], SUBJECTS, "{sorts:?}");
+        assert_eq!(sorts[0]["details"]["subjects"], SUBJECTS, "{sorts:?}");
+        assert_eq!(sorts[1]["details"]["opened"], 0, "{sorts:?}");
+        eprintln!(
+            "{SUBJECTS} subjects on {}: a page by code {by_code:?}, the first page by id \
+             {cold:?} ({SUBJECTS} values opened, 1 sort row, {read_cold} read rows), the \
+             next page {warm:?} (0 opened, 1 sort row, {read_warm} read rows)",
+            if postgres.is_some() {
+                "postgres"
+            } else {
+                "sqlite"
+            },
+        );
+        bed.done();
+    }
+
+    #[test]
+    fn an_order_over_thousands_is_told_once_on_sqlite() {
+        an_order_over_thousands_is_told_once(None);
+    }
+
+    #[test]
+    fn an_order_over_thousands_is_told_once_on_postgres() {
+        if let Some(dsn) = postgres_dsn("the order over thousands") {
+            an_order_over_thousands_is_told_once(Some(&dsn));
         }
     }
 }
