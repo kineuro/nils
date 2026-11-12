@@ -4,6 +4,10 @@ All notable changes to NILS v1 are recorded here. The format follows [Keep a Cha
 
 ## [Unreleased]
 
+## [1.0.0-beta.15] - 2026-11-12
+
+The fifteenth engine beta makes the pages of Data answer at once: the datasets, the cohorts, a dataset's summary and its subjects are answered from what the engine kept and read again apart from the request. Subjects can be listed in the order of what they are shown by.
+
 ### Added
 
 - The subjects doors take `order=id`: subjects come in the order of what they are shown by, the subject code's or, to a caller answered ID values as they are, the values of the ID type `show` names, numbers within a value read as numbers (`S2` before `S10`) and a subject with no such ID last, by its code. A caller who is answered only the shape of an ID gets the subject code's order. An order by an ID type leaves one audit row with the type and the number of subjects, no value. `GET /api/datasets/{name}/subjects`, `GET /api/cohorts/{name}/subjects` and `GET /api/subjects`.
