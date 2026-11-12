@@ -3057,7 +3057,8 @@ fn routed(
                 .and_then(|l| l.parse::<usize>().ok())
                 .unwrap_or(12)
                 .clamp(1, 100);
-            if query.get("probe").is_some_and(|p| p == "1" || p == "true") {
+            let probe = query.get("probe").is_some_and(|p| p == "1" || p == "true");
+            if probe {
                 use nils_registry::place;
                 for p in place::active(registry.store())? {
                     if p.role == place::Role::Source {
@@ -3065,12 +3066,17 @@ fn routed(
                         place::set(registry.store(), p.id, None, None, Some(&probed))?;
                     }
                 }
-                crate::sources::forget();
             }
-            // kept while what it was read from is the same (the Data page's
-            // speed, 2026-10-15)
+            // 2026-11-12: answered at once, the places' rows as they are
+            // and each dataset's counts as kept, counted again apart where
+            // they moved; `?at_once=1` does not wait for a first count
+            // either, as the summary's door; a probe asked for is answered
+            // with what it found, counted now
+            let at_once = query
+                .get("at_once")
+                .is_some_and(|a| a == "1" || a == "true");
             Ok(Reply::ok(
-                crate::sources::document_kept(registry, recent)
+                crate::sources::answer(registry, recent, at_once, probe)
                     .map_err(|e| Reply::error(500, e.to_string()))?,
             ))
         }
