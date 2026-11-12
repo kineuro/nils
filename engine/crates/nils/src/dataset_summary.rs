@@ -1844,9 +1844,18 @@ pub(crate) fn moved(store: &mut Store) -> Result<(String, bool), StoreError> {
     } else {
         format!("{question}|{open_questions}|{judged}")
     };
+    // said only where any wait, so that a stamp written before 2026-11-12
+    // (by an engine that did not count them) is still the stamp of a
+    // registry where none waits, and its kept counts are taken over as
+    // they are instead of every dataset being counted again after the update
+    let waiting = if staged > 0 {
+        format!("|staged {staged}")
+    } else {
+        String::new()
+    };
     let key = format!(
         "{batches}|{last_batch}|{running}|{finished}|{moving}|{merged}|{sealed}|{labels}|{sets}|\
-         {sessions}:{visits}|{staged}"
+         {sessions}:{visits}{waiting}"
     );
     Ok((key, busy))
 }
