@@ -453,7 +453,7 @@ struct SynthArgs {
 #[derive(Debug, Args)]
 struct ReleaseArgs {
     /// Where the tree is written
-    #[arg(long, value_name = "DIR", required_unless_present_any = ["history", "withdraw"])]
+    #[arg(long, value_name = "DIR", required_unless_present_any = ["history", "withdraw", "name_plan"])]
     out: Option<PathBuf>,
     /// What every version of this dataset did, and write nothing (§8.6)
     #[arg(long)]
@@ -606,6 +606,31 @@ struct ReleaseArgs {
     /// and the cores. 1 writes one stack after another, in the plan's order
     #[arg(long, value_name = "N", value_parser = clap::value_parser!(u16).range(1..=64))]
     workers: Option<u16>,
+    /// Name each subject by its value of an ID type instead of its subject
+    /// code: the first type in the list the subject holds a kept value of,
+    /// cleaned to letters and digits, and the subject code only where it
+    /// holds none. Repeatable or comma-separated, in the order the types
+    /// are tried. Where an ID names a subject its code is nowhere in the
+    /// tree; the registry keeps which name is which subject
+    #[arg(long = "name-by", value_name = "ID-TYPE", value_delimiter = ',')]
+    name_by: Vec<String>,
+    /// With --name-by: which value names a subject that holds several of
+    /// the type that names it, as CODE=VALUE with the subject code.
+    /// Repeatable. The choice is kept with the release, so its next
+    /// version does not need it again
+    #[arg(long = "name-choice", value_name = "CODE=VALUE", requires = "name_by")]
+    name_choice: Vec<String>,
+    /// With --name-by: a file of such choices, one a line, the subject code
+    /// and the value separated by a tab, a comma or `=`; `#` starts a
+    /// comment
+    #[arg(long = "name-choices", value_name = "FILE", requires = "name_by")]
+    name_choices: Option<PathBuf>,
+    /// With --name-by: say how the subjects would be named and stop: how
+    /// many each type names, how many keep their code, which subjects need
+    /// a choice (with their values) and which names two subjects would
+    /// share. Nothing is written
+    #[arg(long = "name-plan", requires = "name_by")]
+    name_plan: bool,
     /// Machine-readable output
     #[arg(long)]
     json: bool,
@@ -8637,6 +8662,7 @@ fn custody_doc(home: &Home, registry: &mut Registry) -> Result<serde_json::Value
                 "quasi-identifying: birth dates, sex, study dates and times, station and institution names, study descriptions and comments, source paths",
                 "technical: everything else the catalogue declares, the series description and the protocol name among them",
                 "secret, sealed: a handover's password a person typed, under the registry's key and never in clear; a password NILS made for a handover is not kept, since it is derived again (record 55, ruling 35 (c))",
+                "an ID in clear, only where a release names its subjects by an ID type: the name each subject was written under, the ID's value cleaned to letters and digits, kept with the release beside the type it came from so that what comes back under the name is linked to its subject; the same name stands in the released tree and in a handover's rows",
             ],
             "counts": { "subjects": subjects, "studies": studies, "series": series, "instances": instances, "source_files": source_files },
             "kept": "until deleted; nothing expires on its own, and a run marks files that vanished as gone instead of deleting their rows; a stack or series that holds no instance, because every file of it was a duplicate, is removed",
@@ -12382,6 +12408,275 @@ fn handover_list(home: &Home, args: HandoverListArgs) -> Result<(), Exit> {
 // The release (Wave 3 §8)
 // --------------------------------------------------------------------------
 
+/// The pack a release classifies under, by its name in the pack directory.
+fn release_pack(dir: &Path, name: &str) -> Result<nils_pack::pack::Pack, Exit> {
+    let found = packs_in(dir)?
+        .into_iter()
+        .find(|p| p.file_name().is_some_and(|f| f == name))
+        .ok_or_else(|| fail(format!("no pack named {name} in {}", dir.display())))?;
+    nils_pack::load(&found, None).map_err(|e| fail(e.to_string()))
+}
+
+/// What a release under these arguments selects, resolved: the same for the
+/// release and for the rehearsal of its names, so the rehearsal answers for
+/// the subjects the release would write.
+fn release_selection(
+    registry: &mut Registry,
+    pack: &nils_pack::pack::Pack,
+    args: &ReleaseArgs,
+    items: &[nils_release::select::Item],
+) -> Result<nils_release::run::Selection, Exit> {
+    // record 26 section 13: a dataset named is a source place in force
+    for name in &args.dataset {
+        let found = nils_registry::place::by_name(registry.store(), name)
+            .map_err(|e| fail(e.to_string()))?
+            .filter(|p| p.role == nils_registry::place::Role::Source && p.retired_at.is_none());
+        if found.is_none() {
+            return Err(usage(format!(
+                "--dataset {name}: no source place in force is named so; `nils place list` shows them"
+            )));
+        }
+    }
+    // Wave 4a section 8: every item resolved up front, and a refusal that
+    // names what did not, rather than a smaller release.
+    let chosen = resolve_or_refuse(registry, items, Some(pack))?.selection;
+    // record 55: the picks a run's frozen list of main scans was resolved
+    // from, the list taken as it was frozen
+    let picks = match &args.picks_read {
+        Some(file) => Some(
+            std::fs::read_to_string(file)
+                .map_err(|e| usage(format!("--picks-read {}: {e}", file.display())))
+                .and_then(|text| {
+                    serde_json::from_str::<serde_json::Value>(&text).map_err(|e| {
+                        usage(format!("--picks-read {}: not JSON: {e}", file.display()))
+                    })
+                })?,
+        ),
+        None => None,
+    };
+    Ok(nils_release::run::Selection {
+        subjects: chosen.subjects,
+        sessions: chosen.sessions,
+        stacks: chosen.stacks,
+        dispositions: args.disposition.clone(),
+        roles: args.role.clone(),
+        picked_only: args.picked,
+        modality: args.modality.clone(),
+        axes: chosen.axes,
+        cohorts: chosen.cohorts,
+        datasets: args.dataset.clone(),
+        picks,
+    })
+}
+
+/// The ID types a release was asked to name its subjects by, in order, and
+/// the choices given with them, from the flags and the file.
+fn names_asked(
+    args: &ReleaseArgs,
+) -> Result<(Vec<String>, Vec<nils_release::name_by::Choice>), Exit> {
+    use nils_release::name_by::{Choice, choices_of_file};
+    let by: Vec<String> = args
+        .name_by
+        .iter()
+        .map(|t| t.trim().to_string())
+        .filter(|t| !t.is_empty())
+        .collect();
+    let mut choices = Vec::new();
+    for text in &args.name_choice {
+        choices.push(Choice::parse(text).map_err(|e| usage(format!("--name-choice: {e}")))?);
+    }
+    if let Some(file) = &args.name_choices {
+        let text = fs::read_to_string(file)
+            .map_err(|e| usage(format!("--name-choices {}: {e}", file.display())))?;
+        choices.extend(
+            choices_of_file(&text)
+                .map_err(|e| usage(format!("--name-choices {}: {e}", file.display())))?,
+        );
+    }
+    Ok((by, choices))
+}
+
+/// How a release under these arguments would name its subjects, worked out
+/// and nothing written; none where it names by no ID type. The values read
+/// are audited in the linkage store under `actor`.
+pub(crate) fn release_name_plan(
+    registry: &mut Registry,
+    packs: &Path,
+    args: &ReleaseArgs,
+    actor: &str,
+) -> Result<Option<nils_release::name_by::Plan>, Exit> {
+    use nils_release::{policy, run};
+    let (name_by, name_choices) = names_asked(args)?;
+    let items = selection_items(
+        &args.subject,
+        &args.session,
+        &args.stack,
+        &args.cohort,
+        &args.axis,
+        args.select.as_deref(),
+    )?;
+    let pack = release_pack(packs, &args.pack)?;
+    let selection = release_selection(registry, &pack, args, &items)?;
+    // A release without a name is named by the moment it runs, so it has no
+    // version before it and no choice kept: the rehearsal reads none either.
+    let name = args.name.clone().unwrap_or_default();
+    // Only the name, the selection, the pack and the names asked for decide
+    // the plan; the rest is what a release would default to, and is not read.
+    let policy = policy::Policy::default();
+    let scheme = session::Scheme::default();
+    let settings = run::Settings {
+        name: &name,
+        root: Path::new(""),
+        policy: &policy,
+        policy_from: policy::Source::Datasets,
+        categories: Vec::new(),
+        selection,
+        scheme: &scheme,
+        private: &[],
+        on_unknown: nils_release::burned::OnUnknown::Write,
+        actor,
+        key: &[],
+        pack: &pack,
+        layout: run::Layout::Descriptive,
+        naming: nils_release::name::Naming::Full,
+        places: nils_release::bids::place::Options::default(),
+        converter: None,
+        compress: true,
+        authors: &[],
+        observations: &[],
+        workers: 0,
+        name_by: &name_by,
+        name_choices: &name_choices,
+    };
+    run::name_plan(registry, &settings).map_err(|e| match e {
+        run::Error::Refused(m) => usage(m),
+        other => fail(other.to_string()),
+    })
+}
+
+/// The same for a door: the command it would queue, read as the job would
+/// read it, so the rehearsal and the release cannot disagree about a flag.
+pub(crate) fn release_name_plan_of_command(
+    registry: &mut Registry,
+    packs: &Path,
+    command: &[String],
+    actor: &str,
+) -> Result<Option<nils_release::name_by::Plan>, Exit> {
+    let asked = std::iter::once("nils".to_string())
+        .chain(command.iter().cloned())
+        .chain(std::iter::once("--name-plan".to_string()));
+    let cli = Cli::try_parse_from(asked).map_err(|e| usage(e.to_string()))?;
+    match cli.command {
+        Command::Release(args) => release_name_plan(registry, packs, &args, actor),
+        _ => Err(usage("the command is not a release")),
+    }
+}
+
+/// `nils release --name-plan`: the rehearsal, said. The values of the
+/// subjects that need a choice are printed, because the person at the host
+/// is the one who chooses; each read is in the linkage store's audit.
+fn release_name_plan_said(home: &Home, args: &ReleaseArgs) -> Result<(), Exit> {
+    let dir = pack_dir(home, args.pack_dir.clone())?;
+    let mut registry = open(home)?;
+    let plan = release_name_plan(&mut registry, &dir, args, &actor())?
+        .ok_or_else(|| usage("--name-plan needs --name-by, the ID types to name by"))?;
+    if args.json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({ "names": plan.doc(true) }))
+                .map_err(|e| fail(format!("will not serialize: {e}")))?
+        );
+        return Ok(());
+    }
+    println!(
+        "subjects named by {}: {} in the selection",
+        plan.by.join(", then "),
+        plan.subjects
+    );
+    for t in &plan.types {
+        println!("  {:<24} {}", t.name, t.subjects);
+    }
+    println!("  {:<24} {}", "the subject code", plan.code);
+    if plan.chosen > 0 {
+        println!("  {:<24} {}", "of them by a choice", plan.chosen);
+    }
+    if !plan.passed_over.is_empty() {
+        println!(
+            "  {} hold a value shaped like a personnummer, which names nobody: {}",
+            plan.passed_over.len(),
+            plan.passed_over.join(", ")
+        );
+    }
+    if !plan.needs_choice.is_empty() {
+        println!(
+            "needs a choice ({}): pass --name-choice CODE=VALUE for each, or a --name-choices file",
+            plan.needs_choice.len()
+        );
+        for n in &plan.needs_choice {
+            println!("  {}  {}: {}", n.subject, n.id_type, n.values.join(" | "));
+        }
+    }
+    if !plan.collisions.is_empty() {
+        println!(
+            "names two subjects would share ({}): correct the values, name by another type \
+             first, or release the subjects apart",
+            plan.collisions.len()
+        );
+        for c in &plan.collisions {
+            let who: Vec<String> = c
+                .subjects
+                .iter()
+                .map(|(code, by)| match by {
+                    Some(t) => format!("{code} (by {t})"),
+                    None => format!("{code} (by its code)"),
+                })
+                .collect();
+            println!("  {}: {}", c.name, who.join(" and "));
+        }
+    }
+    println!(
+        "{}",
+        if plan.ready() {
+            "ready: a release with these arguments would start. Nothing was written."
+        } else {
+            "not ready: a release with these arguments would be refused. Nothing was written."
+        }
+    );
+    Ok(())
+}
+
+/// The counts a release's names are reported by, on one line.
+fn names_line(names: &serde_json::Value) -> String {
+    let mut parts: Vec<String> = names["types"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|t| {
+            format!(
+                "{} by {}",
+                t["subjects"].as_i64().unwrap_or(0),
+                t["type"].as_str().unwrap_or_default()
+            )
+        })
+        .collect();
+    parts.push(format!(
+        "{} by the subject code",
+        names["code"].as_i64().unwrap_or(0)
+    ));
+    let mut line = parts.join(", ");
+    let chosen = names["chosen"].as_i64().unwrap_or(0);
+    if chosen > 0 {
+        line.push_str(&format!("; {chosen} by a choice"));
+    }
+    let passed = names["passed_over"].as_i64().unwrap_or(0);
+    if passed > 0 {
+        line.push_str(&format!(
+            "; {passed} with a value shaped like a personnummer, passed over"
+        ));
+    }
+    line
+}
+
 fn release(home: &Home, args: ReleaseArgs) -> Result<(), Exit> {
     use nils_release::{policy, run, tags, uid};
 
@@ -12394,6 +12689,10 @@ fn release(home: &Home, args: ReleaseArgs) -> Result<(), Exit> {
         })?;
         return release_withdraw(home, name, version, args.why.as_deref().unwrap_or(""));
     }
+    if args.name_plan {
+        return release_name_plan_said(home, &args);
+    }
+    let (name_by, name_choices) = names_asked(&args)?;
     let out = args.out.clone().expect("--out, or --history");
     // record 26 section 13: without the flags each dataset's leaving policy
     // applies to its own files, and the run's defaults elsewhere
@@ -12518,12 +12817,8 @@ fn release(home: &Home, args: ReleaseArgs) -> Result<(), Exit> {
         &args.axis,
         args.select.as_deref(),
     )?;
-    let dir = pack_dir(home, args.pack_dir)?;
-    let found = packs_in(&dir)?
-        .into_iter()
-        .find(|p| p.file_name().is_some_and(|f| f == args.pack.as_str()))
-        .ok_or_else(|| fail(format!("no pack named {} in {}", args.pack, dir.display())))?;
-    let pack = nils_pack::load(&found, None).map_err(|e| fail(e.to_string()))?;
+    let dir = pack_dir(home, args.pack_dir.clone())?;
+    let pack = release_pack(&dir, &args.pack)?;
 
     let mut registry = open(home)?;
     // Wave 5 section 10.2: a release writes only to an export place; a
@@ -12532,20 +12827,7 @@ fn release(home: &Home, args: ReleaseArgs) -> Result<(), Exit> {
         Some(run) => pipelines::release_target(registry.store(), run, &out).map_err(usage)?,
         None => require_place(&mut registry, nils_registry::place::Role::Export, &out)?,
     }
-    // record 26 section 13: a dataset named is a source place in force
-    for name in &args.dataset {
-        let found = nils_registry::place::by_name(registry.store(), name)
-            .map_err(|e| fail(e.to_string()))?
-            .filter(|p| p.role == nils_registry::place::Role::Source && p.retired_at.is_none());
-        if found.is_none() {
-            return Err(usage(format!(
-                "--dataset {name}: no source place in force is named so; `nils place list` shows them"
-            )));
-        }
-    }
-    // Wave 4a section 8: every item resolved up front, and a refusal that
-    // names what did not, rather than a smaller release.
-    let chosen = resolve_or_refuse(&mut registry, &items, Some(&pack))?.selection;
+    let selection = release_selection(&mut registry, &pack, &args, &items)?;
     let scheme = match (&args.scheme, &args.scheme_name) {
         (Some(path), _) => read_scheme(path)?,
         (None, Some(name)) => stored_scheme(&mut registry, name)?,
@@ -12556,20 +12838,6 @@ fn release(home: &Home, args: ReleaseArgs) -> Result<(), Exit> {
     // domain of the same key so that neither can be used to reason about the
     // other.
     let key = registry.pseudonym_key().map_err(|e| fail(e.to_string()))?;
-    // record 55: the picks a run's frozen list of main scans was resolved
-    // from, the list taken as it was frozen
-    let picks = match &args.picks_read {
-        Some(file) => Some(
-            std::fs::read_to_string(file)
-                .map_err(|e| usage(format!("--picks-read {}: {e}", file.display())))
-                .and_then(|text| {
-                    serde_json::from_str::<serde_json::Value>(&text).map_err(|e| {
-                        usage(format!("--picks-read {}: not JSON: {e}", file.display()))
-                    })
-                })?,
-        ),
-        None => None,
-    };
 
     let name = args
         .name
@@ -12581,19 +12849,7 @@ fn release(home: &Home, args: ReleaseArgs) -> Result<(), Exit> {
         policy: &policy,
         policy_from,
         categories,
-        selection: run::Selection {
-            subjects: chosen.subjects,
-            sessions: chosen.sessions,
-            stacks: chosen.stacks,
-            dispositions: args.disposition.clone(),
-            roles: args.role.clone(),
-            picked_only: args.picked,
-            modality: args.modality.clone(),
-            axes: chosen.axes,
-            cohorts: chosen.cohorts,
-            datasets: args.dataset.clone(),
-            picks,
-        },
+        selection,
         scheme: &scheme,
         // §8.4: dropped by default, and back only by name. The pack declares
         // the list, because which vendor element carries a gradient is
@@ -12611,6 +12867,8 @@ fn release(home: &Home, args: ReleaseArgs) -> Result<(), Exit> {
         authors: &args.author,
         observations: &args.observation,
         workers: args.workers.map_or(0, usize::from),
+        name_by: &name_by,
+        name_choices: &name_choices,
     };
     // Wave 7b (the maintenance track): Ctrl-C or a termination stops the
     // release as a cancel on its job does, at the top of the next stack,
@@ -12677,6 +12935,11 @@ fn release(home: &Home, args: ReleaseArgs) -> Result<(), Exit> {
             _ => "full: every slot without an entity in acq-, in v0's order",
         }
     );
+    // What stands after `sub-`, where an ID type was asked to name: the
+    // counts, never a value.
+    if let Some(names) = &report.names {
+        println!("  subjects named   {}", names_line(names));
+    }
     // record 26 section 13: what each dataset's files left under
     for p in &report.policies {
         println!(
@@ -13014,6 +13277,7 @@ fn releases_doc(
     let pick_rules = text_of(store, "release", "pick_rules");
     let finished = text_of(store, "release", "finished_at");
     let phases = text_of(store, "release", "phases");
+    let name_by = text_of(store, "release", "name_by");
     let mut wheres = String::new();
     let mut params: Vec<Param> = Vec::new();
     if let Some(name) = name {
@@ -13029,7 +13293,7 @@ fn releases_doc(
         "SELECT id, name, version, root, {started}, files, subjects, unchanged, moved, rewritten, \
          added, removed, layout, actor, {withdrawn}, withdrawn_by, withdrawn_why, {policy}, \
          {policies}, {scheme}, session_naming, categories, naming, purpose, {pick_rules}, \
-         {finished}, error, stopped, {phases} \
+         {finished}, error, stopped, {phases}, {name_by} \
          FROM {}{wheres} ORDER BY id DESC LIMIT {}",
         store.qualified("release"),
         limit.max(1)
@@ -13044,6 +13308,17 @@ fn releases_doc(
         .map(|r| r.int(0))
         .collect::<Result<_, nils_registry::Error>>()?;
     let sessions = sessions_of(store, &ids)?;
+    let mut named_by: BTreeMap<i64, Vec<String>> = BTreeMap::new();
+    for r in &found {
+        if let Some(by) = r
+            .opt_text(29)?
+            .and_then(|t| serde_json::from_str::<Vec<String>>(t).ok())
+            .filter(|by| !by.is_empty())
+        {
+            named_by.insert(r.int(0)?, by);
+        }
+    }
+    let names = names_kept(store, &named_by)?;
     let rows: Vec<serde_json::Value> = found
         .iter()
         .map(|r| {
@@ -13122,6 +13397,13 @@ fn releases_doc(
                 // Wave 7b (3.x6): the seconds its stacks spent in each
                 // phase, summed; null on a row from before
                 "phases": json(r.opt_text(28)?),
+                // The ID types its subjects are named by, in the order they
+                // were tried, and how many each named, how many kept their
+                // subject code and how many a person chose the value for:
+                // counts, never a name. Both null on a release that names
+                // every subject by its code.
+                "name_by": named_by.get(&id),
+                "names": names.get(&id),
             }))
         })
         .collect::<Result<_, nils_registry::Error>>()?;
@@ -13155,6 +13437,64 @@ fn converter_older_than_pin(line: &str) -> bool {
         (Some(found), Some(pinned)) => found < pinned,
         _ => false,
     }
+}
+
+/// How each of these releases named its subjects, by the names it kept:
+/// per ID type of its list, in the list's order, how many subjects the
+/// type named, then how many kept their subject code and how many are
+/// named by a person's choice. Counts over the subjects the release's
+/// selection reached; no name and no value.
+fn names_kept(
+    store: &mut Store,
+    lists: &BTreeMap<i64, Vec<String>>,
+) -> Result<BTreeMap<i64, serde_json::Value>, nils_registry::Error> {
+    let mut tally: BTreeMap<i64, (BTreeMap<String, i64>, i64, i64)> = BTreeMap::new();
+    // The ids are the ones just read out of the release table, so the list is
+    // the rows' own integers and never a caller's text.
+    let ids: Vec<String> = lists.keys().map(|id| id.to_string()).collect();
+    for chunk in ids.chunks(500) {
+        let sql = format!(
+            "SELECT release_id, id_type, chosen, COUNT(*) FROM {} WHERE release_id IN ({}) \
+             GROUP BY release_id, id_type, chosen",
+            store.qualified("release_name"),
+            chunk.join(", ")
+        );
+        for r in store.query(&sql, &[])? {
+            let (by_type, code, chosen) = tally.entry(r.int(0)?).or_default();
+            let n = r.int(3)?;
+            match r.opt_text(1)? {
+                Some(t) => *by_type.entry(t.to_string()).or_default() += n,
+                None => *code += n,
+            }
+            let picked = match r.get(2) {
+                nils_registry::store::Cell::Bool(b) => *b,
+                nils_registry::store::Cell::Int(i) => *i != 0,
+                _ => false,
+            };
+            if picked {
+                *chosen += n;
+            }
+        }
+    }
+    Ok(lists
+        .iter()
+        .map(|(id, by)| {
+            let (by_type, code, chosen) = tally.remove(id).unwrap_or_default();
+            let types: Vec<serde_json::Value> = by
+                .iter()
+                .map(|t| {
+                    serde_json::json!({
+                        "type": t,
+                        "subjects": by_type.get(t).copied().unwrap_or(0),
+                    })
+                })
+                .collect();
+            (
+                *id,
+                serde_json::json!({ "types": types, "code": code, "chosen": chosen }),
+            )
+        })
+        .collect())
 }
 
 /// How many sessions each of these releases holds.
@@ -13221,6 +13561,8 @@ struct Version {
     error: Option<String>,
     /// Wave 7b (3.x6): the seconds its stacks spent in each phase, summed.
     phases: Option<nils_release::run::Phases>,
+    /// The ID types its subjects are named by, where it names by any.
+    name_by: Vec<String>,
 }
 
 /// What a release read of the main scans, in words, for its history: the
@@ -13309,9 +13651,10 @@ fn history(home: &Home, args: &ReleaseArgs) -> Result<(), Exit> {
     let pick_rules = text_of(store, "release", "pick_rules");
     let finished = text_of(store, "release", "finished_at");
     let phases = text_of(store, "release", "phases");
+    let name_by = text_of(store, "release", "name_by");
     let sql = format!(
         "SELECT id, name, version, root, {started}, files, unchanged, moved, rewritten, added, \
-         removed, {pick_rules}, {finished}, error, {phases} FROM {}{wheres} ORDER BY id",
+         removed, {pick_rules}, {finished}, error, {phases}, {name_by} FROM {}{wheres} ORDER BY id",
         store.qualified("release"),
     );
     let rows = store
@@ -13348,8 +13691,19 @@ fn history(home: &Home, args: &ReleaseArgs) -> Result<(), Exit> {
                 .opt_text(14)
                 .map_err(|e| fail(e.to_string()))?
                 .and_then(|t| serde_json::from_str(t).ok()),
+            name_by: r
+                .opt_text(15)
+                .map_err(|e| fail(e.to_string()))?
+                .and_then(|t| serde_json::from_str(t).ok())
+                .unwrap_or_default(),
         });
     }
+    let named_by: BTreeMap<i64, Vec<String>> = versions
+        .iter()
+        .filter(|v| !v.name_by.is_empty())
+        .map(|v| (v.id, v.name_by.clone()))
+        .collect();
+    let names = names_kept(store, &named_by).map_err(|e| fail(e.to_string()))?;
     let mut last_name = String::new();
     for v in &versions {
         if v.name != last_name {
@@ -13373,6 +13727,9 @@ fn history(home: &Home, args: &ReleaseArgs) -> Result<(), Exit> {
         }
         if let Some(p) = &v.picks {
             println!("      main scans   {}", picks_line(p));
+        }
+        if let Some(n) = names.get(&v.id) {
+            println!("      named        {}", names_line(n));
         }
         let mut said = false;
         for (n, what) in [

@@ -159,6 +159,8 @@ fn settings<'a>(
         observations: &[],
         authors: &[],
         workers: 0,
+        name_by: &[],
+        name_choices: &[],
     }
 }
 
@@ -2729,5 +2731,103 @@ fn a_stale_file_of_our_own_is_replaced_and_not_refused() {
         std::fs::read(&planted).unwrap(),
         b"half an image a killed run left",
         "the stale file was replaced"
+    );
+}
+
+#[test]
+fn a_bids_tree_named_by_an_id_spells_the_name_everywhere_and_the_code_nowhere() {
+    // The label after `sub-` is in every folder and file name, in
+    // participants.tsv, in the sessions and scans files and in the DICOM
+    // kept beside the NIfTI. Named by an ID type, each of them carries the
+    // name, and the subject code is in none of what a recipient gets.
+    let Some(converter) = converter() else { return };
+    let source = tree();
+    let home_dir = TempDir::new("bids-home");
+    let out = TempDir::new("bids-out");
+    let (_home, mut reg) = registry(&home_dir, &source);
+    let (subject, code) = {
+        let store = reg.store();
+        let sql = format!("SELECT id, code FROM {}", store.qualified("subject"));
+        let rows = store.query(&sql, &[]).unwrap();
+        assert_eq!(rows.len(), 1);
+        (
+            rows[0].int(0).unwrap(),
+            rows[0].text(1).unwrap().to_string(),
+        )
+    };
+    {
+        use nils_registry::linkage::{self, NewIdentity, Subkeys};
+        let keys = Subkeys::derive(&reg.pseudonym_key().unwrap());
+        let mut link = reg.open_linkage().unwrap();
+        let t = linkage::add_id_type(&mut link, "study-id", None).unwrap();
+        linkage::insert_identities(
+            &mut link,
+            &[NewIdentity {
+                subject_id: subject,
+                id_type_id: t.id,
+                lookup: keys.lookup("study-id", "ST_001"),
+                ciphertext: keys.seal("ST_001"),
+                source: "csv",
+                first_batch_id: None,
+            }],
+        )
+        .unwrap();
+    }
+
+    let policy = Policy::default();
+    let scheme = SessionScheme::default();
+    let types = ["study-id".to_string()];
+    let named = run::Settings {
+        name_by: &types,
+        // Not compressed, so that a name inside a NIfTI would be found.
+        compress: false,
+        ..settings(
+            out.path(),
+            &policy,
+            &scheme,
+            Options::default(),
+            Some(&converter),
+        )
+    };
+    let report = run::run(&mut reg, &named).unwrap();
+    assert!(report.files > 0);
+
+    let written = files_under(out.path());
+    for f in &written {
+        assert!(!f.contains(&code), "the code is in the path {f}");
+        let bytes = std::fs::read(out.path().join(f)).unwrap();
+        assert!(
+            bytes.windows(code.len()).all(|w| w != code.as_bytes()),
+            "the code is in the bytes of {f}"
+        );
+    }
+    assert!(
+        written
+            .iter()
+            .any(|f| f.starts_with("sub-ST001/") && f.contains("/anat/sub-ST001_")),
+        "{written:?}"
+    );
+    let participants = std::fs::read_to_string(out.path().join("participants.tsv")).unwrap();
+    assert!(participants.contains("sub-ST001"), "{participants}");
+    let sessions = written
+        .iter()
+        .find(|f| f.ends_with("_sessions.tsv"))
+        .expect("a sessions file");
+    assert_eq!(sessions, "sub-ST001/sub-ST001_sessions.tsv");
+    let scans = written
+        .iter()
+        .find(|f| f.ends_with("_scans.tsv"))
+        .expect("a scans file");
+    assert!(
+        scans.starts_with("sub-ST001/") && scans.contains("/sub-ST001_ses-"),
+        "{scans}"
+    );
+    // Everything under a `sub-` folder is under the name's.
+    assert!(
+        written
+            .iter()
+            .filter(|f| f.contains("sub-"))
+            .all(|f| f.contains("sub-ST001")),
+        "{written:?}"
     );
 }

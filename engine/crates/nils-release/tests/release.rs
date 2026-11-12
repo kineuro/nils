@@ -154,6 +154,8 @@ fn settings<'a>(out: &'a Path, policy: &'a Policy, scheme: &'a SessionScheme) ->
         observations: &[],
         authors: &[],
         workers: 0,
+        name_by: &[],
+        name_choices: &[],
     }
 }
 

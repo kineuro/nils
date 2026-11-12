@@ -177,6 +177,8 @@ fn settings<'a>(out: &'a Path, policy: &'a Policy, scheme: &'a SessionScheme) ->
         authors: &[],
         // one stack at a time: these tests time a stop against the stacks
         workers: 1,
+        name_by: &[],
+        name_choices: &[],
     }
 }
 

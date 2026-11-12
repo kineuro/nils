@@ -305,6 +305,14 @@ pub struct Report {
     /// or how, in one line. The stopped words carry it. Absent otherwise.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub lock_lost: Option<String>,
+    /// Of a release that names its subjects by ID types: the types in
+    /// order, how many of the subjects the selection reaches each named,
+    /// how many kept their code, how many a person's choice named and how
+    /// many held a value that was passed over, `{by, subjects, types:
+    /// [{type, subjects}], code, chosen, passed_over}`. Never a value or a
+    /// name. Absent from a release that names every subject by its code.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub names: Option<serde_json::Value>,
 }
 
 /// Where the seconds of writing one stack went (Wave 7b, 3.x6), each
@@ -468,6 +476,14 @@ pub struct Settings<'a> {
     /// ([`Settings::workers`]). 1 writes one stack after another, in the
     /// plan's order, as releases did before.
     pub workers: usize,
+    /// The ID types the release names its subjects by, in order: for each
+    /// subject the first it holds a kept value of gives the name after
+    /// `sub-`, and the subject code is the last fallback. Empty names every
+    /// subject by its code, as releases did before.
+    pub name_by: &'a [String],
+    /// Which value names a subject that holds several of the type that
+    /// would name it. Read only with `name_by`.
+    pub name_choices: &'a [crate::name_by::Choice],
 }
 
 impl Settings<'_> {
@@ -897,6 +913,26 @@ pub fn run_with(
             },
         )
         .map_err(Error::Store)?;
+        // A release that named its subjects by ID types says so in a row of
+        // its own: the types and the counts. What a subject was called is
+        // in the release's own rows, and no value is anywhere in this one.
+        if let Some(names) = &report.names {
+            nils_registry::audit::record(
+                registry,
+                &nils_registry::audit::Entry {
+                    principal: settings.actor,
+                    action: nils_registry::audit::Action::ReleaseNames,
+                    scope: serde_json::json!({
+                        "release": settings.name,
+                        "version": report.version,
+                    }),
+                    policy: None,
+                    job_id: Some(job_id),
+                    details: Some(names.clone()),
+                },
+            )
+            .map_err(Error::Store)?;
+        }
     }
     result
 }
@@ -1131,6 +1167,15 @@ fn run_release(
     // layout.
     observation_kinds(registry.store(), settings)?;
 
+    // What each subject is called, before a registry row exists or a byte
+    // is written: a subject with several values of the type that would
+    // name it, or two subjects that would share a name, stops the release
+    // here with the list.
+    let names = name_plan_with(registry, settings, &live)?;
+    if let Some(words) = names.as_ref().and_then(|n| n.refusal()) {
+        return Err(Error::Refused(words));
+    }
+
     // §9.6, before a byte is written: the root has to be writable and there
     // has to be room. A release that discovers a full disk after 400 GB has
     // written 400 GB for nothing, and what it reports is the operating
@@ -1273,6 +1318,12 @@ fn run_release(
         pick_rules.as_ref(),
     )?;
     heart.row = Some(report.release_id);
+    // The pairing of subject and name is kept before a file carries a name,
+    // so a tree a run died in can still be read back to its subjects.
+    if let Some(names) = &names {
+        crate::name_by::keep(registry.store(), report.release_id, names)?;
+        report.names = Some(names.counts());
+    }
     // record 55 (rulings of 2026-10-12, item 6, carried to releases): what
     // the release reads of the picks is frozen with it before it takes a
     // stack, and it takes its stacks by the list it froze, so every reader
@@ -1360,6 +1411,21 @@ fn run_release(
         if mine.is_empty() {
             continue;
         }
+        // What the tree calls the subject: its code, unless the release
+        // names by ID types, and then what the plan of names decided. The
+        // code itself stays for what is said to the operator and for
+        // matching the sessions asked for, which are asked for by code.
+        let called = match &names {
+            None => None,
+            Some(plan) => Some(plan.names.get(&subject).ok_or_else(|| {
+                Error::Refused(format!(
+                    "the selection gained subject {code} while the release was planned, \
+                     and it has no name yet. Run the release again."
+                ))
+            })?),
+        };
+        let name = called.map_or(code.as_str(), |n| n.name.as_str());
+        let name_from = called.and_then(|n| n.id_type.as_deref());
         let labels = session_labels(&mine, &by_study, subject);
         let mut grouped: BTreeMap<i64, Vec<Instance>> = BTreeMap::new();
         for i in mine {
@@ -1400,7 +1466,7 @@ fn run_release(
             let under = policies.of_root(&instances[0].root);
             policy_of.insert(stack, under);
             let policy = &policies.all[under];
-            let decided = planner.decide(stack, subject, &code, study, &labels);
+            let decided = planner.decide(stack, subject, &code, name, study, &labels);
             let (unjudged, label, route, place, fallback) = match decided {
                 // Record 35 finding 1: never a silent drop, the stack is
                 // recorded in `release_absent` and the subject is named.
@@ -1458,7 +1524,7 @@ fn run_release(
             }
             let placed = named.get(&stack);
             let content = crate::version::content_of(
-                &subject_policy(settings, policy, &code),
+                &subject_policy(settings, policy, name, name_from),
                 &categories,
                 &private,
                 &pack,
@@ -1471,11 +1537,11 @@ fn run_release(
                     .filter_map(|i| i.frames.as_deref().map(|f| (i.id, f)))
                     .collect::<Vec<_>>(),
             );
-            people.insert(code.clone());
-            subjects_seen.insert(code.clone(), subject);
+            people.insert(name.to_string());
+            subjects_seen.insert(name.to_string(), subject);
             if let Some(day) = days.get(&study).copied() {
                 sessions_seen
-                    .entry((code.clone(), label.clone()))
+                    .entry((name.to_string(), label.clone()))
                     .and_modify(|(_, d)| {
                         if day < *d {
                             *d = day;
@@ -1528,7 +1594,7 @@ fn run_release(
                     Some(stem) => Param::from(stem),
                     None => Param::Null,
                 },
-                Param::from(code.as_str()),
+                Param::from(name),
                 Param::from(label),
             ]);
             if planned.len() >= PLAN_BATCH {
@@ -3354,6 +3420,9 @@ impl Planner<'_> {
         stack: i64,
         subject: i64,
         code: &str,
+        // what the tree calls the subject: its code, or the name an ID
+        // type gave it
+        name: &str,
         study: i64,
         labels: &HashMap<i64, String>,
     ) -> Decision {
@@ -3427,7 +3496,7 @@ impl Planner<'_> {
             }
             _ => folder,
         };
-        let place = place_of(&route, self.layout, code, &label, &folder, &stem, placed);
+        let place = place_of(&route, self.layout, name, &label, &folder, &stem, placed);
         let fallback = match (&route, &place.stem) {
             // Record 55 C4 (2026-10-09): a stack in a folder of its own that
             // the converter refuses is DICOM where the export would have put
@@ -3442,7 +3511,7 @@ impl Planner<'_> {
             _ => place_of(
                 &crate::bids::place::Route::SourceData,
                 self.layout,
-                code,
+                name,
                 &label,
                 &folder,
                 &stem,
@@ -3557,7 +3626,7 @@ pub fn plan_picked(
                 suffix: None,
                 why: None,
             };
-            match planner.decide(stack, subject, &code, study, &labels) {
+            match planner.decide(stack, subject, &code, &code, study, &labels) {
                 Decision::NoSession => {
                     p.route = "no_session".into();
                     p.why = Some(
@@ -3961,9 +4030,16 @@ fn today() -> Day {
 /// `offset=0` is what every release that kept its dates wrote here while a
 /// shift drew an offset per subject (before record 38 S3). It stays, so a
 /// tree released before re-runs unchanged rather than rewritten whole.
-fn subject_policy(settings: &Settings, policy: &Policy, code: &str) -> String {
+///
+/// A subject an ID type named says so after the rest (`named_by=`), with
+/// the name where the code stood, so that naming by another type, or by
+/// another value, writes the subject again. A subject named by its code
+/// says nothing more than it did before a release could name by anything
+/// else, so nothing of it is written again.
+fn subject_policy(settings: &Settings, policy: &Policy, name: &str, by: Option<&str>) -> String {
+    let named_by = by.map(|t| format!(" named_by={t}")).unwrap_or_default();
     format!(
-        "{} code={code} offset=0 unknown={} layout={} converter={}",
+        "{} code={name} offset=0 unknown={} layout={} converter={}{named_by}",
         policy.as_json(),
         settings.on_unknown.name(),
         settings.layout.name(),
@@ -4810,6 +4886,45 @@ fn selected_subjects(
         out.push((r.int(0)?, r.text(1)?.to_string()));
     }
     Ok(out)
+}
+
+/// How a release under `settings` would name its subjects, worked out and
+/// nothing written: the rehearsal of [`Settings::name_by`]. None where the
+/// release names by no ID type. The values read are audited in the linkage
+/// store under the settings' actor.
+pub fn name_plan(
+    registry: &mut Registry,
+    settings: &Settings,
+) -> Result<Option<crate::name_by::Plan>, Error> {
+    if settings.name_by.is_empty() && settings.name_choices.is_empty() {
+        return Ok(None);
+    }
+    let (reading, _) = picks_read(
+        registry.store(),
+        &settings.selection,
+        &settings.pack.name,
+        &settings.pack.version.to_string(),
+    )?;
+    name_plan_with(registry, settings, &Picks::Live(reading))
+}
+
+fn name_plan_with(
+    registry: &mut Registry,
+    settings: &Settings,
+    picks: &Picks,
+) -> Result<Option<crate::name_by::Plan>, Error> {
+    if settings.name_by.is_empty() && settings.name_choices.is_empty() {
+        return Ok(None);
+    }
+    let subjects = selected_subjects(registry.store(), &settings.selection, picks)?;
+    crate::name_by::plan(
+        registry,
+        settings.name,
+        settings.name_by,
+        settings.name_choices,
+        &subjects,
+        settings.actor,
+    )
 }
 
 /// How much source the selection is, for the preflight.
@@ -5695,6 +5810,7 @@ fn open_row(
                 "removed",
                 "policies",
                 "pick_rules",
+                "name_by",
             ],
         )
         .returning(&["id"]),
@@ -5733,6 +5849,11 @@ fn open_row(
             Param::Int(0),
             Param::from(serde_json::Value::Array(policies.to_vec()).to_string()),
             pick_rules,
+            // null on a release that names every subject by its code
+            match settings.name_by {
+                [] => Param::Null,
+                by => Param::from(serde_json::json!(by).to_string()),
+            },
         ]],
     )?;
     Ok(written.first().map(|r| r.int(0)).transpose()?.unwrap_or(0))
@@ -5832,7 +5953,7 @@ fn close_row(store: &mut Store, report: &Report, stopped: Option<&str>) -> Resul
 }
 
 /// Insert a batch, or leave the table as it was.
-fn write_rows(
+pub(crate) fn write_rows(
     store: &mut Store,
     into: &str,
     columns: &[&str],

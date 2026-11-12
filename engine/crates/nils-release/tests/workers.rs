@@ -195,6 +195,8 @@ fn settings<'a>(
         observations: &[],
         authors: &[],
         workers,
+        name_by: &[],
+        name_choices: &[],
     }
 }
 

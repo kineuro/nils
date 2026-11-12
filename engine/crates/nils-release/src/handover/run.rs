@@ -235,7 +235,7 @@ fn run_handover(registry: &mut Registry, settings: &Settings) -> Result<Report, 
     // its own password, now that it has an id; held here and nowhere else
     let password = settings.protection.password(report.handover_id);
 
-    let codes = subject_ids(registry.store())?;
+    let codes = subject_ids(registry.store(), found.id)?;
     let mut rows: Vec<Vec<Param>> = Vec::new();
     let mut people: Vec<(usize, Vec<Param>)> = Vec::new();
     for chunk in &chunks {
@@ -762,10 +762,22 @@ fn walk(root: &Path, dir: &Path, out: &mut Vec<(String, i64)>) {
 
 /// The subject behind each code, so an archive names people the registry knows
 /// rather than strings from a path.
-fn subject_ids(store: &mut Store) -> Result<HashMap<String, i64>, Error> {
+/// The subject behind each `sub-` label of the release's tree: its code,
+/// and, where the release named its subjects by ID types, the name the
+/// version gave it, which is read last so that a name wins over a code it
+/// happens to spell.
+fn subject_ids(store: &mut Store, release: i64) -> Result<HashMap<String, i64>, Error> {
     let sql = format!("SELECT code, id FROM {}", store.qualified("subject"));
     let mut out = HashMap::new();
     for r in store.query(&sql, &[])? {
+        out.insert(r.text(0)?.to_string(), r.int(1)?);
+    }
+    let sql = format!(
+        "SELECT name, subject_id FROM {} WHERE release_id = {}",
+        store.qualified("release_name"),
+        store.dialect().param(1, Type::Int),
+    );
+    for r in store.query(&sql, &[Param::Int(release)])? {
         out.insert(r.text(0)?.to_string(), r.int(1)?);
     }
     Ok(out)

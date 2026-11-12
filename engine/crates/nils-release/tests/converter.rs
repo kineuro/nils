@@ -171,6 +171,8 @@ fn settings<'a>(
         authors: &[],
         // one stack at a time: these tests time a stop against the stacks
         workers: 1,
+        name_by: &[],
+        name_choices: &[],
     }
 }
 

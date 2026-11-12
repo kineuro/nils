@@ -65,6 +65,8 @@ pub const SUBJECT_TABLES: &[(&str, Handling)] = &[
     ("handover_subject", Handling::Repoint),
     // the main scans a release read, frozen when it was made
     ("release_pick", Handling::Repoint),
+    // what a release named by an ID type called the subject
+    ("release_name", Handling::Repoint),
     ("session_cache", Handling::Rebuild),
     // record 55 F5: the post-contrast label follows its stack, and the next
     // labelling reads the merged subject's sessions together
