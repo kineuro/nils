@@ -201,6 +201,59 @@ fn the_repair_finds_and_mends(dsn: Option<&str>) {
         .int(0)
         .unwrap();
     assert_eq!(audited, 1);
+    drop(store);
+
+    // A trigger goes, around the engine. The repair's dry run says which
+    // and how, and writes nothing, the trigger neither.
+    let changed = "stack_axis_of_fingerprint_changed";
+    {
+        let mut store = self::store(&home, dsn);
+        let print = store.qualified("stack_fingerprint");
+        store
+            .batch(&match dsn {
+                Some(_) => format!("ALTER TABLE {print} DISABLE TRIGGER {changed}"),
+                None => format!("DROP TRIGGER {changed}"),
+            })
+            .unwrap();
+    }
+    let found = json(&home, dsn, &["repair", "stack-axis", "--dry-run", "--json"]);
+    assert_eq!(
+        (&found["agrees"], &found["triggers"]),
+        (&false.into(), &false.into()),
+        "{found}"
+    );
+    let (lost, none) = (serde_json::json!([changed]), serde_json::json!([]));
+    let (missing, disabled) = match dsn {
+        Some(_) => (&none, &lost),
+        None => (&lost, &none),
+    };
+    assert_eq!(&found["triggers_missing"], missing, "{found}");
+    assert_eq!(&found["triggers_disabled"], disabled, "{found}");
+    assert_eq!(&found["triggers_astray"], &none, "{found}");
+    let again = json(&home, dsn, &["repair", "stack-axis", "--dry-run", "--json"]);
+    assert_eq!(again["triggers"], false, "{again}");
+    // any other command opens the registry, which sets the triggers and
+    // makes the rows again before it goes on, and the audit has it
+    run(&home, dsn, &["status"], None);
+    let after = json(&home, dsn, &["repair", "stack-axis", "--dry-run", "--json"]);
+    assert_eq!(
+        (&after["agrees"], &after["triggers"]),
+        (&true.into(), &true.into()),
+        "{after}"
+    );
+    let mut store = self::store(&home, dsn);
+    let audited = store
+        .query(
+            &format!(
+                "SELECT COUNT(*) FROM {} WHERE action = 'registry.repair'",
+                store.qualified("audit")
+            ),
+            &[],
+        )
+        .unwrap()[0]
+        .int(0)
+        .unwrap();
+    assert_eq!(audited, 2);
 }
 
 #[test]

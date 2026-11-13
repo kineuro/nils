@@ -823,6 +823,30 @@ fn a_registry_without_the_triggers_is_found_and_mended() {
         let found = stack_axis::verify(store).unwrap();
         assert!(!found.agrees() && !found.triggers, "{name}: {found:?}");
         assert_eq!(found.different, 0, "{name}");
+        // and which it was: dropped on SQLite, switched off on Postgres
+        let lost = vec!["stack_axis_of_fingerprint_changed".to_string()];
+        let none: Vec<String> = Vec::new();
+        if name == "postgres" {
+            assert_eq!(
+                (
+                    &found.lost.missing,
+                    &found.lost.disabled,
+                    &found.lost.astray
+                ),
+                (&none, &lost, &none),
+                "{name}"
+            );
+        } else {
+            assert_eq!(
+                (
+                    &found.lost.missing,
+                    &found.lost.disabled,
+                    &found.lost.astray
+                ),
+                (&lost, &none, &none),
+                "{name}"
+            );
+        }
         // a write the row does not hear of
         run(
             store,
@@ -839,6 +863,7 @@ fn a_registry_without_the_triggers_is_found_and_mended() {
         assert!(stack_axis::triggers(store).unwrap().set(), "{name}");
         assert_eq!(place(store, 1).unwrap().6, Some(3.0), "{name}");
         agrees(store, name, "a rebuild");
+        assert!(stack_axis::verify(store).unwrap().lost.set(), "{name}");
         // and the trigger set again hears the next write
         run(
             store,

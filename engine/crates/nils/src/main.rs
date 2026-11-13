@@ -7335,7 +7335,15 @@ fn confirm(prompt: &str) -> Result<bool, Exit> {
 /// triggers that keep part of it, and all of it made again where a row
 /// differs or a trigger is gone.
 fn repair_stack_axis(home: &Home, dry_run: bool, json: bool) -> Result<(), Exit> {
-    let mut registry = open(home)?;
+    // opened as it is found: an ordinary open mends lost triggers before
+    // anything else, and this is the command that says how they stood
+    if !home.exists() {
+        return Err(usage(format!(
+            "no registry in {}; run nils init there, or point --registry or {REGISTRY_ENV} at one",
+            home.dir().display()
+        )));
+    }
+    let mut registry = home.open_as_found()?;
     let principal = actor();
     let store = registry.store();
     let found = nils_registry::stack_axis::verify(store)?;
@@ -7359,6 +7367,9 @@ fn repair_stack_axis(home: &Home, dry_run: bool, json: bool) -> Result<(), Exit>
                         "extra": found.extra,
                         "different": found.different,
                         "triggers": found.triggers,
+                        "triggers_missing": found.lost.missing,
+                        "triggers_disabled": found.lost.disabled,
+                        "triggers_astray": found.lost.astray,
                     })),
                 },
             )?;
@@ -7381,6 +7392,9 @@ fn repair_stack_axis(home: &Home, dry_run: bool, json: bool) -> Result<(), Exit>
             "extra": found.extra,
             "different": found.different,
             "triggers": found.triggers,
+            "triggers_missing": found.lost.missing,
+            "triggers_disabled": found.lost.disabled,
+            "triggers_astray": found.lost.astray,
             "sample": found.sample,
             "rebuilt": rebuild,
         });
@@ -7397,9 +7411,12 @@ fn repair_stack_axis(home: &Home, dry_run: bool, json: bool) -> Result<(), Exit>
             found.extra,
             found.different,
             if found.triggers {
-                ""
+                String::new()
             } else {
-                ", and the triggers that keep a stack's series and fingerprint columns are not all set"
+                format!(
+                    ", and of the triggers that keep a stack's series and fingerprint columns {}",
+                    found.lost.in_words()
+                )
             },
             if rebuild {
                 "the triggers were set and every row was made again"

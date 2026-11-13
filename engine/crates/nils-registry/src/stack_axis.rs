@@ -691,6 +691,10 @@ pub struct Standing {
     /// Whether the triggers that keep the stack's place and the
     /// fingerprint columns are set ([`triggers`]).
     pub triggers: bool,
+    /// Which of them are not, and how: missing, switched off, or running
+    /// a function that does not write this registry's rows.
+    #[serde(default)]
+    pub lost: Triggers,
 }
 
 impl Standing {
@@ -706,9 +710,11 @@ impl Standing {
 pub fn verify(store: &mut Store) -> Result<Standing, Error> {
     let mine = store.qualified("stack_axis");
     let rows = fresh(store, None);
+    let lost = triggers(store)?;
     let mut out = Standing {
         stacks: store.query(&format!("SELECT COUNT(*) FROM {mine}"), &[])?[0].int(0)? as u64,
-        triggers: triggers(store)?.set(),
+        triggers: lost.set(),
+        lost,
         ..Standing::default()
     };
     // a null on one side only is a difference, which `<>` would not say

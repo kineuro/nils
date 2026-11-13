@@ -411,6 +411,18 @@ impl Home {
     /// the key is ([`crate::shape_sweep`]); a sweep that cannot run or fails
     /// changes nothing about the open and is tried again at the next.
     pub fn open(&self) -> Result<Registry, HomeError> {
+        self.open_mending(true)
+    }
+
+    /// [`Home::open`] without its look at the triggers of the read model:
+    /// for the repair that is to say how they stand (`nils repair
+    /// stack-axis`), which an open that mended them first would leave
+    /// nothing to say of, and whose dry run writes nothing.
+    pub fn open_as_found(&self) -> Result<Registry, HomeError> {
+        self.open_mending(false)
+    }
+
+    fn open_mending(&self, mend: bool) -> Result<Registry, HomeError> {
         let config = self.read_config()?;
         let mut store = self.open_store(&config, Kind::Registry)?;
         let migrated = match migrate::standing(&mut store, Kind::Registry)? {
@@ -435,10 +447,15 @@ impl Home {
         // again before anything is read or written, since a question would
         // otherwise count stale rows and say nothing. It is said once, on
         // stderr, and audited. A registry opens either way.
-        let mended = match crate::stack_axis::mend(
-            &mut store,
-            &crate::principal::Principal::current().to_string(),
-        ) {
+        let mended = match mend
+            .then(|| {
+                crate::stack_axis::mend(
+                    &mut store,
+                    &crate::principal::Principal::current().to_string(),
+                )
+            })
+            .unwrap_or(Ok(None))
+        {
             Ok(mended) => mended,
             Err(e) => {
                 eprintln!(
