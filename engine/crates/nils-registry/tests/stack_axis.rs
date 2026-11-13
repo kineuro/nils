@@ -406,7 +406,7 @@ fn the_database_keeps_a_stack_s_place_and_its_fingerprint_columns() {
     for mut l in labs() {
         let name = l.name;
         let store = l.registry.store();
-        assert!(stack_axis::triggers(store).unwrap(), "{name}");
+        assert!(stack_axis::triggers(store).unwrap().set(), "{name}");
 
         // a stack: its row names its series and says it has no fingerprint
         stack(store, 1, 11);
@@ -819,7 +819,7 @@ fn a_registry_without_the_triggers_is_found_and_mended() {
                     .unwrap();
             }
         }
-        assert!(!stack_axis::triggers(store).unwrap(), "{name}");
+        assert!(!stack_axis::triggers(store).unwrap().set(), "{name}");
         let found = stack_axis::verify(store).unwrap();
         assert!(!found.agrees() && !found.triggers, "{name}: {found:?}");
         assert_eq!(found.different, 0, "{name}");
@@ -836,7 +836,7 @@ fn a_registry_without_the_triggers_is_found_and_mended() {
         );
         assert_eq!(place(store, 1).unwrap().6, Some(1.0), "{name}");
         stack_axis::rebuild(store).unwrap();
-        assert!(stack_axis::triggers(store).unwrap(), "{name}");
+        assert!(stack_axis::triggers(store).unwrap().set(), "{name}");
         assert_eq!(place(store, 1).unwrap().6, Some(3.0), "{name}");
         agrees(store, name, "a rebuild");
         // and the trigger set again hears the next write
@@ -934,6 +934,170 @@ fn a_refresh_is_planned_for_the_stacks_it_names() {
                 "{name}: the planner expects {expected} rows for {} stacks: {plan}",
                 ids.len()
             );
+        }
+    }
+}
+
+/// How many repairs the registry's audit holds.
+fn repairs(store: &mut Store) -> i64 {
+    let sql = format!(
+        "SELECT COUNT(*) FROM {} WHERE action = 'registry.repair'",
+        store.qualified("audit")
+    );
+    store.query(&sql, &[]).unwrap()[0].int(0).unwrap()
+}
+
+/// An open looks for the triggers. Where they are set it does nothing and
+/// says nothing. Where one is dropped, switched off or runs a function
+/// that writes another schema's rows, it sets them all again and makes
+/// every row again before the registry is used, says what it found, and
+/// writes an audit row as the repair does; the open after it finds
+/// nothing.
+#[test]
+fn an_open_finds_lost_triggers_and_mends_the_rows() {
+    for mut l in labs() {
+        let name = l.name;
+        let home = Home::new(l._dir.path());
+        let postgres = name == "postgres";
+        let astray_schema = format!("{SCHEMA}_astray");
+        {
+            let store = l.registry.store();
+            stack(store, 1, 11);
+            fingerprint(
+                store,
+                &[printed(
+                    1,
+                    11,
+                    (Some("3D"), None, Some(0.5), Some(0.5), Some(1.0)),
+                )],
+            );
+        }
+        // the ordinary open: nothing found, nothing done, nothing audited
+        let mut reg = home.open().unwrap();
+        assert_eq!(reg.mended(), None, "{name}");
+        assert_eq!(repairs(reg.store()), 0, "{name}");
+        drop(reg);
+
+        let changed = "stack_axis_of_fingerprint_changed";
+        let of_fingerprint = [
+            "stack_axis_of_fingerprint_written",
+            changed,
+            "stack_axis_of_fingerprint_removed",
+        ];
+        // each way a trigger is lost: what breaks it, and what an open
+        // then finds missing, switched off and astray
+        let mut ways: Vec<(&str, String, Vec<&str>, Vec<&str>, Vec<&str>)> = vec![(
+            "dropped",
+            if postgres {
+                format!("DROP TRIGGER {changed} ON {{print}}")
+            } else {
+                format!("DROP TRIGGER {changed}")
+            },
+            vec![changed],
+            vec![],
+            vec![],
+        )];
+        if postgres {
+            ways.push((
+                "switched off",
+                format!("ALTER TABLE {{print}} DISABLE TRIGGER {changed}"),
+                vec![],
+                vec![changed],
+                vec![],
+            ));
+            // the function of a registry copied under another name: its
+            // body as it is, naming the tables of the other schema
+            ways.push((
+                "astray",
+                format!(
+                    "DO $$ DECLARE body text; BEGIN \
+                     SELECT replace(p.prosrc, '{SCHEMA}.', '{astray_schema}.') INTO body \
+                     FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace \
+                     WHERE n.nspname = '{SCHEMA}' AND p.proname = 'stack_axis_of_fingerprint'; \
+                     EXECUTE format('CREATE OR REPLACE FUNCTION {SCHEMA}.stack_axis_of_fingerprint() \
+                     RETURNS trigger LANGUAGE plpgsql AS %L', body); END $$"
+                ),
+                vec![],
+                vec![],
+                of_fingerprint.to_vec(),
+            ));
+            let store = l.registry.store();
+            store
+                .batch(&format!(
+                    "DROP SCHEMA IF EXISTS {astray_schema} CASCADE; CREATE SCHEMA {astray_schema}; \
+                     CREATE TABLE {astray_schema}.stack_axis (LIKE {SCHEMA}.stack_axis INCLUDING ALL); \
+                     CREATE TABLE {astray_schema}.stack (LIKE {SCHEMA}.stack INCLUDING ALL)"
+                ))
+                .unwrap();
+        }
+        let mut thickness = 1.0;
+        for (round, (what, breaking, missing, disabled, astray)) in ways.iter().enumerate() {
+            let store = l.registry.store();
+            run(store, breaking);
+            // a write the stack's row does not hear of
+            thickness += 1.0;
+            run(
+                store,
+                &format!("UPDATE {{print}} SET slice_thickness = {thickness} WHERE stack_id = 1"),
+            );
+            assert_eq!(
+                place(store, 1).unwrap().6,
+                Some(thickness - 1.0),
+                "{name}: {what}"
+            );
+            let names = |v: &Vec<&str>| v.iter().map(|n| n.to_string()).collect::<Vec<_>>();
+            let found = stack_axis::triggers(store).unwrap();
+            assert_eq!(
+                (
+                    found.missing.clone(),
+                    found.disabled.clone(),
+                    found.astray.clone()
+                ),
+                (names(missing), names(disabled), names(astray)),
+                "{name}: {what}"
+            );
+            assert!(!found.in_words().is_empty(), "{name}: {what}");
+
+            let mut reg = home.open().unwrap();
+            let mended = reg
+                .mended()
+                .cloned()
+                .unwrap_or_else(|| panic!("{name}: {what}"));
+            assert_eq!(mended.found, found, "{name}: {what}");
+            assert_eq!(
+                (mended.rows, mended.error.clone()),
+                (Some(1), None),
+                "{name}: {what}"
+            );
+            let store = reg.store();
+            assert_eq!(
+                place(store, 1).unwrap().6,
+                Some(thickness),
+                "{name}: {what}"
+            );
+            agrees(store, name, what);
+            assert_eq!(repairs(store), round as i64 + 1, "{name}: {what}");
+            // and the triggers hear the next write
+            run(
+                store,
+                "UPDATE {print} SET pixel_spacing_row = 0.75 WHERE stack_id = 1",
+            );
+            assert_eq!(place(store, 1).unwrap().4, Some(0.75), "{name}: {what}");
+            run(
+                store,
+                "UPDATE {print} SET pixel_spacing_row = 0.5 WHERE stack_id = 1",
+            );
+            drop(reg);
+            // the open after it finds nothing and writes nothing
+            let mut reg = home.open().unwrap();
+            assert_eq!(reg.mended(), None, "{name}: {what}");
+            assert_eq!(repairs(reg.store()), round as i64 + 1, "{name}: {what}");
+        }
+        if postgres {
+            l.registry
+                .store()
+                .batch(&format!("DROP SCHEMA IF EXISTS {astray_schema} CASCADE"))
+                .unwrap();
         }
     }
 }

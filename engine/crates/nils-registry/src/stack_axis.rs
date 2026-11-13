@@ -224,22 +224,130 @@ pub fn refresh(store: &mut Store, stacks: &[i64]) -> Result<(), Error> {
 }
 
 /// The triggers that keep a stack's place and its fingerprint columns:
-/// which table each is on.
-const TRIGGERS: &[(&str, &str)] = &[
-    ("stack_axis_of_stack_written", "stack"),
-    ("stack_axis_of_stack_changed", "stack"),
-    ("stack_axis_of_stack_removed", "stack"),
-    ("stack_axis_of_fingerprint_written", "stack_fingerprint"),
-    ("stack_axis_of_fingerprint_changed", "stack_fingerprint"),
-    ("stack_axis_of_fingerprint_removed", "stack_fingerprint"),
+/// which table each is on, and the function it runs on Postgres.
+const TRIGGERS: &[(&str, &str, &str)] = &[
+    (
+        "stack_axis_of_stack_written",
+        "stack",
+        "stack_axis_of_stack",
+    ),
+    (
+        "stack_axis_of_stack_changed",
+        "stack",
+        "stack_axis_of_stack",
+    ),
+    (
+        "stack_axis_of_stack_removed",
+        "stack",
+        "stack_axis_of_stack",
+    ),
+    (
+        "stack_axis_of_fingerprint_written",
+        "stack_fingerprint",
+        "stack_axis_of_fingerprint",
+    ),
+    (
+        "stack_axis_of_fingerprint_changed",
+        "stack_fingerprint",
+        "stack_axis_of_fingerprint",
+    ),
+    (
+        "stack_axis_of_fingerprint_removed",
+        "stack_fingerprint",
+        "stack_axis_of_fingerprint",
+    ),
 ];
 
 /// On Postgres a table can be emptied without a row being deleted: a
 /// statement trigger each for that.
-const EMPTIED: &[(&str, &str)] = &[
-    ("stack_axis_of_stack_emptied", "stack"),
-    ("stack_axis_of_fingerprint_emptied", "stack_fingerprint"),
+const EMPTIED: &[(&str, &str, &str)] = &[
+    (
+        "stack_axis_of_stack_emptied",
+        "stack",
+        "stack_axis_of_stack_emptied",
+    ),
+    (
+        "stack_axis_of_fingerprint_emptied",
+        "stack_fingerprint",
+        "stack_axis_of_fingerprint_emptied",
+    ),
 ];
+
+/// The functions the triggers run on Postgres, each with its body as it is
+/// written between the dollar quotes. Each names its tables with their
+/// schema, since a trigger runs under the search path of whoever writes;
+/// so the body is this registry's own, and [`triggers`] holds what the
+/// database has against it to the letter.
+fn functions(store: &Store) -> Vec<(&'static str, String)> {
+    let mine = store.qualified("stack_axis");
+    let stack = store.qualified("stack");
+    let nothing = says_nothing(store);
+    let none = no_axes(store);
+    let hot_columns: String = HOT.iter().map(|c| format!(", {c}")).collect();
+    let hot_new: String = HOT.iter().map(|c| format!(", NEW.{c}")).collect();
+    let hot_set: String = HOT
+        .iter()
+        .map(|c| format!(", {c} = excluded.{c}"))
+        .collect();
+    let hot_null: String = HOT.iter().map(|c| format!(", {c} = NULL")).collect();
+    vec![
+        (
+            "stack_axis_of_stack",
+            format!(
+                "\nBEGIN\n\
+                   IF TG_OP = 'DELETE' OR (TG_OP = 'UPDATE' AND OLD.id IS DISTINCT FROM NEW.id) THEN\n\
+                     UPDATE {mine} SET series_id = NULL WHERE stack_id = OLD.id;\n\
+                     DELETE FROM {mine} WHERE stack_id = OLD.id AND {nothing};\n\
+                   END IF;\n\
+                   IF TG_OP <> 'DELETE' THEN\n\
+                     INSERT INTO {mine} (stack_id, series_id, axes, excluded, fingerprinted)\n\
+                     VALUES (NEW.id, NEW.series_id, {none}, 0, 0)\n\
+                     ON CONFLICT (stack_id) DO UPDATE SET series_id = excluded.series_id;\n\
+                   END IF;\n\
+                   RETURN NULL;\n\
+                 END\n"
+            ),
+        ),
+        (
+            "stack_axis_of_fingerprint",
+            format!(
+                "\nBEGIN\n\
+                   IF TG_OP = 'DELETE' OR (TG_OP = 'UPDATE' AND OLD.stack_id IS DISTINCT FROM NEW.stack_id) THEN\n\
+                     UPDATE {mine} SET fingerprinted = 0{hot_null} WHERE stack_id = OLD.stack_id;\n\
+                     DELETE FROM {mine} WHERE stack_id = OLD.stack_id AND {nothing};\n\
+                   END IF;\n\
+                   IF TG_OP <> 'DELETE' THEN\n\
+                     INSERT INTO {mine} (stack_id, series_id, axes, excluded, fingerprinted{hot_columns})\n\
+                     VALUES (NEW.stack_id, (SELECT st.series_id FROM {stack} st WHERE st.id = NEW.stack_id),\n\
+                       {none}, 0, 1{hot_new})\n\
+                     ON CONFLICT (stack_id) DO UPDATE SET fingerprinted = 1{hot_set};\n\
+                   END IF;\n\
+                   RETURN NULL;\n\
+                 END\n"
+            ),
+        ),
+        (
+            "stack_axis_of_stack_emptied",
+            format!(
+                "\nBEGIN\n\
+                   UPDATE {mine} SET series_id = NULL WHERE series_id IS NOT NULL;\n\
+                   DELETE FROM {mine} WHERE {nothing};\n\
+                   RETURN NULL;\n\
+                 END\n"
+            ),
+        ),
+        (
+            "stack_axis_of_fingerprint_emptied",
+            format!(
+                "\nBEGIN\n\
+                   UPDATE {mine} SET fingerprinted = 0{hot_null} WHERE fingerprinted <> 0;\n\
+                   DELETE FROM {mine} WHERE {nothing};\n\
+                   RETURN NULL;\n\
+                 END\n"
+            ),
+        ),
+    ]
+}
 
 /// Set the triggers on `stack` and `stack_fingerprint` that keep this
 /// table's `series_id`, `fingerprinted` and [`HOT`] columns, replacing any
@@ -296,7 +404,7 @@ pub fn ensure_triggers(store: &mut Store) -> Result<(), Error> {
                      DELETE FROM stack_axis WHERE stack_id = {old} AND {nothing};"
                 )
             };
-            for (name, _) in TRIGGERS {
+            for (name, _, _) in TRIGGERS {
                 store.batch(&format!("DROP TRIGGER IF EXISTS {name}"))?;
             }
             store.batch(&format!(
@@ -327,7 +435,6 @@ pub fn ensure_triggers(store: &mut Store) -> Result<(), Error> {
             ))
         }
         Store::Postgres { .. } => {
-            let mine = store.qualified("stack_axis");
             let stack = store.qualified("stack");
             let fingerprint = store.qualified("stack_fingerprint");
             let function = |name: &str| store.qualified(name);
@@ -336,59 +443,20 @@ pub fn ensure_triggers(store: &mut Store) -> Result<(), Error> {
                 .map(|c| format!(" OR OLD.{c} IS DISTINCT FROM NEW.{c}"))
                 .collect();
             let mut sql = String::new();
-            for (name, table) in TRIGGERS.iter().chain(EMPTIED) {
+            for (name, table, _) in TRIGGERS.iter().chain(EMPTIED) {
                 sql.push_str(&format!(
                     "DROP TRIGGER IF EXISTS {name} ON {};\n",
                     store.qualified(table)
                 ));
             }
-            // Each function names its tables with their schema: a trigger
-            // runs under the search path of whoever writes.
+            for (name, body) in functions(store) {
+                sql.push_str(&format!(
+                    "CREATE OR REPLACE FUNCTION {}() RETURNS trigger LANGUAGE plpgsql AS $body${body}$body$;\n",
+                    function(name)
+                ));
+            }
             sql.push_str(&format!(
-                "CREATE OR REPLACE FUNCTION {of_stack}() RETURNS trigger LANGUAGE plpgsql AS $body$\n\
-                 BEGIN\n\
-                   IF TG_OP = 'DELETE' OR (TG_OP = 'UPDATE' AND OLD.id IS DISTINCT FROM NEW.id) THEN\n\
-                     UPDATE {mine} SET series_id = NULL WHERE stack_id = OLD.id;\n\
-                     DELETE FROM {mine} WHERE stack_id = OLD.id AND {nothing};\n\
-                   END IF;\n\
-                   IF TG_OP <> 'DELETE' THEN\n\
-                     INSERT INTO {mine} (stack_id, series_id, axes, excluded, fingerprinted)\n\
-                     VALUES (NEW.id, NEW.series_id, {none}, 0, 0)\n\
-                     ON CONFLICT (stack_id) DO UPDATE SET series_id = excluded.series_id;\n\
-                   END IF;\n\
-                   RETURN NULL;\n\
-                 END\n\
-                 $body$;\n\
-                 CREATE OR REPLACE FUNCTION {of_fingerprint}() RETURNS trigger LANGUAGE plpgsql AS $body$\n\
-                 BEGIN\n\
-                   IF TG_OP = 'DELETE' OR (TG_OP = 'UPDATE' AND OLD.stack_id IS DISTINCT FROM NEW.stack_id) THEN\n\
-                     UPDATE {mine} SET fingerprinted = 0{hot_null} WHERE stack_id = OLD.stack_id;\n\
-                     DELETE FROM {mine} WHERE stack_id = OLD.stack_id AND {nothing};\n\
-                   END IF;\n\
-                   IF TG_OP <> 'DELETE' THEN\n\
-                     INSERT INTO {mine} (stack_id, series_id, axes, excluded, fingerprinted{hot_columns})\n\
-                     VALUES (NEW.stack_id, (SELECT st.series_id FROM {stack} st WHERE st.id = NEW.stack_id),\n\
-                       {none}, 0, 1{hot_new})\n\
-                     ON CONFLICT (stack_id) DO UPDATE SET fingerprinted = 1{hot_set};\n\
-                   END IF;\n\
-                   RETURN NULL;\n\
-                 END\n\
-                 $body$;\n\
-                 CREATE OR REPLACE FUNCTION {stack_emptied}() RETURNS trigger LANGUAGE plpgsql AS $body$\n\
-                 BEGIN\n\
-                   UPDATE {mine} SET series_id = NULL WHERE series_id IS NOT NULL;\n\
-                   DELETE FROM {mine} WHERE {nothing};\n\
-                   RETURN NULL;\n\
-                 END\n\
-                 $body$;\n\
-                 CREATE OR REPLACE FUNCTION {fingerprint_emptied}() RETURNS trigger LANGUAGE plpgsql AS $body$\n\
-                 BEGIN\n\
-                   UPDATE {mine} SET fingerprinted = 0{hot_null} WHERE fingerprinted <> 0;\n\
-                   DELETE FROM {mine} WHERE {nothing};\n\
-                   RETURN NULL;\n\
-                 END\n\
-                 $body$;\n\
-                 CREATE TRIGGER stack_axis_of_stack_written AFTER INSERT ON {stack} \
+                "CREATE TRIGGER stack_axis_of_stack_written AFTER INSERT ON {stack} \
                  FOR EACH ROW EXECUTE FUNCTION {of_stack}();\n\
                  CREATE TRIGGER stack_axis_of_stack_changed AFTER UPDATE ON {stack} \
                  FOR EACH ROW WHEN (OLD.id IS DISTINCT FROM NEW.id OR OLD.series_id IS DISTINCT FROM NEW.series_id) \
@@ -416,44 +484,177 @@ pub fn ensure_triggers(store: &mut Store) -> Result<(), Error> {
     }
 }
 
-/// Whether every trigger [`ensure_triggers`] sets is on its table and runs
-/// for an ordinary write.
-pub fn triggers(store: &mut Store) -> Result<bool, Error> {
+/// What is wrong with the triggers [`ensure_triggers`] sets, by name: none
+/// of the three where they keep the rows.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Triggers {
+    /// Not on its table at all.
+    pub missing: Vec<String>,
+    /// There, and switched off, or left to run for a replica's session
+    /// alone (Postgres).
+    pub disabled: Vec<String>,
+    /// There and running a function that is not this registry's own: one
+    /// of another schema, or one whose body is not the one this engine
+    /// writes, which names this registry's tables with their schema
+    /// (Postgres). A registry copied under another schema's name by a dump
+    /// rewritten by hand has these: its triggers would write the rows of
+    /// the schema it was copied from.
+    pub astray: Vec<String>,
+}
+
+impl Triggers {
+    /// Every trigger is there, runs for an ordinary write and writes this
+    /// registry's rows.
+    pub fn set(&self) -> bool {
+        self.missing.is_empty() && self.disabled.is_empty() && self.astray.is_empty()
+    }
+
+    /// The three in plain words, for a person: empty where they are set.
+    pub fn in_words(&self) -> String {
+        let mut said = Vec::new();
+        for (names, what) in [
+            (&self.missing, "missing"),
+            (&self.disabled, "switched off"),
+            (
+                &self.astray,
+                "running a function that does not write this registry's rows",
+            ),
+        ] {
+            if !names.is_empty() {
+                said.push(format!("{} {what} ({})", names.len(), names.join(", ")));
+            }
+        }
+        said.join("; ")
+    }
+}
+
+/// How the triggers stand: one read of the database's own catalogue,
+/// whatever the registry's size. On Postgres each trigger's function is
+/// held against the body [`ensure_triggers`] would write, to the letter.
+pub fn triggers(store: &mut Store) -> Result<Triggers, Error> {
+    let mut out = Triggers::default();
     match store {
         Store::Sqlite(_) => {
-            let names: Vec<String> = TRIGGERS.iter().map(|(n, _)| format!("'{n}'")).collect();
-            let n = store.query(
-                &format!(
-                    "SELECT COUNT(*) FROM sqlite_master WHERE type = 'trigger' AND name IN ({})",
-                    names.join(", ")
-                ),
-                &[],
-            )?[0]
-                .int(0)?;
-            Ok(n as usize == TRIGGERS.len())
+            let there: Vec<String> = store
+                .query(
+                    "SELECT name FROM sqlite_master WHERE type = 'trigger' \
+                     AND name LIKE 'stack!_axis!_of!_%' ESCAPE '!'",
+                    &[],
+                )?
+                .iter()
+                .map(|r| r.text(0).map(str::to_string))
+                .collect::<Result<_, _>>()?;
+            for (name, _, _) in TRIGGERS {
+                if !there.iter().any(|t| t == name) {
+                    out.missing.push(name.to_string());
+                }
+            }
         }
         Store::Postgres { .. } => {
             let schema = store.schema().unwrap_or("public").to_string();
-            let all: Vec<&(&str, &str)> = TRIGGERS.iter().chain(EMPTIED).collect();
-            let names: Vec<String> = all.iter().map(|(n, _)| format!("'{n}'")).collect();
+            let bodies = functions(store);
             // 'O' runs for an ordinary session and 'A' for every one; 'D'
             // is switched off and 'R' runs for a replica's only
-            let n = store.query(
-                &format!(
-                    "SELECT COUNT(*) FROM pg_trigger t JOIN pg_class c ON c.oid = t.tgrelid \
-                     JOIN pg_namespace n ON n.oid = c.relnamespace \
-                     WHERE n.nspname = $1 AND NOT t.tgisinternal AND t.tgenabled IN ('O', 'A') \
-                     AND ((c.relname = 'stack' AND t.tgname LIKE 'stack_axis_of_stack_%') \
-                       OR (c.relname = 'stack_fingerprint' AND t.tgname LIKE 'stack_axis_of_fingerprint_%')) \
-                     AND t.tgname IN ({})",
-                    names.join(", ")
-                ),
-                &[crate::store::Param::from(schema)],
-            )?[0]
-                .int(0)?;
-            Ok(n as usize == all.len())
+            let there = store.query(
+                "SELECT t.tgname::text, c.relname::text, t.tgenabled::text, pn.nspname::text, \
+                 p.proname::text, p.prosrc \
+                 FROM pg_trigger t JOIN pg_class c ON c.oid = t.tgrelid \
+                 JOIN pg_namespace n ON n.oid = c.relnamespace \
+                 JOIN pg_proc p ON p.oid = t.tgfoid \
+                 JOIN pg_namespace pn ON pn.oid = p.pronamespace \
+                 WHERE n.nspname = $1 AND NOT t.tgisinternal \
+                 AND c.relname IN ('stack', 'stack_fingerprint') \
+                 AND t.tgname LIKE 'stack!_axis!_of!_%' ESCAPE '!'",
+                &[crate::store::Param::from(schema.clone())],
+            )?;
+            for (name, table, function) in TRIGGERS.iter().chain(EMPTIED) {
+                let Some(row) = there.iter().find(|r| {
+                    r.text(0).is_ok_and(|n| n == *name) && r.text(1).is_ok_and(|t| t == *table)
+                }) else {
+                    out.missing.push(name.to_string());
+                    continue;
+                };
+                if !matches!(row.text(2)?, "O" | "A") {
+                    out.disabled.push(name.to_string());
+                }
+                let body = bodies
+                    .iter()
+                    .find(|(f, _)| f == function)
+                    .map(|(_, b)| b.as_str());
+                if row.text(3)? != schema || row.text(4)? != *function || Some(row.text(5)?) != body
+                {
+                    out.astray.push(name.to_string());
+                }
+            }
         }
     }
+    Ok(out)
+}
+
+/// What an open did where it found the triggers not set ([`mend`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Mended {
+    /// What it found.
+    pub found: Triggers,
+    /// The rows made again, where the triggers were set and the rows made;
+    /// none where that failed, and then `error` says why.
+    pub rows: Option<u64>,
+    pub error: Option<String>,
+}
+
+/// Look for the triggers, and where one is missing, switched off or astray
+/// set them all again and make every row again, in one transaction with an
+/// audit row and a new epoch, as `nils repair stack-axis` records a
+/// rebuild: the rows written while the triggers were not there say what
+/// their sources said before. None where the triggers are set, which is
+/// one read of the catalogue. A registry is opened either way: where the
+/// mending fails (a store opened to read, a role that may not write the
+/// table), `error` says so and nothing is changed.
+pub fn mend(store: &mut Store, principal: &str) -> Result<Option<Mended>, Error> {
+    let found = triggers(store)?;
+    if found.set() {
+        return Ok(None);
+    }
+    store.begin()?;
+    let done = (|| -> Result<u64, Error> {
+        let rows = rebuild(store)?;
+        crate::home::next_epoch_in(store)?;
+        crate::audit::record_in(
+            store,
+            &crate::audit::Entry {
+                principal,
+                action: crate::audit::Action::RegistryRepair,
+                scope: serde_json::json!({"repair": "stack-axis", "at": "open"}),
+                policy: None,
+                job_id: None,
+                details: Some(serde_json::json!({
+                    "triggers_missing": found.missing,
+                    "triggers_disabled": found.disabled,
+                    "triggers_astray": found.astray,
+                    "rows": rows,
+                })),
+            },
+        )?;
+        Ok(rows)
+    })();
+    Ok(Some(match done {
+        Ok(rows) => {
+            store.commit()?;
+            Mended {
+                found,
+                rows: Some(rows),
+                error: None,
+            }
+        }
+        Err(e) => {
+            store.rollback().ok();
+            Mended {
+                found,
+                rows: None,
+                error: Some(e.to_string()),
+            }
+        }
+    }))
 }
 
 /// Set the triggers and make every row again from its sources, and say how
@@ -507,7 +708,7 @@ pub fn verify(store: &mut Store) -> Result<Standing, Error> {
     let rows = fresh(store, None);
     let mut out = Standing {
         stacks: store.query(&format!("SELECT COUNT(*) FROM {mine}"), &[])?[0].int(0)? as u64,
-        triggers: triggers(store)?,
+        triggers: triggers(store)?.set(),
         ..Standing::default()
     };
     // a null on one side only is a difference, which `<>` would not say
