@@ -738,6 +738,25 @@ fn a_compile_only_refusal_reaches_a_model_as_a_refused_document() {
     server.stop();
 }
 
+/// 2026-11-13: a draft that will not parse reaches a model with where its
+/// reading stopped, after the words it was told before.
+#[test]
+fn a_draft_that_will_not_parse_tells_a_model_where() {
+    let home = synthetic();
+    let server = Server::start(&home, &packs(), &[]);
+    let text = "ast_version: 1\nsets:\n  scans: {grain: stack}\n  good:\n    grain: session\n    attach: [{as: scan, set: scans, foo: 1}]\nout: {set: good, level: count}\n";
+    let refused = server.call("nils_draft", json!({"text": text}), None);
+    assert_eq!(refused["isError"], true, "{refused}");
+    assert_eq!(
+        refused["content"][0]["text"],
+        "the ask will not parse: unknown field `foo`, expected one of `as`, `set`, `optional`\n  \
+         not_parsed at sets.good.attach[0] (change the document at sets.good.attach[0] as the error says; \
+         GET /api/ask/schema describes a document)",
+        "{refused}"
+    );
+    server.stop();
+}
+
 /// Record 55 K7, small lists at plain (the ruling of 2026-10-13): through
 /// the tools a model calls, a list of the first visits of the 2 subjects 45
 /// or older answers no row at plain, names every column as held back and

@@ -2181,3 +2181,142 @@ fn the_sets_a_quasi_field_chose_and_the_counts_held_are_traced() {
         assert!(at_quasi.quasi_sets.is_empty() && at_quasi.counts.is_empty());
     }
 }
+
+/// 2026-11-13: a document that will not parse says where its reading
+/// stopped. A model was told `invalid type: integer 1, expected a sequence`
+/// and `unknown field foo, expected one of as, set, optional` and not which
+/// part of its document either was about. The path is the dotted one an
+/// issue of the validator names, the same for a YAML and a JSON document,
+/// with and without repair; the words are the ones said before.
+#[test]
+fn a_document_that_will_not_parse_says_where() {
+    let shaped = |text: &str, path: &str, words: &str| {
+        for e in [
+            parse(text).expect_err("no ask"),
+            parse_repaired(text).expect_err("repair makes no ask of it"),
+        ] {
+            assert_eq!(e.path(), Some(path), "{text}: {e}");
+            assert_eq!(e.to_string(), format!("the ask will not parse: {words}"));
+            match e {
+                nils_ask::Error::Shape { path: p, message } => {
+                    assert_eq!((p.as_str(), message.as_str()), (path, words));
+                }
+                other => panic!("{other:?}"),
+            }
+        }
+    };
+    // a number where a list is written
+    let not_a_list = "invalid type: integer `1`, expected a sequence";
+    shaped(
+        r#"
+ast_version: 1
+sets:
+  scans: {grain: stack}
+  good: {grain: session, attach: 1}
+out: {set: good, level: count}
+"#,
+        "sets.good.attach",
+        not_a_list,
+    );
+    shaped(
+        &json!({
+            "ast_version": 1,
+            "sets": {"scans": {"grain": "stack"}, "good": {"grain": "session", "attach": 1}},
+            "out": {"set": "good", "level": "count"}
+        })
+        .to_string(),
+        "sets.good.attach",
+        not_a_list,
+    );
+    // a key the part does not have, at the item that holds it
+    let no_such_key = "unknown field `foo`, expected one of `as`, `set`, `optional`";
+    shaped(
+        r#"
+ast_version: 1
+sets:
+  scans: {grain: stack}
+  good:
+    grain: session
+    attach:
+      - {as: scan, set: scans, foo: 1}
+out: {set: good, level: count}
+"#,
+        "sets.good.attach[0]",
+        no_such_key,
+    );
+    shaped(
+        &json!({
+            "ast_version": 1,
+            "sets": {
+                "scans": {"grain": "stack"},
+                "good": {"grain": "session", "attach": [{"as": "scan", "set": "scans", "foo": 1}]}
+            },
+            "out": {"set": "good", "level": "count"}
+        })
+        .to_string(),
+        "sets.good.attach[0]",
+        no_such_key,
+    );
+    // the second item of a list is named by its place
+    let second = json!({
+        "ast_version": 1,
+        "sets": {
+            "scans": {"grain": "stack"},
+            "good": {"grain": "session", "attach": [
+                {"as": "scan", "set": "scans"},
+                {"as": "other", "set": "scans", "foo": 1}
+            ]}
+        },
+        "out": {"set": "good", "level": "count"}
+    });
+    shaped(&second.to_string(), "sets.good.attach[1]", no_such_key);
+    // a key the document itself does not have is told at the document
+    let e = parse(
+        r#"{"ast_version": 1, "sets": {}, "out": {"set": "s", "level": "count"}, "nope": 1}"#,
+    )
+    .expect_err("no such key");
+    assert_eq!(e.path(), Some("document"), "{e}");
+    // a clause is read whole, so a fault inside one is told at the clause
+    let e = parse(
+        &json!({
+            "ast_version": 1,
+            "sets": {"good": {"grain": "session", "where": [["=", {}, ["field", {}, "label"], "a"], [1]]}},
+            "out": {"set": "good", "level": "count"}
+        })
+        .to_string(),
+    )
+    .expect_err("no clause");
+    assert_eq!(e.path(), Some("sets.good.where[1]"), "{e}");
+    // the pick clause's own words still follow its refusal, at the pick
+    let e = parse(
+        r#"
+ast_version: 1
+sets:
+  t1: {grain: stack, pick: {per: session, model: main, by: [[["field", {}, "id"], asc]]}}
+out: {set: t1, level: count}
+"#,
+    )
+    .expect_err("model is no key of pick");
+    assert_eq!(e.path(), Some("sets.t1.pick"), "{e}");
+    assert!(
+        e.to_string().contains(r#"[["picked", {role: t1w}]]"#),
+        "{e}"
+    );
+    // a text that is neither JSON nor YAML has no place to name
+    for text in ["{\"ast_version\": 1,", "sets: [unclosed"] {
+        let e = parse(text).expect_err("no document");
+        assert_eq!(e.path(), None, "{e}");
+        assert!(matches!(e, nils_ask::Error::Parse(_)), "{e:?}");
+    }
+    // and a document that parses is the one it was
+    for name in ["gold-a", "gold-b", "gold-c", "yardstick"] {
+        let text = std::fs::read_to_string(format!(
+            "{}/fixtures/{name}.ask.yml",
+            env!("CARGO_MANIFEST_DIR")
+        ))
+        .unwrap();
+        let ask = parse(&text).unwrap_or_else(|e| panic!("{name}: {e}"));
+        let direct: nils_ask::Ask = serde_json::from_value(nils_ask::read(&text).unwrap()).unwrap();
+        assert_eq!(ask, direct, "{name}");
+    }
+}

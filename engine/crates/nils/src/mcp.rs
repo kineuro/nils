@@ -277,6 +277,14 @@ fn refusal(reply: &Reply) -> Value {
         .map(String::from)
         .unwrap_or_else(|| reply.body.to_string());
     let mut text = message;
+    // a document that will not parse says where its reading stopped
+    if let Some(path) = reply.body["path"].as_str() {
+        text.push_str(&format!(
+            "\n  {} at {path} ({})",
+            reply.body["code"].as_str().unwrap_or_default(),
+            reply.body["next"].as_str().unwrap_or_default()
+        ));
+    }
     for i in reply.body["issues"].as_array().into_iter().flatten() {
         text.push_str(&format!(
             "\n  {} at {}: {} ({})",

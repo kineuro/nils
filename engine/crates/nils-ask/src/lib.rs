@@ -37,8 +37,16 @@ use serde_json::Value;
 
 #[derive(Debug)]
 pub enum Error {
-    /// The text is neither JSON nor YAML of an ask.
+    /// The text is neither JSON nor YAML.
     Parse(String),
+    /// The text reads as JSON or YAML and is not an ask: where in the
+    /// document its reading stopped, as the dotted path an issue of the
+    /// validator names (`sets.good.attach[0]`, `document` for the whole),
+    /// and why.
+    Shape {
+        path: String,
+        message: String,
+    },
     Sugar(SugarError),
     Invalid(Vec<Issue>),
 }
@@ -47,6 +55,9 @@ impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Error::Parse(m) => write!(f, "the ask will not parse: {m}"),
+            // the same words as before the path was known: the path is told
+            // beside them, by `Error::path`
+            Error::Shape { message, .. } => write!(f, "the ask will not parse: {message}"),
             Error::Sugar(e) => write!(f, "the ask will not desugar: {e}"),
             Error::Invalid(issues) => {
                 write!(f, "the ask is refused:")?;
@@ -60,6 +71,17 @@ impl std::fmt::Display for Error {
 }
 
 impl std::error::Error for Error {}
+
+impl Error {
+    /// Where in the document a parse stopped, when the text read as JSON or
+    /// YAML: the path a caller changes the document at.
+    pub fn path(&self) -> Option<&str> {
+        match self {
+            Error::Shape { path, .. } => Some(path),
+            _ => None,
+        }
+    }
+}
 
 /// Read a document as JSON, else as YAML, into a JSON value.
 ///
@@ -84,27 +106,67 @@ pub fn read(text: &str) -> Result<Value, Error> {
 pub const PICK_IS_NOT_THE_MAIN_SCANS: &str = "pick keeps the first rows of a set by an order (per, by, n, ties); \
 the main scans NILS picked are a stack set's where: [[\"picked\", {role: t1w}]], one role per clause";
 
-/// A document's parse error, with the next step where the mistake is known.
-fn parse_error(e: serde_json::Error) -> Error {
-    let m = e.to_string();
-    if m.contains("expected one of `per`, `by`, `n`, `ties`") {
-        return Error::Parse(format!("{m}; {PICK_IS_NOT_THE_MAIN_SCANS}"));
+/// Where a reading stopped, as the dotted path an issue of the validator
+/// names: a key after a dot, a place in a list in brackets, `document` for
+/// the whole. An unknown key is told at the part that holds it, which is
+/// the part to change, so the key itself is left off the path.
+fn path_of(path: &serde_path_to_error::Path, message: &str) -> String {
+    use serde_path_to_error::Segment;
+    let mut segments: Vec<&Segment> = path.iter().collect();
+    if let Some(Segment::Map { key }) = segments.last()
+        && message.starts_with(&format!("unknown field `{key}`"))
+    {
+        segments.pop();
     }
-    Error::Parse(m)
+    let mut out = String::new();
+    for s in segments {
+        match s {
+            Segment::Seq { index } => out.push_str(&format!("[{index}]")),
+            Segment::Map { key } | Segment::Enum { variant: key } => {
+                if !out.is_empty() {
+                    out.push('.');
+                }
+                out.push_str(key);
+            }
+            Segment::Unknown => {
+                if !out.is_empty() {
+                    out.push('.');
+                }
+                out.push('?');
+            }
+        }
+    }
+    if out.is_empty() {
+        out.push_str("document");
+    }
+    out
+}
+
+/// The ask a value holds, or where its reading stopped and why, with the
+/// next step where the mistake is known. A YAML document and a JSON one are
+/// both read from the value, so both are told the same path. A clause is
+/// read whole, so a fault inside one is told at the clause.
+fn ask_of(v: Value) -> Result<Ask, Error> {
+    serde_path_to_error::deserialize(v).map_err(|e| {
+        let mut message = e.inner().to_string();
+        let path = path_of(e.path(), &message);
+        if message.contains("expected one of `per`, `by`, `n`, `ties`") {
+            message = format!("{message}; {PICK_IS_NOT_THE_MAIN_SCANS}");
+        }
+        Error::Shape { path, message }
+    })
 }
 
 /// A document parsed strictly: no repair, unknown keys refused.
 pub fn parse(text: &str) -> Result<Ask, Error> {
-    let v = read(text)?;
-    serde_json::from_value(v).map_err(parse_error)
+    ask_of(read(text)?)
 }
 
 /// A document parsed after structural repair, with what was repaired.
 pub fn parse_repaired(text: &str) -> Result<(Ask, Vec<Repair>), Error> {
     let mut v = read(text)?;
     let repairs = repair::repair(&mut v);
-    let ask = serde_json::from_value(v).map_err(parse_error)?;
-    Ok((ask, repairs))
+    Ok((ask_of(v)?, repairs))
 }
 
 /// What a door or a runner holds once a document is accepted: the

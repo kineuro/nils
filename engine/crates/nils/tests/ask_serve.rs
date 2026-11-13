@@ -5197,3 +5197,116 @@ fn a_slow_question_is_drafted_valid_and_answered_as_a_job() {
     assert_eq!(result["row_count"], 1, "{done}");
     assert!(result["content_hash"].is_string(), "{done}");
 }
+
+/// 2026-11-13: a document that will not parse is refused with where its
+/// reading stopped. The draft door told a model `invalid type: integer 1,
+/// expected a sequence` and `unknown field foo, expected one of as, set,
+/// optional`, and not which part of its document either was about. The 400
+/// keeps `error` as it was and gains `path`, the dotted path an issue names,
+/// with `code` and `next`: for a YAML and a JSON text at the draft door, and
+/// for a document at the doors that take one. A text that is neither YAML
+/// nor JSON has no place to name, and is answered as before.
+#[test]
+fn a_document_that_will_not_parse_is_refused_with_where() {
+    let home = synthetic();
+    let server = Server::start(&home, 8, &[]);
+    let not_a_list = "the ask will not parse: invalid type: integer `1`, expected a sequence";
+    let no_such_key =
+        "the ask will not parse: unknown field `foo`, expected one of `as`, `set`, `optional`";
+    let refused = |door: &str, request: serde_json::Value, error: &str, path: &str| {
+        let (status, r) = server.request("POST", door, Some(&body(request)), None);
+        assert_eq!(status, 400, "{door}: {r}");
+        assert_eq!(r["error"], error, "{door}: {r}");
+        assert_eq!(r["disclosure"], "safe", "{door}: {r}");
+        assert_eq!(r["code"], "not_parsed", "{door}: {r}");
+        assert_eq!(r["path"], path, "{door}: {r}");
+        assert_eq!(
+            r["next"],
+            format!(
+                "change the document at {path} as the error says; GET /api/ask/schema describes a document"
+            ),
+            "{door}: {r}"
+        );
+    };
+    let document = |attach: serde_json::Value| {
+        serde_json::json!({
+            "ast_version": 1,
+            "sets": {
+                "scans": {"grain": "stack"},
+                "good": {"grain": "session", "attach": attach}
+            },
+            "out": {"set": "good", "level": "count"}
+        })
+    };
+    let number = document(serde_json::json!(1));
+    let key = document(serde_json::json!([{"as": "scan", "set": "scans", "foo": 1}]));
+    // the draft door, a text as YAML and as JSON
+    let yaml = |attach: &str| {
+        format!(
+            "ast_version: 1\nsets:\n  scans: {{grain: stack}}\n  good:\n    grain: session\n    attach: {attach}\nout: {{set: good, level: count}}\n"
+        )
+    };
+    let draft = |text: String| serde_json::json!({"text": text});
+    refused(
+        "/api/ask/draft",
+        draft(yaml("1")),
+        not_a_list,
+        "sets.good.attach",
+    );
+    refused(
+        "/api/ask/draft",
+        draft(number.to_string()),
+        not_a_list,
+        "sets.good.attach",
+    );
+    refused(
+        "/api/ask/draft",
+        draft(yaml("[{as: scan, set: scans, foo: 1}]")),
+        no_such_key,
+        "sets.good.attach[0]",
+    );
+    refused(
+        "/api/ask/draft",
+        draft(key.to_string()),
+        no_such_key,
+        "sets.good.attach[0]",
+    );
+    // the doors that take a document, strictly and under repair
+    refused(
+        "/api/ask/validate",
+        serde_json::json!({"document": number}),
+        &format!("the document is refused: {not_a_list}"),
+        "sets.good.attach",
+    );
+    refused(
+        "/api/ask/validate",
+        serde_json::json!({"document": key, "mode": "repair"}),
+        no_such_key,
+        "sets.good.attach[0]",
+    );
+    refused(
+        "/api/ask/run",
+        serde_json::json!({"document": key}),
+        &format!("the document is refused: {no_such_key}"),
+        "sets.good.attach[0]",
+    );
+    // a text that is no document at all: the words alone, as before
+    let (status, r) = server.request(
+        "POST",
+        "/api/ask/draft",
+        Some(&body(draft("sets: [unclosed".to_string()))),
+        None,
+    );
+    assert_eq!(status, 400, "{r}");
+    assert!(
+        r["error"]
+            .as_str()
+            .is_some_and(|e| e.starts_with("the ask will not parse: ")),
+        "{r}"
+    );
+    assert_eq!(r["disclosure"], "safe", "{r}");
+    for absent in ["path", "code", "next"] {
+        assert_eq!(r[absent], serde_json::Value::Null, "{absent}: {r}");
+    }
+    server.finish();
+}

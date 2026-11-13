@@ -75,6 +75,8 @@ rusqlite = { version = "0.40", features = ["bundled"] }
 schemars = { version = "1.2", features = ["preserve_order"] }
 serde = { version = "1.0", features = ["derive"] }
 serde-saphyr = "1.2"
+# Where in a document its reading stopped, as a path (nils-ask's parse errors).
+serde_path_to_error = "0.1"
 # float_roundtrip: a release reads dcm2niix's sidecar and writes it back, and the
 # default parser misreads some 17-digit decimals by an ulp.
 serde_json = { version = "1.0", features = ["preserve_order", "float_roundtrip"] }
