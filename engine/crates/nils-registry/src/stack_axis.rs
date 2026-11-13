@@ -1,32 +1,72 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
-//! The axes of a stack as one row (`stack_axis`): a read model of
-//! `classification_axis`, which keeps a row per value and stays the place
-//! of truth. A question that reads an axis of every stack of a set (a
-//! predicate, a group's key, a level's signature, the rule that a stack the
-//! pack ruled out is in no set) read `classification_axis` once per stack
-//! and axis, and on a registry of half a million stacks and five million
-//! axis rows the reading was most of the question's time. Here each stack
-//! has one row:
+//! One row a stack (`stack_axis`): what a question reads of every stack of
+//! a set, kept beside each other so that the set is one read of one table.
+//!
+//! **The axes**, a read model of `classification_axis`, which keeps a row
+//! per value and stays the place of truth. A question that reads an axis of
+//! every stack of a set (a predicate, a group's key, a level's signature,
+//! the rule that a stack the pack ruled out is in no set) read
+//! `classification_axis` once per stack and axis, and on a registry of half
+//! a million stacks and five million axis rows the reading was most of the
+//! question's time. Here each stack has:
 //!
 //! - `axes`, one JSON object: each axis the stack has a row of, with the
 //!   array of its values, one element per row, a row with no value as null;
+//!   a stack with no axis row has the empty object;
 //! - `excluded`, 1 where the stack's `disposition` holds `excluded`, with a
 //!   unique index over those rows alone, so the rule is one lookup in a
 //!   list of the few stacks ruled out.
 //!
-//! It holds nothing `classification_axis` does not: the same values per
-//! stack and axis, grouped. What a value is called, in which order values
-//! are listed and what a stack with none reads as are all decided where the
-//! row is read, as they were on the rows themselves.
+//! **The stack's place and its hot fingerprint columns** (schema 119).
+//! With the axes in one row, what was left of a plain count of stacks was
+//! the joins a stack set made row by row before it could hold a clause
+//! against a stack: the stack to its fingerprint and to its row here. So
+//! the row also holds
 //!
-//! **It is never stale.** Every writer of `classification_axis` calls
-//! [`refresh`] for the stacks it wrote, inside the transaction that wrote
-//! them: the sort's class and disposition phases, a pass, the session
-//! pass, the synthetic registries. A stack that is removed takes its row
-//! with it (`crate::empty::STACK_TABLES`). [`verify`] compares the two for
-//! every stack and [`rebuild`] makes the read model again from nothing
-//! (`nils repair stack-axis`); the migration that added it is a rebuild.
+//! - `series_id`, the stack's own, null where no stack of this id is (a
+//!   fingerprint or an axis row some writer left of a stack that is gone);
+//! - `fingerprinted`, 1 where the stack has a fingerprint row, and the
+//!   columns of it a question filters stacks on ([`HOT`]): the acquisition
+//!   type as filled and as read, the two pixel spacings and the slice
+//!   thickness, each null where the fingerprint's is or where there is
+//!   none.
+//!
+//! A stack set is then read from here and tied to its series; the stack's
+//! own table and its fingerprint are joined only where a set names another
+//! column of theirs.
+//!
+//! The row holds nothing its sources do not. What a value is called, in
+//! which order values are listed and what a stack with none reads as are
+//! all decided where the row is read, as they were on the rows themselves.
+//! A row that would say nothing (no stack, no fingerprint, no axis row) is
+//! no row.
+//!
+//! **It is never stale**, by two means.
+//!
+//! The axes: every writer of `classification_axis` calls [`refresh`] for
+//! the stacks it wrote, inside the transaction that wrote them: the sort's
+//! class and disposition phases, a pass, the session pass, the synthetic
+//! registries. [`refresh`] makes the whole row again from its sources, so
+//! it also mends the other columns of those stacks.
+//!
+//! The stack's place and the fingerprint columns: the database keeps them
+//! (2026-11-13). `stack` and `stack_fingerprint` each have triggers that
+//! write this row in the statement that wrote theirs ([`ensure_triggers`]).
+//! Their writers are many and of many kinds: the digest's bulk insert, the
+//! fingerprint job's upsert, a fold, a sweep driven by a list of tables, a
+//! merge that repoints every table with a subject, the synthetic
+//! registries, and tests that write a row by hand. A call in each would be
+//! a list somebody keeps; a trigger is the one thing every one of them
+//! passes, whoever writes and however. A trigger does not see a table
+//! emptied by `TRUNCATE` on SQLite (which has none) and is told of it on
+//! Postgres; it does not run where it was dropped or switched off, or
+//! under a session that asks for none (`session_replication_role`), and a
+//! table copied by hand comes without it. [`verify`] says whether the
+//! triggers are there and compares every column of every row with its
+//! sources, and [`rebuild`] sets the triggers again and makes every row
+//! again (`nils repair stack-axis`); the migrations that added the table
+//! and the columns are a rebuild each.
 
 use serde::{Deserialize, Serialize};
 
@@ -36,6 +76,16 @@ use crate::store::{Error, Store};
 /// 4.4 rule 10): no set of a question sees it.
 pub const RULED_OUT: (&str, &str) = ("disposition", "excluded");
 
+/// The columns of a stack's fingerprint row this row carries: the ones a
+/// question filters stacks on (the derived acquisition type and voxel).
+pub const HOT: &[&str] = &[
+    "acquisition_type_filled",
+    "mr_acquisition_type",
+    "pixel_spacing_row",
+    "pixel_spacing_col",
+    "slice_thickness",
+];
+
 fn list(ids: &[i64]) -> String {
     ids.iter()
         .map(i64::to_string)
@@ -43,18 +93,39 @@ fn list(ids: &[i64]) -> String {
         .join(", ")
 }
 
-/// Every stack's row as `classification_axis` says it now, `(stack_id,
-/// axes, excluded)`, for the stacks `scope` names (`ax.stack_id IN (...)`)
-/// or for all. The object's keys and each array's values are put in one
-/// order, so that the same rows always make the same document.
-fn fresh(store: &Store, scope: Option<&str>) -> String {
+/// The empty object, as the backend writes it.
+fn no_axes(store: &Store) -> &'static str {
+    match store {
+        Store::Sqlite(_) => "'{}'",
+        Store::Postgres { .. } => "'{}'::jsonb",
+    }
+}
+
+/// Whether a row says nothing: of no stack, no fingerprint and no axis row.
+fn says_nothing(store: &Store) -> String {
+    format!(
+        "series_id IS NULL AND fingerprinted = 0 AND excluded = 0 AND axes = {}",
+        no_axes(store)
+    )
+}
+
+/// Every stack's row as its sources say it now, `(stack_id, series_id,
+/// axes, excluded, fingerprinted,` [`HOT`]`)`, for the stacks `ids` names
+/// or for all. A row for every id one of the sources has: `stack`,
+/// `stack_fingerprint`, `classification_axis`. The object's keys and each
+/// array's values are put in one order, so that the same rows always make
+/// the same document.
+fn fresh(store: &Store, ids: Option<&str>) -> String {
     let axis = store.qualified("classification_axis");
-    let scope = scope.map_or(String::new(), |s| format!(" WHERE {s}"));
+    let stack = store.qualified("stack");
+    let fingerprint = store.qualified("stack_fingerprint");
+    let among = |column: &str| ids.map_or(String::new(), |i| format!(" WHERE {column} IN ({i})"));
     let (ruled_axis, ruled_value) = RULED_OUT;
     let excluded = format!(
         "MAX(CASE WHEN ax.axis = '{ruled_axis}' AND ax.value = '{ruled_value}' THEN 1 ELSE 0 END)"
     );
-    match store {
+    let scope = among("ax.stack_id");
+    let axes = match store {
         Store::Sqlite(_) => format!(
             "SELECT a.stack_id AS stack_id, \
              json_group_object(a.axis, json(a.vals) ORDER BY a.axis) AS axes, \
@@ -70,40 +141,295 @@ fn fresh(store: &Store, scope: Option<&str>) -> String {
              jsonb_agg(ax.value ORDER BY ax.value) AS vals, {excluded} AS excluded \
              FROM {axis} ax{scope} GROUP BY ax.stack_id, ax.axis) a GROUP BY a.stack_id"
         ),
-    }
+    };
+    let hot: String = HOT.iter().map(|c| format!(", f.{c} AS {c}")).collect();
+    format!(
+        "SELECT k.stack_id AS stack_id, st.series_id AS series_id, \
+         COALESCE(a.axes, {none}) AS axes, COALESCE(a.excluded, 0) AS excluded, \
+         CASE WHEN f.stack_id IS NULL THEN 0 ELSE 1 END AS fingerprinted{hot} \
+         FROM (SELECT id AS stack_id FROM {stack}{of_stack} \
+         UNION SELECT stack_id FROM {fingerprint}{of_row} \
+         UNION SELECT ax.stack_id FROM {axis} ax{scope}) k \
+         LEFT JOIN {stack} st ON st.id = k.stack_id \
+         LEFT JOIN {fingerprint} f ON f.stack_id = k.stack_id \
+         LEFT JOIN ({axes}) a ON a.stack_id = k.stack_id",
+        none = no_axes(store),
+        of_stack = among("id"),
+        of_row = among("stack_id"),
+    )
 }
 
-/// Bring the rows of these stacks up to what `classification_axis` holds
-/// for them now. Every writer of `classification_axis` calls this for the
-/// stacks it wrote, inside its own transaction, after its last write: a
-/// stack left with no axis row is left with no row here.
+/// The columns of a row, in the order [`fresh`] gives them.
+fn columns() -> String {
+    let mut out = String::from("stack_id, series_id, axes, excluded, fingerprinted");
+    for c in HOT {
+        out.push_str(", ");
+        out.push_str(c);
+    }
+    out
+}
+
+/// Bring the rows of these stacks up to what their sources hold for them
+/// now. Every writer of `classification_axis` calls this for the stacks it
+/// wrote, inside its own transaction, after its last write. The whole row
+/// is made again, the stack's place and its fingerprint columns with the
+/// axes; a stack none of the sources has is left with no row here.
 pub fn refresh(store: &mut Store, stacks: &[i64]) -> Result<(), Error> {
     let mine = store.qualified("stack_axis");
+    let columns = columns();
     for chunk in stacks.chunks(500) {
         let ids = list(chunk);
         store.execute(
             &format!("DELETE FROM {mine} WHERE stack_id IN ({ids})"),
             &[],
         )?;
-        let rows = fresh(store, Some(&format!("ax.stack_id IN ({ids})")));
-        store.execute(
-            &format!("INSERT INTO {mine} (stack_id, axes, excluded) {rows}"),
-            &[],
-        )?;
+        let rows = fresh(store, Some(&ids));
+        store.execute(&format!("INSERT INTO {mine} ({columns}) {rows}"), &[])?;
     }
     Ok(())
 }
 
-/// Make every row again from `classification_axis`, and say how many
-/// stacks have one. Runs inside the caller's transaction, if any.
+/// The triggers that keep a stack's place and its fingerprint columns:
+/// which table each is on.
+const TRIGGERS: &[(&str, &str)] = &[
+    ("stack_axis_of_stack_written", "stack"),
+    ("stack_axis_of_stack_changed", "stack"),
+    ("stack_axis_of_stack_removed", "stack"),
+    ("stack_axis_of_fingerprint_written", "stack_fingerprint"),
+    ("stack_axis_of_fingerprint_changed", "stack_fingerprint"),
+    ("stack_axis_of_fingerprint_removed", "stack_fingerprint"),
+];
+
+/// On Postgres a table can be emptied without a row being deleted: a
+/// statement trigger each for that.
+const EMPTIED: &[(&str, &str)] = &[
+    ("stack_axis_of_stack_emptied", "stack"),
+    ("stack_axis_of_fingerprint_emptied", "stack_fingerprint"),
+];
+
+/// Set the triggers on `stack` and `stack_fingerprint` that keep this
+/// table's `series_id`, `fingerprinted` and [`HOT`] columns, replacing any
+/// of the same names. Each writes the row of the stack its own row names,
+/// in the statement that wrote that row:
+///
+/// - a stack inserted, or given another series: its row here is made or
+///   its `series_id` set;
+/// - a stack deleted: `series_id` is null, and the row goes if it then
+///   says nothing;
+/// - a fingerprint inserted, or one of its columns here changed: the row
+///   is made, or `fingerprinted` and the columns set;
+/// - a fingerprint deleted, or moved to another stack: `fingerprinted` is
+///   0 and the columns null on the stack it left, and the row goes if it
+///   then says nothing.
+///
+/// An insert that replaces a row on a conflict runs the insert's trigger
+/// with the row that stays, so the columns are that row's.
+pub fn ensure_triggers(store: &mut Store) -> Result<(), Error> {
+    let nothing = says_nothing(store);
+    let none = no_axes(store);
+    let hot_columns: String = HOT.iter().map(|c| format!(", {c}")).collect();
+    let hot_new: String = HOT.iter().map(|c| format!(", NEW.{c}")).collect();
+    let hot_set: String = HOT
+        .iter()
+        .map(|c| format!(", {c} = excluded.{c}"))
+        .collect();
+    let hot_null: String = HOT.iter().map(|c| format!(", {c} = NULL")).collect();
+    match store {
+        Store::Sqlite(_) => {
+            // `IS NOT` holds for a null against a value, which `<>` does not
+            let hot_differs: String = HOT
+                .iter()
+                .map(|c| format!(" OR OLD.{c} IS NOT NEW.{c}"))
+                .collect();
+            let place = "INSERT INTO stack_axis (stack_id, series_id, axes, excluded, fingerprinted) \
+                 VALUES (NEW.id, NEW.series_id, '{}', 0, 0) \
+                 ON CONFLICT (stack_id) DO UPDATE SET series_id = excluded.series_id;";
+            let left = |old: &str| {
+                format!(
+                    "UPDATE stack_axis SET series_id = NULL WHERE stack_id = {old}; \
+                     DELETE FROM stack_axis WHERE stack_id = {old} AND {nothing};"
+                )
+            };
+            let print = format!(
+                "INSERT INTO stack_axis (stack_id, series_id, axes, excluded, fingerprinted{hot_columns}) \
+                 VALUES (NEW.stack_id, (SELECT st.series_id FROM stack st WHERE st.id = NEW.stack_id), \
+                 {none}, 0, 1{hot_new}) \
+                 ON CONFLICT (stack_id) DO UPDATE SET fingerprinted = 1{hot_set};"
+            );
+            let unprinted = |old: &str| {
+                format!(
+                    "UPDATE stack_axis SET fingerprinted = 0{hot_null} WHERE stack_id = {old}; \
+                     DELETE FROM stack_axis WHERE stack_id = {old} AND {nothing};"
+                )
+            };
+            for (name, _) in TRIGGERS {
+                store.batch(&format!("DROP TRIGGER IF EXISTS {name}"))?;
+            }
+            store.batch(&format!(
+                "CREATE TRIGGER stack_axis_of_stack_written AFTER INSERT ON stack \
+                 BEGIN {place} END;\n\
+                 CREATE TRIGGER stack_axis_of_stack_changed AFTER UPDATE ON stack \
+                 WHEN OLD.id IS NOT NEW.id OR OLD.series_id IS NOT NEW.series_id \
+                 BEGIN \
+                 UPDATE stack_axis SET series_id = NULL WHERE stack_id = OLD.id AND OLD.id IS NOT NEW.id; \
+                 DELETE FROM stack_axis WHERE stack_id = OLD.id AND OLD.id IS NOT NEW.id AND {nothing}; \
+                 {place} END;\n\
+                 CREATE TRIGGER stack_axis_of_stack_removed AFTER DELETE ON stack \
+                 BEGIN {gone} END;\n\
+                 CREATE TRIGGER stack_axis_of_fingerprint_written AFTER INSERT ON stack_fingerprint \
+                 BEGIN {print} END;\n\
+                 CREATE TRIGGER stack_axis_of_fingerprint_changed AFTER UPDATE ON stack_fingerprint \
+                 WHEN OLD.stack_id IS NOT NEW.stack_id{hot_differs} \
+                 BEGIN \
+                 UPDATE stack_axis SET fingerprinted = 0{hot_null} \
+                 WHERE stack_id = OLD.stack_id AND OLD.stack_id IS NOT NEW.stack_id; \
+                 DELETE FROM stack_axis WHERE stack_id = OLD.stack_id \
+                 AND OLD.stack_id IS NOT NEW.stack_id AND {nothing}; \
+                 {print} END;\n\
+                 CREATE TRIGGER stack_axis_of_fingerprint_removed AFTER DELETE ON stack_fingerprint \
+                 BEGIN {unprint} END;",
+                gone = left("OLD.id"),
+                unprint = unprinted("OLD.stack_id"),
+            ))
+        }
+        Store::Postgres { .. } => {
+            let mine = store.qualified("stack_axis");
+            let stack = store.qualified("stack");
+            let fingerprint = store.qualified("stack_fingerprint");
+            let function = |name: &str| store.qualified(name);
+            let hot_differs: String = HOT
+                .iter()
+                .map(|c| format!(" OR OLD.{c} IS DISTINCT FROM NEW.{c}"))
+                .collect();
+            let mut sql = String::new();
+            for (name, table) in TRIGGERS.iter().chain(EMPTIED) {
+                sql.push_str(&format!(
+                    "DROP TRIGGER IF EXISTS {name} ON {};\n",
+                    store.qualified(table)
+                ));
+            }
+            // Each function names its tables with their schema: a trigger
+            // runs under the search path of whoever writes.
+            sql.push_str(&format!(
+                "CREATE OR REPLACE FUNCTION {of_stack}() RETURNS trigger LANGUAGE plpgsql AS $body$\n\
+                 BEGIN\n\
+                   IF TG_OP = 'DELETE' OR (TG_OP = 'UPDATE' AND OLD.id IS DISTINCT FROM NEW.id) THEN\n\
+                     UPDATE {mine} SET series_id = NULL WHERE stack_id = OLD.id;\n\
+                     DELETE FROM {mine} WHERE stack_id = OLD.id AND {nothing};\n\
+                   END IF;\n\
+                   IF TG_OP <> 'DELETE' THEN\n\
+                     INSERT INTO {mine} (stack_id, series_id, axes, excluded, fingerprinted)\n\
+                     VALUES (NEW.id, NEW.series_id, {none}, 0, 0)\n\
+                     ON CONFLICT (stack_id) DO UPDATE SET series_id = excluded.series_id;\n\
+                   END IF;\n\
+                   RETURN NULL;\n\
+                 END\n\
+                 $body$;\n\
+                 CREATE OR REPLACE FUNCTION {of_fingerprint}() RETURNS trigger LANGUAGE plpgsql AS $body$\n\
+                 BEGIN\n\
+                   IF TG_OP = 'DELETE' OR (TG_OP = 'UPDATE' AND OLD.stack_id IS DISTINCT FROM NEW.stack_id) THEN\n\
+                     UPDATE {mine} SET fingerprinted = 0{hot_null} WHERE stack_id = OLD.stack_id;\n\
+                     DELETE FROM {mine} WHERE stack_id = OLD.stack_id AND {nothing};\n\
+                   END IF;\n\
+                   IF TG_OP <> 'DELETE' THEN\n\
+                     INSERT INTO {mine} (stack_id, series_id, axes, excluded, fingerprinted{hot_columns})\n\
+                     VALUES (NEW.stack_id, (SELECT st.series_id FROM {stack} st WHERE st.id = NEW.stack_id),\n\
+                       {none}, 0, 1{hot_new})\n\
+                     ON CONFLICT (stack_id) DO UPDATE SET fingerprinted = 1{hot_set};\n\
+                   END IF;\n\
+                   RETURN NULL;\n\
+                 END\n\
+                 $body$;\n\
+                 CREATE OR REPLACE FUNCTION {stack_emptied}() RETURNS trigger LANGUAGE plpgsql AS $body$\n\
+                 BEGIN\n\
+                   UPDATE {mine} SET series_id = NULL WHERE series_id IS NOT NULL;\n\
+                   DELETE FROM {mine} WHERE {nothing};\n\
+                   RETURN NULL;\n\
+                 END\n\
+                 $body$;\n\
+                 CREATE OR REPLACE FUNCTION {fingerprint_emptied}() RETURNS trigger LANGUAGE plpgsql AS $body$\n\
+                 BEGIN\n\
+                   UPDATE {mine} SET fingerprinted = 0{hot_null} WHERE fingerprinted <> 0;\n\
+                   DELETE FROM {mine} WHERE {nothing};\n\
+                   RETURN NULL;\n\
+                 END\n\
+                 $body$;\n\
+                 CREATE TRIGGER stack_axis_of_stack_written AFTER INSERT ON {stack} \
+                 FOR EACH ROW EXECUTE FUNCTION {of_stack}();\n\
+                 CREATE TRIGGER stack_axis_of_stack_changed AFTER UPDATE ON {stack} \
+                 FOR EACH ROW WHEN (OLD.id IS DISTINCT FROM NEW.id OR OLD.series_id IS DISTINCT FROM NEW.series_id) \
+                 EXECUTE FUNCTION {of_stack}();\n\
+                 CREATE TRIGGER stack_axis_of_stack_removed AFTER DELETE ON {stack} \
+                 FOR EACH ROW EXECUTE FUNCTION {of_stack}();\n\
+                 CREATE TRIGGER stack_axis_of_stack_emptied AFTER TRUNCATE ON {stack} \
+                 FOR EACH STATEMENT EXECUTE FUNCTION {stack_emptied}();\n\
+                 CREATE TRIGGER stack_axis_of_fingerprint_written AFTER INSERT ON {fingerprint} \
+                 FOR EACH ROW EXECUTE FUNCTION {of_fingerprint}();\n\
+                 CREATE TRIGGER stack_axis_of_fingerprint_changed AFTER UPDATE ON {fingerprint} \
+                 FOR EACH ROW WHEN (OLD.stack_id IS DISTINCT FROM NEW.stack_id{hot_differs}) \
+                 EXECUTE FUNCTION {of_fingerprint}();\n\
+                 CREATE TRIGGER stack_axis_of_fingerprint_removed AFTER DELETE ON {fingerprint} \
+                 FOR EACH ROW EXECUTE FUNCTION {of_fingerprint}();\n\
+                 CREATE TRIGGER stack_axis_of_fingerprint_emptied AFTER TRUNCATE ON {fingerprint} \
+                 FOR EACH STATEMENT EXECUTE FUNCTION {fingerprint_emptied}();\n",
+                of_stack = function("stack_axis_of_stack"),
+                of_fingerprint = function("stack_axis_of_fingerprint"),
+                stack_emptied = function("stack_axis_of_stack_emptied"),
+                fingerprint_emptied = function("stack_axis_of_fingerprint_emptied"),
+            ));
+            store.batch(&sql)
+        }
+    }
+}
+
+/// Whether every trigger [`ensure_triggers`] sets is on its table and runs
+/// for an ordinary write.
+pub fn triggers(store: &mut Store) -> Result<bool, Error> {
+    match store {
+        Store::Sqlite(_) => {
+            let names: Vec<String> = TRIGGERS.iter().map(|(n, _)| format!("'{n}'")).collect();
+            let n = store.query(
+                &format!(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE type = 'trigger' AND name IN ({})",
+                    names.join(", ")
+                ),
+                &[],
+            )?[0]
+                .int(0)?;
+            Ok(n as usize == TRIGGERS.len())
+        }
+        Store::Postgres { .. } => {
+            let schema = store.schema().unwrap_or("public").to_string();
+            let all: Vec<&(&str, &str)> = TRIGGERS.iter().chain(EMPTIED).collect();
+            let names: Vec<String> = all.iter().map(|(n, _)| format!("'{n}'")).collect();
+            // 'O' runs for an ordinary session and 'A' for every one; 'D'
+            // is switched off and 'R' runs for a replica's only
+            let n = store.query(
+                &format!(
+                    "SELECT COUNT(*) FROM pg_trigger t JOIN pg_class c ON c.oid = t.tgrelid \
+                     JOIN pg_namespace n ON n.oid = c.relnamespace \
+                     WHERE n.nspname = $1 AND NOT t.tgisinternal AND t.tgenabled IN ('O', 'A') \
+                     AND ((c.relname = 'stack' AND t.tgname LIKE 'stack_axis_of_stack_%') \
+                       OR (c.relname = 'stack_fingerprint' AND t.tgname LIKE 'stack_axis_of_fingerprint_%')) \
+                     AND t.tgname IN ({})",
+                    names.join(", ")
+                ),
+                &[crate::store::Param::from(schema)],
+            )?[0]
+                .int(0)?;
+            Ok(n as usize == all.len())
+        }
+    }
+}
+
+/// Set the triggers and make every row again from its sources, and say how
+/// many stacks have one. Runs inside the caller's transaction, if any.
 pub fn rebuild(store: &mut Store) -> Result<u64, Error> {
+    ensure_triggers(store)?;
     let mine = store.qualified("stack_axis");
     store.execute(&format!("DELETE FROM {mine}"), &[])?;
     let rows = fresh(store, None);
-    let made = store.execute(
-        &format!("INSERT INTO {mine} (stack_id, axes, excluded) {rows}"),
-        &[],
-    )?;
+    let made = store.execute(&format!("INSERT INTO {mine} ({}) {rows}", columns()), &[])?;
     // Postgres plans a question from what it last counted of a table, and
     // of rows just written it has counted nothing: until its own sweep
     // came by, a minute or more, the first questions after a rebuild
@@ -114,41 +440,58 @@ pub fn rebuild(store: &mut Store) -> Result<u64, Error> {
     Ok(made)
 }
 
-/// How the read model stands against `classification_axis`.
+/// How the table stands against its sources.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Standing {
     /// Stacks with a row.
     pub stacks: u64,
-    /// Stacks with axis rows and no row here.
+    /// Stacks one of the sources has and no row here.
     pub missing: u64,
-    /// Rows here of stacks with no axis row.
+    /// Rows here of stacks none of the sources has.
     pub extra: u64,
-    /// Rows that say something else than the axis rows do.
+    /// Rows that say something else than their sources do.
     pub different: u64,
     /// Some of the stacks that differ, lowest first.
     pub sample: Vec<i64>,
+    /// Whether the triggers that keep the stack's place and the
+    /// fingerprint columns are set ([`triggers`]).
+    pub triggers: bool,
 }
 
 impl Standing {
-    /// Every stack's row says what its axis rows say.
+    /// Every stack's row says what its sources say, and the triggers that
+    /// keep it so are set.
     pub fn agrees(&self) -> bool {
-        self.missing == 0 && self.extra == 0 && self.different == 0
+        self.missing == 0 && self.extra == 0 && self.different == 0 && self.triggers
     }
 }
 
-/// Compare the read model against `classification_axis` for every stack.
+/// Compare every column of every row against its sources, and look for
+/// the triggers.
 pub fn verify(store: &mut Store) -> Result<Standing, Error> {
     let mine = store.qualified("stack_axis");
     let rows = fresh(store, None);
     let mut out = Standing {
         stacks: store.query(&format!("SELECT COUNT(*) FROM {mine}"), &[])?[0].int(0)? as u64,
+        triggers: triggers(store)?,
         ..Standing::default()
     };
+    // a null on one side only is a difference, which `<>` would not say
+    let differs = match store {
+        Store::Sqlite(_) => "IS NOT",
+        Store::Postgres { .. } => "IS DISTINCT FROM",
+    };
+    let other: String = ["series_id", "fingerprinted"]
+        .iter()
+        .chain(HOT)
+        .map(|c| format!(" OR x.{c} {differs} n.{c}"))
+        .collect();
     let differing = format!(
         "SELECT COALESCE(n.stack_id, x.stack_id) AS stack_id, \
          CASE WHEN x.stack_id IS NULL THEN 0 WHEN n.stack_id IS NULL THEN 1 ELSE 2 END AS how \
          FROM ({rows}) n FULL JOIN {mine} x ON x.stack_id = n.stack_id \
-         WHERE x.stack_id IS NULL OR n.stack_id IS NULL OR x.axes <> n.axes OR x.excluded <> n.excluded"
+         WHERE x.stack_id IS NULL OR n.stack_id IS NULL OR x.axes <> n.axes \
+         OR x.excluded <> n.excluded{other}"
     );
     for r in store.query(
         &format!("SELECT d.how, COUNT(*) FROM ({differing}) d GROUP BY d.how"),

@@ -1940,12 +1940,14 @@ enum RepairCommand {
         #[arg(long)]
         json: bool,
     },
-    /// Hold the axes of every stack as one row (`stack_axis`, which a
-    /// question reads the axes of a stack from) against the axis rows they
-    /// are made of, and make them all again where one differs. Every writer
-    /// of an axis keeps the two together in one transaction, so a
-    /// difference is a write that went around the engine. The repair is
-    /// audited, and answers kept before it are not read again
+    /// Hold every stack's row of `stack_axis` (which a question reads a
+    /// stack's axes, its series and some columns of its fingerprint from)
+    /// against the axis rows, the stack and the fingerprint it is made of,
+    /// look for the triggers that keep it, and set them and make every row
+    /// again where a row differs or a trigger is gone. Every writer of an
+    /// axis keeps its part in one transaction and the database keeps the
+    /// rest, so a difference is a write that went around both. The repair
+    /// is audited, and answers kept before it are not read again
     StackAxis {
         /// Say how the two stand, and write nothing
         #[arg(long)]
@@ -7328,8 +7330,10 @@ fn confirm(prompt: &str) -> Result<bool, Exit> {
     Ok(answer.trim().eq_ignore_ascii_case("yes"))
 }
 
-/// `nils repair stack-axis`: the read model of the axes held against the
-/// axis rows for every stack, and made again where they differ.
+/// `nils repair stack-axis`: every stack's row (its axes, its series and
+/// the fingerprint columns it carries) held against its sources, with the
+/// triggers that keep part of it, and all of it made again where a row
+/// differs or a trigger is gone.
 fn repair_stack_axis(home: &Home, dry_run: bool, json: bool) -> Result<(), Exit> {
     let mut registry = open(home)?;
     let principal = actor();
@@ -7354,6 +7358,7 @@ fn repair_stack_axis(home: &Home, dry_run: bool, json: bool) -> Result<(), Exit>
                         "missing": found.missing,
                         "extra": found.extra,
                         "different": found.different,
+                        "triggers": found.triggers,
                     })),
                 },
             )?;
@@ -7375,23 +7380,29 @@ fn repair_stack_axis(home: &Home, dry_run: bool, json: bool) -> Result<(), Exit>
             "missing": found.missing,
             "extra": found.extra,
             "different": found.different,
+            "triggers": found.triggers,
             "sample": found.sample,
             "rebuilt": rebuild,
         });
         println!("{}", serde_json::to_string_pretty(&doc).unwrap_or_default());
     } else if found.agrees() {
         println!(
-            "the axes of {} stacks are one row each, and every row says what its axis rows say",
+            "{} stacks have one row each, and every row says what its stack, its fingerprint and its axis rows say",
             found.stacks
         );
     } else {
         println!(
-            "{} stacks have no row, {} rows are of a stack with no axis row and {} say something else than the axis rows; {}",
+            "{} stacks have no row, {} rows are of a stack nothing else holds and {} say something else than their sources{}; {}",
             found.missing,
             found.extra,
             found.different,
+            if found.triggers {
+                ""
+            } else {
+                ", and the triggers that keep a stack's series and fingerprint columns are not all set"
+            },
             if rebuild {
-                "every row was made again"
+                "the triggers were set and every row was made again"
             } else {
                 "nothing was written"
             }
@@ -8833,7 +8844,7 @@ fn custody_doc(home: &Home, registry: &mut Registry) -> Result<serde_json::Value
             "store": "classifications",
             "owner": "the pack's author for the rules, the reviewers for the decisions",
             "what": "what a pack decided about each stack, one row per axis, with the evidence that made it, every rule's vote on it and any decision a person recorded",
-            "where": "rows of stack_fingerprint, classification, classification_axis (and the same values a row a stack in stack_axis), classification_evidence, classification_voter, classification_vote and decision in the registry",
+            "where": "rows of stack_fingerprint (five of its columns again in the stack's row of stack_axis), classification, classification_axis (and the same values a row a stack in stack_axis), classification_evidence, classification_voter, classification_vote and decision in the registry",
             "files": [],
             "holds": ["technical: the fields a pack reads, the axes, the tiers and confidences, the rule that fired, every clause that held and the value its rule said", "a person's words: the why on a decision"],
             "counts": { "fingerprints": fingerprints, "classified": classified, "decisions": decisions },

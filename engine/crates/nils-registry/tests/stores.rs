@@ -2879,6 +2879,181 @@ fn migration_69_lets_a_campaign_carry_suggestions_on_both_backends() {
     }
 }
 
+/// A registry whose rows of `stack_axis` hold the axes and nothing else, as
+/// migration 118 left them: migration 119 makes the table again with the
+/// stack's series and its fingerprint columns, fills every row from the
+/// stacks, the fingerprints and the axis rows the registry holds, and sets
+/// the triggers, so that a write after it is kept with no call from its
+/// writer. Who could read the table can read it still.
+#[test]
+fn migration_119_puts_a_stack_s_place_and_fingerprint_in_its_row_on_both_backends() {
+    for (name, _guard, mut store) in stores() {
+        migrate::migrate(&mut store, Kind::Registry).unwrap();
+        let (a, x, st, f, meta) = (
+            store.qualified("classification_axis"),
+            store.qualified("stack_axis"),
+            store.qualified("stack"),
+            store.qualified("stack_fingerprint"),
+            store.qualified("registry_meta"),
+        );
+        let postgres = name.starts_with("postgres");
+        // the table as schema 118 declared it, and no trigger
+        let (json, int, named) = if postgres {
+            ("JSONB", "BIGINT", " OVERRIDING SYSTEM VALUE")
+        } else {
+            ("TEXT", "INTEGER", "")
+        };
+        let triggers: String = [
+            ("stack_axis_of_stack_written", &st),
+            ("stack_axis_of_stack_changed", &st),
+            ("stack_axis_of_stack_removed", &st),
+            ("stack_axis_of_fingerprint_written", &f),
+            ("stack_axis_of_fingerprint_changed", &f),
+            ("stack_axis_of_fingerprint_removed", &f),
+        ]
+        .iter()
+        .map(|(trigger, table)| {
+            if postgres {
+                format!("DROP TRIGGER {trigger} ON {table};\n")
+            } else {
+                format!("DROP TRIGGER {trigger};\n")
+            }
+        })
+        .collect();
+        store
+            .batch(&format!(
+                "{triggers}
+                 DROP TABLE {x};
+                 CREATE TABLE {x} (stack_id {int} NOT NULL, axes {json} NOT NULL, \
+                   excluded {int} NOT NULL, PRIMARY KEY (stack_id));
+                 INSERT INTO {st} (id, series_id, stack_index, stack_key, modality, orientation, \
+                   n_instances, first_batch_id){named} VALUES
+                   (7, 70, 0, 'a', 'MR', 'ax', 1, 1), (8, 70, 1, 'b', 'MR', 'ax', 1, 1),
+                   (10, 71, 0, 'c', 'MR', 'ax', 1, 1);
+                 INSERT INTO {f} (stack_id, series_id, study_id, subject_id, modality, orientation, \
+                   n_instances, stack_index, stacks_in_series, job_id, epoch, \
+                   acquisition_type_filled, mr_acquisition_type, pixel_spacing_row, \
+                   pixel_spacing_col, slice_thickness) VALUES
+                   (7, 70, 1, 1, 'MR', 'ax', 1, 0, 2, 1, 1, '3D', NULL, 0.5, 0.5, 1.0),
+                   (10, 71, 1, 1, 'MR', 'ax', 1, 0, 1, 1, 1, NULL, '2D', NULL, 0.4, 5.0);
+                 INSERT INTO {a} (stack_id, axis, value, confidence, tier) VALUES
+                   (7, 'base', 'T2w', 0.9, 'keywords'),
+                   (8, 'disposition', 'excluded', 0.9, 'stated'),
+                   (9, 'construct', NULL, 1.0, 'decision');
+                 INSERT INTO {x} (stack_id, axes, excluded) VALUES
+                   (7, '{{\"base\": [\"T2w\"]}}', 0), (8, '{{\"disposition\": [\"excluded\"]}}', 1),
+                   (9, '{{\"construct\": [null]}}', 0);
+                 UPDATE {meta} SET value = '118' WHERE key = 'schema_version'"
+            ))
+            .unwrap();
+        let reader = "nils_stack_row_reader";
+        let granted = postgres
+            && store
+                .batch(&format!(
+                    "DROP ROLE IF EXISTS {reader}; CREATE ROLE {reader}; \
+                     GRANT SELECT ON {x} TO {reader}"
+                ))
+                .is_ok();
+        assert!(
+            !migrate::column_exists(&mut store, "stack_axis", "fingerprinted").unwrap(),
+            "{name}"
+        );
+        assert_eq!(
+            migrate::migrate(&mut store, Kind::Registry).unwrap(),
+            (119..=migrate::SCHEMA_VERSION).collect::<Vec<i64>>(),
+            "{name}"
+        );
+        let standing = nils_registry::stack_axis::verify(&mut store).unwrap();
+        assert!(standing.agrees(), "{name}: {standing:?}");
+        // a row for each of the four stacks something holds: two with a
+        // fingerprint, one with axes alone, one that is a stack alone
+        assert_eq!(standing.stacks, 4, "{name}");
+        let rows = store
+            .query(
+                &format!(
+                    "SELECT stack_id, series_id, fingerprinted, excluded, acquisition_type_filled, \
+                     mr_acquisition_type, pixel_spacing_row, slice_thickness FROM {x} ORDER BY stack_id"
+                ),
+                &[],
+            )
+            .unwrap();
+        use nils_registry::store::Cell::{Double, Int, Null, Text};
+        assert_eq!(
+            rows.iter().map(|r| r.0.clone()).collect::<Vec<_>>(),
+            vec![
+                vec![
+                    Int(7),
+                    Int(70),
+                    Int(1),
+                    Int(0),
+                    Text("3D".into()),
+                    Null,
+                    Double(0.5),
+                    Double(1.0)
+                ],
+                vec![Int(8), Int(70), Int(0), Int(1), Null, Null, Null, Null],
+                vec![Int(9), Null, Int(0), Int(0), Null, Null, Null, Null],
+                vec![
+                    Int(10),
+                    Int(71),
+                    Int(1),
+                    Int(0),
+                    Null,
+                    Text("2D".into()),
+                    Null,
+                    Double(5.0)
+                ],
+            ],
+            "{name}"
+        );
+        // a write after the migration is kept by the database
+        store
+            .batch(&format!(
+                "UPDATE {f} SET slice_thickness = 2.5 WHERE stack_id = 7; \
+                 DELETE FROM {f} WHERE stack_id = 10"
+            ))
+            .unwrap();
+        let standing = nils_registry::stack_axis::verify(&mut store).unwrap();
+        assert!(standing.agrees(), "{name}: {standing:?}");
+        if postgres {
+            // the planner has counted the rows the migration wrote
+            let counted = store
+                .query(
+                    &format!("SELECT reltuples > 0 FROM pg_class WHERE oid = '{x}'::regclass"),
+                    &[],
+                )
+                .unwrap();
+            assert_eq!(
+                counted[0].0[0],
+                nils_registry::store::Cell::Bool(true),
+                "{name}"
+            );
+        }
+        if granted {
+            let may = store
+                .query(
+                    &format!("SELECT has_table_privilege('{reader}', '{x}', 'SELECT')"),
+                    &[],
+                )
+                .unwrap();
+            assert_eq!(
+                may[0].0[0],
+                nils_registry::store::Cell::Bool(true),
+                "{name}"
+            );
+            let _ = store.batch(&format!(
+                "REVOKE ALL ON {x} FROM {reader}; DROP ROLE IF EXISTS {reader}"
+            ));
+        }
+        assert!(
+            migrate::migrate(&mut store, Kind::Registry)
+                .unwrap()
+                .is_empty(),
+            "{name}"
+        );
+    }
+}
+
 /// A registry from before the read model of the axes: migration 118 adds
 /// `stack_axis` and fills it from the axis rows the registry holds, a stack
 /// of several values, one the pack ruled out and one decided to nothing

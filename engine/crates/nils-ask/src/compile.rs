@@ -616,8 +616,56 @@ struct Needs {
     /// The session of a stack or an instance: a field of it, or its key
     /// for a set of sessions to count or pick by.
     session: bool,
-    /// The axes of a stack, its row of the read model.
-    axes: bool,
+    /// A column of a stack's own row that its row of the read model does
+    /// not carry (its index, its orientation, its count of instances).
+    stack: bool,
+    /// A column of a stack's fingerprint that its row of the read model
+    /// does not carry.
+    fingerprint: bool,
+}
+
+/// Whether a term's SQL reads a column of the relation `alias` names.
+fn reads_alias(sql: &str, alias: &str) -> bool {
+    let dotted = format!("{alias}.");
+    sql.match_indices(&dotted).any(|(at, _)| {
+        sql[..at]
+            .chars()
+            .next_back()
+            .is_none_or(|c| !(c.is_ascii_alphanumeric() || c == '_'))
+    })
+}
+
+thread_local! {
+    /// Whether a stack set on this thread reads every fingerprint column
+    /// through the fingerprint's own row ([`fingerprint_by_join`]).
+    static BY_JOIN: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Have the stack sets compiled on this thread read a stack's fingerprint
+/// as they did before its row of the read model carried any of it: tied to
+/// the fingerprint's own row, a stack with none in no set, every column
+/// from that row. It is what a test holds the read model's columns to, on
+/// stacks with no fingerprint and with columns of it unknown; nothing else
+/// asks for it.
+#[doc(hidden)]
+pub fn fingerprint_by_join(on: bool) {
+    BY_JOIN.set(on);
+}
+
+/// A column of a stack as a stack set reads it: from the stack's row of
+/// the read model (`xa`) where the row carries it, which is the stack's
+/// key and the fingerprint columns `nils_registry::stack_axis::HOT` names,
+/// and from the stack's own table or its fingerprint otherwise.
+fn of_stack_row(mut t: Term) -> Term {
+    if t.sql == "st.id" {
+        t.sql = "xa.stack_id".into();
+    } else if let Some(column) = t.sql.strip_prefix("f.")
+        && nils_registry::stack_axis::HOT.contains(&column)
+        && !BY_JOIN.get()
+    {
+        t.sql = format!("xa.{column}");
+    }
+    t
 }
 
 /// What ties a relation that restricts a set to the set's base: the base's
@@ -1124,16 +1172,6 @@ impl<'a> Builder<'a> {
                     String::new()
                 };
                 let label = label(self);
-                // the stack's row of the read model, where a clause reads an
-                // axis of it
-                let axes = if needs.axes && grain == Grain::Stack {
-                    format!(
-                        " LEFT JOIN {} xa ON xa.stack_id = st.id",
-                        q(self, "stack_axis")
-                    )
-                } else {
-                    String::new()
-                };
                 let detail = if needs.detail && grain == Grain::Stack {
                     format!(
                         " LEFT JOIN {} smr ON smr.series_id = se.id",
@@ -1162,19 +1200,33 @@ impl<'a> Builder<'a> {
                 let (series, study, subject) =
                     (q(self, "series"), q(self, "study"), q(self, "subject"));
                 let (scs, sc) = (q(self, "session_cache_study"), q(self, "session_cache"));
-                // the grain's own rows off a series: a stack with its
-                // fingerprint, or an instance (the same rule, for the same
-                // reason)
+                // The grain's own rows off a series. An instance is its own
+                // row. A stack is its row of the read model
+                // (`nils_registry::stack_axis`), which names its series and
+                // carries its axes and the fingerprint columns a question
+                // filters on: one row read where the stack, its fingerprint
+                // and its axes were three, tied row by row. The stack's own
+                // table and its fingerprint are joined where the set names
+                // another column of theirs, each by its key.
                 let (unit, of_series, own_first) = if grain == Grain::Stack {
-                    let (st, f) = (q(self, "stack"), q(self, "stack_fingerprint"));
+                    let xa = q(self, "stack_axis");
+                    let mut more = String::new();
+                    if needs.stack {
+                        more.push_str(&format!(
+                            " JOIN {} st ON st.id = xa.stack_id",
+                            q(self, "stack")
+                        ));
+                    }
+                    if needs.fingerprint || BY_JOIN.get() {
+                        more.push_str(&format!(
+                            " JOIN {} f ON f.stack_id = xa.stack_id",
+                            q(self, "stack_fingerprint")
+                        ));
+                    }
                     (
-                        format!("{st} st"),
-                        format!(
-                            " JOIN {st} st ON st.series_id = se.id JOIN {f} f ON f.stack_id = st.id"
-                        ),
-                        format!(
-                            " JOIN {series} se ON se.id = st.series_id JOIN {f} f ON f.stack_id = st.id"
-                        ),
+                        format!("{xa} xa"),
+                        format!(" JOIN {xa} xa ON xa.series_id = se.id{more}"),
+                        format!(" JOIN {series} se ON se.id = xa.series_id{more}"),
                     )
                 } else {
                     let i = q(self, "instance");
@@ -1209,34 +1261,39 @@ impl<'a> Builder<'a> {
                             " JOIN {scs} scs ON scs.session_id = sc.id AND scs.window_days = {window} \
                              JOIN {study} sy ON sy.id = scs.study_id \
                              JOIN {series} se ON se.study_id = sy.id AND {own}{of_series} \
-                             JOIN {subject} su ON su.id = se.subject_id{axes}{label}{detail}"
+                             JOIN {subject} su ON su.id = se.subject_id{label}{detail}"
                         ),
                     ),
                     Via::Subject => (
                         format!("{subject} su"),
                         format!(
                             " JOIN {series} se ON se.subject_id = su.id{of_series} \
-                             JOIN {study} sy ON sy.id = se.study_id{axes}{sessions}{label}{detail}"
+                             JOIN {study} sy ON sy.id = se.study_id{sessions}{label}{detail}"
                         ),
                     ),
                     Via::Key => (
                         unit,
                         format!(
                             "{own_first} JOIN {subject} su ON su.id = se.subject_id \
-                             JOIN {study} sy ON sy.id = se.study_id{axes}{sessions}{label}{detail}"
+                             JOIN {study} sy ON sy.id = se.study_id{sessions}{label}{detail}"
                         ),
                     ),
                 };
                 let mut standing = Vec::new();
                 let stack = if grain == Grain::Stack {
+                    // A stack set holds the stacks that have a fingerprint,
+                    // as it did when it was tied to the fingerprint's own
+                    // row: the read model says which they are.
+                    if !BY_JOIN.get() {
+                        standing.push("xa.fingerprinted = 1".into());
+                    }
                     // §4.4 rule 10 and §14.2: a stack the pack ruled out is
                     // not a stack any set sees, and a document cannot switch
                     // it off. Describe prints this predicate, so the query
                     // has to carry it or the two disagree by exactly the
-                    // excluded stacks. It reads the few rows of the read
-                    // model that say so (`nils_registry::stack_axis`).
-                    standing.push(self.not_ruled_out("dax", "st.id"));
-                    "st.id"
+                    // excluded stacks. The stack's row says so itself.
+                    standing.push("xa.excluded = 0".into());
+                    "xa.stack_id"
                 } else {
                     "i.stack_id"
                 };
@@ -1247,7 +1304,7 @@ impl<'a> Builder<'a> {
                     first,
                     joins,
                     key: if grain == Grain::Stack {
-                        "st.id"
+                        "xa.stack_id"
                     } else {
                         "i.id"
                     }
@@ -1356,8 +1413,17 @@ impl<'a> Builder<'a> {
     /// a partial key lists), where every stack's `disposition` rows were
     /// looked up before.
     fn not_ruled_out(&self, alias: &str, stack: &str) -> String {
+        // SQLite is told which index: with a row for every stack it took
+        // the lookup for one by the table's key, a row read for every
+        // stack asked, where the key over the rows that say `excluded`
+        // holds only those few.
+        let by = if self.sql.is_pg() {
+            ""
+        } else {
+            " INDEXED BY uq_stack_axis_excluded"
+        };
         format!(
-            "NOT EXISTS (SELECT 1 FROM {} {alias} WHERE {alias}.stack_id = {stack} AND {alias}.excluded = 1)",
+            "NOT EXISTS (SELECT 1 FROM {} {alias}{by} WHERE {alias}.stack_id = {stack} AND {alias}.excluded = 1)",
             self.q("stack_axis")
         )
     }
@@ -1900,7 +1966,7 @@ impl<'a> Builder<'a> {
             _ => return None,
         };
         let unit = |a: &str| match level {
-            "stack" => Some(format!("{a}.stack_id = st.id")),
+            "stack" => Some(format!("{a}.stack_id = xa.stack_id")),
             "session" => Some(format!(
                 "{a}.subject_id = su.id AND {a}.session_day = sc.first"
             )),
@@ -2010,7 +2076,12 @@ impl<'a> Builder<'a> {
                 return (rest == "id" && frame.of.is_some())
                     .then(|| Term::plain("cm.cohort_id".into()));
             }
-            return self.base_column(first, rest);
+            let t = self.base_column(first, rest);
+            return if grain == Grain::Stack && first == "stack" {
+                t.map(of_stack_row)
+            } else {
+                t
+            };
         }
         if let Some(of) = &frame.of
             && of == first
@@ -2022,7 +2093,12 @@ impl<'a> Builder<'a> {
             }
             return self.base_column(ancestor.grain.name(), rest);
         }
-        self.base_column(grain.name(), path)
+        let t = self.base_column(grain.name(), path);
+        if grain == Grain::Stack {
+            t.map(of_stack_row)
+        } else {
+            t
+        }
     }
 
     /// The link from a child set's CTE to a parent grain's key.
@@ -2218,6 +2294,8 @@ impl<'a> Builder<'a> {
                     needs.label |= x.starts_with("sl.");
                     needs.detail |= x.starts_with("smr.");
                     needs.session |= x.contains("sc.") || x.starts_with("sl.");
+                    needs.stack |= reads_alias(x, "st");
+                    needs.fingerprint |= reads_alias(x, "f");
                 }
                 needs.session |= t.holder == Some(Holder::Session);
             }
@@ -2236,7 +2314,7 @@ impl<'a> Builder<'a> {
             Grain::Cohort => "c.id",
             Grain::Subject => "su.id",
             Grain::Session => "sc.id",
-            Grain::Stack => "st.id",
+            Grain::Stack => "xa.stack_id",
             Grain::Instance => "i.id",
             Grain::Event => "e.id",
             Grain::Group | Grain::Pair => "",
@@ -2290,7 +2368,7 @@ impl<'a> Builder<'a> {
                     on: vec![
                         format!("p.role = {role}"),
                         "ps.pick_id = p.id".into(),
-                        "ps.stack_id = st.id".into(),
+                        "ps.stack_id = xa.stack_id".into(),
                     ],
                 });
             }
@@ -2453,7 +2531,6 @@ impl<'a> Builder<'a> {
         } else {
             BTreeSet::new()
         };
-        needs.axes = !axes.is_empty();
         let base = self.base(set.grain, &path, needs, anchor)?;
         let mut from = String::new();
         let mut wheres: Vec<String> = Vec::new();
