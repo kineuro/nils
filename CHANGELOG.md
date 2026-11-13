@@ -4,6 +4,10 @@ All notable changes to NILS v1 are recorded here. The format follows [Keep a Cha
 
 ## [Unreleased]
 
+### Fixed
+
+- The assistant's proposed changes have a store on an install. Its environment file named none, the assistant looked for one in a `data` folder under the folder it runs from and does not make that folder, so every proposal failed with a store that could not be opened. `nils setup` now writes `ASSISTANT_CHANGES` beside the assistant's other stores, and an install from before gains the line when `nils update` restarts its services or `nils setup` is run again; a line a site wrote, and a store an install already keeps at the old place, stay as they are.
+
 ## [1.0.0-beta.15] - 2026-11-12
 
 The fifteenth engine beta makes the pages of Data answer at once: the datasets, the cohorts, a dataset's summary and its subjects are answered from what the engine kept and read again apart from the request. Subjects can be listed in the order of what they are shown by.

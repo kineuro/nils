@@ -14353,6 +14353,8 @@ fn write_assistant_env(plan: &Plan, chosen: Option<&ModelChoice>) -> Result<(), 
         if let Some(model) = model {
             set_env_line(&mut lines, "ASSISTANT_MODEL", Some(model));
         }
+        // a file from before the assistant kept the changes it proposes
+        name_assistant_changes(&mut lines, &dir);
         let mended = format!("{}\n", lines.join("\n"));
         if mended != text {
             std::fs::write(&path, mended).map_err(|e| fail(format!("{}: {e}", path.display())))?;
@@ -14392,12 +14394,74 @@ fn write_assistant_env(plan: &Plan, chosen: Option<&ModelChoice>) -> Result<(), 
         "ASSISTANT_NOTES={}",
         dir.join("notes.sqlite").display()
     );
+    let _ = writeln!(
+        text,
+        "{ASSISTANT_CHANGES}={}",
+        assistant_changes(&dir).display()
+    );
     let _ = writeln!(text, "DESK_ORIGIN={origin}");
     let _ = writeln!(text, "PORT={}", plan.ports.assistant);
     if let Some(host) = host {
         let _ = writeln!(text, "HOST={host}");
     }
     std::fs::write(&path, text).map_err(|e| fail(format!("{}: {e}", path.display())))
+}
+
+/// The variable that names the store of the changes the assistant proposes
+/// for a person to approve.
+const ASSISTANT_CHANGES: &str = "ASSISTANT_CHANGES";
+
+/// Where an install keeps the changes the assistant proposes: beside its
+/// other stores, in the assistant's folder. Left unnamed, the assistant
+/// keeps them in a `data` folder under wherever it runs from and does not
+/// make that folder, so on an install every proposal failed with the store
+/// that could not be opened (2026-11-13). A store an install already keeps
+/// at that place stays where it is.
+fn assistant_changes(dir: &Path) -> PathBuf {
+    let kept = dir.join("data").join("changes.sqlite");
+    if kept.is_file() {
+        kept
+    } else {
+        dir.join("changes.sqlite")
+    }
+}
+
+/// The lines of the assistant's environment with the store of its proposed
+/// changes named, where no line names it; a line that does is left as it
+/// is. Answers whether a line was added.
+fn name_assistant_changes(lines: &mut Vec<String>, dir: &Path) -> bool {
+    let prefix = format!("{ASSISTANT_CHANGES}=");
+    if lines.iter().any(|line| line.starts_with(&prefix)) {
+        return false;
+    }
+    lines.push(format!("{prefix}{}", assistant_changes(dir).display()));
+    true
+}
+
+/// After an update, the assistant's environment names the store of its
+/// proposed changes, on an install whose file was written before setup
+/// named it: the one line is added and said, and nothing else in the file
+/// changes. An install without the file is left for setup.
+fn mend_assistant_env(plan: &Plan) {
+    let dir = plan.dir.join("assistant");
+    let path = dir.join("assistant.env");
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return;
+    };
+    let mut lines: Vec<String> = text.lines().map(str::to_string).collect();
+    if !name_assistant_changes(&mut lines, &dir) {
+        return;
+    }
+    match std::fs::write(&path, format!("{}\n", lines.join("\n"))) {
+        Ok(()) => println!(
+            "the assistant's environment now names the store of the changes it proposes ({})",
+            path.display()
+        ),
+        Err(e) => println!(
+            "the assistant's environment was left alone: {}: {e}",
+            path.display()
+        ),
+    }
 }
 
 /// One `KEY=value` line of an environment file set, added or taken out,
@@ -18351,6 +18415,8 @@ pub(crate) fn restart_after_update(channel: Option<&str>) {
     if plan.has(Part::Assistant) {
         mend_kvasir_auth(&plan);
         register_station_purposes(&plan);
+        // and the assistant reads its environment when it starts
+        mend_assistant_env(&plan);
     }
     let console = Console::new(true);
     println!("restarting the services");
@@ -31514,6 +31580,19 @@ mod tests {
         assert!(env.contains("NILS_URL=http://nils-engine:8437"), "{env}");
         assert!(env.contains("KVASIR_URL=http://nils-kvasir:7100"), "{env}");
         assert!(env.contains("HOST=0.0.0.0"), "{env}");
+        // every store setup names is in the assistant's own folder
+        for (variable, file) in [
+            ("ASSISTANT_STORE", "assistant.sqlite"),
+            ("ASSISTANT_LEDGER", "seam.sqlite"),
+            ("ASSISTANT_NOTES", "notes.sqlite"),
+            ("ASSISTANT_CHANGES", "changes.sqlite"),
+        ] {
+            let line = format!(
+                "{variable}={}\n",
+                dir.join("assistant").join(file).display()
+            );
+            assert!(env.contains(&line), "{line} is not in:\n{env}");
+        }
 
         // the same setup moved to a pod: the addresses follow, the rest stays
         std::fs::write(&env_path, format!("{env}ASSISTANT_MODEL=mine\n")).unwrap();
@@ -31523,6 +31602,80 @@ mod tests {
         assert!(moved.contains("NILS_URL=http://127.0.0.1:8437"), "{moved}");
         assert!(!moved.contains("HOST="), "{moved}");
         assert!(moved.contains("ASSISTANT_MODEL=mine"), "{moved}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 2026-11-13, met on an install: the assistant's environment named no
+    /// store for the changes it proposes, the assistant looked for one in a
+    /// `data` folder under the folder it runs from, which it does not make,
+    /// and every proposal failed with a store that could not be opened. A
+    /// file from before gains the one line, on a setup run again and after
+    /// an update, and nothing else in it changes.
+    #[test]
+    fn an_environment_from_before_names_the_store_of_the_assistant_s_changes() {
+        let dir = scratch("assistant-changes");
+        let mut plan = plan(Runtime::Machine);
+        plan.dir = dir.clone();
+        plan.parts.push(Part::Assistant);
+        let assistant = dir.join("assistant");
+        std::fs::create_dir_all(&assistant).unwrap();
+        let env_path = assistant.join("assistant.env");
+        let line = format!(
+            "ASSISTANT_CHANGES={}",
+            assistant.join("changes.sqlite").display()
+        );
+
+        // no file: an update leaves it for setup
+        mend_assistant_env(&plan);
+        assert!(!env_path.exists());
+
+        // a file from before: the update adds the line and keeps the rest,
+        // the settings setup never wrote among them
+        let before = format!(
+            "# Written by nils setup.\nASSISTANT_MODEL=mine\nNILS_URL=http://127.0.0.1:{}\n\
+             ASSISTANT_STORE={}\nASSISTANT_RETENTION_DAYS=30\n",
+            plan.ports.engine,
+            assistant.join("assistant.sqlite").display()
+        );
+        std::fs::write(&env_path, &before).unwrap();
+        mend_assistant_env(&plan);
+        let mended = std::fs::read_to_string(&env_path).unwrap();
+        assert_eq!(mended, format!("{before}{line}\n"));
+        // and once: a second update finds it named
+        mend_assistant_env(&plan);
+        assert_eq!(std::fs::read_to_string(&env_path).unwrap(), mended);
+
+        // a setup run again mends the same file the same way
+        std::fs::write(&env_path, &before).unwrap();
+        assert!(write_assistant_env(&plan, None).is_ok());
+        let again = std::fs::read_to_string(&env_path).unwrap();
+        assert!(again.lines().any(|l| l == line), "{again}");
+        assert!(again.contains("ASSISTANT_RETENTION_DAYS=30\n"), "{again}");
+        assert!(again.contains("ASSISTANT_MODEL=mine\n"), "{again}");
+
+        // a store a site named is the site's
+        let named = "ASSISTANT_CHANGES=/srv/elsewhere/changes.sqlite\n";
+        std::fs::write(&env_path, named).unwrap();
+        mend_assistant_env(&plan);
+        assert_eq!(std::fs::read_to_string(&env_path).unwrap(), named);
+        assert!(write_assistant_env(&plan, None).is_ok());
+        let kept = std::fs::read_to_string(&env_path).unwrap();
+        assert!(kept.contains(named) && !kept.contains(&line), "{kept}");
+
+        // changes an install already keeps where the assistant looked by
+        // itself stay there
+        std::fs::create_dir_all(assistant.join("data")).unwrap();
+        std::fs::write(assistant.join("data").join("changes.sqlite"), b"").unwrap();
+        std::fs::write(&env_path, &before).unwrap();
+        mend_assistant_env(&plan);
+        let there = std::fs::read_to_string(&env_path).unwrap();
+        assert!(
+            there.ends_with(&format!(
+                "ASSISTANT_CHANGES={}\n",
+                assistant.join("data").join("changes.sqlite").display()
+            )),
+            "{there}"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
