@@ -4,6 +4,14 @@ All notable changes to NILS v1 are recorded here. The format follows [Keep a Cha
 
 ## [Unreleased]
 
+### Changed
+
+- The funnel of a set is counted in one statement. A draft (`POST /api/ask/draft`) and a diagnosis (`POST /api/ask/diagnose`) counted each stage with a statement of its own, the whole set read again under one clause more, so the funnel of a question of four clauses over half a million stacks took three to four and a half seconds where the question took half a second, and of fourteen made-up questions one to three did not have their funnel whole within `draft_timeout_ms`. The stages from a set's last relation through its `where` clauses are now counted by one read of the set: each row is given the number of clauses it meets in their order, and the stage after a clause is the rows, and the subjects, of that number or more. Sets that read the same rows (one grain, no source, relation or binding of their own) are counted by one read together. The same funnel takes one to two seconds, and all fourteen are whole within the time on both backends. Every count, what is held back of it, the drops and their unknown fields are what a statement per stage answers; a set whose stages cannot be counted this way (a group, the result of an algebra, a set with no `where`, a clause that reads `ordinal`, `prev`, `next` or `change`, a diagnosis that lists the keys of its stages) is counted a stage at a time as before, and so are the relations of a set before its last and its pick. When the time for the counts runs out during the one read, none of the stages it counts is a stage of the funnel, where a stage at a time kept those counted before the time ran out; `diagnosis.unavailable` says what was not counted, as before.
+
+### Added
+
+- `nils ask-scale time` times the funnel of every document under a draft's time, in one statement per set and by a statement per stage, and takes `--record-funnel`, `--reference-funnel` and `--check-funnel`: the whole diagnosis of every document kept in a file, held against a kept one, and held against the diagnosis counted a stage at a time.
+
 ## [1.0.0-beta.16] - 2026-11-13
 
 The sixteenth engine beta makes a question over stacks answer in a second or two on a registry of half a million stacks, where it did not end: its statement is set-based, and the axes of a stack are read from one row (schema 118, filled by the migration in some ten seconds). A question queued as a job runs under a job's bounds, a draft whose counts are slow is valid, stored and says so, and the assistant's proposed changes have a store on an install. Installs take the assistant at 1.0.0-alpha.33.

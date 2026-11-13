@@ -6,7 +6,8 @@
 //! compiles and runs every document of a fixture directory on it, a few
 //! times each, and prints how long the statement took and what it
 //! answered: the rows, the subjects, and the content hash of the answer,
-//! and how long the funnel a draft counts took under a draft's time.
+//! and how long the funnel a draft counts took under a draft's time, in
+//! one pass per set and by a statement per stage.
 //!
 //! The answers are the reference a change to the compiler is held to: the
 //! generator is code and a seed, so a registry built again holds the same
@@ -86,6 +87,10 @@ pub(crate) struct TimeArgs {
     /// keeps
     #[arg(long, value_name = "FILE")]
     reference_funnel: Option<PathBuf>,
+    /// Count each fixture's diagnosis a second time with a statement per
+    /// stage, and fail where the two differ
+    #[arg(long)]
+    check_funnel: bool,
 }
 
 pub(crate) fn ask_scale(home: &Home, cmd: AskScaleCommand) -> Result<(), Exit> {
@@ -249,36 +254,65 @@ fn time(home: &Home, args: TimeArgs) -> Result<(), Exit> {
         // a draft gives all its counts together: how long it took, and
         // whether every count was made within it
         let caps = Caps::default();
-        let started = Instant::now();
-        let funnel = diagnose::diagnose_within(
-            &mut registry,
-            drafted,
-            Vec::new(),
-            &catalog,
-            &scope,
-            &scheme,
-            Bounds {
-                timeout_ms: caps.sync_timeout_ms,
-                max_rows: caps.sync_max_rows,
-                max_bytes: caps.sync_max_bytes,
-            },
-            false,
-            None,
-            Some(caps.draft_timeout_ms),
-        );
-        let funnel_ms = started.elapsed().as_millis();
-        let funnel = match funnel {
-            Ok(d) => json!({
-                "ms": funnel_ms,
-                "stages": d.funnel.len(),
-                "whole": d.unavailable.is_none(),
-            }),
-            Err(e) => json!({"ms": funnel_ms, "error": e.to_string()}),
+        let door = Bounds {
+            timeout_ms: caps.sync_timeout_ms,
+            max_rows: caps.sync_max_rows,
+            max_bytes: caps.sync_max_bytes,
         };
+        // counted in one pass per set, as a draft counts it, and by a
+        // statement per stage, each the least of the runs
+        let mut funnel = json!({});
+        for (in_one_pass, ms, whole) in [
+            (true, "ms", "whole"),
+            (false, "by_stage_ms", "by_stage_whole"),
+        ] {
+            let mut least: Option<(u128, Value)> = None;
+            for _ in 0..args.runs.max(1) {
+                let started = Instant::now();
+                let counted = if in_one_pass {
+                    diagnose::diagnose_within(
+                        &mut registry,
+                        drafted.clone(),
+                        Vec::new(),
+                        &catalog,
+                        &scope,
+                        &scheme,
+                        door,
+                        false,
+                        None,
+                        Some(caps.draft_timeout_ms),
+                    )
+                } else {
+                    diagnose::diagnose_by_stage(
+                        &mut registry,
+                        drafted.clone(),
+                        Vec::new(),
+                        &catalog,
+                        &scope,
+                        &scheme,
+                        door,
+                        false,
+                        None,
+                        Some(caps.draft_timeout_ms),
+                    )
+                };
+                let took = started.elapsed().as_millis();
+                let said = match counted {
+                    Ok(d) => json!(d.unavailable.is_none()),
+                    Err(e) => json!(e.to_string()),
+                };
+                if least.as_ref().is_none_or(|(l, _)| took < *l) {
+                    least = Some((took, said));
+                }
+            }
+            if let Some((took, said)) = least {
+                funnel[ms] = json!(took);
+                funnel[whole] = said;
+            }
+        }
         // the diagnosis whole, with no time for all its counts: what a
         // change to how the funnel is counted may not change
-        let mut funnel = funnel;
-        if args.record_funnel.is_some() || funnel_reference.is_some() {
+        if args.record_funnel.is_some() || funnel_reference.is_some() || args.check_funnel {
             let whole = diagnose::diagnose(
                 &mut registry,
                 parse(&text).map_err(|e| usage(format!("{}: {e}", path.display())))?,
@@ -310,6 +344,35 @@ fn time(home: &Home, args: TimeArgs) -> Result<(), Exit> {
                     ));
                 }
                 funnel["same_as_reference"] = json!(same);
+            }
+            if args.check_funnel {
+                let by_stage = diagnose::diagnose_by_stage(
+                    &mut registry,
+                    parse(&text).map_err(|e| usage(format!("{}: {e}", path.display())))?,
+                    Vec::new(),
+                    &catalog,
+                    &scope,
+                    &scheme,
+                    Bounds {
+                        timeout_ms: args.timeout_ms,
+                        max_rows: caps.sync_max_rows,
+                        max_bytes: caps.sync_max_bytes,
+                    },
+                    false,
+                    None,
+                    None,
+                );
+                let by_stage = match by_stage {
+                    Ok(d) => serde_json::to_value(&d).unwrap_or(Value::Null),
+                    Err(e) => json!({"error": e.to_string()}),
+                };
+                let same = by_stage == whole;
+                if !same {
+                    differ.push(format!(
+                        "{name}: the diagnosis differs from a count per stage: {by_stage}, in one pass {whole}"
+                    ));
+                }
+                funnel["same_as_by_stage"] = json!(same);
             }
             funnels.insert(name.clone(), whole);
         }

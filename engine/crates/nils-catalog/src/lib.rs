@@ -64,8 +64,8 @@ pub struct Caps {
     /// (2026-11-13): a draft answers whether the document is valid and
     /// stores it within about this long, and where the counts take longer
     /// it says so and names the job path. Well under `sync_timeout_ms`,
-    /// since a funnel is one count per stage and a draft is written, read
-    /// and written again.
+    /// since a funnel is a statement for each set, and for each stage one
+    /// pass does not count, and a draft is written, read and written again.
     pub draft_timeout_ms: u64,
 }
 
