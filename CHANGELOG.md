@@ -4,6 +4,10 @@ All notable changes to NILS v1 are recorded here. The format follows [Keep a Cha
 
 ## [Unreleased]
 
+## [1.0.0-beta.16] - 2026-11-13
+
+The sixteenth engine beta makes a question over stacks answer in a second or two on a registry of half a million stacks, where it did not end: its statement is set-based, and the axes of a stack are read from one row (schema 118, filled by the migration in some ten seconds). A question queued as a job runs under a job's bounds, a draft whose counts are slow is valid, stored and says so, and the assistant's proposed changes have a store on an install. Installs take the assistant at 1.0.0-alpha.33.
+
 ### Fixed
 
 - A question queued as a job is no longer stopped at the limit of an answer. `POST /api/ask/jobs` queues `nils ask run`, which ran under the caps of `POST /api/ask/run`, so a statement slower than `sync_timeout_ms` (20 s) failed as a job too, with the advice to queue it as a job. `nils ask run` beside the registry, queued by a door or typed, now runs under a job's bounds: no row or byte cap, so its answer is whole and hashed where an answer past 5,000 rows was cut, and a job's time, 30 minutes for its statement, or `NILS_ASK_JOB_TIMEOUT_MS` (milliseconds) in the engine's environment. A statement past a job's time fails the job with words that say it was a job's time and what is left to do: narrow the question, or give jobs longer. A freeze that keeps every key runs under the same bounds.
