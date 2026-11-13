@@ -472,6 +472,16 @@ fn affordance_err(e: AffordanceError) -> Reply {
             Reply::error(404, format!("no document {id}"))
         }
         AffordanceError::Run(r) => run_err(r),
+        // the value sampler asked for a name that is no field of the level:
+        // the caller's to change, with the step from there (2026-11-13; it
+        // answered 500)
+        e @ AffordanceError::NoField { .. } => {
+            let mut reply = Reply::error(404, e.to_string());
+            if let AffordanceError::NoField { next, .. } = e {
+                reply.body["next"] = json!(next);
+            }
+            reply
+        }
         other => Reply::error(500, other.to_string()),
     }
 }

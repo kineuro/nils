@@ -1817,7 +1817,7 @@ paths:
         - {name: limit, in: query, schema: {type: integer}, description: At most options_values}
       responses:
         "200": {description: "{level, field, kind, items[[value_or_shape, count]], distinct, truncated}"}
-        "404": {description: No such level or field in this scope}
+        "404": {description: "No such level or field in this scope: {error, disclosure: safe}. Amended in place on 2026-11-13: a name that is no field of the level answers this with `next`, the step from there, where it answered 500. For a derived field such as `signature`, which is worked out for each row and stored nowhere, `next` says that it is derived, that it has no list of values, and how a question reads it, [\"derived\", {\"level\": \"loose\"}, \"signature\"], with the pack's comparability levels; for any other name it names GET /api/ask/catalog/{level}, which lists the level's fields, and the levels that have a field of the name"}
   /api/packs:
     get:
       summary: The loaded packs (Wave 4c section 6.5; data:see)

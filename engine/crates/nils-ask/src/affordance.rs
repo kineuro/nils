@@ -36,6 +36,14 @@ pub enum AffordanceError {
     /// The options list the moves came from is not the document's current
     /// one: the document, the epoch or the scope moved.
     StaleOptions(Issue),
+    /// The value sampler was asked for a name that is no field of the level
+    /// (2026-11-13): the caller's to change, never a fault of the engine,
+    /// with what to do next.
+    NoField {
+        level: String,
+        field: String,
+        next: String,
+    },
     Message(String),
 }
 
@@ -48,6 +56,9 @@ impl fmt::Display for AffordanceError {
             AffordanceError::Run(e) => write!(f, "{e}"),
             AffordanceError::Store(e) => write!(f, "{e}"),
             AffordanceError::StaleOptions(i) => write!(f, "{i}"),
+            AffordanceError::NoField { level, field, .. } => {
+                write!(f, "no field {field} at {level} in this scope")
+            }
             AffordanceError::Message(m) => f.write_str(m),
         }
     }
@@ -371,6 +382,74 @@ pub struct Sample {
 
 use crate::validate::shape as shape_of;
 
+/// The sampler's refusal of a name that is no field of the level, with the
+/// next step. A derived field is worked out for each row and stored
+/// nowhere, so it has no list of values, and the step is how a question
+/// reads it; for any other name, the door that lists the level's fields,
+/// and the levels that do have a field of the name.
+fn no_field(names: &dyn Names, level: &str, field: &str) -> AffordanceError {
+    let next = match names.derived(field) {
+        Some(d) => {
+            let levels = names.levels();
+            let level_of = d.params.iter().any(|p| p == "level") && !levels.is_empty();
+            // the form as a document writes it, the pack's `loose` level
+            // where it names one, as the catalog's default is
+            let options = if level_of {
+                let shown = levels.iter().find(|l| *l == "loose").unwrap_or(&levels[0]);
+                format!("{{\"level\": {}}}", serde_json::json!(shown))
+            } else {
+                "{}".to_string()
+            };
+            let written = format!("[\"derived\", {options}, {}]", serde_json::json!(field));
+            let mut next = format!(
+                "{field} is a derived field of a {}: it is worked out for each row and stored nowhere, \
+                 so it has no list of values; a question reads it as {written}",
+                d.grain
+            );
+            if level_of {
+                next.push_str(&format!(
+                    ", with level one of the pack's comparability levels: {}",
+                    levels.join(", ")
+                ));
+            }
+            let others: Vec<&str> = d
+                .params
+                .iter()
+                .map(String::as_str)
+                .filter(|p| !(level_of && *p == "level"))
+                .collect();
+            if !others.is_empty() {
+                next.push_str(&format!(
+                    "; GET /api/ask/catalog names its options ({}) under derived",
+                    others.join(", ")
+                ));
+            }
+            next
+        }
+        None => {
+            let mut next =
+                format!("GET /api/ask/catalog/{level} lists the fields of {level}, page by page");
+            let elsewhere: Vec<&str> = crate::validate::levels()
+                .iter()
+                .copied()
+                .filter(|l| *l != level && names.field(l, field).is_some())
+                .collect();
+            if !elsewhere.is_empty() {
+                next.push_str(&format!(
+                    "; {field} is a field of {}",
+                    elsewhere.join(" and of ")
+                ));
+            }
+            next
+        }
+    };
+    AffordanceError::NoField {
+        level: level.to_string(),
+        field: field.to_string(),
+        next,
+    }
+}
+
 /// Sample the values of one field at one level, as a grouped count under
 /// the caller's own scope and bounds: values for a technical or clinical
 /// field, shapes for the rest, the distinct count either way. A stack's
@@ -391,9 +470,10 @@ pub fn values(
     let shapes = if axis {
         false
     } else {
-        let info = s.names.field(level, field).ok_or_else(|| {
-            AffordanceError::Message(format!("no field {field} at {level} in this scope"))
-        })?;
+        let info = s
+            .names
+            .field(level, field)
+            .ok_or_else(|| no_field(s.names, level, field))?;
         matches!(
             info.class,
             Class::QuasiIdentifying | Class::Sensitive | Class::Identifying

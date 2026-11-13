@@ -1131,3 +1131,93 @@ fn a_draft_is_a_card_only_when_a_person_keeps_it() {
         assert_eq!(once_more.kept.unwrap().by, "bo@lab", "{}", l.name);
     }
 }
+
+/// 2026-11-13, on each backend: the value sampler asked for a name that is
+/// no field of the level refuses it as the caller's, with the step from
+/// there. A derived field is worked out for each row and stored nowhere, so
+/// it has no list of values, and the step is how a question reads it, with
+/// the pack's levels for the signature; any other name is sent to the door
+/// that lists the level's fields, and told where a field of that name is. A
+/// field and an axis are sampled as they were.
+#[test]
+fn the_sampler_refuses_a_name_that_is_no_field_with_the_next_step() {
+    for mut l in labs() {
+        let scope = Scope::default();
+        let scheme = Scheme::default();
+        let s = Setting {
+            names: &l.catalog,
+            scope: &scope,
+            scheme: &scheme,
+            principal: "author",
+            bounds: bounds(),
+            values_cap: 50,
+        };
+        let mut refused = |level: &str, field: &str| -> String {
+            match affordance::values(&mut l.registry, level, field, &s, 50, None) {
+                Err(e @ AffordanceError::NoField { .. }) => {
+                    assert_eq!(
+                        e.to_string(),
+                        format!("no field {field} at {level} in this scope"),
+                        "{}",
+                        l.name
+                    );
+                    match e {
+                        AffordanceError::NoField { next, .. } => next,
+                        _ => unreachable!(),
+                    }
+                }
+                other => panic!("{}: {level}.{field}: {other:?}", l.name),
+            }
+        };
+        assert_eq!(
+            refused("stack", "signature"),
+            "signature is a derived field of a stack: it is worked out for each row and stored nowhere, \
+             so it has no list of values; a question reads it as [\"derived\", {\"level\": \"loose\"}, \"signature\"], \
+             with level one of the pack's comparability levels: exact, strict, loose"
+        );
+        // a derived field with an option of its own, and one with none
+        assert_eq!(
+            refused("stack", "voxel"),
+            "voxel is a derived field of a stack: it is worked out for each row and stored nowhere, \
+             so it has no list of values; a question reads it as [\"derived\", {}, \"voxel\"]; \
+             GET /api/ask/catalog names its options (third) under derived"
+        );
+        assert_eq!(
+            refused("stack", "voxel_min"),
+            "voxel_min is a derived field of a stack: it is worked out for each row and stored nowhere, \
+             so it has no list of values; a question reads it as [\"derived\", {}, \"voxel_min\"]"
+        );
+        // asked at another level than its own, it is still told as derived
+        assert!(
+            refused("subject", "signature")
+                .starts_with("signature is a derived field of a stack: "),
+            "{}",
+            l.name
+        );
+        // a name nothing has, and a name another level has
+        assert_eq!(
+            refused("stack", "no_such_field"),
+            "GET /api/ask/catalog/stack lists the fields of stack, page by page"
+        );
+        assert_eq!(
+            refused("stack", "sex"),
+            "GET /api/ask/catalog/stack lists the fields of stack, page by page; sex is a field of subject"
+        );
+        // a field, one answered as shapes and an axis are sampled as before
+        let sample = affordance::values(&mut l.registry, "subject", "sex", &s, 50, None)
+            .unwrap_or_else(|e| panic!("{}: {e}", l.name));
+        assert_eq!(sample.kind, "shapes", "{}", l.name);
+        let sample = affordance::values(&mut l.registry, "cohort", "name", &s, 50, None)
+            .unwrap_or_else(|e| panic!("{}: {e}", l.name));
+        assert_eq!(sample.kind, "values", "{}", l.name);
+        assert!(
+            !sample.items.is_empty() && sample.distinct >= 1,
+            "{}: {sample:?}",
+            l.name
+        );
+        let sample = affordance::values(&mut l.registry, "stack", "base", &s, 50, None)
+            .unwrap_or_else(|e| panic!("{}: {e}", l.name));
+        assert_eq!(sample.kind, "values", "{}", l.name);
+        assert!(!sample.items.is_empty(), "{}: {sample:?}", l.name);
+    }
+}

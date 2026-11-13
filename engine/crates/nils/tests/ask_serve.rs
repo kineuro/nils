@@ -5310,3 +5310,99 @@ fn a_document_that_will_not_parse_is_refused_with_where() {
     }
     server.finish();
 }
+
+/// 2026-11-13, on each backend: the value sampler answered 500 where it was
+/// asked for the values of `signature`, a derived field of a stack and no
+/// stored one. A name that is no field of the level is the caller's to
+/// change: 404, safe to show, with `next`. For a derived field `next` says
+/// that it is derived, that it has no list of values and how a question
+/// reads it; for any other name it names the door that lists the level's
+/// fields. A level the catalog does not have, a field and an axis answer as
+/// they did.
+#[test]
+fn the_sampler_answers_404_and_the_next_step_for_a_name_that_is_no_field() {
+    for (backend, home, dsn) in backends("nils_ask_serve_sampler_test") {
+        let server = Server::start(&home, 8, &[]);
+        let sampled = |level: &str, field: &str| {
+            server.request(
+                "GET",
+                &format!("/api/ask/catalog/{level}/{field}/values"),
+                None,
+                None,
+            )
+        };
+        let refused = |level: &str, field: &str, next: &str| {
+            let (status, r) = sampled(level, field);
+            assert_eq!(status, 404, "{backend}: {r}");
+            assert_eq!(
+                r,
+                serde_json::json!({
+                    "error": format!("no field {field} at {level} in this scope"),
+                    "disclosure": "safe",
+                    "next": next,
+                }),
+                "{backend}"
+            );
+        };
+        refused(
+            "stack",
+            "signature",
+            "signature is a derived field of a stack: it is worked out for each row and stored nowhere, \
+             so it has no list of values; a question reads it as [\"derived\", {\"level\": \"loose\"}, \"signature\"], \
+             with level one of the pack's comparability levels: exact, strict, loose",
+        );
+        refused(
+            "stack",
+            "voxel",
+            "voxel is a derived field of a stack: it is worked out for each row and stored nowhere, \
+             so it has no list of values; a question reads it as [\"derived\", {}, \"voxel\"]; \
+             GET /api/ask/catalog names its options (third) under derived",
+        );
+        refused(
+            "stack",
+            "no_such_field",
+            "GET /api/ask/catalog/stack lists the fields of stack, page by page",
+        );
+        refused(
+            "stack",
+            "sex",
+            "GET /api/ask/catalog/stack lists the fields of stack, page by page; sex is a field of subject",
+        );
+        // a level the catalog does not have, as before
+        let (status, r) = sampled("nowhere", "signature");
+        assert_eq!(status, 404, "{backend}: {r}");
+        assert_eq!(
+            r,
+            serde_json::json!({
+                "error": "nowhere is not a level of the catalog",
+                "disclosure": "safe",
+            }),
+            "{backend}"
+        );
+        // a field, one answered as shapes and an axis, as before
+        let (status, sample) = sampled("subject", "sex");
+        assert_eq!(status, 200, "{backend}: {sample}");
+        assert_eq!(sample["kind"], "shapes", "{backend}: {sample}");
+        let (status, sample) = sampled("cohort", "name");
+        assert_eq!(status, 200, "{backend}: {sample}");
+        assert_eq!(sample["level"], "cohort", "{backend}: {sample}");
+        assert_eq!(sample["field"], "name", "{backend}: {sample}");
+        assert_eq!(sample["kind"], "values", "{backend}: {sample}");
+        assert!(
+            sample["items"].as_array().is_some_and(|i| !i.is_empty())
+                && sample["distinct"].as_i64().is_some_and(|d| d >= 1),
+            "{backend}: {sample}"
+        );
+        let (status, sample) = sampled("stack", "base");
+        assert_eq!(status, 200, "{backend}: {sample}");
+        assert_eq!(sample["kind"], "values", "{backend}: {sample}");
+        assert!(
+            sample["items"].as_array().is_some_and(|i| !i.is_empty()),
+            "{backend}: {sample}"
+        );
+        server.finish();
+        if let Some(dsn) = &dsn {
+            drop_schema(dsn, "nils_ask_serve_sampler_test");
+        }
+    }
+}
