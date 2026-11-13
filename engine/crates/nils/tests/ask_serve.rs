@@ -4957,3 +4957,243 @@ fn a_draft_is_listed_as_a_card_only_when_a_person_keeps_it() {
     }
     server.finish();
 }
+
+/// Every read of the clinical events made slow, on a registry where each
+/// statement answers in milliseconds: the table is put aside under another
+/// name and a view takes its place that counts to some millions before its
+/// first row (SQLite has no sleep). A statement that reads events then takes
+/// far longer than the 250 ms the test below gives an answer, and one that
+/// reads none is as fast as before.
+fn slow_events(home: &TempDir) {
+    let registry = rusqlite::Connection::open(home.path().join("registry.db")).unwrap();
+    registry
+        .execute_batch(
+            "ALTER TABLE event RENAME TO event_kept; \
+             CREATE VIEW event AS SELECT e.* FROM event_kept e WHERE \
+             (WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c WHERE x < 6000000) \
+              SELECT count(*) FROM c) > 0",
+        )
+        .unwrap();
+}
+
+/// 2026-11-13, met on an install: a question whose statement is slow was
+/// stopped at the answer's limit when it ran as a job, with the advice to
+/// queue it as a job; its draft answered 504 with nothing stored, so no
+/// caller could tell a wrong document from a slow one or had an id to queue.
+/// Here the answer's limit and the draft's time are 250 ms and the statement
+/// takes seconds: the draft is valid, stored and says its counts ran out of
+/// time; the doors whose whole work is the statement answer 504 with a code,
+/// the document and the job path; and the job runs past the answer's limit
+/// to a whole answer, and fails in a job's own words only past a job's time.
+#[test]
+fn a_slow_question_is_drafted_valid_and_answered_as_a_job() {
+    let home = synthetic();
+    slow_events(&home);
+    let server = Server::start(
+        &home,
+        1000,
+        &[
+            "--ask-caps",
+            r#"{"sync_timeout_ms": 250, "draft_timeout_ms": 250}"#,
+        ],
+    );
+    let events = serde_json::json!({
+        "ast_version": 1,
+        "sets": {"e": {"grain": "event"}},
+        "out": {"set": "e", "level": "count"},
+    });
+
+    // the draft: valid, with its cost class, stored, the counts unavailable
+    let (status, drafted) = server.request(
+        "POST",
+        "/api/ask/draft",
+        Some(&body(serde_json::json!({"text": events.to_string()}))),
+        None,
+    );
+    assert_eq!(status, 200, "{drafted}");
+    let document = drafted["document"]
+        .as_i64()
+        .unwrap_or_else(|| panic!("a valid draft is stored: {drafted}"));
+    let diagnosis = &drafted["diagnosis"];
+    assert_eq!(diagnosis["valid"], true, "{drafted}");
+    assert_eq!(diagnosis["issues"], serde_json::json!([]), "{drafted}");
+    assert_eq!(diagnosis["cost"]["class"], "small", "{drafted}");
+    assert_eq!(diagnosis["unavailable"]["code"], "timeout", "{drafted}");
+    assert_eq!(diagnosis["unavailable"]["budget_ms"], 250, "{drafted}");
+    assert_eq!(
+        diagnosis["unavailable"]["parts"],
+        serde_json::json!(["funnel", "drops", "ties", "coarse"]),
+        "{drafted}"
+    );
+    let job_door = format!("POST /api/ask/jobs with document_id {document}");
+    assert!(
+        diagnosis["next"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|n| n.as_str().unwrap().starts_with(&job_door)),
+        "{drafted}"
+    );
+    let by_id = body(serde_json::json!({"document_id": document}));
+
+    // whether a document is valid never waits for a statement
+    let (status, valid) = server.request("POST", "/api/ask/validate", Some(&by_id), None);
+    assert_eq!(status, 200, "{valid}");
+    assert_eq!(valid["hash"], drafted["hash"], "{valid}");
+
+    // the doors whose whole work is the statement: 504, said so that no
+    // caller reads a refusal of the document in it
+    for door in ["/api/ask/preview", "/api/ask/run"] {
+        let (status, late) = server.request("POST", door, Some(&by_id), None);
+        assert_eq!(status, 504, "{door}: {late}");
+        assert_eq!(late["code"], "timeout", "{door}: {late}");
+        assert_eq!(late["limit_ms"], 250, "{door}: {late}");
+        assert_eq!(late["document_id"], document, "{door}: {late}");
+        assert!(late.get("issues").is_none(), "{door}: {late}");
+        assert!(
+            late["next"].as_str().unwrap().starts_with(&job_door),
+            "{door}: {late}"
+        );
+        let words = late["error"].as_str().unwrap();
+        assert!(words.contains("ran past 250 ms"), "{door}: {words}");
+        assert!(words.contains("POST /api/ask/jobs"), "{door}: {words}");
+    }
+    // a document the request carries has no id to name
+    let (status, late) = server.request(
+        "POST",
+        "/api/ask/run",
+        Some(&body(serde_json::json!({"document": events}))),
+        None,
+    );
+    assert_eq!(status, 504, "{late}");
+    assert_eq!(late["code"], "timeout", "{late}");
+    assert!(late.get("document_id").is_none(), "{late}");
+    // a preview takes a shorter time than the door's own, never a longer
+    for (asked, limit) in [(100, 100), (60_000, 250)] {
+        let (status, late) = server.request(
+            "POST",
+            "/api/ask/preview",
+            Some(&body(
+                serde_json::json!({"document_id": document, "timeout_ms": asked}),
+            )),
+            None,
+        );
+        assert_eq!(status, 504, "{late}");
+        assert_eq!(late["limit_ms"], limit, "{late}");
+    }
+
+    // the diagnosis: the same facts, on a stored document by its id
+    let (status, diagnosed) = server.request("POST", "/api/ask/diagnose", Some(&by_id), None);
+    assert_eq!(status, 200, "{diagnosed}");
+    assert_eq!(diagnosed["valid"], true, "{diagnosed}");
+    assert_eq!(diagnosed["unavailable"]["code"], "timeout", "{diagnosed}");
+    assert!(
+        diagnosed["next"][0]
+            .as_str()
+            .unwrap()
+            .starts_with(&job_door),
+        "{diagnosed}"
+    );
+
+    // the command line prints the same facts
+    let url = format!("http://127.0.0.1:{}", server.port);
+    let file = home.path().join("events.ask.json");
+    std::fs::write(&file, events.to_string()).unwrap();
+    let printed = run(
+        &home,
+        &[
+            "ask",
+            "draft",
+            "--server",
+            &url,
+            "--file",
+            file.to_str().unwrap(),
+        ],
+        None,
+    );
+    assert!(printed.contains("nils ask draft   document "), "{printed}");
+    assert!(
+        printed.contains("valid, not counted (timeout after 250 ms): funnel, drops, ties, coarse"),
+        "{printed}"
+    );
+    assert!(printed.contains("cost    small"), "{printed}");
+    assert!(
+        printed.contains("next    POST /api/ask/jobs with document_id "),
+        "{printed}"
+    );
+    let printed = run(
+        &home,
+        &[
+            "ask",
+            "diagnose",
+            "--server",
+            &url,
+            "--document",
+            &document.to_string(),
+        ],
+        None,
+    );
+    assert!(printed.contains("cost small"), "{printed}");
+    assert!(
+        printed.contains("valid, not counted (timeout after 250 ms)"),
+        "{printed}"
+    );
+    assert!(printed.contains(&job_door), "{printed}");
+
+    // the job path, by the document's id. A worker whose jobs have 250 ms
+    // stops it past a job's time, and says so in a job's words
+    let queue = |server: &Server| -> i64 {
+        let (status, queued) = server.request("POST", "/api/ask/jobs", Some(&by_id), None);
+        assert_eq!(status, 202, "{queued}");
+        assert_eq!(queued["document"], document, "{queued}");
+        queued["job"].as_i64().unwrap()
+    };
+    let work = |short: bool| {
+        let mut worker = nils();
+        worker
+            .arg("--registry")
+            .arg(home.path())
+            .args(["jobs", "work", "--once"])
+            .env("USER", "anna")
+            .env("HOSTNAME", "ward-3")
+            .stdin(Stdio::null());
+        if short {
+            worker.env("NILS_ASK_JOB_TIMEOUT_MS", "250");
+        } else {
+            worker.env_remove("NILS_ASK_JOB_TIMEOUT_MS");
+        }
+        worker.output().unwrap();
+    };
+    let job = queue(&server);
+    work(true);
+    let (status, failed) = server.request("GET", &format!("/api/jobs/{job}"), None, None);
+    assert_eq!(status, 200, "{failed}");
+    assert_eq!(failed["state"], "failed", "{failed}");
+    let words = failed["error"].as_str().unwrap();
+    assert!(
+        words.contains("ran past 250 ms, the time a job has"),
+        "{words}"
+    );
+    assert!(words.contains("NILS_ASK_JOB_TIMEOUT_MS"), "{words}");
+    assert!(!words.contains("queue it as a job"), "{words}");
+
+    // with a job's own time, the statement that every door above stopped at
+    // 250 ms runs to its answer, whole and hashed
+    let job = queue(&server);
+    let started = std::time::Instant::now();
+    work(false);
+    assert!(
+        started.elapsed() > std::time::Duration::from_millis(250),
+        "the statement is slower than an answer's limit: {:?}",
+        started.elapsed()
+    );
+    let (status, done) = server.request("GET", &format!("/api/jobs/{job}"), None, None);
+    assert_eq!(status, 200, "{done}");
+    assert_eq!(done["state"], "done", "{done}");
+    assert_eq!(done["error"], serde_json::Value::Null, "{done}");
+    let result = &done["result"];
+    assert!(result["handle"].as_i64().unwrap() > 0, "{done}");
+    assert_eq!(result["truncated"], false, "{done}");
+    assert_eq!(result["row_count"], 1, "{done}");
+    assert!(result["content_hash"].is_string(), "{done}");
+}

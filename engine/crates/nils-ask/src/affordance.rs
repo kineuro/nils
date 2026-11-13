@@ -16,7 +16,7 @@ use serde_json::Value;
 
 use crate::ast::{Ask, Level};
 use crate::describe::{Description, describe as describe_pure, set_sentence};
-use crate::diagnose::{Diagnosis, diagnose};
+use crate::diagnose::{Diagnosis, diagnose_within};
 use crate::document::{self, Document, DocumentError};
 use crate::exec::Bounds;
 use crate::handle::cell_json;
@@ -294,10 +294,28 @@ pub fn draft(
     s: &Setting<'_>,
     reader: Option<&mut Store>,
 ) -> Result<Drafted, AffordanceError> {
+    draft_within(registry, text, s, reader, None)
+}
+
+/// [`draft`] with a time for the diagnosis's counts together, `budget_ms`
+/// (2026-11-13). A document that validates is stored and answered by its
+/// handle whether or not its counts came in time: where they did not, the
+/// diagnosis is valid, carries its cost class and the stages counted so
+/// far, and says in `unavailable` that the rest ran out of time, with the
+/// job path as the next call. Before, a slow statement failed the whole
+/// draft and stored nothing, so a caller could not tell a document that is
+/// wrong from one that is right and slow, and had no id to queue.
+pub fn draft_within(
+    registry: &mut Registry,
+    text: &str,
+    s: &Setting<'_>,
+    reader: Option<&mut Store>,
+    budget_ms: Option<u64>,
+) -> Result<Drafted, AffordanceError> {
     let (ask, repairs) = parse_repaired(text)?;
     // the diagnosis refuses what the validator and the compiler refuse
     // before it counts anything, and stores nothing then
-    let diagnosis = diagnose(
+    let diagnosis = diagnose_within(
         registry,
         ask.clone(),
         repairs.clone(),
@@ -307,13 +325,14 @@ pub fn draft(
         s.bounds,
         false,
         reader,
+        budget_ms,
     )?;
-    let (document, hash) = if diagnosis.valid {
+    let (diagnosis, document, hash) = if diagnosis.valid {
         let prepared = prepare(ask.clone(), s.names, s.scope)?;
         let d = document::put(registry.store(), &ask, &prepared.hash, s.principal, None)?;
-        (Some(d.id), Some(prepared.hash))
+        (diagnosis.of_stored(d.id), Some(d.id), Some(prepared.hash))
     } else {
-        (None, None)
+        (diagnosis, None, None)
     };
     Ok(Drafted {
         repairs,

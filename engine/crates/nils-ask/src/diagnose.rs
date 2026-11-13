@@ -9,6 +9,7 @@
 //! variant is a job's.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::time::Instant;
 
 use nils_registry::home::Registry;
 use nils_registry::session::Scheme;
@@ -17,11 +18,12 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::ast::{Ask, Clause, Grain, Level, Out, Set, Src};
+use crate::compile::Compiled;
 use crate::describe::clause_text;
-use crate::exec::Bounds;
+use crate::exec::{Answer, Bounds, ExecError};
 use crate::repair::Repair;
 use crate::run::{RunError, Runner, count_level, inline_selections, keys_level};
-use crate::validate::{Issue, Names, Scope, validate};
+use crate::validate::{Issue, Names, Scope, Validated, validate};
 use crate::{Error as AskError, prepare};
 
 /// One stage of the funnel. Record 55 K7, small counts at plain (the
@@ -90,6 +92,26 @@ pub struct ClauseGroup {
 
 pub const GROUPS: [&str; 7] = ["source", "near", "attach", "has", "where", "pick", "out"];
 
+/// The parts of a diagnosis that are counted, in the order they are: what
+/// [`Unavailable::parts`] names.
+pub const PARTS: [&str; 4] = ["funnel", "drops", "ties", "coarse"];
+
+/// What a diagnosis did not count because the time it was given ran out
+/// (2026-11-13). The document is valid all the same: validity and the cost
+/// class come from the document alone, and only the counts are missing.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Unavailable {
+    /// Why, for a caller that reads no words: `timeout`.
+    pub code: String,
+    /// The parts not counted whole, of [`PARTS`]. The funnel keeps the
+    /// stages counted before the time ran out; any other part named here is
+    /// left empty rather than half counted.
+    pub parts: Vec<String>,
+    /// The time the counts were given as a whole, in milliseconds.
+    pub budget_ms: u64,
+    pub why: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Diagnosis {
     pub valid: bool,
@@ -113,6 +135,10 @@ pub struct Diagnosis {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub groups: Vec<ClauseGroup>,
     pub next: Vec<String>,
+    /// What was not counted because the counts ran past their time; absent
+    /// where everything was counted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unavailable: Option<Unavailable>,
 }
 
 fn by_set() -> String {
@@ -139,6 +165,7 @@ impl Diagnosis {
             by: by_set(),
             groups: Vec::new(),
             next,
+            unavailable: None,
         }
     }
 
@@ -350,6 +377,21 @@ struct Counter<'a> {
     runner: Runner<'a>,
     names: &'a dyn Names,
     scope: &'a Scope,
+    /// The time the counts have as a whole, where the caller gave one.
+    budget: Option<Budget>,
+}
+
+/// The time a diagnosis has for all its counts together: each statement runs
+/// under what is left of it, and once it is spent nothing more is counted.
+struct Budget {
+    started: Instant,
+    ms: u64,
+    /// The bound of one statement, which the time left never raises.
+    statement_ms: u64,
+    /// The part being counted, of [`PARTS`].
+    part: usize,
+    /// The part the time ran out in.
+    spent_in: Option<usize>,
 }
 
 /// A count the diagnosis read: its rows and subjects, null where held back
@@ -363,12 +405,73 @@ struct Count {
 }
 
 impl Counter<'_> {
+    /// One statement of the diagnosis, under what is left of its time: none
+    /// once the time is spent, and none where the statement ran past it,
+    /// which spends it. Without a time for the whole, the statement runs
+    /// under its own bound and a timeout is the error it always was.
+    fn answer(
+        &mut self,
+        registry: &mut Registry,
+        ask: &Ask,
+        validated: &Validated,
+    ) -> Result<Option<(Compiled, Answer)>, RunError> {
+        if let Some(b) = &mut self.budget {
+            let left = b.ms.saturating_sub(b.started.elapsed().as_millis() as u64);
+            if b.spent_in.is_some() || left == 0 {
+                b.spent_in.get_or_insert(b.part);
+                return Ok(None);
+            }
+            self.runner.bounds.timeout_ms = left.min(b.statement_ms);
+        }
+        match self.runner.answer(registry, ask, validated, None, None) {
+            Ok(answered) => Ok(Some(answered)),
+            Err(RunError::Exec(ExecError::Timeout(_))) if self.budget.is_some() => {
+                if let Some(b) = &mut self.budget {
+                    b.spent_in.get_or_insert(b.part);
+                }
+                Ok(None)
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Whether the time for the counts is spent: what is read after it is
+    /// not a count and is not shown as one.
+    fn spent(&self) -> bool {
+        self.budget.as_ref().is_some_and(|b| b.spent_in.is_some())
+    }
+
+    /// The next part of [`PARTS`] is being counted.
+    fn enter(&mut self, part: &str) {
+        if let Some(b) = &mut self.budget {
+            b.part = PARTS.iter().position(|p| *p == part).unwrap_or(b.part);
+        }
+    }
+
+    /// What the time left uncounted: the part it ran out in and every part
+    /// after it.
+    fn unavailable(&self) -> Option<Unavailable> {
+        let b = self.budget.as_ref()?;
+        let from = b.spent_in?;
+        Some(Unavailable {
+            code: "timeout".to_string(),
+            parts: PARTS[from..].iter().map(|p| p.to_string()).collect(),
+            budget_ms: b.ms,
+            why: format!(
+                "the counts ran past {} ms and were stopped; the document is valid, and a job runs it under a job's time",
+                b.ms
+            ),
+        })
+    }
+
     /// A count level variant's rows and subjects, as the ask answers them
     /// under the caller's scope.
     fn count(&mut self, registry: &mut Registry, ask: &Ask) -> Result<Count, RunError> {
         let v = validate(ask, self.names, self.scope).map_err(AskError::Invalid)?;
         let quasi = v.quasi_sets.contains(&ask.out.set);
-        let (_, a) = self.runner.answer(registry, ask, &v, None, None)?;
+        let Some((_, a)) = self.answer(registry, ask, &v)? else {
+            return Ok(Count::default());
+        };
         let row = a.rows.first();
         let cell = |i: usize| -> Result<Option<i64>, RunError> {
             Ok(match row {
@@ -390,7 +493,9 @@ impl Counter<'_> {
     fn keys(&mut self, registry: &mut Registry, ask: &Ask) -> Result<(Count, Vec<i64>), RunError> {
         let v = validate(ask, self.names, self.scope).map_err(AskError::Invalid)?;
         let quasi = v.quasi_sets.contains(&ask.out.set);
-        let (_, a) = self.runner.answer(registry, ask, &v, None, None)?;
+        let Some((_, a)) = self.answer(registry, ask, &v)? else {
+            return Ok((Count::default(), Vec::new()));
+        };
         let mut keys: Vec<i64> = a
             .rows
             .iter()
@@ -441,6 +546,32 @@ pub fn diagnose(
     with_keys: bool,
     reader: Option<&mut Store>,
 ) -> Result<Diagnosis, RunError> {
+    diagnose_within(
+        registry, ask, repairs, names, scope, scheme, bounds, with_keys, reader, None,
+    )
+}
+
+/// [`diagnose`] with a time for all its counts together, `budget_ms`
+/// (2026-11-13). A funnel is a count for each stage of each set, and each
+/// had the whole of `bounds.timeout_ms`, so a document whose statement is
+/// slow took that time once per stage and then failed as a whole, valid or
+/// not. With a budget, each statement runs under what is left of it, nothing
+/// more is counted once it is spent, and the diagnosis says so in
+/// `unavailable` rather than failing: whether a document is valid never
+/// waits for a slow statement.
+#[allow(clippy::too_many_arguments)]
+pub fn diagnose_within(
+    registry: &mut Registry,
+    ask: Ask,
+    repairs: Vec<Repair>,
+    names: &dyn Names,
+    scope: &Scope,
+    scheme: &Scheme,
+    bounds: Bounds,
+    with_keys: bool,
+    reader: Option<&mut Store>,
+    budget_ms: Option<u64>,
+) -> Result<Diagnosis, RunError> {
     let cost = cost_of(&ask);
     // the diagnosis compiles what it counts, so what the compiler refuses
     // is refused before anything is counted, as what the validator refuses
@@ -474,6 +605,13 @@ pub fn diagnose(
         },
         names,
         scope,
+        budget: budget_ms.map(|ms| Budget {
+            started: Instant::now(),
+            ms,
+            statement_ms: bounds.timeout_ms,
+            part: 0,
+            spent_in: None,
+        }),
     };
     // the funnel, set by set in topological order, stage by stage
     let mut funnel = Vec::new();
@@ -504,6 +642,11 @@ pub fn diagnose(
                 let v = variant(&ask, name, &step, Level::Count);
                 (counter.count(registry, &v)?, Vec::new())
             };
+            // the time for the counts is spent: this stage and every one
+            // after it is not counted, and is not a stage of the funnel
+            if counter.spent() {
+                break;
+            }
             // record 55 K7, small counts at plain (the ruling of
             // 2026-10-12): a stage a quasi identifying field chose that
             // drops fewer than MEASURE_K subjects from the stage before it
@@ -537,6 +680,7 @@ pub fn diagnose(
         }
     }
     // the answer's where clauses: before, after and the nulls
+    counter.enter("drops");
     let mut drops = Vec::new();
     if let Some(out_set) = ask.sets.get(&ask.out.set)
         && out_set.grain != Grain::Group
@@ -585,6 +729,7 @@ pub fn diagnose(
         }
     }
     // ties per pick
+    counter.enter("ties");
     let mut ties = Vec::new();
     for (name, set) in &ask.sets {
         if name.contains("__") || set.pick.is_none() {
@@ -597,7 +742,9 @@ pub fn diagnose(
         v.out.columns = vec![Clause::field("pick.tied")];
         let vv = validate(&v, names, scope).map_err(AskError::Invalid)?;
         let quasi = vv.quasi_sets.contains(name);
-        let (_, a) = counter.runner.answer(registry, &v, &vv, None, None)?;
+        let Some((_, a)) = counter.answer(registry, &v, &vv)? else {
+            break;
+        };
         let tied = a
             .rows
             .iter()
@@ -609,6 +756,7 @@ pub fn diagnose(
         ties.push((name.clone(), (!small).then_some(tied)));
     }
     // rows coarser than a day, per dated set with a precision
+    counter.enter("coarse");
     let mut coarse = Vec::new();
     for name in &validated.order {
         let Some(set) = ask.sets.get(name) else {
@@ -667,6 +815,22 @@ pub fn diagnose(
     if !warnings.is_empty() {
         next.push("read the warnings; a selection_outdated warning carries an update move".into());
     }
+    // what the time left uncounted is said, and a part it cut is left empty
+    // rather than shown half counted; the funnel keeps its counted stages
+    let unavailable = counter.unavailable();
+    if let Some(u) = &unavailable {
+        let cut = |part: &str| u.parts.iter().any(|p| p == part);
+        if cut("drops") {
+            drops.clear();
+        }
+        if cut("ties") {
+            ties.clear();
+        }
+        if cut("coarse") {
+            coarse.clear();
+        }
+        next.push(job_next(None));
+    }
     Ok(Diagnosis {
         valid: true,
         issues: Vec::new(),
@@ -682,7 +846,32 @@ pub fn diagnose(
         by: by_set(),
         groups: Vec::new(),
         next,
+        unavailable,
     })
+}
+
+/// The next call where the counts ran past their time: the job path, by the
+/// document's id where it is stored.
+pub fn job_next(document: Option<i64>) -> String {
+    match document {
+        Some(id) => {
+            format!("POST /api/ask/jobs with document_id {id} runs it as a job, under a job's time")
+        }
+        None => "POST /api/ask/jobs runs the document as a job, under a job's time".to_string(),
+    }
+}
+
+impl Diagnosis {
+    /// The same diagnosis of a document stored as `document`: where the
+    /// counts ran past their time, the next call names it.
+    pub fn of_stored(mut self, document: i64) -> Diagnosis {
+        if self.unavailable.is_some() {
+            let unnamed = job_next(None);
+            self.next.retain(|n| *n != unnamed);
+            self.next.push(job_next(Some(document)));
+        }
+        self
+    }
 }
 
 /// The cost class of a document, by its shape.

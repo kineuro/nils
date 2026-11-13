@@ -8737,7 +8737,8 @@ fn run_stacks(lab: &Lab, run: i64) -> BTreeSet<i64> {
 /// Postgres, 32,766 on SQLite) is compiled with its list as one value.
 /// `--chunk` splits a selection into runs of at most that many stacks that
 /// together are the selection, each once. An ask's own answer stays under
-/// its cap.
+/// its cap at the door a person waits at (`ask_serve.rs`); run beside the
+/// registry it is a job's, and whole (2026-11-13).
 #[test]
 fn a_run_takes_a_selection_larger_than_an_answer_holds() {
     if !have("python3") {
@@ -8760,7 +8761,9 @@ fn a_run_takes_a_selection_larger_than_an_answer_holds() {
         let packs = packs();
         let packs = packs.to_str().unwrap();
 
-        // the ask's own answer is still capped
+        // the ask's own answer, run beside the registry, is a job's: whole
+        // and hashed past the 5,000 rows an answer at a door holds, where
+        // until 2026-11-13 it was cut there, queued as a job or typed
         let every = lab.work.path().join("every-ask.json");
         std::fs::write(
             &every,
@@ -8776,7 +8779,9 @@ fn a_run_takes_a_selection_larger_than_an_answer_holds() {
             packs,
             "--json",
         ]);
-        assert_eq!(asked["truncated"], true, "{asked}");
+        assert_eq!(asked["truncated"], false, "{asked}");
+        assert_eq!(asked["row_count"], 5_104, "{asked}");
+        assert!(asked["content_hash"].is_string(), "{asked}");
 
         // a listed selection past both backends' bind limits and past the
         // answer's cap, frozen whole: every stack but three, and 70,000 ids

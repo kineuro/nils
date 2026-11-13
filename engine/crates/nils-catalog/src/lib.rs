@@ -60,6 +60,13 @@ pub struct Caps {
     pub count_on_options: bool,
     pub preview_on_options: bool,
     pub move_kinds: u64,
+    /// The time a draft's diagnosis has for all its counts together
+    /// (2026-11-13): a draft answers whether the document is valid and
+    /// stores it within about this long, and where the counts take longer
+    /// it says so and names the job path. Well under `sync_timeout_ms`,
+    /// since a funnel is one count per stage and a draft is written, read
+    /// and written again.
+    pub draft_timeout_ms: u64,
 }
 
 impl Default for Caps {
@@ -79,6 +86,7 @@ impl Default for Caps {
             count_on_options: false,
             preview_on_options: false,
             move_kinds: 30,
+            draft_timeout_ms: 5_000,
         }
     }
 }
