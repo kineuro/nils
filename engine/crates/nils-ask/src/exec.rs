@@ -244,8 +244,11 @@ pub fn run(store: &mut Store, compiled: &Compiled, bounds: Bounds) -> Result<Ans
     store.begin_read()?;
     let is_pg = matches!(store.dialect(), nils_registry::dialect::Dialect::Postgres);
     if is_pg {
+        // An ask is one statement, planned and run once: compiling its
+        // expressions to machine code costs more than running them, and on
+        // a statement of many layers took longer than the statement itself.
         store.batch(&format!(
-            "SET LOCAL statement_timeout = {}",
+            "SET LOCAL statement_timeout = {}; SET LOCAL jit = off",
             bounds.timeout_ms
         ))?;
     }
