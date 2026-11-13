@@ -29,11 +29,20 @@ use crate::validate::{Code, ColumnRef, Issue, Names, Validated, WrittenDate};
 pub struct CompileError {
     pub path: String,
     pub message: String,
+    /// What else the same part of the document is refused for, each at its
+    /// own path: the other keys of a group, the other columns and order
+    /// keys of the answer. A draft once named three keys of one group in
+    /// three refusals, one a turn (2026-11-13).
+    pub more: Vec<CompileError>,
 }
 
 impl std::fmt::Display for CompileError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}: {}", self.path, self.message)
+        write!(f, "{}: {}", self.path, self.message)?;
+        for e in &self.more {
+            write!(f, "\n{}: {}", e.path, e.message)?;
+        }
+        Ok(())
     }
 }
 
@@ -57,6 +66,14 @@ impl CompileError {
                 .to_string(),
         }
     }
+
+    /// Every refusal as an issue, this one first: what one answer tells.
+    pub fn issues(&self) -> Vec<Issue> {
+        std::iter::once(self)
+            .chain(&self.more)
+            .map(CompileError::issue)
+            .collect()
+    }
 }
 
 type R<T> = Result<T, CompileError>;
@@ -65,7 +82,23 @@ fn err(path: impl Into<String>, message: impl Into<String>) -> CompileError {
     CompileError {
         path: path.into(),
         message: message.into(),
+        more: Vec::new(),
     }
+}
+
+/// The refusals found in one part of a document as one: the first, with
+/// the others beside it in the order they were found. None found, none.
+fn together(found: Vec<CompileError>) -> R<()> {
+    let mut found = found.into_iter();
+    let Some(mut first) = found.next() else {
+        return Ok(());
+    };
+    for mut e in found {
+        let more = std::mem::take(&mut e.more);
+        first.more.push(e);
+        first.more.extend(more);
+    }
+    Err(first)
 }
 
 /// What the compiler needs beside the document.
@@ -3162,10 +3195,18 @@ impl<'a> Builder<'a> {
         // Wave 7a: the keys read by an axis, by their column's name, which
         // hold each value in the form the pack stores
         let mut axis_keys: BTreeMap<String, String> = BTreeMap::new();
+        // every key that cannot be read, told in the one refusal
+        let mut unread: Vec<CompileError> = Vec::new();
         for (i, c) in g.by.iter().enumerate() {
             let at = format!("{path}.group.by[{i}]");
             if c.op != "axis" {
-                let key = self.expr(c, &child_terms, "ch", &at)?;
+                let key = match self.expr(c, &child_terms, "ch", &at) {
+                    Ok(key) => key,
+                    Err(e) => {
+                        unread.push(e);
+                        continue;
+                    }
+                };
                 if !key.members {
                     by_sql.push(key.sql);
                     by_dated.push(key.dated);
@@ -3252,6 +3293,7 @@ impl<'a> Builder<'a> {
             by_sql.push(format!("ch.{col}"));
             by_dated.push(None);
         }
+        together(unread)?;
         let source = if axis_cols.is_empty() {
             format!("{} ch", cte_name(&g.of))
         } else {
@@ -5389,9 +5431,18 @@ impl<'a> Builder<'a> {
                 crate::validate::MEASURE_K - 1
             ));
         }
+        // every column and order key that cannot be read, told in the one
+        // refusal
+        let mut unread: Vec<CompileError> = Vec::new();
         for (i, c) in out.columns.iter().enumerate() {
             let at = format!("out.columns[{i}]");
-            let e = self.expr(c, &terms, "o", &at)?;
+            let e = match self.expr(c, &terms, "o", &at) {
+                Ok(e) => e,
+                Err(e) => {
+                    unread.push(e);
+                    continue;
+                }
+            };
             let name = c
                 .ref_name()
                 .map(str::to_string)
@@ -5454,10 +5505,17 @@ impl<'a> Builder<'a> {
         let mut ord_cols = Vec::new();
         let mut order = Vec::new();
         for (i, o) in out.order.iter().enumerate() {
-            let e = self.expr(&o.0, &terms, "o", &format!("out.order[{i}]"))?;
+            let e = match self.expr(&o.0, &terms, "o", &format!("out.order[{i}]")) {
+                Ok(e) => e,
+                Err(e) => {
+                    unread.push(e);
+                    continue;
+                }
+            };
             ord_cols.push(format!("{} AS ord_{i}", e.sql));
             order.push(self.sql.order_term(&format!("z.ord_{i}"), o.1));
         }
+        together(unread)?;
         order.push("z._key ASC".into());
         let mut inner_cols = cols.clone();
         inner_cols.extend(ord_cols);

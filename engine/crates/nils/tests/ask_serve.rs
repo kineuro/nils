@@ -5197,3 +5197,366 @@ fn a_slow_question_is_drafted_valid_and_answered_as_a_job() {
     assert_eq!(result["row_count"], 1, "{done}");
     assert!(result["content_hash"].is_string(), "{done}");
 }
+
+/// 2026-11-13: a document that will not parse is refused with where its
+/// reading stopped. The draft door told a model `invalid type: integer 1,
+/// expected a sequence` and `unknown field foo, expected one of as, set,
+/// optional`, and not which part of its document either was about. The 400
+/// keeps `error` as it was and gains `path`, the dotted path an issue names,
+/// with `code` and `next`: for a YAML and a JSON text at the draft door, and
+/// for a document at the doors that take one. A text that is neither YAML
+/// nor JSON has no place to name, and is answered as before.
+#[test]
+fn a_document_that_will_not_parse_is_refused_with_where() {
+    let home = synthetic();
+    let server = Server::start(&home, 8, &[]);
+    let not_a_list = "the ask will not parse: invalid type: integer `1`, expected a sequence";
+    let no_such_key =
+        "the ask will not parse: unknown field `foo`, expected one of `as`, `set`, `optional`";
+    let refused = |door: &str, request: serde_json::Value, error: &str, path: &str| {
+        let (status, r) = server.request("POST", door, Some(&body(request)), None);
+        assert_eq!(status, 400, "{door}: {r}");
+        assert_eq!(r["error"], error, "{door}: {r}");
+        assert_eq!(r["disclosure"], "safe", "{door}: {r}");
+        assert_eq!(r["code"], "not_parsed", "{door}: {r}");
+        assert_eq!(r["path"], path, "{door}: {r}");
+        assert_eq!(
+            r["next"],
+            format!(
+                "change the document at {path} as the error says; GET /api/ask/schema describes a document"
+            ),
+            "{door}: {r}"
+        );
+    };
+    let document = |attach: serde_json::Value| {
+        serde_json::json!({
+            "ast_version": 1,
+            "sets": {
+                "scans": {"grain": "stack"},
+                "good": {"grain": "session", "attach": attach}
+            },
+            "out": {"set": "good", "level": "count"}
+        })
+    };
+    let number = document(serde_json::json!(1));
+    let key = document(serde_json::json!([{"as": "scan", "set": "scans", "foo": 1}]));
+    // the draft door, a text as YAML and as JSON
+    let yaml = |attach: &str| {
+        format!(
+            "ast_version: 1\nsets:\n  scans: {{grain: stack}}\n  good:\n    grain: session\n    attach: {attach}\nout: {{set: good, level: count}}\n"
+        )
+    };
+    let draft = |text: String| serde_json::json!({"text": text});
+    refused(
+        "/api/ask/draft",
+        draft(yaml("1")),
+        not_a_list,
+        "sets.good.attach",
+    );
+    refused(
+        "/api/ask/draft",
+        draft(number.to_string()),
+        not_a_list,
+        "sets.good.attach",
+    );
+    refused(
+        "/api/ask/draft",
+        draft(yaml("[{as: scan, set: scans, foo: 1}]")),
+        no_such_key,
+        "sets.good.attach[0]",
+    );
+    refused(
+        "/api/ask/draft",
+        draft(key.to_string()),
+        no_such_key,
+        "sets.good.attach[0]",
+    );
+    // the doors that take a document, strictly and under repair
+    refused(
+        "/api/ask/validate",
+        serde_json::json!({"document": number}),
+        &format!("the document is refused: {not_a_list}"),
+        "sets.good.attach",
+    );
+    refused(
+        "/api/ask/validate",
+        serde_json::json!({"document": key, "mode": "repair"}),
+        no_such_key,
+        "sets.good.attach[0]",
+    );
+    refused(
+        "/api/ask/run",
+        serde_json::json!({"document": key}),
+        &format!("the document is refused: {no_such_key}"),
+        "sets.good.attach[0]",
+    );
+    // a text that is no document at all: the words alone, as before
+    let (status, r) = server.request(
+        "POST",
+        "/api/ask/draft",
+        Some(&body(draft("sets: [unclosed".to_string()))),
+        None,
+    );
+    assert_eq!(status, 400, "{r}");
+    assert!(
+        r["error"]
+            .as_str()
+            .is_some_and(|e| e.starts_with("the ask will not parse: ")),
+        "{r}"
+    );
+    assert_eq!(r["disclosure"], "safe", "{r}");
+    for absent in ["path", "code", "next"] {
+        assert_eq!(r[absent], serde_json::Value::Null, "{absent}: {r}");
+    }
+    server.finish();
+}
+
+/// 2026-11-13, on each backend: the value sampler answered 500 where it was
+/// asked for the values of `signature`, a derived field of a stack and no
+/// stored one. A name that is no field of the level is the caller's to
+/// change: 404, safe to show, with `next`. For a derived field `next` says
+/// that it is derived, that it has no list of values and how a question
+/// reads it; for any other name it names the door that lists the level's
+/// fields. A level the catalog does not have, a field and an axis answer as
+/// they did.
+#[test]
+fn the_sampler_answers_404_and_the_next_step_for_a_name_that_is_no_field() {
+    for (backend, home, dsn) in backends("nils_ask_serve_sampler_test") {
+        let server = Server::start(&home, 8, &[]);
+        let sampled = |level: &str, field: &str| {
+            server.request(
+                "GET",
+                &format!("/api/ask/catalog/{level}/{field}/values"),
+                None,
+                None,
+            )
+        };
+        let refused = |level: &str, field: &str, next: &str| {
+            let (status, r) = sampled(level, field);
+            assert_eq!(status, 404, "{backend}: {r}");
+            assert_eq!(
+                r,
+                serde_json::json!({
+                    "error": format!("no field {field} at {level} in this scope"),
+                    "disclosure": "safe",
+                    "next": next,
+                }),
+                "{backend}"
+            );
+        };
+        refused(
+            "stack",
+            "signature",
+            "signature is a derived field of a stack: it is worked out for each row and stored nowhere, \
+             so it has no list of values; a question reads it as [\"derived\", {\"level\": \"loose\"}, \"signature\"], \
+             with level one of the pack's comparability levels: exact, strict, loose",
+        );
+        refused(
+            "stack",
+            "voxel",
+            "voxel is a derived field of a stack: it is worked out for each row and stored nowhere, \
+             so it has no list of values; a question reads it as [\"derived\", {}, \"voxel\"]; \
+             GET /api/ask/catalog names its options (third) under derived",
+        );
+        refused(
+            "stack",
+            "no_such_field",
+            "GET /api/ask/catalog/stack lists the fields of stack, page by page",
+        );
+        refused(
+            "stack",
+            "sex",
+            "GET /api/ask/catalog/stack lists the fields of stack, page by page; sex is a field of subject",
+        );
+        // a level the catalog does not have, as before
+        let (status, r) = sampled("nowhere", "signature");
+        assert_eq!(status, 404, "{backend}: {r}");
+        assert_eq!(
+            r,
+            serde_json::json!({
+                "error": "nowhere is not a level of the catalog",
+                "disclosure": "safe",
+            }),
+            "{backend}"
+        );
+        // a field, one answered as shapes and an axis, as before
+        let (status, sample) = sampled("subject", "sex");
+        assert_eq!(status, 200, "{backend}: {sample}");
+        assert_eq!(sample["kind"], "shapes", "{backend}: {sample}");
+        let (status, sample) = sampled("cohort", "name");
+        assert_eq!(status, 200, "{backend}: {sample}");
+        assert_eq!(sample["level"], "cohort", "{backend}: {sample}");
+        assert_eq!(sample["field"], "name", "{backend}: {sample}");
+        assert_eq!(sample["kind"], "values", "{backend}: {sample}");
+        assert!(
+            sample["items"].as_array().is_some_and(|i| !i.is_empty())
+                && sample["distinct"].as_i64().is_some_and(|d| d >= 1),
+            "{backend}: {sample}"
+        );
+        let (status, sample) = sampled("stack", "base");
+        assert_eq!(status, 200, "{backend}: {sample}");
+        assert_eq!(sample["kind"], "values", "{backend}: {sample}");
+        assert!(
+            sample["items"].as_array().is_some_and(|i| !i.is_empty()),
+            "{backend}: {sample}"
+        );
+        server.finish();
+        if let Some(dsn) = &dsn {
+            drop_schema(dsn, "nils_ask_serve_sampler_test");
+        }
+    }
+}
+
+/// 2026-11-13, on each backend: a draft whose group read three keys that
+/// are "not projected in this layer" was refused three times, each refusal
+/// naming one key, and the model that wrote it spent a turn on each. Every
+/// door that compiles names all of a group's keys the compiler cannot read
+/// in one refusal, each at its own path with the message and the next step
+/// it had alone: the draft in its diagnosis, validate and run as a 400. And
+/// `cohort.id` on a subject set drawn `from` another, which the validator
+/// passed and the compiler then refused, is refused by the validator, every
+/// reader of it in the one answer.
+#[test]
+fn a_refusal_names_every_key_of_a_group_that_cannot_be_read() {
+    let document = |by: serde_json::Value| {
+        serde_json::json!({
+            "ast_version": 1,
+            "name": "scans by what no layer projects",
+            "sets": {
+                "cohorts": {"grain": "cohort"},
+                "people": {"grain": "subject", "of": "cohorts"},
+                "some": {"grain": "subject", "from": "people"},
+                "visits": {"grain": "session", "of": "people"},
+                "scans": {"grain": "stack", "of": "visits"},
+                "by_reach": {"grain": "group", "group": {"of": "scans", "by": by}},
+                "by_cohort": {"grain": "group", "group": {"of": "some", "by": [
+                    ["field", {}, "sex"]
+                ]}}
+            },
+            "out": {"set": "by_reach", "level": "aggregate", "columns": [["field", {}, "_rows"]]}
+        })
+    };
+    let keys = [
+        "visits.people.cohort.id",
+        "visits.people.sex",
+        "visits.people.code",
+    ];
+    let three = document(serde_json::json!([
+        ["field", {}, keys[0]],
+        ["field", {}, keys[1]],
+        ["field", {}, keys[2]]
+    ]));
+    let expected: Vec<serde_json::Value> = keys
+        .iter()
+        .enumerate()
+        .map(|(n, key)| {
+            serde_json::json!({
+                "code": "not_compilable",
+                "path": format!("sets.by_reach.group.by[{n}]"),
+                "message": format!("{key} is not projected in this layer"),
+                "next": "change the document as the message says; validate compiles what run would",
+            })
+        })
+        .collect();
+    // the cohort edge on a set drawn from another, three readers of it
+    let mut edge = document(serde_json::json!([["field", {}, "subject.sex"]]));
+    edge["sets"]["by_cohort"]["group"]["by"] = serde_json::json!([
+        ["field", {}, "cohort.id"],
+        ["field", {}, "sex"],
+        ["field", {}, "cohort.id"]
+    ]);
+    edge["out"] = serde_json::json!({"set": "by_cohort", "level": "aggregate",
+        "columns": [["field", {}, "cohort.id"], ["field", {}, "_rows"]]});
+    let edge_paths = ["sets.by_cohort.group.by[0]", "sets.by_cohort.group.by[2]"];
+    for (backend, home, dsn) in backends("nils_ask_serve_keys_test") {
+        let server = Server::start(&home, 7, &[]);
+        let post = |door: &str, request: serde_json::Value| {
+            server.request("POST", door, Some(&body(request)), None)
+        };
+        // the draft door: one diagnosis, the three keys
+        let (status, drafted) = post(
+            "/api/ask/draft",
+            serde_json::json!({"text": three.to_string()}),
+        );
+        assert_eq!(status, 200, "{backend}: {drafted}");
+        let d = &drafted["diagnosis"];
+        assert_eq!(d["valid"], false, "{backend}: {drafted}");
+        assert_eq!(drafted["document"], serde_json::Value::Null, "{backend}");
+        assert_eq!(
+            d["issues"],
+            serde_json::json!(expected),
+            "{backend}: {drafted}"
+        );
+        // validate and run: one 400, the three keys and their next steps
+        for door in ["/api/ask/validate", "/api/ask/run"] {
+            let (status, refused) = post(door, serde_json::json!({"document": three}));
+            assert_eq!(status, 400, "{backend} {door}: {refused}");
+            assert_eq!(
+                refused["error"], "the document is refused",
+                "{backend} {door}"
+            );
+            assert_eq!(refused["disclosure"], "safe", "{backend} {door}");
+            assert_eq!(
+                refused["issues"],
+                serde_json::json!(expected),
+                "{backend} {door}: {refused}"
+            );
+            assert_eq!(
+                refused["next"].as_array().map(Vec::len),
+                Some(3),
+                "{backend} {door}: {refused}"
+            );
+        }
+        // the cohort edge, decided by the validator: every reader at once
+        let (status, drafted) = post(
+            "/api/ask/draft",
+            serde_json::json!({"text": edge.to_string()}),
+        );
+        assert_eq!(status, 200, "{backend}: {drafted}");
+        let issues = drafted["diagnosis"]["issues"].as_array().unwrap();
+        let paths: Vec<&str> = issues.iter().map(|i| i["path"].as_str().unwrap()).collect();
+        assert_eq!(paths, edge_paths, "{backend}: {drafted}");
+        for i in issues {
+            assert_eq!(i["code"], "unknown_field", "{backend}: {drafted}");
+            assert!(
+                i["message"].as_str().unwrap().starts_with(
+                    "cohort.id is carried by a subject set drawn of a cohort set, and some is not: "
+                ),
+                "{backend}: {drafted}"
+            );
+        }
+        // the same group over the set that has the edge drafts and is stored
+        let mut sound = edge.clone();
+        sound["sets"]["by_cohort"]["group"]["of"] = serde_json::json!("people");
+        let (status, drafted) = post(
+            "/api/ask/draft",
+            serde_json::json!({"text": sound.to_string()}),
+        );
+        assert_eq!(status, 200, "{backend}: {drafted}");
+        assert_eq!(drafted["diagnosis"]["valid"], true, "{backend}: {drafted}");
+        assert!(
+            drafted["document"].as_i64().is_some(),
+            "{backend}: {drafted}"
+        );
+        let (status, ran) = post("/api/ask/run", serde_json::json!({"document": sound}));
+        assert_eq!(status, 200, "{backend}: {ran}");
+        assert!(
+            ran["row_count"].as_i64().is_some_and(|n| n >= 1),
+            "{backend}: {ran}"
+        );
+        // and so does the set drawn from another once it names a cohort set
+        // in its own `of`, as the refusal says to write
+        let mut own = edge.clone();
+        own["sets"]["some"]["of"] = serde_json::json!("cohorts");
+        let (status, ran) = post("/api/ask/run", serde_json::json!({"document": own}));
+        assert_eq!(status, 200, "{backend}: {ran}");
+        assert!(
+            ran["row_count"].as_i64().is_some_and(|n| n >= 1),
+            "{backend}: {ran}"
+        );
+        server.finish();
+        if let Some(dsn) = &dsn {
+            drop_schema(dsn, "nils_ask_serve_keys_test");
+        }
+    }
+}

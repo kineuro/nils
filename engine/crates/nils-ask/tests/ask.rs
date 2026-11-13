@@ -2150,7 +2150,8 @@ fn the_sets_a_quasi_field_chose_and_the_counts_held_are_traced() {
     // a group's own count of a comparison of an age: the subjects it counts
     let own = doc(
         json!({
-            "people": {"grain": "subject", "bind": {
+            "scope": {"grain": "cohort"},
+            "people": {"grain": "subject", "of": "scope", "bind": {
                 "old": ["case", {}, [">=", {}, ["age_at", {}, ["field", {}, "birth_date"], "2026-01-01"], 45], 1, 0]
             }},
             "by_cohort": {"grain": "group", "group": {"of": "people", "by": [["field", {}, "cohort.id"]]},
@@ -2180,4 +2181,269 @@ fn the_sets_a_quasi_field_chose_and_the_counts_held_are_traced() {
         let at_quasi = prepare(ask, &Fixture, &quasi_scope()).unwrap().validated;
         assert!(at_quasi.quasi_sets.is_empty() && at_quasi.counts.is_empty());
     }
+}
+
+/// 2026-11-13: a document that will not parse says where its reading
+/// stopped. A model was told `invalid type: integer 1, expected a sequence`
+/// and `unknown field foo, expected one of as, set, optional` and not which
+/// part of its document either was about. The path is the dotted one an
+/// issue of the validator names, the same for a YAML and a JSON document,
+/// with and without repair; the words are the ones said before.
+#[test]
+fn a_document_that_will_not_parse_says_where() {
+    let shaped = |text: &str, path: &str, words: &str| {
+        for e in [
+            parse(text).expect_err("no ask"),
+            parse_repaired(text).expect_err("repair makes no ask of it"),
+        ] {
+            assert_eq!(e.path(), Some(path), "{text}: {e}");
+            assert_eq!(e.to_string(), format!("the ask will not parse: {words}"));
+            match e {
+                nils_ask::Error::Shape { path: p, message } => {
+                    assert_eq!((p.as_str(), message.as_str()), (path, words));
+                }
+                other => panic!("{other:?}"),
+            }
+        }
+    };
+    // a number where a list is written
+    let not_a_list = "invalid type: integer `1`, expected a sequence";
+    shaped(
+        r#"
+ast_version: 1
+sets:
+  scans: {grain: stack}
+  good: {grain: session, attach: 1}
+out: {set: good, level: count}
+"#,
+        "sets.good.attach",
+        not_a_list,
+    );
+    shaped(
+        &json!({
+            "ast_version": 1,
+            "sets": {"scans": {"grain": "stack"}, "good": {"grain": "session", "attach": 1}},
+            "out": {"set": "good", "level": "count"}
+        })
+        .to_string(),
+        "sets.good.attach",
+        not_a_list,
+    );
+    // a key the part does not have, at the item that holds it
+    let no_such_key = "unknown field `foo`, expected one of `as`, `set`, `optional`";
+    shaped(
+        r#"
+ast_version: 1
+sets:
+  scans: {grain: stack}
+  good:
+    grain: session
+    attach:
+      - {as: scan, set: scans, foo: 1}
+out: {set: good, level: count}
+"#,
+        "sets.good.attach[0]",
+        no_such_key,
+    );
+    shaped(
+        &json!({
+            "ast_version": 1,
+            "sets": {
+                "scans": {"grain": "stack"},
+                "good": {"grain": "session", "attach": [{"as": "scan", "set": "scans", "foo": 1}]}
+            },
+            "out": {"set": "good", "level": "count"}
+        })
+        .to_string(),
+        "sets.good.attach[0]",
+        no_such_key,
+    );
+    // the second item of a list is named by its place
+    let second = json!({
+        "ast_version": 1,
+        "sets": {
+            "scans": {"grain": "stack"},
+            "good": {"grain": "session", "attach": [
+                {"as": "scan", "set": "scans"},
+                {"as": "other", "set": "scans", "foo": 1}
+            ]}
+        },
+        "out": {"set": "good", "level": "count"}
+    });
+    shaped(&second.to_string(), "sets.good.attach[1]", no_such_key);
+    // a key the document itself does not have is told at the document
+    let e = parse(
+        r#"{"ast_version": 1, "sets": {}, "out": {"set": "s", "level": "count"}, "nope": 1}"#,
+    )
+    .expect_err("no such key");
+    assert_eq!(e.path(), Some("document"), "{e}");
+    // a clause is read whole, so a fault inside one is told at the clause
+    let e = parse(
+        &json!({
+            "ast_version": 1,
+            "sets": {"good": {"grain": "session", "where": [["=", {}, ["field", {}, "label"], "a"], [1]]}},
+            "out": {"set": "good", "level": "count"}
+        })
+        .to_string(),
+    )
+    .expect_err("no clause");
+    assert_eq!(e.path(), Some("sets.good.where[1]"), "{e}");
+    // the pick clause's own words still follow its refusal, at the pick
+    let e = parse(
+        r#"
+ast_version: 1
+sets:
+  t1: {grain: stack, pick: {per: session, model: main, by: [[["field", {}, "id"], asc]]}}
+out: {set: t1, level: count}
+"#,
+    )
+    .expect_err("model is no key of pick");
+    assert_eq!(e.path(), Some("sets.t1.pick"), "{e}");
+    assert!(
+        e.to_string().contains(r#"[["picked", {role: t1w}]]"#),
+        "{e}"
+    );
+    // a text that is neither JSON nor YAML has no place to name
+    for text in ["{\"ast_version\": 1,", "sets: [unclosed"] {
+        let e = parse(text).expect_err("no document");
+        assert_eq!(e.path(), None, "{e}");
+        assert!(matches!(e, nils_ask::Error::Parse(_)), "{e:?}");
+    }
+    // and a document that parses is the one it was
+    for name in ["gold-a", "gold-b", "gold-c", "yardstick"] {
+        let text = std::fs::read_to_string(format!(
+            "{}/fixtures/{name}.ask.yml",
+            env!("CARGO_MANIFEST_DIR")
+        ))
+        .unwrap();
+        let ask = parse(&text).unwrap_or_else(|e| panic!("{name}: {e}"));
+        let direct: nils_ask::Ask = serde_json::from_value(nils_ask::read(&text).unwrap()).unwrap();
+        assert_eq!(ask, direct, "{name}");
+    }
+}
+
+/// 2026-11-13: the cohort edge (rule 4, C40) is decided by the validator. A
+/// subject set carries `cohort.id` when it names a cohort set in its own
+/// `of`, and an algebra of sets when its left operand does; a set drawn
+/// `from` another is not passed it. The validator passed `cohort.id` on any
+/// subject set and the compiler refused it, one reader a refusal, so a
+/// group of three such keys took three drafts. Each reader is refused here
+/// at its own path, all in the one answer, with what to write.
+#[test]
+fn the_cohort_edge_is_decided_by_the_validator_at_every_reader() {
+    let by_cohort = |of: &str| {
+        json!({"grain": "group", "group": {"of": of, "by": [
+            ["field", {}, "cohort.id"],
+            ["field", {}, "sex"],
+            ["bucket", {"unit": "year"}, ["field", {}, "cohort.id"]]
+        ]}})
+    };
+    let out = json!({"set": "g", "level": "aggregate", "columns": [["field", {}, "_rows"]]});
+    let words = |set: &str| {
+        format!(
+            "cohort.id is carried by a subject set drawn of a cohort set, and {set} is not: \
+             give {set} of: <a set of grain cohort>, or read cohort.id on the set that has one \
+             (from does not pass it on)"
+        )
+    };
+    let at = |issues: &[nils_ask::Issue], set: &str| -> Vec<String> {
+        issues
+            .iter()
+            .map(|i| {
+                assert_eq!(i.code, Code::UnknownField, "{issues:?}");
+                assert_eq!(i.message, words(set), "{issues:?}");
+                assert!(!i.next.is_empty(), "{issues:?}");
+                i.path.clone()
+            })
+            .collect()
+    };
+    // a set drawn of no cohort set: both keys that read the edge, at once
+    let plain = doc(
+        json!({"people": {"grain": "subject"}, "g": by_cohort("people")}),
+        out.clone(),
+    );
+    assert_eq!(
+        at(&refused(plain), "people"),
+        ["sets.g.group.by[0]", "sets.g.group.by[2]"]
+    );
+    // a set drawn from one that has the edge is not passed it
+    let from = doc(
+        json!({
+            "scope": {"grain": "cohort"},
+            "people": {"grain": "subject", "of": "scope"},
+            "some": {"grain": "subject", "from": "people"},
+            "g": by_cohort("some")
+        }),
+        out.clone(),
+    );
+    assert_eq!(
+        at(&refused(from), "some"),
+        ["sets.g.group.by[0]", "sets.g.group.by[2]"]
+    );
+    // the set's own clauses, the answer's columns and its order
+    let own = doc(
+        json!({"people": {"grain": "subject",
+            "bind": {"c": ["field", {}, "cohort.id"]},
+            "where": [["=", {}, ["field", {}, "cohort.id"], 1]]}}),
+        json!({"set": "people", "level": "record",
+            "columns": [["field", {}, "cohort.id"]],
+            "order": [[["field", {}, "cohort.id"], "asc"]]}),
+    );
+    let mut paths = at(&refused(own), "people");
+    paths.sort();
+    assert_eq!(
+        paths,
+        [
+            "out.columns[0]",
+            "out.order[0]",
+            "sets.people.bind.c",
+            "sets.people.where[0]"
+        ]
+    );
+    // an algebra keeps its left operand's edge, and not its right one's
+    let algebra = |op: &str, sets: [&str; 2]| {
+        doc(
+            json!({
+                "scope": {"grain": "cohort"},
+                "members": {"grain": "subject", "of": "scope"},
+                "everyone": {"grain": "subject"},
+                "both": {"grain": "subject", "algebra": {"op": op, "sets": sets}}
+            }),
+            json!({"set": "both", "level": "record", "columns": [["field", {}, "cohort.id"]]}),
+        )
+    };
+    accepted(algebra("intersect", ["members", "everyone"]));
+    accepted(algebra("except", ["members", "everyone"]));
+    assert_eq!(
+        at(
+            &refused(algebra("intersect", ["everyone", "members"])),
+            "both"
+        ),
+        ["out.columns[0]"]
+    );
+    // the edge exposes the key alone, as before
+    let name = doc(
+        json!({"scope": {"grain": "cohort"}, "people": {"grain": "subject", "of": "scope",
+            "where": [["=", {}, ["field", {}, "cohort.name"], "a"]]}}),
+        json!({"set": "people", "level": "count"}),
+    );
+    let issues = refused(name);
+    assert!(
+        issues
+            .iter()
+            .any(|i| i.message == "the cohort edge exposes cohort.id alone"),
+        "{issues:?}"
+    );
+    // and a set drawn of a cohort set reads it as it did: gold C, and a group
+    accepted(doc(
+        json!({
+            "scope": {"grain": "cohort"},
+            "people": {"grain": "subject", "of": "scope",
+                "where": [["=", {}, ["field", {}, "cohort.id"], 1]]},
+            "g": by_cohort("people")
+        }),
+        out,
+    ));
+    let gold_c = parse(&fixture("gold-c")).unwrap();
+    prepare(gold_c, &Fixture, &quasi_scope()).unwrap_or_else(|e| panic!("gold C: {e}"));
 }

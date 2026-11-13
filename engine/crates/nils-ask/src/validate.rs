@@ -1610,6 +1610,27 @@ fn level_prefix(grain: Grain, first: &str) -> bool {
     ancestors.contains(&first)
 }
 
+/// Whether a subject set carries `cohort.id` (rule 4, C40), as the compiler
+/// projects it: the set names a cohort set in its own `of`, or it is the
+/// algebra of sets whose left operand, whose frame an algebra keeps, does.
+fn cohort_edge(ask: &Ask, set: &Set, depth: usize) -> bool {
+    // a cycle, which is refused as one, ends here
+    if depth > ask.sets.len() {
+        return false;
+    }
+    if let Some(a) = &set.algebra {
+        return a
+            .sets
+            .first()
+            .and_then(|left| ask.sets.get(left))
+            .is_some_and(|left| cohort_edge(ask, left, depth + 1));
+    }
+    set.of
+        .as_ref()
+        .and_then(|of| ask.sets.get(of))
+        .is_some_and(|of| of.grain == Grain::Cohort)
+}
+
 /// The exposed names of `near` and `attach` partners beyond their sets'
 /// own fields and bindings.
 const PARTNER_EXTRAS: &[&str] = &["date", "precision", "offset_days", "tied", "candidates"];
@@ -1732,11 +1753,22 @@ fn resolve_field(
         && level_prefix(grain, first)
     {
         if first == "cohort" && grain == Grain::Subject {
-            // the cohort edge exposes the cohort key alone (rule 4)
-            return if rest == "id" {
+            // the cohort edge exposes the cohort key alone (rule 4), and
+            // only on a subject set that names a cohort set in its own `of`
+            // (C40): a set drawn `from` another is not passed it. The
+            // compiler projects it nowhere else, and refused what was
+            // passed here one reader at a time (2026-11-13).
+            if rest != "id" {
+                return Err("the cohort edge exposes cohort.id alone".into());
+            }
+            return if cohort_edge(ask, set, 0) {
                 Ok(None)
             } else {
-                Err("the cohort edge exposes cohort.id alone".into())
+                Err(format!(
+                    "cohort.id is carried by a subject set drawn of a cohort set, and {set_name} is not: \
+                     give {set_name} of: <a set of grain cohort>, or read cohort.id on the set that has one \
+                     (from does not pass it on)"
+                ))
             };
         }
         return match names.field(first, rest) {

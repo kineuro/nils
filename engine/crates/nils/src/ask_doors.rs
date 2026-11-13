@@ -349,7 +349,7 @@ fn document_of(registry: &mut Registry, body: &Value) -> Result<(Ask, Option<i64
     }
     if body["document"].is_object() {
         let ask = parse(&body["document"].to_string())
-            .map_err(|e| Reply::error(400, format!("the document is refused: {e}")))?;
+            .map_err(|e| not_parsed(format!("the document is refused: {e}"), &e))?;
         return Ok((ask, None));
     }
     Err(Reply::error(
@@ -375,10 +375,28 @@ fn issues_reply(status: u16, what: &str, issues: &[nils_ask::validate::Issue]) -
     }
 }
 
+/// A document that will not parse (400), with where its reading stopped
+/// (2026-11-13): `error` says what is wrong, as it did, and `path` says
+/// where, as the dotted path an issue names (`sets.good.attach[0]`), so a
+/// caller changes that place and not the document around it. `code` is
+/// `not_parsed` and `next` the step from there. A text that is neither JSON
+/// nor YAML has no path, and is answered `error` alone, as before.
+fn not_parsed(error: String, e: &AskError) -> Reply {
+    let mut reply = Reply::error(400, error);
+    if let Some(path) = e.path() {
+        reply.body["code"] = json!("not_parsed");
+        reply.body["path"] = json!(path);
+        reply.body["next"] = json!(format!(
+            "change the document at {path} as the error says; GET /api/ask/schema describes a document"
+        ));
+    }
+    reply
+}
+
 fn ask_err(e: AskError) -> Reply {
     match e {
         AskError::Invalid(issues) => issues_reply(400, "the document is refused", &issues),
-        other => Reply::error(400, other.to_string()),
+        other => not_parsed(other.to_string(), &other),
     }
 }
 
@@ -388,7 +406,7 @@ fn run_err(e: RunError) -> Reply {
         // what only the compiler refuses, a parameter without a value for
         // one, is refused as a validation refusal is, at the path the
         // compiler names, and no longer answers 500 (2026-10-12)
-        RunError::Compile(c) => issues_reply(400, "the document is refused", &[c.issue()]),
+        RunError::Compile(c) => issues_reply(400, "the document is refused", &c.issues()),
         RunError::Forbidden(m) => Reply::error(403, m),
         RunError::Handle(HandleError::NotFound(id)) => Reply::error(404, format!("no handle {id}")),
         RunError::Handle(
@@ -454,6 +472,16 @@ fn affordance_err(e: AffordanceError) -> Reply {
             Reply::error(404, format!("no document {id}"))
         }
         AffordanceError::Run(r) => run_err(r),
+        // the value sampler asked for a name that is no field of the level:
+        // the caller's to change, with the step from there (2026-11-13; it
+        // answered 500)
+        e @ AffordanceError::NoField { .. } => {
+            let mut reply = Reply::error(404, e.to_string());
+            if let AffordanceError::NoField { next, .. } = e {
+                reply.body["next"] = json!(next);
+            }
+            reply
+        }
         other => Reply::error(500, other.to_string()),
     }
 }

@@ -53,7 +53,13 @@ impl fmt::Display for RunError {
         match self {
             RunError::Ask(e) => write!(f, "{e}"),
             // read as a validation refusal reads (crate::Error::Invalid)
-            RunError::Compile(e) => write!(f, "the ask is refused:\n  {}", e.issue()),
+            RunError::Compile(e) => {
+                write!(f, "the ask is refused:")?;
+                for i in e.issues() {
+                    write!(f, "\n  {i}")?;
+                }
+                Ok(())
+            }
             RunError::Store(e) => write!(f, "{e}"),
             RunError::Home(e) => write!(f, "{e}"),
             RunError::Exec(e) => write!(f, "{e}"),
@@ -1004,7 +1010,9 @@ pub fn explain(
 /// What the compiler refuses of a document, as issues at its paths, no
 /// statement run (Wave 4c, kineuro/nils#93: validate compiles what run
 /// would). None where it compiles, and none where it is refused before it
-/// is compiled, which its validation says.
+/// is compiled, which its validation says. Every key of a group it cannot
+/// read is here at once, and every column and order key of the answer, so
+/// a caller mends them in one turn (2026-11-13).
 pub fn not_compilable(
     registry: &mut Registry,
     ask: &Ask,
@@ -1013,7 +1021,7 @@ pub fn not_compilable(
     scheme: &Scheme,
 ) -> Vec<Issue> {
     match explain(registry, ask.clone(), names, scope, scheme) {
-        Err(RunError::Compile(e)) => vec![e.issue()],
+        Err(RunError::Compile(e)) => e.issues(),
         _ => Vec::new(),
     }
 }
