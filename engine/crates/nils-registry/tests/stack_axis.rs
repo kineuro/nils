@@ -963,6 +963,10 @@ fn a_refresh_is_planned_for_the_stacks_it_names() {
     }
 }
 
+/// A way a trigger is lost: its name, what breaks it, and what an open then
+/// finds missing, switched off and astray.
+type Way<'a> = (&'a str, String, Vec<&'a str>, Vec<&'a str>, Vec<&'a str>);
+
 /// How many repairs the registry's audit holds.
 fn repairs(store: &mut Store) -> i64 {
     let sql = format!(
@@ -1011,7 +1015,7 @@ fn an_open_finds_lost_triggers_and_mends_the_rows() {
         ];
         // each way a trigger is lost: what breaks it, and what an open
         // then finds missing, switched off and astray
-        let mut ways: Vec<(&str, String, Vec<&str>, Vec<&str>, Vec<&str>)> = vec![(
+        let mut ways: Vec<Way<'_>> = vec![(
             "dropped",
             if postgres {
                 format!("DROP TRIGGER {changed} ON {{print}}")

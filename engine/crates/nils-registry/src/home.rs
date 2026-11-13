@@ -447,15 +447,15 @@ impl Home {
         // again before anything is read or written, since a question would
         // otherwise count stale rows and say nothing. It is said once, on
         // stderr, and audited. A registry opens either way.
-        let mended = match mend
-            .then(|| {
-                crate::stack_axis::mend(
-                    &mut store,
-                    &crate::principal::Principal::current().to_string(),
-                )
-            })
-            .unwrap_or(Ok(None))
-        {
+        let looked = if mend {
+            crate::stack_axis::mend(
+                &mut store,
+                &crate::principal::Principal::current().to_string(),
+            )
+        } else {
+            Ok(None)
+        };
+        let mended = match looked {
             Ok(mended) => mended,
             Err(e) => {
                 eprintln!(
