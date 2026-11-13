@@ -1,0 +1,14 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# Lists: values of an axis by more than one of their names, stations,
+# datasets.
+ast_version: 1
+name: stacks by lists of techniques, bases, stations and datasets
+sets:
+  scans:
+    grain: stack
+    where:
+      - ["in", {}, ["axis", {}, "technique"], ["MPRAGE", "SP-GRE", "SPACE"]]
+      - ["in", {}, ["axis", {}, "base"], ["T1w", "T2starw", "T2w"]]
+      - ["in", {}, ["field", {}, "station_name"], ["STN01", "STN02", "STN03", "STN07", "STN11"]]
+      - ["in", {}, ["field", {}, "dataset"], ["site-a", "site-c"]]
+out: {set: scans, level: count}

@@ -25,6 +25,10 @@ use nils_registry::schema::table;
 use nils_registry::{Error, Insert, Param, Registry, Store};
 use serde::{Deserialize, Serialize};
 
+mod scale;
+
+pub use scale::{COHORT, DATASETS, ScaleManifest, ScalePlan, build_scale};
+
 /// The vocabulary the registry is planted with: one disease with four
 /// courses, two scales, a diagnosis, a transition known to the year, and
 /// a sensitive kind with no rows, so the affordances can prove they never
@@ -776,7 +780,9 @@ pub fn build(registry: &mut Registry, plan: &Plan) -> Result<Manifest, Error> {
 
     let store = registry.store();
     store.begin()?;
-    let result = write(store, &folk, plan, &now, &mut manifest);
+    // the axes are written a row a value, and the read model of them once
+    let result = write(store, &folk, plan, &now, &mut manifest)
+        .and_then(|()| nils_registry::stack_axis::rebuild(store).map(|_| ()));
     match result {
         Ok(()) => {}
         Err(e) => {

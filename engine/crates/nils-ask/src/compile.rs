@@ -405,9 +405,24 @@ struct Term {
     /// `not_in` and `has` ask whether a name is among them, and a group
     /// keyed by it counts a row once under each name.
     members: bool,
+    /// The list is the datasets of the row's own stack, subject or session,
+    /// which the layer's spine names, so whether a dataset is among them is
+    /// asked of the stacks' holders by the dataset's `source` rows instead
+    /// of the list. None where the list was carried from another row (a
+    /// partner, an ancestor, a binding, a union).
+    holder: Option<Holder>,
     /// The value is a date, a day or an instant (2026-10-12), so a text it
     /// meets is read as a date: Postgres compares no date with text.
     dated: Option<Dated>,
+}
+
+/// Whose datasets a list of names is: the row's stack's, or those of the
+/// stacks of its subject or its session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Holder {
+    Stack,
+    Subject,
+    Session,
 }
 
 /// What a date holds: a day, or an instant written `YYYY-MM-DDTHH:MM:SSZ`.
@@ -425,6 +440,7 @@ impl Term {
             ci: None,
             param: None,
             members: false,
+            holder: None,
             dated: None,
         }
     }
@@ -486,7 +502,9 @@ fn field_col(path: &str) -> String {
 /// The base relation of a grain: its FROM clause, its key, and what it
 /// carries. The aliases are fixed so a field's column can be named.
 struct Base {
-    from: String,
+    /// The grain's own table, and the joins that hang off it.
+    first: String,
+    joins: String,
     key: String,
     subj: Option<String>,
     day: Option<String>,
@@ -496,6 +514,60 @@ struct Base {
     series_k: Option<String>,
     stack_k: Option<String>,
     standing: Vec<String>,
+}
+
+/// The joins of a base relation that only some sets read: the labels of a
+/// session under the scheme, and the MR detail of a series.
+#[derive(Debug, Clone, Copy, Default)]
+struct Needs {
+    label: bool,
+    detail: bool,
+    /// The session of a stack or an instance: a field of it, or its key
+    /// for a set of sessions to count or pick by.
+    session: bool,
+    /// The axes of a stack, its row of the read model.
+    axes: bool,
+}
+
+/// What ties a relation that restricts a set to the set's base: the base's
+/// own key, its subject, or its session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Via {
+    Key,
+    Subject,
+    Session,
+}
+
+/// A relation, or two, that restricts a set: a source, an ancestor, a
+/// handle's or a list's members.
+struct Lead {
+    via: Via,
+    /// The relations, in an order where each is tied to the one before.
+    rels: Vec<String>,
+    /// What ties them to each other and to the base, and what they are
+    /// read under.
+    on: Vec<String>,
+}
+
+/// The name a stack set's frame keeps the values of an axis under: no
+/// document writes it, so no field, binding or partner is called it.
+fn axis_term(axis: &str) -> String {
+    format!("@axis:{axis}")
+}
+
+/// Whether an axis's name is one a column and a JSON path can carry as
+/// written: letters, digits and underscores, as every axis of a pack is.
+fn plain_axis(axis: &str) -> bool {
+    !axis.is_empty()
+        && !axis.starts_with(|c: char| c.is_ascii_digit())
+        && axis.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+/// What a row's value of an axis is held against: one of some texts, each
+/// a placeholder, or a condition on `ax.value`.
+enum Held {
+    Any(Vec<String>),
+    Sql(String),
 }
 
 fn alias_of(table: &str) -> Option<&'static str> {
@@ -858,11 +930,25 @@ impl<'a> Builder<'a> {
         }
     }
 
-    fn base(&mut self, grain: Grain, path: &str) -> R<Base> {
+    fn base(&mut self, grain: Grain, path: &str, needs: Needs, anchor: Via) -> R<Base> {
         let q = |b: &Builder, t: &str| b.q(t);
+        // the labels of a session and the MR detail of a series are read by
+        // a unique key each, so a set that names no field of theirs is the
+        // same set without the join
+        let label = |b: &mut Builder| -> String {
+            if !needs.label {
+                return String::new();
+            }
+            let digest = b.p(Param::from(b.ctx.scheme_digest.as_str()), Type::Text);
+            format!(
+                " LEFT JOIN {} sl ON sl.session_id = sc.id AND sl.scheme_digest = {digest}",
+                b.q("session_label")
+            )
+        };
         Ok(match grain {
             Grain::Cohort => Base {
-                from: format!("{} c", q(self, "cohort")),
+                first: format!("{} c", q(self, "cohort")),
+                joins: String::new(),
                 key: "c.id".into(),
                 subj: None,
                 day: None,
@@ -874,7 +960,8 @@ impl<'a> Builder<'a> {
                 standing: Vec::new(),
             },
             Grain::Subject => Base {
-                from: format!("{} su", q(self, "subject")),
+                first: format!("{} su", q(self, "subject")),
+                joins: String::new(),
                 key: "su.id".into(),
                 subj: Some("su.id".into()),
                 day: None,
@@ -888,16 +975,22 @@ impl<'a> Builder<'a> {
                 standing: vec!["su.merged_into IS NULL".into()],
             },
             Grain::Session => {
-                let digest = self.p(Param::from(self.ctx.scheme_digest.as_str()), Type::Text);
+                let label = label(self);
                 let window = self.p(Param::Int(self.ctx.window_days), Type::Int);
-                Base {
-                    from: format!(
-                        "{} sc JOIN {} su ON su.id = sc.subject_id \
-                         LEFT JOIN {} sl ON sl.session_id = sc.id AND sl.scheme_digest = {digest}",
-                        q(self, "session_cache"),
-                        q(self, "subject"),
-                        q(self, "session_label")
+                let (sc, su) = (q(self, "session_cache"), q(self, "subject"));
+                let (first, joins) = match anchor {
+                    Via::Subject => (
+                        format!("{su} su"),
+                        format!(" JOIN {sc} sc ON sc.subject_id = su.id{label}"),
                     ),
+                    _ => (
+                        format!("{sc} sc"),
+                        format!(" JOIN {su} su ON su.id = sc.subject_id{label}"),
+                    ),
+                };
+                Base {
+                    first,
+                    joins,
                     key: "sc.id".into(),
                     subj: Some("su.id".into()),
                     day: Some("sc.first".into()),
@@ -909,111 +1002,186 @@ impl<'a> Builder<'a> {
                     standing: vec![format!("sc.window_days = {window}")],
                 }
             }
-            Grain::Stack => {
-                let window = self.p(Param::Int(self.ctx.window_days), Type::Int);
-                let digest = self.p(Param::from(self.ctx.scheme_digest.as_str()), Type::Text);
-                // §4.4 rule 10 and §14.2: a stack the pack ruled out is not a
-                // stack any set sees, and a document cannot switch it off.
-                // Describe prints this predicate, so the query has to carry
-                // it or the two disagree by exactly the excluded stacks.
-                let axis = self.p(Param::from("disposition"), Type::Text);
-                let ruled_out = self.p(Param::from("excluded"), Type::Text);
-                let not_excluded = format!(
-                    "NOT EXISTS (SELECT 1 FROM {} dax WHERE dax.stack_id = st.id \
-                     AND dax.axis = {axis} AND dax.value = {ruled_out})",
-                    q(self, "classification_axis")
-                );
-                Base {
-                    // Record 35 finding 1: whose stack this is comes off the
-                    // **series**, which carries the subject the stack's own
-                    // files named, and not off the study, which carries
-                    // whoever the study's files named. The two differ wherever
-                    // an archive re-linked a series, and reading the study
-                    // folded one subject's stacks into another's: an ask saw
-                    // 38 subjects where a selection reached 39. The session
-                    // follows the same rule, so a stack is never rolled up
-                    // under a session of somebody else.
-                    from: format!(
-                        "{} st JOIN {} se ON se.id = st.series_id JOIN {} sy ON sy.id = se.study_id \
-                         JOIN {} su ON su.id = se.subject_id JOIN {} f ON f.stack_id = st.id \
-                         LEFT JOIN {} smr ON smr.series_id = se.id \
-                         LEFT JOIN {} scs ON scs.study_id = sy.id AND scs.window_days = {window} \
-                         LEFT JOIN {} sc ON sc.id = scs.session_id AND sc.subject_id = se.subject_id \
-                         LEFT JOIN {} sl ON sl.session_id = sc.id AND sl.scheme_digest = {digest}",
-                        q(self, "stack"),
-                        q(self, "series"),
-                        q(self, "study"),
-                        q(self, "subject"),
-                        q(self, "stack_fingerprint"),
-                        q(self, "series_mr"),
-                        q(self, "session_cache_study"),
-                        q(self, "session_cache"),
-                        q(self, "session_label")
+            Grain::Stack | Grain::Instance => {
+                let window = if needs.session || anchor == Via::Session {
+                    self.p(Param::Int(self.ctx.window_days), Type::Int)
+                } else {
+                    String::new()
+                };
+                let label = label(self);
+                // the stack's row of the read model, where a clause reads an
+                // axis of it
+                let axes = if needs.axes && grain == Grain::Stack {
+                    format!(
+                        " LEFT JOIN {} xa ON xa.stack_id = st.id",
+                        q(self, "stack_axis")
+                    )
+                } else {
+                    String::new()
+                };
+                let detail = if needs.detail && grain == Grain::Stack {
+                    format!(
+                        " LEFT JOIN {} smr ON smr.series_id = se.id",
+                        q(self, "series_mr")
+                    )
+                } else {
+                    String::new()
+                };
+                // Record 35 finding 1: whose stack this is comes off the
+                // **series**, which carries the subject the stack's own
+                // files named, and not off the study, which carries
+                // whoever the study's files named. The two differ wherever
+                // an archive re-linked a series, and reading the study
+                // folded one subject's stacks into another's: an ask saw
+                // 38 subjects where a selection reached 39. The session
+                // follows the same rule, so a stack is never rolled up
+                // under a session of somebody else: the session of a
+                // stack's study, where it is the session of the stack's
+                // own subject. It is joined by its key alone, with the
+                // subject held as a condition on the row found and not as
+                // a second key: written as two keys, a planner multiplies
+                // the two selectivities and takes the join, once a set
+                // reads it strictly, for one row in thousands where it is
+                // nearly every row, and plans what follows for a handful.
+                let own = "NULLIF(sc.subject_id = se.subject_id, FALSE) IS NOT NULL";
+                let (series, study, subject) =
+                    (q(self, "series"), q(self, "study"), q(self, "subject"));
+                let (scs, sc) = (q(self, "session_cache_study"), q(self, "session_cache"));
+                // the grain's own rows off a series: a stack with its
+                // fingerprint, or an instance (the same rule, for the same
+                // reason)
+                let (unit, of_series, own_first) = if grain == Grain::Stack {
+                    let (st, f) = (q(self, "stack"), q(self, "stack_fingerprint"));
+                    (
+                        format!("{st} st"),
+                        format!(
+                            " JOIN {st} st ON st.series_id = se.id JOIN {f} f ON f.stack_id = st.id"
+                        ),
+                        format!(
+                            " JOIN {series} se ON se.id = st.series_id JOIN {f} f ON f.stack_id = st.id"
+                        ),
+                    )
+                } else {
+                    let i = q(self, "instance");
+                    (
+                        format!("{i} i"),
+                        format!(" JOIN {i} i ON i.series_id = se.id"),
+                        format!(" JOIN {series} se ON se.id = i.series_id"),
+                    )
+                };
+                // a set nothing reads the session of is the same set without
+                // it: each study has one session under a window, and each
+                // session one row
+                let sessions = if needs.session {
+                    format!(
+                        " LEFT JOIN {scs} scs ON scs.study_id = sy.id AND scs.window_days = {window} \
+                         LEFT JOIN {sc} sc ON sc.id = scs.session_id AND {own}"
+                    )
+                } else {
+                    String::new()
+                };
+                // The joins are written from what restricts the set: each
+                // table after the first is tied to one before it, so that
+                // a planner which takes a long list of joins in the order
+                // written (Postgres past `join_collapse_limit`) joins
+                // neighbours and never two tables nothing ties yet. A set
+                // of an ancestor's sessions reads the session strictly, so
+                // its joins to the session are inner ones.
+                let (first, joins) = match anchor {
+                    Via::Session => (
+                        format!("{sc} sc"),
+                        format!(
+                            " JOIN {scs} scs ON scs.session_id = sc.id AND scs.window_days = {window} \
+                             JOIN {study} sy ON sy.id = scs.study_id \
+                             JOIN {series} se ON se.study_id = sy.id AND {own}{of_series} \
+                             JOIN {subject} su ON su.id = se.subject_id{axes}{label}{detail}"
+                        ),
                     ),
-                    key: "st.id".into(),
+                    Via::Subject => (
+                        format!("{subject} su"),
+                        format!(
+                            " JOIN {series} se ON se.subject_id = su.id{of_series} \
+                             JOIN {study} sy ON sy.id = se.study_id{axes}{sessions}{label}{detail}"
+                        ),
+                    ),
+                    Via::Key => (
+                        unit,
+                        format!(
+                            "{own_first} JOIN {subject} su ON su.id = se.subject_id \
+                             JOIN {study} sy ON sy.id = se.study_id{axes}{sessions}{label}{detail}"
+                        ),
+                    ),
+                };
+                let mut standing = Vec::new();
+                let stack = if grain == Grain::Stack {
+                    // §4.4 rule 10 and §14.2: a stack the pack ruled out is
+                    // not a stack any set sees, and a document cannot switch
+                    // it off. Describe prints this predicate, so the query
+                    // has to carry it or the two disagree by exactly the
+                    // excluded stacks. It reads the few rows of the read
+                    // model that say so (`nils_registry::stack_axis`).
+                    standing.push(self.not_ruled_out("dax", "st.id"));
+                    "st.id"
+                } else {
+                    "i.stack_id"
+                };
+                if let Some(sealed) = self.not_sealed(stack) {
+                    standing.push(sealed);
+                }
+                Base {
+                    first,
+                    joins,
+                    key: if grain == Grain::Stack {
+                        "st.id"
+                    } else {
+                        "i.id"
+                    }
+                    .into(),
                     subj: Some("su.id".into()),
                     day: Some("COALESCE(sy.date_filled, sy.study_date)".into()),
                     prec: None,
-                    session_k: Some("sc.id".into()),
+                    session_k: (needs.session || anchor == Via::Session)
+                        .then(|| "sc.id".to_string()),
                     study_k: Some("sy.id".into()),
                     series_k: Some("se.id".into()),
-                    stack_k: Some("st.id".into()),
-                    standing: {
-                        let mut standing = vec![not_excluded];
-                        if let Some(sealed) = self.not_sealed("st.id") {
-                            standing.push(sealed);
-                        }
-                        standing
-                    },
+                    stack_k: Some(stack.into()),
+                    standing,
                 }
             }
-            Grain::Instance => {
-                let window = self.p(Param::Int(self.ctx.window_days), Type::Int);
-                let digest = self.p(Param::from(self.ctx.scheme_digest.as_str()), Type::Text);
-                Base {
-                    // The same rule as the stack grain, for the same reason.
-                    from: format!(
-                        "{} i JOIN {} se ON se.id = i.series_id JOIN {} sy ON sy.id = se.study_id \
-                         JOIN {} su ON su.id = se.subject_id \
-                         LEFT JOIN {} scs ON scs.study_id = sy.id AND scs.window_days = {window} \
-                         LEFT JOIN {} sc ON sc.id = scs.session_id AND sc.subject_id = se.subject_id \
-                         LEFT JOIN {} sl ON sl.session_id = sc.id AND sl.scheme_digest = {digest}",
-                        q(self, "instance"),
-                        q(self, "series"),
-                        q(self, "study"),
-                        q(self, "subject"),
-                        q(self, "session_cache_study"),
-                        q(self, "session_cache"),
-                        q(self, "session_label")
-                    ),
-                    key: "i.id".into(),
-                    subj: Some("su.id".into()),
-                    day: Some("COALESCE(sy.date_filled, sy.study_date)".into()),
-                    prec: None,
-                    session_k: Some("sc.id".into()),
-                    study_k: Some("sy.id".into()),
-                    series_k: Some("se.id".into()),
-                    stack_k: Some("i.stack_id".into()),
-                    standing: self.not_sealed("i.stack_id").into_iter().collect(),
-                }
-            }
-            Grain::Event => Base {
-                from: format!(
-                    "{} e JOIN {} ot ON ot.id = e.observation_type_id JOIN {} su ON su.id = e.subject_id",
+            Grain::Event => {
+                let (e, ot, su) = (
                     q(self, "event"),
                     q(self, "observation_type"),
-                    q(self, "subject")
-                ),
-                key: "e.id".into(),
-                subj: Some("su.id".into()),
-                day: Some("e.event_date".into()),
-                prec: Some("COALESCE(e.event_date_precision, 'day')".into()),
-                session_k: None,
-                study_k: None,
-                series_k: None,
-                stack_k: None,
-                standing: vec!["e.superseded_by IS NULL".into()],
-            },
+                    q(self, "subject"),
+                );
+                let (first, joins) = match anchor {
+                    Via::Subject => (
+                        format!("{su} su"),
+                        format!(
+                            " JOIN {e} e ON e.subject_id = su.id JOIN {ot} ot ON ot.id = e.observation_type_id"
+                        ),
+                    ),
+                    _ => (
+                        format!("{e} e"),
+                        format!(
+                            " JOIN {ot} ot ON ot.id = e.observation_type_id JOIN {su} su ON su.id = e.subject_id"
+                        ),
+                    ),
+                };
+                Base {
+                    first,
+                    joins,
+                    key: "e.id".into(),
+                    subj: Some("su.id".into()),
+                    day: Some("e.event_date".into()),
+                    prec: Some("COALESCE(e.event_date_precision, 'day')".into()),
+                    session_k: None,
+                    study_k: None,
+                    series_k: None,
+                    stack_k: None,
+                    standing: vec!["e.superseded_by IS NULL".into()],
+                }
+            }
             Grain::Group | Grain::Pair => {
                 return Err(err(path, format!("{grain} has no base relation")));
             }
@@ -1044,8 +1212,202 @@ impl<'a> Builder<'a> {
             ci: c.ci.map(|ci| format!("{alias}.{ci}")),
             param: None,
             members: false,
+            holder: None,
             dated: dated_column(&c.table, &c.column),
         })
+    }
+
+    /// §4.4 rule 10: the stack is not one the pack ruled out, asked of the
+    /// rows of the read model that say a stack is (`excluded = 1`, the few
+    /// a partial key lists), where every stack's `disposition` rows were
+    /// looked up before.
+    fn not_ruled_out(&self, alias: &str, stack: &str) -> String {
+        format!(
+            "NOT EXISTS (SELECT 1 FROM {} {alias} WHERE {alias}.stack_id = {stack} AND {alias}.excluded = 1)",
+            self.q("stack_axis")
+        )
+    }
+
+    /// One axis out of a stack's `axes` document: the array of its values,
+    /// null where the stack has no row of the axis.
+    fn axis_of(&mut self, doc: &str, axis: &str) -> String {
+        if self.sql.is_pg() {
+            format!("({doc} -> {})", sql_text(axis))
+        } else if plain_axis(axis) {
+            format!("json_extract({doc}, '$.{axis}')")
+        } else {
+            let key = self.p(Param::from(axis), Type::Text);
+            format!("(SELECT xj.value FROM json_each({doc}) xj WHERE xj.key = {key})")
+        }
+    }
+
+    /// The values of an axis of the row `alias` names, as the array the
+    /// read model keeps (`nils_registry::stack_axis`): the column the set
+    /// projects for the axis, or, where the layer carries none (a set that
+    /// did not foresee the reader, a union), the stack's row read by its
+    /// key. The values are the rows `classification_axis` holds for the
+    /// stack and the axis, one element each, so every reading below
+    /// answers what it answered on those rows.
+    fn axis_values(
+        &mut self,
+        axis: &str,
+        terms: &[(String, Term)],
+        alias: &str,
+        at: &str,
+    ) -> String {
+        if let Ok(t) = self.term(terms, alias, &axis_term(axis), at) {
+            return t.sql;
+        }
+        let k = if alias.is_empty() {
+            "k".to_string()
+        } else {
+            format!("{alias}.k")
+        };
+        let one = self.axis_of("xa.axes", axis);
+        format!(
+            "(SELECT {one} FROM {} xa WHERE xa.stack_id = {k})",
+            self.q("stack_axis")
+        )
+    }
+
+    /// An axis's values as rows `alias(value)`, for a FROM clause: one row
+    /// a value, a row with no value as null, none where there is no array.
+    fn axis_rows(&self, values: &str, alias: &str) -> String {
+        if self.sql.is_pg() {
+            format!("jsonb_array_elements_text({values}) AS {alias}(value)")
+        } else {
+            format!("json_each({values}) {alias}")
+        }
+    }
+
+    /// Whether a row's axis holds a value: one of some texts, or one a
+    /// condition on `ax.value` takes. Never null. On SQLite the value is
+    /// read as text, as the column of `classification_axis` is, so a
+    /// number it is held against is compared as its digits.
+    fn axis_holds(&self, values: &str, held: &Held) -> String {
+        let cond = match held {
+            Held::Any(texts) if self.sql.is_pg() && !texts.is_empty() => {
+                return format!("COALESCE({values} ?| ARRAY[{}], FALSE)", texts.join(", "));
+            }
+            Held::Any(texts) if texts.is_empty() => "ax.value IN (NULL)".to_string(),
+            Held::Any(texts) => format!("ax.value IN ({})", texts.join(", ")),
+            Held::Sql(cond) => cond.clone(),
+        };
+        let cond = if self.sql.is_pg() {
+            cond
+        } else {
+            cond.replace("ax.value", "CAST(ax.value AS TEXT)")
+        };
+        format!(
+            "EXISTS (SELECT 1 FROM {} WHERE {cond})",
+            self.axis_rows(values, "ax")
+        )
+    }
+
+    /// A row's values of an axis as one sorted list (H5), each read in the
+    /// form `form` gives it: null where it has none. An axis of one value,
+    /// as most rows have, is that value in its form, read without a
+    /// subquery.
+    fn axis_list(&self, values: &str, form: impl Fn(&str) -> String) -> String {
+        let all = format!(
+            "(SELECT {} FROM {})",
+            self.sql.sorted_list(&form("ax.value")),
+            self.axis_rows(values, "ax")
+        );
+        let (count, one) = if self.sql.is_pg() {
+            (
+                format!("jsonb_array_length({values})"),
+                format!("({values} ->> 0)"),
+            )
+        } else {
+            (
+                format!("json_array_length({values})"),
+                format!("({values} ->> '$[0]')"),
+            )
+        };
+        format!(
+            "(CASE WHEN {values} IS NULL THEN NULL WHEN {count} = 1 THEN {} ELSE {all} END)",
+            form(&one)
+        )
+    }
+
+    /// The axes a clause reads of the row it is held against: those it
+    /// names, and those of a level whose signature it takes.
+    fn axes_in(&self, c: &Clause, out: &mut BTreeSet<String>) {
+        let mut all = Vec::new();
+        c.walk(&mut all);
+        for cl in all {
+            match (cl.op.as_str(), cl.ref_name()) {
+                ("axis", Some(axis)) => {
+                    out.insert(axis.to_string());
+                }
+                ("derived", Some("signature")) => {
+                    let level = cl
+                        .opts
+                        .get("level")
+                        .and_then(Value::as_str)
+                        .unwrap_or("loose");
+                    if let Some(spec) = self.ctx.names.level_spec(level) {
+                        for m in spec.exact.iter().chain(spec.rounded.iter().map(|(k, _)| k)) {
+                            if self.ctx.names.axis_values(m).is_some() {
+                                out.insert(m.clone());
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// The axes a stack set projects: those its own clauses read, the
+    /// answer's where it is the answer's set, and those another set reads
+    /// of its rows through an aggregate or a group's keys. One a reader
+    /// names that is not foreseen here is read by the stack's key instead
+    /// ([`Self::axis_values`]), with the same answer.
+    fn wanted_axes(&self, name: &str, set: &Set) -> BTreeSet<String> {
+        let mut out = BTreeSet::new();
+        for c in clauses_of(set) {
+            self.axes_in(c, &mut out);
+        }
+        let mut elsewhere: Vec<&Clause> = Vec::new();
+        for other in self.ask.sets.values() {
+            elsewhere.extend(clauses_of(other));
+            if let Some(g) = &other.group
+                && g.of == name
+            {
+                for c in &g.by {
+                    self.axes_in(c, &mut out);
+                }
+            }
+        }
+        elsewhere.extend(self.ask.out.columns.iter());
+        elsewhere.extend(self.ask.out.order.iter().map(|o| &o.0));
+        if name == self.ask.out.set {
+            for c in &self.ask.out.columns {
+                self.axes_in(c, &mut out);
+            }
+            for o in &self.ask.out.order {
+                self.axes_in(&o.0, &mut out);
+            }
+        }
+        for c in elsewhere {
+            let mut all = Vec::new();
+            c.walk(&mut all);
+            for cl in all {
+                if AGGREGATES.contains(&cl.op.as_str())
+                    && cl.opts.get("set").and_then(Value::as_str) == Some(name)
+                {
+                    for a in &cl.args {
+                        if let Arg::Clause(inner) = a {
+                            self.axes_in(inner, &mut out);
+                        }
+                    }
+                }
+            }
+        }
+        out.retain(|a| plain_axis(a));
+        out
     }
 
     /// Wave 7a: the `dataset` of a stack, a session or a subject, the names
@@ -1059,10 +1421,105 @@ impl<'a> Builder<'a> {
     /// session with no such stack, reads null. The stacks rolled up for a
     /// session or a subject are the ones a stack set sees: none the pack
     /// ruled out, and none of a sample sealed now where those are withheld.
+    ///
+    /// The term names whose list it is; the list itself is made above the
+    /// base relation, from the spine ([`Self::dataset_list`]), and a clause
+    /// that asks whether a dataset is among them never makes it
+    /// ([`Self::dataset_holds`]).
     fn dataset_column(&self, level: &str) -> Option<Term> {
-        if !matches!(level, "stack" | "session" | "subject") {
-            return None;
+        let holder = match level {
+            "stack" => Holder::Stack,
+            "subject" => Holder::Subject,
+            "session" => Holder::Session,
+            _ => return None,
+        };
+        let mut term = Term::plain("NULL".into());
+        term.members = true;
+        term.holder = Some(holder);
+        Some(term)
+    }
+
+    /// The stacks a holder's datasets are read from: a FROM clause that
+    /// ends at their `source_stack` rows (`dsb`), the columns that name the
+    /// holder, each with the spine column of a row it is tied to, and the
+    /// conditions among the stacks. Whose stack it is comes off its series
+    /// (record 35 finding 1), and a session's stacks are its studies' of
+    /// its own subject; a stack is the row itself, which its set already
+    /// sees. Written as cross joins with their conditions beside, which
+    /// SQLite reads in the order written, from the row's own key down to
+    /// the holders, where left to choose with no statistics it started
+    /// from every stack a source holds.
+    fn held_stacks(&self, holder: Holder) -> (String, Vec<(&'static str, &'static str)>, String) {
+        let (stack, series, held) = (self.q("stack"), self.q("series"), self.q("source_stack"));
+        let standing = || {
+            let mut standing = format!(" AND {}", self.not_ruled_out("dsx", "dst.id"));
+            if let Some(sealed) = self.not_sealed("dst.id") {
+                standing.push_str(&format!(" AND {sealed}"));
+            }
+            standing
+        };
+        match holder {
+            Holder::Stack => (
+                format!("{held} dsb"),
+                vec![("dsb.stack_id", "stack_k")],
+                "1 = 1".to_string(),
+            ),
+            Holder::Subject => (
+                format!("{series} dse CROSS JOIN {stack} dst CROSS JOIN {held} dsb"),
+                vec![("dse.subject_id", "subj")],
+                format!(
+                    "dst.series_id = dse.id AND dsb.stack_id = dst.id{}",
+                    standing()
+                ),
+            ),
+            Holder::Session => (
+                format!(
+                    "{} dscs CROSS JOIN {series} dse CROSS JOIN {stack} dst CROSS JOIN {held} dsb",
+                    self.q("session_cache_study")
+                ),
+                vec![("dscs.session_id", "session_k"), ("dse.subject_id", "subj")],
+                format!(
+                    "dse.study_id = dscs.study_id AND dst.series_id = dse.id \
+                     AND dsb.stack_id = dst.id{}",
+                    standing()
+                ),
+            ),
         }
+    }
+
+    /// [`Self::held_stacks`] for the one row `alias` names: the FROM clause
+    /// and the conditions that tie it to the row.
+    fn held_stacks_of(&self, holder: Holder, alias: &str) -> (String, String) {
+        let (from, ties, rest) = self.held_stacks(holder);
+        let tied: Vec<String> = ties
+            .iter()
+            .map(|(mine, spine)| format!("{mine} = {alias}.{spine}"))
+            .collect();
+        (from, format!("{} AND {rest}", tied.join(" AND ")))
+    }
+
+    /// Whether a group keyed by a row's own datasets joins its rows to
+    /// them, and so never reads the list: on Postgres always; on SQLite,
+    /// which joins no relation made per row and reads one made for all
+    /// rows once per row, only for a stack's, where every dataset has one
+    /// `source` row at most and the stack's holders are its datasets.
+    fn joins_datasets(&self, holder: Holder) -> bool {
+        self.sql.is_pg() || (holder == Holder::Stack && self.one_source_each())
+    }
+
+    /// Every dataset has one `source` row at most, so a stack's holders
+    /// among them are its datasets, each once.
+    fn one_source_each(&self) -> bool {
+        self.ctx
+            .names
+            .datasets()
+            .iter()
+            .all(|d| d.sources.len() <= 1)
+    }
+
+    /// Each source of a dataset as the dataset's name, over `dsb.source_id`,
+    /// and the sources of every dataset; none where no dataset holds one.
+    fn dataset_names(&self) -> Option<(String, String)> {
         let quote = |t: &str| format!("'{}'", t.replace('\'', "''"));
         let mut whens = String::new();
         let mut sources: Vec<String> = Vec::new();
@@ -1072,66 +1529,222 @@ impl<'a> Builder<'a> {
                 sources.push(s.to_string());
             }
         }
-        let mut term = if sources.is_empty() {
+        (!sources.is_empty())
+            .then(|| (format!("CASE dsb.source_id{whens} END"), sources.join(", ")))
+    }
+
+    /// The datasets of the row `alias` names, as one sorted list of names:
+    /// null where no dataset holds a file of its stacks.
+    fn dataset_list(&self, holder: Holder, alias: &str) -> String {
+        let Some((name, sources)) = self.dataset_names() else {
             // no dataset holds a source, so no stack is in one
-            Term::plain("CAST(NULL AS TEXT)".into())
-        } else {
-            let name = format!("CASE dsb.source_id{whens} END");
-            let (stack, series) = (self.q("stack"), self.q("series"));
-            // the sources whose tree holds a file of the stack, as every
-            // reader of a dataset's stacks reads them
-            let holders =
-                nils_registry::dataset_subjects::holders(self.ctx.schema.as_deref(), "dst", "dsb");
-            let standing = || {
-                let mut standing = format!(
-                    " AND NOT EXISTS (SELECT 1 FROM {} dsx WHERE dsx.stack_id = dst.id \
-                     AND dsx.axis = 'disposition' AND dsx.value = 'excluded')",
-                    self.q("classification_axis")
-                );
-                if let Some(sealed) = self.not_sealed("dst.id") {
-                    standing.push_str(&format!(" AND {sealed}"));
-                }
-                standing
-            };
-            // whose stack it is comes off its series (record 35 finding 1),
-            // and a session's stacks are its studies' of its own subject;
-            // a stack is the row itself, which its set already sees
-            let (from, unit, standing) = match level {
-                "stack" => {
-                    let id = match self.current {
-                        Some(Grain::Instance) => "i.stack_id",
-                        _ => "st.id",
-                    };
-                    (
-                        format!("{stack} dst"),
-                        format!("dst.id = {id}"),
-                        String::new(),
-                    )
-                }
-                "subject" => (
-                    format!("{stack} dst JOIN {series} dse ON dse.id = dst.series_id"),
-                    "dse.subject_id = su.id".to_string(),
-                    standing(),
-                ),
-                _ => (
-                    format!(
-                        "{} dscs JOIN {series} dse ON dse.study_id = dscs.study_id \
-                         JOIN {stack} dst ON dst.series_id = dse.id",
-                        self.q("session_cache_study")
-                    ),
-                    "dscs.session_id = sc.id AND dse.subject_id = sc.subject_id".to_string(),
-                    standing(),
-                ),
-            };
-            Term::plain(format!(
-                "(SELECT {} FROM (SELECT DISTINCT {name} AS n FROM {from} {holders} \
-                 WHERE {unit} AND dsb.source_id IN ({}){standing}) dsn)",
-                self.sql.name_list("dsn.n"),
-                sources.join(", ")
-            ))
+            return "CAST(NULL AS TEXT)".into();
         };
-        term.members = true;
-        Some(term)
+        let (from, unit) = self.held_stacks_of(holder, alias);
+        format!(
+            "(SELECT {} FROM (SELECT DISTINCT {name} AS n FROM {from} \
+             WHERE {unit} AND dsb.source_id IN ({sources})) dsn)",
+            self.sql.name_list("dsn.n"),
+        )
+    }
+
+    /// Every holder with each dataset that holds a file of its stacks, one
+    /// row a pair: the relation a group keyed by `dataset` joins its rows
+    /// to, so that a row counts once under each of its datasets (and, by a
+    /// left join, once under none). The holder's columns are `hk0`, `hk1`;
+    /// the conditions tie them to the spine of the rows `alias` names. Made
+    /// once for all rows, where looking each name up in each row's list
+    /// made the list once per row and name.
+    fn dataset_pairs(&self, holder: Holder, alias: &str, pairs: &str) -> Option<(String, String)> {
+        let (name, sources) = self.dataset_names()?;
+        let (from, ties, rest) = self.held_stacks(holder);
+        let keys: Vec<String> = ties
+            .iter()
+            .enumerate()
+            .map(|(i, (mine, _))| format!("{mine} AS hk{i}"))
+            .collect();
+        let on: Vec<String> = ties
+            .iter()
+            .enumerate()
+            .map(|(i, (_, spine))| format!("{pairs}.hk{i} = {alias}.{spine}"))
+            .collect();
+        Some((
+            format!(
+                "(SELECT DISTINCT {}, {name} AS n FROM {from} WHERE {rest} \
+                 AND dsb.source_id IN ({sources}))",
+                keys.join(", ")
+            ),
+            on.join(" AND "),
+        ))
+    }
+
+    /// Whether one of the datasets named is among those of the row `alias`
+    /// names: whether one of their `source` rows holds a file of a stack of
+    /// it. The same answer as looking the name up in the list of
+    /// [`Self::dataset_list`], asked of the holders by their key instead of
+    /// made, sorted and searched as text for every row.
+    fn dataset_holds(&self, holder: Holder, alias: &str, names: &[String]) -> String {
+        let mut sources: Vec<String> = Vec::new();
+        for d in self.ctx.names.datasets() {
+            if names.contains(&d.name) {
+                sources.extend(d.sources.iter().map(i64::to_string));
+            }
+        }
+        if sources.is_empty() {
+            return "(1 = 0)".into();
+        }
+        let (from, unit) = self.held_stacks_of(holder, alias);
+        format!(
+            "EXISTS (SELECT 1 FROM {from} WHERE {unit} AND dsb.source_id IN ({}))",
+            sources.join(", ")
+        )
+    }
+
+    /// Whether one of the datasets a clause names outright is among those
+    /// of the row, where the field it compares is the row's own list: asked
+    /// of the stacks' holders. None for any other clause, which reads the
+    /// list.
+    fn dataset_among(
+        &self,
+        c: &Clause,
+        terms: &[(String, Term)],
+        alias: &str,
+        at: &str,
+    ) -> Option<String> {
+        let (path, named) = self.dataset_named(c)?;
+        let holder = self.term(terms, alias, path, at).ok()?.holder?;
+        Some(self.dataset_holds(holder, alias, &named))
+    }
+
+    /// The dataset field a clause compares with datasets it names outright,
+    /// and those names: `=`, `<>`, `in`, `not_in` or `has` of a field and a
+    /// text or a list of texts, each the name of a dataset of the registry;
+    /// or `is_null` or `not_null` of the field, which name every dataset.
+    /// Such a clause asks whether a dataset is among a row's, and never
+    /// reads the list; any other reading of the field does.
+    fn dataset_named<'c>(&self, c: &'c Clause) -> Option<(&'c str, Vec<String>)> {
+        let field = |a: &'c Arg| match a {
+            Arg::Clause(l) if l.op == "field" => l.ref_name(),
+            _ => None,
+        };
+        let (path, named) = match (c.op.as_str(), c.args.first(), c.args.get(1)) {
+            // whether there is one at all: whether any dataset is among them
+            ("is_null" | "not_null", Some(l), None) => (
+                field(l)?,
+                self.ctx
+                    .names
+                    .datasets()
+                    .into_iter()
+                    .map(|d| d.name)
+                    .collect(),
+            ),
+            ("=" | "<>" | "has", Some(l), Some(Arg::Text(t))) => (field(l)?, vec![t.clone()]),
+            ("=" | "<>", Some(Arg::Text(t)), Some(r)) => (field(r)?, vec![t.clone()]),
+            ("in" | "not_in", Some(l), Some(Arg::List(items))) => {
+                let mut named = Vec::with_capacity(items.len());
+                for i in items {
+                    named.push(i.as_text()?.to_string());
+                }
+                (field(l)?, named)
+            }
+            _ => return None,
+        };
+        if c.args.len() > 2 || named.is_empty() {
+            return None;
+        }
+        let known = self.ctx.names.datasets();
+        named
+            .iter()
+            .all(|n| known.iter().any(|d| d.name == *n))
+            .then_some((path, named))
+    }
+
+    /// Whether a clause reads the list of datasets at `path` as a list:
+    /// anywhere but in a comparison with datasets named outright.
+    fn reads_list(&self, c: &Clause, path: &str) -> bool {
+        if c.op == "field" {
+            return c.ref_name() == Some(path);
+        }
+        if self.dataset_named(c).is_some_and(|(p, _)| p == path) {
+            return false;
+        }
+        let in_opts = c
+            .opts
+            .values()
+            .any(|v| crate::ast::clause_of(v).is_ok_and(|inner| self.reads_list(&inner, path)));
+        in_opts
+            || c.args.iter().any(|a| match a {
+                Arg::Clause(inner) => self.reads_list(inner, path),
+                _ => false,
+            })
+    }
+
+    /// Whether anything reads the list of datasets at `path` of a set once
+    /// its `where` is cut: a clause of its own that reads it as a list, the
+    /// answer, another set through an aggregate, a group or a partner, or a
+    /// union the set is an operand of.
+    fn list_is_read(&self, name: &str, set: &Set, path: &str, holder: Holder) -> bool {
+        // a partner carries every column of the set it is of
+        let all = || self.ask.sets.values();
+        if all()
+            .any(|s| s.near.iter().any(|n| n.set == name) || s.attach.iter().any(|a| a.set == name))
+        {
+            return true;
+        }
+        if self.external.get(name).is_some_and(|e| e.contains(path)) {
+            // another set reads it: an aggregate reads it as its clause
+            // does; a group keyed by it joins the rows to their datasets
+            // and never reads the list
+            let mut clauses: Vec<&Clause> = all().flat_map(clauses_of).collect();
+            clauses.extend(self.ask.out.columns.iter());
+            clauses.extend(self.ask.out.order.iter().map(|o| &o.0));
+            for c in clauses {
+                let mut inside = Vec::new();
+                c.walk(&mut inside);
+                for cl in inside {
+                    if AGGREGATES.contains(&cl.op.as_str())
+                        && cl.opts.get("set").and_then(Value::as_str) == Some(name)
+                        && cl.args.iter().any(|a| match a {
+                            Arg::Clause(inner) => self.reads_list(inner, path),
+                            _ => false,
+                        })
+                    {
+                        return true;
+                    }
+                }
+            }
+            for g in all().filter_map(|s| s.group.as_ref()) {
+                if g.of == name
+                    && g.by.iter().any(|c| {
+                        let key = c.op == "field" && c.ref_name() == Some(path);
+                        !(key && self.joins_datasets(holder)) && self.reads_list(c, path)
+                    })
+                {
+                    return true;
+                }
+            }
+        }
+        if self.ask.sets.values().any(|s| {
+            s.algebra
+                .as_ref()
+                .is_some_and(|a| a.sets.iter().any(|o| o == name))
+        }) {
+            return true;
+        }
+        if clauses_of(set).iter().any(|c| self.reads_list(c, path)) {
+            return true;
+        }
+        if name != self.ask.out.set {
+            return false;
+        }
+        let mut named = BTreeSet::new();
+        for c in &self.ask.out.columns {
+            paths_in(c, &mut named);
+        }
+        for o in &self.ask.out.order {
+            paths_in(&o.0, &mut named);
+        }
+        named.contains(path)
     }
 
     /// A run's measure of a unit (record 49 A3), `<number|text|run>:
@@ -1260,7 +1873,8 @@ impl<'a> Builder<'a> {
         };
         if let (Some(rest), true) = (rest, Self::level_reachable(grain, first)) {
             if first == "cohort" && grain == Grain::Subject {
-                return (rest == "id" && frame.of.is_some()).then(|| Term::plain("a.k".into()));
+                return (rest == "id" && frame.of.is_some())
+                    .then(|| Term::plain("cm.cohort_id".into()));
             }
             return self.base_column(first, rest);
         }
@@ -1270,7 +1884,7 @@ impl<'a> Builder<'a> {
         {
             let ancestor = self.ask.sets.get(of)?;
             if ancestor.grain == Grain::Cohort {
-                return (rest == "id").then(|| Term::plain("a.k".into()));
+                return (rest == "id").then(|| Term::plain("cm.cohort_id".into()));
             }
             return self.base_column(ancestor.grain.name(), rest);
         }
@@ -1447,35 +2061,63 @@ impl<'a> Builder<'a> {
         if let Some(a) = &set.algebra {
             return self.build_algebra(name, a);
         }
-        let base = self.base(set.grain, &path)?;
-        let mut from = base.from.clone();
-        let mut wheres: Vec<String> = base.standing.clone();
+        // the ancestor a field path may be read through: the set's own, or
+        // the one its source carries
+        let inherited = match &set.from {
+            Some(Src::Set(s)) => self.frames.get(s).and_then(|f| f.of.clone()),
+            _ => None,
+        };
         let mut frame = Frame {
-            has_subj: base.subj.is_some(),
-            has_day: base.day.is_some(),
-            has_prec: base.prec.is_some(),
+            of: set.of.clone().or(inherited),
             ..Frame::default()
         };
-        let null = || "NULL".to_string();
-        let mut projected: Vec<String> = vec![
-            format!("{} AS k", base.key),
-            format!("{} AS subj", base.subj.clone().unwrap_or_else(null)),
-            format!("{} AS day", base.day.clone().unwrap_or_else(null)),
-            format!("{} AS prec", base.prec.clone().unwrap_or_else(null)),
-            format!(
-                "{} AS session_k",
-                base.session_k.clone().unwrap_or_else(null)
-            ),
-            format!("{} AS study_k", base.study_k.clone().unwrap_or_else(null)),
-            format!("{} AS series_k", base.series_k.clone().unwrap_or_else(null)),
-            format!("{} AS stack_k", base.stack_k.clone().unwrap_or_else(null)),
-        ];
-        let mut terms: Vec<(String, Term)> = Vec::new();
+        // the fields this set and its readers name, and which of the base's
+        // optional joins they read
+        let wanted = self.wanted_paths(name, set);
+        let mut needs = Needs::default();
+        for p in &wanted {
+            if let Some(t) = self.field_term(set, &frame, p) {
+                for x in [Some(&t.sql), t.prec.as_ref(), t.ci.as_ref()]
+                    .into_iter()
+                    .flatten()
+                {
+                    needs.label |= x.starts_with("sl.");
+                    needs.detail |= x.starts_with("smr.");
+                    needs.session |= x.contains("sc.") || x.starts_with("sl.");
+                }
+                needs.session |= t.holder == Some(Holder::Session);
+            }
+        }
+        // the session's key is read where a set of sessions counts, picks
+        // or attaches by it, or a union passes it on
+        needs.session |= set.pick.as_ref().is_some_and(|p| p.per == Grain::Session)
+            || self.ask.sets.values().any(|s| {
+                s.grain == Grain::Session || s.grain == Grain::Pair || s.algebra.is_some()
+            });
+        // What restricts the set: a source, an ancestor, a handle's or a
+        // list's members, each tied to the base by its key, its subject or
+        // its session.
+        let mut leads: Vec<Lead> = Vec::new();
+        let key = match set.grain {
+            Grain::Cohort => "c.id",
+            Grain::Subject => "su.id",
+            Grain::Session => "sc.id",
+            Grain::Stack => "st.id",
+            Grain::Instance => "i.id",
+            Grain::Event => "e.id",
+            Grain::Group | Grain::Pair => "",
+        };
         // a source: its bindings and partners come along
+        let mut carried_from: Vec<String> = Vec::new();
+        let mut terms: Vec<(String, Term)> = Vec::new();
         match &set.from {
             None => {}
             Some(Src::Set(s)) => {
-                from.push_str(&format!(" JOIN {} x ON x.k = {}", cte_name(s), base.key));
+                leads.push(Lead {
+                    via: Via::Key,
+                    rels: vec![format!("{} x", cte_name(s))],
+                    on: vec![format!("x.k = {key}")],
+                });
                 let src = self.frames.get(s).cloned().unwrap_or_default();
                 let mut carried: BTreeSet<String> = BTreeSet::new();
                 for (n, t) in &src.terms {
@@ -1490,14 +2132,15 @@ impl<'a> Builder<'a> {
                             .flatten()
                         {
                             if carried.insert(c.clone()) {
-                                projected.push(format!("x.{c} AS {c}"));
+                                carried_from.push(format!("x.{c} AS {c}"));
                             }
                         }
-                        terms.push((n.clone(), t.clone()));
+                        let mut t = t.clone();
+                        t.holder = None;
+                        terms.push((n.clone(), t));
                     }
                 }
                 frame.bindings = src.bindings.clone();
-                frame.of.clone_from(&src.of);
                 frame.picked = src.picked;
             }
             Some(Src::Role(r)) => {
@@ -1507,10 +2150,15 @@ impl<'a> Builder<'a> {
                 let role = self.p(Param::from(r.as_str()), Type::Text);
                 // the main scans, as `picked` reads them with no scope named
                 let picks = self.main_picks(None, &format!("{path}.from"))?;
-                from.push_str(&format!(
-                    " JOIN {} ps ON ps.stack_id = st.id JOIN {picks} p ON p.id = ps.pick_id AND p.role = {role}",
-                    self.q("pick_stack"),
-                ));
+                leads.push(Lead {
+                    via: Via::Key,
+                    rels: vec![format!("{picks} p"), format!("{} ps", self.q("pick_stack"))],
+                    on: vec![
+                        format!("p.role = {role}"),
+                        "ps.pick_id = p.id".into(),
+                        "ps.stack_id = st.id".into(),
+                    ],
+                });
             }
             Some(Src::Handle { id, .. }) => {
                 let hid: i64 = id.parse().map_err(|_| {
@@ -1520,11 +2168,11 @@ impl<'a> Builder<'a> {
                     )
                 })?;
                 let h = self.p(Param::Int(hid), Type::Int);
-                from.push_str(&format!(
-                    " JOIN {} hm ON hm.handle_id = {h} AND hm.key = {}",
-                    self.q("handle_member"),
-                    base.key
-                ));
+                leads.push(Lead {
+                    via: Via::Key,
+                    rels: vec![format!("{} hm", self.q("handle_member"))],
+                    on: vec![format!("hm.handle_id = {h}"), format!("hm.key = {key}")],
+                });
             }
             Some(Src::Values(v)) => {
                 let decl = self.ask.values.get(v).ok_or_else(|| {
@@ -1534,11 +2182,18 @@ impl<'a> Builder<'a> {
                     )
                 })?;
                 let upload = self.p(Param::from(decl.upload.as_str()), Type::Text);
-                from.push_str(&format!(
-                    " JOIN {} vm ON vm.subject_id = su.id JOIN {} vs ON vs.id = vm.source_id AND vs.upload_id = {upload}",
-                    self.q("values_member"),
-                    self.q("values_source")
-                ));
+                leads.push(Lead {
+                    via: Via::Subject,
+                    rels: vec![
+                        format!("{} vs", self.q("values_source")),
+                        format!("{} vm", self.q("values_member")),
+                    ],
+                    on: vec![
+                        format!("vs.upload_id = {upload}"),
+                        "vm.source_id = vs.id".into(),
+                        "vm.subject_id = su.id".into(),
+                    ],
+                });
             }
             Some(Src::Selection { .. }) => {
                 return Err(err(
@@ -1548,43 +2203,83 @@ impl<'a> Builder<'a> {
             }
         }
         // the ancestor
+        let mut carried_of: Vec<String> = Vec::new();
         if let Some(of) = &set.of {
             let ancestor = self
                 .ask
                 .sets
                 .get(of)
                 .ok_or_else(|| err(format!("{path}.of"), format!("no set {of}")))?;
-            let on = match (ancestor.grain, set.grain) {
-                (Grain::Cohort, _) => {
-                    from.push_str(&format!(
-                        " JOIN {} cm ON cm.subject_id = su.id AND cm.left_at IS NULL",
-                        self.q("cohort_member")
-                    ));
-                    "a.k = cm.cohort_id".to_string()
-                }
-                (Grain::Subject, _) => "a.k = su.id".to_string(),
-                (Grain::Session, Grain::Stack | Grain::Instance) => "a.k = sc.id".to_string(),
-                (Grain::Stack, Grain::Instance) => "a.k = i.stack_id".to_string(),
+            let anc = self.frames.get(of).cloned().unwrap_or_default();
+            let carries = anc
+                .terms
+                .iter()
+                .any(|(_, t)| t.sql.starts_with("b_") || t.sql.starts_with("n_"));
+            let a = format!("{} a", cte_name(of));
+            match (ancestor.grain, set.grain) {
+                // The cohorts of a set are a few rows, and which of them
+                // they are is not known when the statement is planned:
+                // joined, the members read are taken for an even share of
+                // all memberships, a handful where a site's one large
+                // cohort holds thousands, and every join after it is
+                // planned for that handful. Asked as a lookup the planner
+                // does not see through, the share is taken for half, and a
+                // set of a few rows is the cheaper mistake. The lookup
+                // reads the cohorts once, however many rows ask.
+                (Grain::Cohort, _) if !carries => leads.push(Lead {
+                    via: Via::Subject,
+                    rels: vec![format!("{} cm", self.q("cohort_member"))],
+                    on: vec![
+                        format!(
+                            "(cm.cohort_id IN (SELECT a.k FROM {} a)) IS TRUE",
+                            cte_name(of)
+                        ),
+                        "cm.left_at IS NULL".into(),
+                        "cm.subject_id = su.id".into(),
+                    ],
+                }),
+                (Grain::Cohort, _) => leads.push(Lead {
+                    via: Via::Subject,
+                    rels: vec![a, format!("{} cm", self.q("cohort_member"))],
+                    on: vec![
+                        "cm.cohort_id = a.k".into(),
+                        "cm.left_at IS NULL".into(),
+                        "cm.subject_id = su.id".into(),
+                    ],
+                }),
+                (Grain::Subject, _) => leads.push(Lead {
+                    via: Via::Subject,
+                    rels: vec![a],
+                    on: vec!["a.k = su.id".into()],
+                }),
+                (Grain::Session, Grain::Stack | Grain::Instance) => leads.push(Lead {
+                    via: Via::Session,
+                    rels: vec![a],
+                    on: vec!["a.k = sc.id".into()],
+                }),
+                (Grain::Stack, Grain::Instance) => leads.push(Lead {
+                    via: Via::Key,
+                    rels: vec![a],
+                    on: vec!["a.k = i.stack_id".into()],
+                }),
                 (g, h) => {
                     return Err(err(
                         format!("{path}.of"),
                         format!("{g} is not an ancestor of {h}"),
                     ));
                 }
-            };
-            from.push_str(&format!(" JOIN {} a ON {on}", cte_name(of)));
-            let anc = self.frames.get(of).cloned().unwrap_or_default();
+            }
             let mut carried: BTreeSet<String> = BTreeSet::new();
             for (n, t) in &anc.terms {
                 if t.sql.starts_with("b_") || t.sql.starts_with("n_") {
                     let mine = format!("o_{}", t.sql);
                     if carried.insert(mine.clone()) {
-                        projected.push(format!("a.{} AS {mine}", t.sql));
+                        carried_of.push(format!("a.{} AS {mine}", t.sql));
                     }
                     let prec = t.prec.as_ref().map(|p| {
                         let pc = format!("o_{p}");
                         if carried.insert(pc.clone()) {
-                            projected.push(format!("a.{p} AS {pc}"));
+                            carried_of.push(format!("a.{p} AS {pc}"));
                         }
                         pc
                     });
@@ -1596,29 +2291,106 @@ impl<'a> Builder<'a> {
                             ci: None,
                             param: None,
                             members: t.members,
+                            holder: None,
                             dated: t.dated,
                         },
                     ));
                 }
             }
             if ancestor.grain == Grain::Cohort {
-                projected.push("a.k AS cohort_k".into());
+                carried_of.push("cm.cohort_id AS cohort_k".into());
                 terms.push(("cohort.id".into(), Term::plain("cohort_k".into())));
             }
-            frame.of = Some(of.clone());
         }
-        // the fields this set and its readers name, projected once
-        let wanted = self.wanted_paths(name, set);
+        // The one that comes first in the FROM clause, with the base
+        // written from the table it ties to: a source or a handle by the
+        // key, else an ancestor's sessions, else its subjects. A planner
+        // that takes a long list of joins in the order written then starts
+        // from the rows that restrict the set, where the base written
+        // first made it join every row of the grain before it met them.
+        let first = [Via::Key, Via::Session, Via::Subject]
+            .iter()
+            .find_map(|v| leads.iter().position(|l| l.via == *v));
+        let anchor = first.map_or(Via::Key, |i| leads[i].via);
+        // the axes of a stack this set or a reader of it reads, each a
+        // column beside the fields
+        let axes = if set.grain == Grain::Stack {
+            self.wanted_axes(name, set)
+        } else {
+            BTreeSet::new()
+        };
+        needs.axes = !axes.is_empty();
+        let base = self.base(set.grain, &path, needs, anchor)?;
+        let mut from = String::new();
+        let mut wheres: Vec<String> = Vec::new();
+        let join = |from: &mut String, rel: &str| {
+            if from.is_empty() {
+                from.push_str(rel);
+            } else {
+                from.push_str(&format!(" JOIN {rel} ON 1 = 1"));
+            }
+        };
+        if let Some(i) = first {
+            let lead = leads.remove(i);
+            for rel in &lead.rels {
+                join(&mut from, rel);
+            }
+            wheres.extend(lead.on);
+        }
+        join(&mut from, &base.first);
+        from.push_str(&base.joins);
+        for lead in leads {
+            for rel in &lead.rels {
+                join(&mut from, rel);
+            }
+            wheres.extend(lead.on);
+        }
+        frame.has_subj = base.subj.is_some();
+        frame.has_day = base.day.is_some();
+        frame.has_prec = base.prec.is_some();
+        let null = || "NULL".to_string();
+        let mut projected: Vec<String> = vec![
+            format!("{} AS k", base.key),
+            format!("{} AS subj", base.subj.clone().unwrap_or_else(null)),
+            format!("{} AS day", base.day.clone().unwrap_or_else(null)),
+            format!("{} AS prec", base.prec.clone().unwrap_or_else(null)),
+            format!(
+                "{} AS session_k",
+                base.session_k.clone().unwrap_or_else(null)
+            ),
+            format!("{} AS study_k", base.study_k.clone().unwrap_or_else(null)),
+            format!("{} AS series_k", base.series_k.clone().unwrap_or_else(null)),
+            format!("{} AS stack_k", base.stack_k.clone().unwrap_or_else(null)),
+        ];
+        projected.extend(carried_from);
+        projected.extend(carried_of);
+        for axis in &axes {
+            let col = format!("x_{axis}");
+            projected.push(format!("{} AS {col}", self.axis_of("xa.axes", axis)));
+            terms.push((axis_term(axis), Term::plain(col)));
+        }
+        // the fields this set and its readers name, projected once. The
+        // datasets of the row are a list made by a subquery per row: they
+        // are read above this layer by the spine, before the clauses where
+        // one reads the list itself and after `where` otherwise, and not at
+        // all where every clause asks only whether a dataset is among them
+        let mut lists: Vec<(String, Holder, String)> = Vec::new();
         for p in &wanted {
             if terms.iter().any(|(n, _)| n == p) {
                 continue;
             }
             if let Some(t) = self.field_term(set, &frame, p) {
                 let col = field_col(p);
-                projected.push(format!("{} AS {col}", t.sql));
                 let mut layered = Term::plain(col.clone());
                 layered.members = t.members;
+                layered.holder = t.holder;
                 layered.dated = t.dated;
+                if let Some(holder) = t.holder {
+                    lists.push((p.clone(), holder, col));
+                    terms.push((p.clone(), layered));
+                    continue;
+                }
+                projected.push(format!("{} AS {col}", t.sql));
                 if let Some(pc) = &t.prec {
                     let pcol = format!("{col}__prec");
                     projected.push(format!("{pc} AS {pcol}"));
@@ -1642,6 +2414,7 @@ impl<'a> Builder<'a> {
                     ci: None,
                     param: None,
                     members: false,
+                    holder: None,
                     dated: Some(Dated::Day),
                 },
             ));
@@ -1664,11 +2437,80 @@ impl<'a> Builder<'a> {
                 }
             }
         }
+        wheres.extend(base.standing.iter().cloned());
         let mut layer = format!("SELECT {} FROM {from}", projected.join(", "));
         if !wheres.is_empty() {
             layer.push_str(&format!(" WHERE {}", wheres.join(" AND ")));
         }
-        wheres.clear();
+
+        // The bindings `where` may be read before: none of those it names,
+        // by themselves or through another, and none at or before the last
+        // one that reads the rows around its own (`ordinal`, `prev`, `next`)
+        // or a subject's history (`change`), which count the rows `where`
+        // has not cut yet.
+        let binds: Vec<(&String, &Clause)> = set.bind.0.iter().map(|(b, c)| (b, c)).collect();
+        let reads = |c: &Clause, b: &str| -> bool {
+            let mut paths = BTreeSet::new();
+            paths_in(c, &mut paths);
+            paths
+                .iter()
+                .any(|p| p == b || p.strip_prefix(b).is_some_and(|r| r.starts_with('.')))
+        };
+        let mut early: Vec<bool> = binds
+            .iter()
+            .map(|(b, _)| set.where_.iter().any(|c| reads(c, b)))
+            .collect();
+        if let Some(last) = binds.iter().rposition(|(_, c)| {
+            let mut all = Vec::new();
+            c.walk(&mut all);
+            all.iter()
+                .any(|cl| matches!(cl.op.as_str(), "ordinal" | "prev" | "next" | "change"))
+        }) {
+            for e in early.iter_mut().take(last + 1) {
+                *e = true;
+            }
+        }
+        loop {
+            let mut changed = false;
+            for i in 0..binds.len() {
+                if early[i] {
+                    for j in 0..i {
+                        if !early[j] && reads(binds[i].1, binds[j].0) {
+                            early[j] = true;
+                            changed = true;
+                        }
+                    }
+                }
+            }
+            if !changed {
+                break;
+            }
+        }
+        // a list read as a list before `where` is cut is made first
+        let mut read_early: Vec<&Clause> = Vec::new();
+        for n in &set.near {
+            read_early.extend(n.order.iter().map(|o| &o.0));
+        }
+        for (i, (_, c)) in binds.iter().enumerate() {
+            if early[i] {
+                read_early.push(c);
+            }
+        }
+        read_early.extend(set.where_.iter());
+        let mut after_where: Vec<(String, Holder, String)> = Vec::new();
+        for (p, holder, col) in lists {
+            let as_list = read_early.iter().any(|c| self.reads_list(c, &p))
+                || set.near.iter().any(|n| n.on.as_deref() == Some(p.as_str()))
+                || set.has.iter().any(|h| h.on.as_deref() == Some(p.as_str()));
+            if as_list {
+                layer = format!(
+                    "SELECT q.*, {} AS {col} FROM ({layer}) q",
+                    self.dataset_list(holder, "q")
+                );
+            } else {
+                after_where.push((p, holder, col));
+            }
+        }
 
         // near: the one row of a dated set of the same subject in a window
         for (i, n) in set.near.iter().enumerate() {
@@ -1689,8 +2531,38 @@ impl<'a> Builder<'a> {
         let mut has_preds: Vec<String> = Vec::new();
         for (i, h) in set.has.iter().enumerate() {
             let hp = format!("{path}.has[{i}]");
-            let count =
-                self.count_of(set, &h.set, h.window.as_ref(), h.on.as_deref(), &terms, &hp)?;
+            let whole = h.window.is_none() && h.on.is_none();
+            // whether there is one, or none: asked as that, which a planner
+            // answers from either side, where a count per row is a pass
+            // over the child's rows for every row
+            let asked = (
+                h.as_.is_some(),
+                h.min.as_ref().map(|m| matches!(m, IntSpec::Literal(1))),
+                h.max.as_ref().map(|m| matches!(m, IntSpec::Literal(0))),
+            );
+            if whole && matches!(asked, (false, Some(true), None) | (false, None, Some(true))) {
+                let link = self.count_link(set, &h.set, "ch", &hp)?;
+                has_preds.push(format!(
+                    "{}EXISTS (SELECT 1 FROM {} ch WHERE {link} = q.k)",
+                    if h.min.is_some() { "" } else { "NOT " },
+                    cte_name(&h.set)
+                ));
+                continue;
+            }
+            // a count of all of a child's rows per row: the child counted
+            // once by the key that ties it, and joined
+            let count = if whole {
+                let link = self.count_link(set, &h.set, "ch", &hp)?;
+                let col = format!("h_{i}");
+                layer = format!(
+                    "SELECT q.*, COALESCE(h.n, 0) AS {col} FROM ({layer}) q LEFT JOIN \
+                     (SELECT {link} AS hk, COUNT(*) AS n FROM {} ch GROUP BY {link}) h ON h.hk = q.k",
+                    cte_name(&h.set)
+                );
+                format!("q.{col}")
+            } else {
+                self.count_of(set, &h.set, h.window.as_ref(), h.on.as_deref(), &terms, &hp)?
+            };
             if let Some(as_) = &h.as_ {
                 let col = column_name(as_);
                 layer = format!("SELECT q.*, {count} AS {col} FROM ({layer}) q");
@@ -1712,39 +2584,71 @@ impl<'a> Builder<'a> {
                 has_preds.join(" AND ")
             );
         }
-        // bind, one layer each so a later one reads an earlier one
-        for (b, c) in &set.bind.0 {
-            let bp = format!("{path}.bind.{b}");
-            if c.op == "change" {
-                layer = self.change_layer(set, b, c, &bp, layer, &mut terms, &mut frame)?;
-                continue;
+        // bind, one layer each so a later one reads an earlier one: first
+        // those `where` reads or may not come before, then `where`, then
+        // the rest, on the rows that are left
+        for late in [false, true] {
+            for (i, (b, c)) in binds.iter().enumerate() {
+                if early[i] == late {
+                    continue;
+                }
+                let bp = format!("{path}.bind.{b}");
+                if c.op == "change" {
+                    layer = self.change_layer(set, b, c, &bp, layer, &mut terms, &mut frame)?;
+                    continue;
+                }
+                let expr = self.expr(c, &terms, "q", &bp)?;
+                let col = column_name(b);
+                layer = format!("SELECT q.*, {} AS {col} FROM ({layer}) q", expr.sql);
+                frame.bindings.push(((*b).clone(), col.clone()));
+                terms.push((
+                    (*b).clone(),
+                    Term {
+                        sql: col,
+                        prec: expr.prec,
+                        ci: None,
+                        param: None,
+                        members: expr.members,
+                        holder: None,
+                        dated: expr.dated,
+                    },
+                ));
             }
-            let expr = self.expr(c, &terms, "q", &bp)?;
-            let col = column_name(b);
-            layer = format!("SELECT q.*, {} AS {col} FROM ({layer}) q", expr.sql);
-            frame.bindings.push((b.clone(), col.clone()));
-            terms.push((
-                b.clone(),
-                Term {
-                    sql: col,
-                    prec: expr.prec,
-                    ci: None,
-                    param: None,
-                    members: expr.members,
-                    dated: expr.dated,
-                },
-            ));
+            if late {
+                break;
+            }
+            // where
+            if !set.where_.is_empty() {
+                let mut preds = Vec::new();
+                for (i, c) in set.where_.iter().enumerate() {
+                    preds.push(
+                        self.expr(c, &terms, "q", &format!("{path}.where[{i}]"))?
+                            .sql,
+                    );
+                }
+                layer = format!("SELECT q.* FROM ({layer}) q WHERE {}", preds.join(" AND "));
+            }
+            // the lists nothing read before, where a later binding, the
+            // pick, the answer or another set reads one
+            for (p, holder, col) in std::mem::take(&mut after_where) {
+                if self.list_is_read(name, set, &p, holder) {
+                    layer = format!(
+                        "SELECT q.*, {} AS {col} FROM ({layer}) q",
+                        self.dataset_list(holder, "q")
+                    );
+                }
+            }
         }
-        // where
-        if !set.where_.is_empty() {
-            let mut preds = Vec::new();
-            for (i, c) in set.where_.iter().enumerate() {
-                preds.push(
-                    self.expr(c, &terms, "q", &format!("{path}.where[{i}]"))?
-                        .sql,
-                );
-            }
-            layer = format!("SELECT q.* FROM ({layer}) q WHERE {}", preds.join(" AND "));
+        // a binding keeps the place it was written at, for a union's columns
+        let order: Vec<&String> = binds.iter().map(|(b, _)| *b).collect();
+        let place = |b: &str| order.iter().position(|o| o.as_str() == b);
+        if !order.is_empty() {
+            let first = frame
+                .bindings
+                .iter()
+                .position(|(b, _)| place(b).is_some())
+                .unwrap_or(frame.bindings.len());
+            frame.bindings[first..].sort_by_key(|(b, _)| place(b).unwrap_or(usize::MAX));
         }
         // pick
         if let Some(pk) = &set.pick {
@@ -1834,6 +2738,7 @@ impl<'a> Builder<'a> {
                     ci,
                     param: None,
                     members: t.members,
+                    holder: None,
                     dated: t.dated,
                 },
             ));
@@ -1852,6 +2757,7 @@ impl<'a> Builder<'a> {
                     ci: None,
                     param: None,
                     members: false,
+                    holder: None,
                     dated: (n == "date").then_some(Dated::Day),
                 },
             ));
@@ -1949,6 +2855,7 @@ impl<'a> Builder<'a> {
                                 ci: None,
                                 param: None,
                                 members: t.members,
+                                holder: None,
                                 dated: t.dated,
                             },
                         )
@@ -1963,6 +2870,7 @@ impl<'a> Builder<'a> {
                             ci: None,
                             param: None,
                             members: t.members,
+                            holder: None,
                             dated: t.dated,
                         },
                     ));
@@ -2047,6 +2955,27 @@ impl<'a> Builder<'a> {
         Ok(out)
     }
 
+    /// The column of a child set that holds the key of the row of this set
+    /// each of its rows is counted under: a group's key by this grain, the
+    /// key itself for a set of the same grain, else the spine's link.
+    fn count_link(&self, set: &Set, child_name: &str, alias: &str, at: &str) -> R<String> {
+        let child = self.frames.get(child_name).cloned().unwrap_or_default();
+        let child_set = &self.ask.sets[child_name];
+        if child_set.grain == Grain::Group {
+            let key_path = format!("{}.id", set.grain.name());
+            let (_, gcol) = child
+                .group_by
+                .iter()
+                .find(|(p, _)| p == &key_path)
+                .ok_or_else(|| err(at, "the group is not keyed by this grain"))?;
+            return Ok(format!("{alias}.{gcol}"));
+        }
+        if child_set.grain == set.grain {
+            return Ok(format!("{alias}.k"));
+        }
+        Self::link(&child, set.grain, alias, at)
+    }
+
     /// The count of a child set's rows per row of this set, windowed when
     /// asked, as a correlated subquery.
     fn count_of(
@@ -2058,27 +2987,7 @@ impl<'a> Builder<'a> {
         terms: &[(String, Term)],
         at: &str,
     ) -> R<String> {
-        let child = self.frames.get(child_name).cloned().unwrap_or_default();
-        let child_set = &self.ask.sets[child_name];
-        if child_set.grain == Grain::Group {
-            let key_path = format!("{}.id", set.grain.name());
-            let (_, gcol) = child
-                .group_by
-                .iter()
-                .find(|(p, _)| p == &key_path)
-                .ok_or_else(|| err(at, "the group is not keyed by this grain"))?;
-            return Ok(format!(
-                "(SELECT COUNT(*) FROM {} ch WHERE ch.{gcol} = q.k)",
-                cte_name(child_name)
-            ));
-        }
-        if child_set.grain == set.grain {
-            return Ok(format!(
-                "(SELECT COUNT(*) FROM {} ch WHERE ch.k = q.k)",
-                cte_name(child_name)
-            ));
-        }
-        let link = Self::link(&child, set.grain, "ch", at)?;
+        let link = self.count_link(set, child_name, "ch", at)?;
         let mut inner = format!(
             "SELECT COUNT(*) FROM {} ch WHERE {link} = q.k",
             cte_name(child_name)
@@ -2199,6 +3108,7 @@ impl<'a> Builder<'a> {
             ci: None,
             param: None,
             members: false,
+            holder: None,
             dated: Some(Dated::Day),
         };
         terms.push((
@@ -2274,10 +3184,30 @@ impl<'a> Builder<'a> {
                     .map(|d| d.name)
                     .collect();
                 names.sort();
-                if names.is_empty() {
+                let alias = format!("dn{i}");
+                let own = key.holder.filter(|h| self.joins_datasets(*h));
+                if names.is_empty() || (own.is_some() && self.dataset_names().is_none()) {
                     axis_cols.push(format!("CAST(NULL AS TEXT) AS {col}"));
+                } else if own == Some(Holder::Stack) && self.one_source_each() {
+                    // a stack's own datasets, one `source` row each: its
+                    // holders among them, each row once
+                    let (name, sources) = self.dataset_names().unwrap_or_default();
+                    axis_joins.push(format!(
+                        "LEFT JOIN {} {alias} ON {alias}.stack_id = ch.stack_k \
+                         AND {alias}.source_id IN ({sources})",
+                        self.q("source_stack")
+                    ));
+                    axis_cols.push(format!(
+                        "{} AS {col}",
+                        name.replace("dsb.", &format!("{alias}."))
+                    ));
+                } else if let Some((pairs, on)) =
+                    own.and_then(|holder| self.dataset_pairs(holder, "ch", &alias))
+                {
+                    // the rows' own datasets: each row joined to its pairs
+                    axis_joins.push(format!("LEFT JOIN {pairs} {alias} ON {on}"));
+                    axis_cols.push(format!("{alias}.n AS {col}"));
                 } else {
-                    let alias = format!("dn{i}");
                     let rows = names
                         .iter()
                         .map(|n| format!("SELECT CAST('{}' AS TEXT) AS n", n.replace('\'', "''")))
@@ -2300,13 +3230,13 @@ impl<'a> Builder<'a> {
             let axis = c
                 .ref_name()
                 .ok_or_else(|| err(&at, "an axis ref names an axis"))?;
-            let ax = self.p(Param::from(axis), Type::Text);
+            let values = self.axis_values(axis, &child_terms, "ch", &at);
             let col = format!("axis_g{i}");
             if c.opts.get("each").and_then(Value::as_bool).unwrap_or(false) {
                 let alias = format!("ax{i}");
                 axis_joins.push(format!(
-                    "LEFT JOIN {} {alias} ON {alias}.stack_id = ch.k AND {alias}.axis = {ax}",
-                    self.q("classification_axis")
+                    "LEFT JOIN {} ON 1 = 1",
+                    self.axis_rows(&values, &alias)
                 ));
                 axis_cols.push(format!(
                     "{} AS {col}",
@@ -2314,9 +3244,8 @@ impl<'a> Builder<'a> {
                 ));
             } else {
                 axis_cols.push(format!(
-                    "(SELECT {} FROM {} ax WHERE ax.stack_id = ch.k AND ax.axis = {ax}) AS {col}",
-                    self.sql.sorted_list(&self.shown_form(axis, "ax.value")),
-                    self.q("classification_axis")
+                    "{} AS {col}",
+                    self.axis_list(&values, |x| self.shown_form(axis, x))
                 ));
             }
             axis_keys.insert(axis.to_string(), axis.to_string());
@@ -2630,6 +3559,7 @@ impl<'a> Builder<'a> {
                     !t.sql.starts_with("b_")
                         && !t.sql.starts_with("n_")
                         && !t.sql.starts_with("pick_")
+                        && !t.sql.starts_with("x_")
                         || common.iter().any(|(b, _)| b == n)
                 });
                 let mut parts = Vec::new();
@@ -2709,6 +3639,8 @@ impl<'a> Builder<'a> {
             ci: t.ci.as_deref().map(dot),
             param: None,
             members: t.members,
+            // the spine the holder is read by is this alias's
+            holder: t.holder.filter(|_| !alias.is_empty()),
             dated: t.dated,
         })
     }
@@ -2776,6 +3708,7 @@ impl<'a> Builder<'a> {
             ci: None,
             param: Some((param, ty)),
             members: false,
+            holder: None,
             dated: (ty == Type::Date).then_some(Dated::Day),
         })
     }
@@ -2829,6 +3762,7 @@ impl<'a> Builder<'a> {
             ci: None,
             param: Some((param, ty)),
             members: false,
+            holder: None,
             dated: Some(dated),
         })
     }
@@ -2843,6 +3777,7 @@ impl<'a> Builder<'a> {
                 ci: None,
                 param: None,
                 members: false,
+                holder: None,
                 dated: Some(Dated::Day),
             },
             _ => t,
@@ -3210,6 +4145,7 @@ impl<'a> Builder<'a> {
                     ci: None,
                     param: None,
                     members: false,
+                    holder: None,
                     dated: Some(Dated::Day),
                 })
             }
@@ -3263,17 +4199,12 @@ impl<'a> Builder<'a> {
                     .names
                     .level_spec(&level)
                     .ok_or_else(|| err(at, format!("{level} is not a comparability level")))?;
-                let k = if alias.is_empty() {
-                    "k".to_string()
-                } else {
-                    format!("{alias}.k")
-                };
                 let mut parts: Vec<String> = Vec::new();
                 for m in &spec.exact {
-                    parts.push(self.signature_member(m, None, &k, terms, alias, at)?);
+                    parts.push(self.signature_member(m, None, terms, alias, at)?);
                 }
                 for (m, step) in &spec.rounded {
-                    parts.push(self.signature_member(m, Some(*step), &k, terms, alias, at)?);
+                    parts.push(self.signature_member(m, Some(*step), terms, alias, at)?);
                 }
                 plain(format!("({})", parts.join(" || '|' || ")))
             }
@@ -3363,7 +4294,7 @@ impl<'a> Builder<'a> {
         terms: &[(String, Term)],
         alias: &str,
         at: &str,
-    ) -> R<String> {
+    ) -> R<Held> {
         let text = match value {
             Arg::Text(t) => Some(t.clone()),
             Arg::Int(n) => Some(n.to_string()),
@@ -3382,16 +4313,16 @@ impl<'a> Builder<'a> {
         };
         let Some(text) = text else {
             let v = self.arg(value, terms, alias, at)?;
-            return Ok(format!("ax.value = {}", v.sql));
+            return Ok(Held::Sql(format!("ax.value = {}", v.sql)));
         };
         let held = self
             .held_texts(axis, &text)
             .unwrap_or_else(|| vec![text.clone()]);
-        let list: Vec<String> = held
-            .into_iter()
-            .map(|h| self.p(Param::from(h), Type::Text))
-            .collect();
-        Ok(format!("ax.value IN ({})", list.join(", ")))
+        Ok(Held::Any(
+            held.into_iter()
+                .map(|h| self.p(Param::from(h), Type::Text))
+                .collect(),
+        ))
     }
 
     /// A clause over a group's keys with each value it names of a key read
@@ -3443,6 +4374,101 @@ impl<'a> Builder<'a> {
         out
     }
 
+    /// A derived field held against a value, written over the columns it is
+    /// derived from (Postgres): the acquisition type, read or filled, with
+    /// `=` or `<>`, and the largest or the smallest side of the voxel with
+    /// an order. The planner keeps statistics of columns and none of an
+    /// expression over them: `COALESCE(filled, read) = '3D'` it takes for
+    /// one row in two hundred and `GREATEST(..) <= 1.2` for one in three,
+    /// whatever the columns hold, and a set it takes for a few hundred
+    /// stacks where it is a hundred thousand is joined a row at a time.
+    /// Each form answers what the expression answers for every row, a null
+    /// where it is null: the acquisition type is the filled one where there
+    /// is one, else the one read; the largest side is at most a value where
+    /// every side there is is, and at least a value where one is, and null
+    /// where there is no side. None for any other comparison.
+    fn derived_compared(
+        &mut self,
+        op: &str,
+        c: &Clause,
+        terms: &[(String, Term)],
+        alias: &str,
+        at: &str,
+    ) -> R<Option<String>> {
+        if !self.sql.is_pg() || c.args.len() != 2 {
+            return Ok(None);
+        }
+        let derived = |a: &Arg| match a {
+            Arg::Clause(d) if d.op == "derived" => Some(d.clone()),
+            _ => None,
+        };
+        let value = |a: &Arg| match a {
+            Arg::Text(_) | Arg::Int(_) | Arg::Number(_) => true,
+            Arg::Clause(p) => p.op == "param",
+            _ => false,
+        };
+        let flipped = match op {
+            "<" => ">",
+            "<=" => ">=",
+            ">" => "<",
+            ">=" => "<=",
+            same => same,
+        };
+        let (d, v, op) = match (derived(&c.args[0]), derived(&c.args[1])) {
+            (Some(d), None) if value(&c.args[1]) => (d, &c.args[1], op),
+            (None, Some(d)) if value(&c.args[0]) => (d, &c.args[0], flipped),
+            _ => return Ok(None),
+        };
+        let col =
+            |b: &Builder, path: &str| -> R<String> { Ok(b.term(terms, alias, path, at)?.sql) };
+        match (d.ref_name().unwrap_or(""), op) {
+            ("acquisition_type", "=" | "<>") => {
+                let filled = col(self, "acquisition_type_filled")?;
+                let read = col(self, "mr_acquisition_type")?;
+                let v1 = self.arg(v, terms, alias, at)?.sql;
+                let v2 = self.arg(v, terms, alias, at)?.sql;
+                Ok(Some(format!(
+                    "(({filled} IS NOT NULL AND {filled} {op} {v1}) OR ({filled} IS NULL AND {read} {op} {v2}))"
+                )))
+            }
+            (name @ ("voxel" | "voxel_max" | "voxel_min"), "<" | "<=" | ">" | ">=") => {
+                let third = match name {
+                    "voxel_min" => "slice_thickness",
+                    _ => d
+                        .opts
+                        .get("third")
+                        .and_then(Value::as_str)
+                        .unwrap_or("slice_thickness"),
+                };
+                let sides = [
+                    col(self, "pixel_spacing_row")?,
+                    col(self, "pixel_spacing_col")?,
+                    col(self, third)?,
+                ];
+                // every side is within the value where the largest is at
+                // most it, or the smallest at least it; one side is where
+                // the largest is at least it, or the smallest at most it
+                let every = (name == "voxel_min") == matches!(op, ">" | ">=");
+                let mut parts = Vec::with_capacity(4);
+                for side in &sides {
+                    let v = self.arg(v, terms, alias, at)?.sql;
+                    parts.push(if every {
+                        format!("({side} IS NULL OR {side} {op} {v})")
+                    } else {
+                        format!("({side} IS NOT NULL AND {side} {op} {v})")
+                    });
+                }
+                let some = format!("COALESCE({})", sides.join(", "));
+                Ok(Some(if every {
+                    format!("({} AND ({some} IS NOT NULL OR NULL))", parts.join(" AND "))
+                } else {
+                    format!("({} OR ({some} IS NULL AND NULL))", parts.join(" OR "))
+                }))
+            }
+            _ => Ok(None),
+        }
+    }
+
     /// One member of a level's signature, as text that is the same on both
     /// backends: an axis as its sorted values, the acquisition type and the
     /// orientation as read, a physics number as an integer at a step.
@@ -3450,17 +4476,15 @@ impl<'a> Builder<'a> {
         &mut self,
         member: &str,
         step: Option<f64>,
-        key: &str,
         terms: &[(String, Term)],
         alias: &str,
         at: &str,
     ) -> R<String> {
         if self.ctx.names.axis_values(member).is_some() {
-            let ax = self.p(Param::from(member), Type::Text);
-            let list = self.sql.sorted_list(&self.stored_form(member, "ax.value"));
+            let values = self.axis_values(member, terms, alias, at);
             return Ok(format!(
-                "COALESCE((SELECT {list} FROM {} ax WHERE ax.stack_id = {key} AND ax.axis = {ax}), '')",
-                self.q("classification_axis")
+                "COALESCE({}, '')",
+                self.axis_list(&values, |x| self.stored_form(member, x))
             ));
         }
         let text = match member {
@@ -3534,18 +4558,26 @@ impl<'a> Builder<'a> {
                         .args
                         .get(1)
                         .ok_or_else(|| err(at, "an axis comparison needs a value"))?;
-                    let ax = self.p(Param::from(axis), Type::Text);
                     let held = self.axis_held(axis, value, terms, alias, at)?;
-                    let exists = format!(
-                        "EXISTS (SELECT 1 FROM {} ax WHERE ax.stack_id = {} AND ax.axis = {ax} AND {held})",
-                        self.q("classification_axis"),
-                        dot("k"),
-                    );
+                    let values = self.axis_values(axis, terms, alias, at);
+                    let exists = self.axis_holds(&values, &held);
                     return plain(if op == "<>" {
                         format!("NOT {exists}")
                     } else {
                         exists
                     });
+                }
+                if matches!(op, "=" | "<>")
+                    && let Some(among) = self.dataset_among(c, terms, alias, at)
+                {
+                    return plain(if op == "=" {
+                        among
+                    } else {
+                        format!("(NOT {among})")
+                    });
+                }
+                if let Some(by_columns) = self.derived_compared(op, c, terms, alias, at)? {
+                    return plain(by_columns);
                 }
                 let (a, b) = self.operands(
                     c.args
@@ -3631,25 +4663,24 @@ impl<'a> Builder<'a> {
                             }
                         }
                     }
-                    let ax = self.p(Param::from(axis), Type::Text);
-                    let list = if held.is_empty() {
-                        "(NULL)".to_string()
-                    } else if held.len() > LIST_BIND_MAX {
-                        self.long_list(held, at)?
+                    let held = if held.len() > LIST_BIND_MAX {
+                        Held::Sql(format!("ax.value IN {}", self.long_list(held, at)?))
                     } else {
-                        let ph: Vec<String> =
-                            held.into_iter().map(|h| self.item_placeholder(h)).collect();
-                        format!("({})", ph.join(", "))
+                        Held::Any(held.into_iter().map(|h| self.item_placeholder(h)).collect())
                     };
-                    let exists = format!(
-                        "EXISTS (SELECT 1 FROM {} ax WHERE ax.stack_id = {} AND ax.axis = {ax} AND ax.value IN {list})",
-                        self.q("classification_axis"),
-                        dot("k"),
-                    );
+                    let values = self.axis_values(axis, terms, alias, at);
+                    let exists = self.axis_holds(&values, &held);
                     return plain(if op == "in" {
                         exists
                     } else {
                         format!("NOT {exists}")
+                    });
+                }
+                if let Some(among) = self.dataset_among(c, terms, alias, at) {
+                    return plain(if op == "in" {
+                        among
+                    } else {
+                        format!("(NOT {among})")
                     });
                 }
                 let a = self.arg(
@@ -3754,6 +4785,9 @@ impl<'a> Builder<'a> {
                     return Err(err(at, "has takes an axis and a value"));
                 };
                 if l.op != "axis" {
+                    if let Some(among) = self.dataset_among(c, terms, alias, at) {
+                        return plain(among);
+                    }
                     // Wave 7a: the datasets of a stack, a subject or a
                     // session are many names, read as an axis of many values
                     // is
@@ -3773,7 +4807,6 @@ impl<'a> Builder<'a> {
                     return plain(self.sql.member(&list.sql, &v.sql));
                 }
                 let axis = l.ref_name().unwrap_or("");
-                let ax = self.p(Param::from(axis), Type::Text);
                 let held = self.axis_held(
                     axis,
                     c.args.get(1).ok_or_else(|| err(at, "has needs a value"))?,
@@ -3781,11 +4814,8 @@ impl<'a> Builder<'a> {
                     alias,
                     at,
                 )?;
-                plain(format!(
-                    "EXISTS (SELECT 1 FROM {} ax WHERE ax.stack_id = {} AND ax.axis = {ax} AND {held})",
-                    self.q("classification_axis"),
-                    dot("k"),
-                ))
+                let values = self.axis_values(axis, terms, alias, at);
+                plain(self.axis_holds(&values, &held))
             }
             "picked" => {
                 let role = self
@@ -3806,6 +4836,16 @@ impl<'a> Builder<'a> {
                 plain(sql)
             }
             "not_null" | "is_null" => {
+                // a row's own datasets: none where no dataset holds a file
+                // of its stacks, asked of the holders, never by making the
+                // list for every row
+                if let Some(among) = self.dataset_among(c, terms, alias, at) {
+                    return plain(if op == "not_null" {
+                        among
+                    } else {
+                        format!("(NOT {among})")
+                    });
+                }
                 let a = self.arg(
                     c.args
                         .first()
@@ -4117,6 +5157,7 @@ impl<'a> Builder<'a> {
                     ci: None,
                     param: None,
                     members: false,
+                    holder: None,
                     dated: a.dated,
                 })
             }

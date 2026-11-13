@@ -238,15 +238,48 @@ pub fn shape_columns(compiled: &Compiled, rows: &mut [Row]) {
     }
 }
 
-/// Run a compiled ask inside a read transaction, under the bounds.
+/// Whether a statement failed because Postgres could not get the shared
+/// memory its parallel workers pass rows through: a Postgres in a container
+/// has 64 MB of it unless it was given more, and a hash join of half a
+/// million rows shared between workers asks for more than that.
+fn out_of_shared_memory(e: &StoreError) -> bool {
+    e.to_string().contains("shared memory segment")
+}
+
+/// Run a compiled ask inside a read transaction, under the bounds. Where
+/// Postgres has no shared memory for the statement's parallel workers, the
+/// statement is run once more without them: a slower answer, where the
+/// first run gave none.
 pub fn run(store: &mut Store, compiled: &Compiled, bounds: Bounds) -> Result<Answer, ExecError> {
+    match run_as(store, compiled, bounds, false) {
+        Err(ExecError::Store(e)) if out_of_shared_memory(&e) => {
+            run_as(store, compiled, bounds, true)
+        }
+        other => other,
+    }
+}
+
+fn run_as(
+    store: &mut Store,
+    compiled: &Compiled,
+    bounds: Bounds,
+    serial: bool,
+) -> Result<Answer, ExecError> {
     let started = Instant::now();
     store.begin_read()?;
     let is_pg = matches!(store.dialect(), nils_registry::dialect::Dialect::Postgres);
     if is_pg {
+        // An ask is one statement, planned and run once: compiling its
+        // expressions to machine code costs more than running them, and on
+        // a statement of many layers took longer than the statement itself.
         store.batch(&format!(
-            "SET LOCAL statement_timeout = {}",
-            bounds.timeout_ms
+            "SET LOCAL statement_timeout = {}; SET LOCAL jit = off{}",
+            bounds.timeout_ms,
+            if serial {
+                "; SET LOCAL max_parallel_workers_per_gather = 0"
+            } else {
+                ""
+            }
         ))?;
     }
     // H9 on SQLite: a watchdog holding the interrupt handle

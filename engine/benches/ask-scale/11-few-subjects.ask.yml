@@ -1,0 +1,26 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# A small question: the stacks of a few subjects, where an index is the
+# plan and a pass over every stack is not.
+ast_version: 1
+name: the T1w stacks of five subjects
+sets:
+  people:
+    grain: subject
+    where:
+      - ["in", {}, ["field", {}, "code"], ["SC000010", "SC000200", "SC001500", "SC003000", "SC005000"]]
+  scans:
+    grain: stack
+    of: people
+    where:
+      - ["=", {}, ["axis", {}, "base"], "T1w"]
+out:
+  set: scans
+  level: record
+  columns:
+    - ["field", {}, "subject.code"]
+    - ["field", {}, "session.first"]
+    - ["field", {}, "dataset"]
+    - ["derived", {}, "acquisition_type"]
+  order:
+    - [["field", {}, "subject.code"], asc]
+    - [["field", {}, "session.first"], asc]

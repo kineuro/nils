@@ -111,6 +111,11 @@ impl Home {
         let mut store = self.store();
         let text = qualified(&store, sql);
         store.execute(&text, &[]).unwrap();
+        // an axis row written by hand: its stack's row follows, as with
+        // every writer of an axis
+        if text.contains("classification_axis") {
+            nils_registry::stack_axis::rebuild(&mut store).unwrap();
+        }
     }
 
     fn rows(&self, sql: &str) -> Vec<Vec<Value>> {

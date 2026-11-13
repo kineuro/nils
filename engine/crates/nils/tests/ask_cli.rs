@@ -196,6 +196,8 @@ fn rule_out(home: &TempDir, how_many: usize) -> Vec<i64> {
              WHERE axis = 'disposition' AND stack_id IN ({list})"
         ))
         .unwrap();
+    // as the sort does when it rules a stack out, in its own transaction
+    nils_registry::stack_axis::refresh(&mut store, &ids).unwrap();
     ids
 }
 
@@ -748,8 +750,10 @@ fn what_the_ask_prints_as_its_predicate_is_what_a_reader_can_reproduce() {
         None,
     );
     let sql = out.ok("explain").to_string();
+    // the predicate reads the stacks the read model of the axes says the
+    // pack ruled out (`stack_axis.excluded`)
     assert!(
-        sql.contains("NOT EXISTS") && sql.contains("classification_axis"),
+        sql.contains("NOT EXISTS") && sql.contains("stack_axis") && sql.contains("excluded = 1"),
         "the printed query carries the standing predicate: {sql}"
     );
 
@@ -774,6 +778,17 @@ fn what_the_ask_prints_as_its_predicate_is_what_a_reader_can_reproduce() {
         readers_own as usize, answered,
         "the predicate a reader reproduces is the one the ask applied"
     );
+    // and as the printed query writes it, over the row made of the axis rows
+    let as_printed = store
+        .query(
+            "SELECT COUNT(*) FROM stack st WHERE NOT EXISTS \
+             (SELECT 1 FROM stack_axis a WHERE a.stack_id = st.id AND a.excluded = 1)",
+            &[],
+        )
+        .unwrap()[0]
+        .int(0)
+        .unwrap();
+    assert_eq!(as_printed, readers_own);
 }
 
 /// The handle a run printed.
@@ -860,6 +875,8 @@ fn a_group_keyed_by_an_axis_counts_every_stack_it_should_and_says_how() {
             ))
             .unwrap();
     }
+    // as every writer of an axis does, in its own transaction
+    nils_registry::stack_axis::refresh(&mut store, &flair).unwrap();
     let count = |sql: &str| -> usize {
         nils_registry::Store::open_sqlite(&home.path().join("registry.db"))
             .unwrap()

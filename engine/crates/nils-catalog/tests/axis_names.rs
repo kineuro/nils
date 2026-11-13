@@ -100,6 +100,8 @@ fn put(store: &mut Store, stack: i64, axis: &str, value: &str, tier: &str) {
             ]],
         )
         .unwrap();
+    // as every writer of an axis does, in its own transaction
+    nils_registry::stack_axis::refresh(store, &[stack]).unwrap();
 }
 
 /// A single-valued axis's row rewritten to another value.
@@ -109,6 +111,7 @@ fn set(store: &mut Store, stack: i64, axis: &str, value: &str) {
         store.qualified("classification_axis")
     );
     store.execute(&sql, &[]).unwrap();
+    nils_registry::stack_axis::refresh(store, &[stack]).unwrap();
 }
 
 /// What was planted, by stack.

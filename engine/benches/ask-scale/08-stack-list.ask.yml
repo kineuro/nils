@@ -1,0 +1,25 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# A list at the stack grain: the dataset, the signature and fields of the
+# stack, its session and its subject projected.
+ast_version: 1
+name: the DIR stacks, listed
+sets:
+  scans:
+    grain: stack
+    where:
+      - ["has", {}, ["axis", {}, "modifier"], "DIR"]
+    bind:
+      sig: ["derived", {level: loose}, "signature"]
+out:
+  set: scans
+  level: record
+  columns:
+    - ["field", {}, "subject.code"]
+    - ["field", {}, "session.first"]
+    - ["field", {}, "dataset"]
+    - ["field", {}, "station_name"]
+    - ["field", {}, "sig"]
+    - ["derived", {}, "voxel"]
+  order:
+    - [["field", {}, "subject.code"], asc]
+    - [["field", {}, "session.first"], asc]

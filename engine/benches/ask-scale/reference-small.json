@@ -1,0 +1,178 @@
+{
+  "plan": {
+    "seed": 7,
+    "subjects": 150
+  },
+  "postgres": {
+    "01-stack-count": {
+      "rows": 2723,
+      "subjects": 114,
+      "hash": "cda116dd74428e6e4519de01d738f9453b871997d5662c487e429cf52e30bb9a",
+      "held": false
+    },
+    "02-cohort-sessions": {
+      "rows": 759,
+      "subjects": 111,
+      "hash": "8f74f16fa93235f0acbc7107479771b54d2ffbc5764a3e74a7edc3a5b1e24830",
+      "held": false
+    },
+    "03-repeat-visits": {
+      "rows": 94,
+      "subjects": 94,
+      "hash": "88e15c14c1c1e232f90d49ea15e47f6a802703c9acfd079d005d6114275ea129",
+      "held": false
+    },
+    "04-negation": {
+      "rows": 8203,
+      "subjects": 119,
+      "hash": "d0ade704afe95e2bfbf74163f033d87414212dd23116a66be9485a6257542ef4",
+      "held": false
+    },
+    "05-has": {
+      "rows": 234,
+      "subjects": 95,
+      "hash": "1f50a9f277cae1a5ed98fe224d8a50864f0fc6bffe9f6a482b84c41884f2f973",
+      "held": false
+    },
+    "06-in-lists": {
+      "rows": 715,
+      "subjects": 44,
+      "hash": "fca4790786bfef137f7fa3cef24298b1c70e4816b2b94fec2446291633b13f2c",
+      "held": false
+    },
+    "07-subjects-by-stacks": {
+      "rows": 42,
+      "subjects": 42,
+      "hash": "204bcea734826590eb1dab6a7bb04bb00b59dbe02dddbfdce6824584a9fd41dc",
+      "held": false
+    },
+    "08-stack-list": {
+      "rows": 118,
+      "subjects": null,
+      "hash": "490ddd3b1f22cd9c9adef8f515499406d0c3e185ad4ecf1db845d30de9afbb17",
+      "held": false
+    },
+    "09-group-by-axes": {
+      "rows": 20,
+      "subjects": null,
+      "hash": "6c4253f8dee82a0d02d41e17a4cde70551840b79a35e4cb3fb8ab16d5e09a3a9",
+      "held": false
+    },
+    "10-group-each-dataset": {
+      "rows": 33,
+      "subjects": null,
+      "hash": "0ad88f324e9e7cb86339a29c44b5ec8a6d5072503bc881efd9830c6bc654fe07",
+      "held": false
+    },
+    "11-few-subjects": {
+      "rows": 12,
+      "subjects": null,
+      "hash": "731fe78cb57051958baa94c21f47337d12c96a2db4391416558bc9257257eb37",
+      "held": false
+    },
+    "12-sessions-and-subjects-by-dataset": {
+      "rows": 15,
+      "subjects": 15,
+      "hash": "4486538669da08f7d107ace966c92e52a030910bbbc004d471f0438c59255190",
+      "held": false
+    },
+    "13-stations.plain": {
+      "rows": 40,
+      "subjects": null,
+      "hash": "d34dcb03dc5b40a8ca825c791561ae6343104268d5796c3a212babde2876f435",
+      "held": true
+    },
+    "14-derived-negated": {
+      "rows": 7848,
+      "subjects": 150,
+      "hash": "8fe6119a0134fc79e0da37bc817390a4ac905ef9d8e355084fe50f98d5fa645a",
+      "held": false
+    }
+  },
+  "sqlite": {
+    "01-stack-count": {
+      "rows": 2699,
+      "subjects": 114,
+      "hash": "f361da1216192b1c50830f65a596ab7f3cf6eb7b9af300d3fc5ff5a3481347d3",
+      "held": false
+    },
+    "02-cohort-sessions": {
+      "rows": 759,
+      "subjects": 111,
+      "hash": "8f74f16fa93235f0acbc7107479771b54d2ffbc5764a3e74a7edc3a5b1e24830",
+      "held": false
+    },
+    "03-repeat-visits": {
+      "rows": 94,
+      "subjects": 94,
+      "hash": "88e15c14c1c1e232f90d49ea15e47f6a802703c9acfd079d005d6114275ea129",
+      "held": false
+    },
+    "04-negation": {
+      "rows": 8203,
+      "subjects": 119,
+      "hash": "d0ade704afe95e2bfbf74163f033d87414212dd23116a66be9485a6257542ef4",
+      "held": false
+    },
+    "05-has": {
+      "rows": 234,
+      "subjects": 95,
+      "hash": "1f50a9f277cae1a5ed98fe224d8a50864f0fc6bffe9f6a482b84c41884f2f973",
+      "held": false
+    },
+    "06-in-lists": {
+      "rows": 715,
+      "subjects": 44,
+      "hash": "fca4790786bfef137f7fa3cef24298b1c70e4816b2b94fec2446291633b13f2c",
+      "held": false
+    },
+    "07-subjects-by-stacks": {
+      "rows": 42,
+      "subjects": 42,
+      "hash": "204bcea734826590eb1dab6a7bb04bb00b59dbe02dddbfdce6824584a9fd41dc",
+      "held": false
+    },
+    "08-stack-list": {
+      "rows": 118,
+      "subjects": null,
+      "hash": "c311de419c055a97592455843cefd012fe17d08620395261984eb69cffb55497",
+      "held": false
+    },
+    "09-group-by-axes": {
+      "rows": 20,
+      "subjects": null,
+      "hash": "d222adc41a0912b5fd0b1020928f6a332dd4bca83436dce67418601a5e0e04c1",
+      "held": false
+    },
+    "10-group-each-dataset": {
+      "rows": 33,
+      "subjects": null,
+      "hash": "e5e024612e2c75371eba2c7f010515f720cc97bfa9aebdecfe3c573fe0a7c751",
+      "held": false
+    },
+    "11-few-subjects": {
+      "rows": 12,
+      "subjects": null,
+      "hash": "731fe78cb57051958baa94c21f47337d12c96a2db4391416558bc9257257eb37",
+      "held": false
+    },
+    "12-sessions-and-subjects-by-dataset": {
+      "rows": 15,
+      "subjects": 15,
+      "hash": "4486538669da08f7d107ace966c92e52a030910bbbc004d471f0438c59255190",
+      "held": false
+    },
+    "13-stations.plain": {
+      "rows": 40,
+      "subjects": null,
+      "hash": "c50e2bbe175d04eedf6cb1c3535e24f05ad8a2e3336cb172f34e7f5f64e80bc6",
+      "held": true
+    },
+    "14-derived-negated": {
+      "rows": 7796,
+      "subjects": 150,
+      "hash": "9bc2d86bc16472bc2e4d8727f7ec6236e65766ca15c9cfa4ef5c3c27952e17d0",
+      "held": false
+    }
+  }
+}

@@ -51,6 +51,8 @@ pub const STACK_TABLES: &[(&str, Row)] = &[
     ("stack_fingerprint", Row::Goes),
     ("classification", Row::Goes),
     ("classification_axis", Row::Goes),
+    // the same rows, one a stack (`crate::stack_axis`)
+    ("stack_axis", Row::Goes),
     ("classification_evidence", Row::Goes),
     ("classification_vote", Row::Goes),
     ("pick_stack", Row::Keeps("a pick names it")),

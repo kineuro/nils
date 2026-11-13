@@ -1,0 +1,26 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# Groups keyed by axes: one of one value, one of several as a list.
+ast_version: 1
+name: stacks per base and modifiers
+sets:
+  scans: {grain: stack}
+  per:
+    grain: group
+    group:
+      of: scans
+      by:
+        - ["axis", {}, "base"]
+        - ["axis", {}, "modifier"]
+    bind:
+      subjects: ["distinct", {set: scans}, ["field", {}, "subject.id"]]
+out:
+  set: per
+  level: record
+  columns:
+    - ["field", {}, "base"]
+    - ["field", {}, "modifier"]
+    - ["field", {}, "_rows"]
+    - ["field", {}, "subjects"]
+  order:
+    - [["field", {}, "base"], asc]
+    - [["field", {}, "modifier"], asc]

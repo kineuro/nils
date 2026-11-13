@@ -1,0 +1,27 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# Read at detail plain: counts of rows a quasi identifying field keyed,
+# held back where they are of few subjects.
+ast_version: 1
+name: fine 3D FLAIR stacks per station
+sets:
+  scans:
+    grain: stack
+    where:
+      - ["has", {}, ["axis", {}, "modifier"], "FLAIR"]
+      - ["=",  {}, ["derived", {}, "acquisition_type"], "3D"]
+      - ["<=", {}, ["derived", {}, "voxel"], 1.0]
+  per:
+    grain: group
+    group:
+      of: scans
+      by:
+        - ["field", {}, "station_name"]
+out:
+  set: per
+  level: record
+  columns:
+    - ["field", {}, "station_name"]
+    - ["field", {}, "_rows"]
+    - ["field", {}, "_subjects"]
+  order:
+    - [["field", {}, "station_name"], asc]

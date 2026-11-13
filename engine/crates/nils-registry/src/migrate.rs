@@ -11,7 +11,7 @@ use crate::schema::{self, ID_TYPES, Table, linkage_tables, registry_tables};
 use crate::store::{Error, Param, Store};
 
 /// The version this binary writes.
-pub const SCHEMA_VERSION: i64 = 117;
+pub const SCHEMA_VERSION: i64 = 118;
 
 /// Which of the two stores a migration runs against.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -522,7 +522,47 @@ pub static MIGRATIONS: &[Migration] = &[
         version: 117,
         apply: a_release_names_its_subjects_by_an_id_type,
     },
+    Migration {
+        version: 118,
+        apply: the_axes_of_a_stack_are_one_row,
+    },
 ];
+
+/// The axes of a stack as one row (`stack_axis`, `crate::stack_axis`): the
+/// read model a question reads an axis of every stack of a set from. The
+/// table is added and filled from `classification_axis`, one pass over its
+/// rows: on a registry of five million axis rows that is the one migration
+/// that takes its time, some ten seconds. From here on every writer of
+/// `classification_axis` keeps it in its own transaction.
+fn the_axes_of_a_stack_are_one_row(store: &mut Store, kind: Kind) -> Result<(), Error> {
+    if kind != Kind::Registry {
+        return Ok(());
+    }
+    add_tables(store, kind, &["stack_axis"])?;
+    crate::stack_axis::rebuild(store)?;
+    // A deployment may run the ask under a role of its own that only reads
+    // (`--ask-dsn`), granted table by table: who may read the axis rows may
+    // read the row made of them, or the first question after the update
+    // would be refused.
+    if let Store::Postgres { .. } = store {
+        let schema = store.schema().unwrap_or("public").to_string();
+        let readers = store.query(
+            "SELECT DISTINCT grantee FROM information_schema.role_table_grants \
+             WHERE table_schema = $1 AND table_name = 'classification_axis' \
+             AND privilege_type = 'SELECT' AND grantee <> current_user",
+            &[Param::from(schema)],
+        )?;
+        let mine = store.qualified("stack_axis");
+        for r in &readers {
+            let who = match r.text(0)? {
+                "PUBLIC" => "PUBLIC".to_string(),
+                role => format!("\"{}\"", role.replace('"', "\"\"")),
+            };
+            store.batch(&format!("GRANT SELECT ON {mine} TO {who}"))?;
+        }
+    }
+    Ok(())
+}
 
 /// The `subject-code` id type says what it holds (2026-11-11): the code of a
 /// subject merged into this one, which a merge files, and the subject's own

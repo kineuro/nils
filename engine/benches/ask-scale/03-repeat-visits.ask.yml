@@ -1,0 +1,63 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# Six sets: a cohort's subjects and sessions, their fine 3D T1w and FLAIR
+# stacks of one dataset with a loose signature each, the sessions holding
+# both on one scanner, and the subjects with two such sessions of one pair
+# of signatures.
+ast_version: 1
+name: subjects scanned twice alike on one scanner
+sets:
+  scope:  {grain: cohort,  where: [["=", {}, ["field", {}, "name"], "alpha"]]}
+  people: {grain: subject, of: scope}
+  visits: {grain: session, of: people}
+  scans:
+    grain: stack
+    of: visits
+    bind:
+      sig: ["derived", {level: loose}, "signature"]
+      is_fl: ["case", {},
+               ["and", {}, ["=", {}, ["axis", {}, "base"], "T2w"],
+                           ["has", {}, ["axis", {}, "modifier"], "FLAIR"]], 1, 0]
+      is_t1: ["case", {}, ["=", {}, ["axis", {}, "base"], "T1w"], 1, 0]
+    where:
+      - ["=",  {}, ["field", {}, "dataset"], "site-a"]
+      - ["=",  {}, ["derived", {}, "acquisition_type"], "3D"]
+      - ["<=", {}, ["derived", {}, "voxel"], 1.2]
+      - ["or", {},
+          ["=", {}, ["axis", {}, "base"], "T1w"],
+          ["and", {}, ["=", {}, ["axis", {}, "base"], "T2w"],
+                      ["has", {}, ["axis", {}, "modifier"], "FLAIR"]]]
+  ses_scan:
+    grain: group
+    group:
+      of: scans
+      by:
+        - ["field", {}, "subject.code"]
+        - ["field", {}, "session.first"]
+        - ["field", {}, "manufacturer_model_name"]
+        - ["field", {}, "station_name"]
+    bind:
+      n_fl: ["sum", {set: scans}, ["field", {}, "is_fl"]]
+      n_t1: ["sum", {set: scans}, ["field", {}, "is_t1"]]
+      sig_fl: ["min", {set: scans},
+                ["case", {}, ["=", {}, ["field", {}, "is_fl"], 1], ["field", {}, "sig"], ""]]
+      sig_t1: ["min", {set: scans},
+                ["case", {}, ["=", {}, ["field", {}, "is_t1"], 1], ["field", {}, "sig"], ""]]
+    where:
+      - [">=", {}, ["field", {}, "n_t1"], 1]
+      - [">=", {}, ["field", {}, "n_fl"], 1]
+  runs:
+    grain: group
+    group:
+      of: ses_scan
+      by:
+        - ["field", {}, "subject.code"]
+        - ["field", {}, "manufacturer_model_name"]
+        - ["field", {}, "station_name"]
+        - ["field", {}, "sig_t1"]
+        - ["field", {}, "sig_fl"]
+    bind:
+      n_sessions: ["count", {set: ses_scan}]
+    where:
+      - [">=", {}, ["field", {}, "n_sessions"], 2]
+keep: [runs]
+out: {set: runs, level: count}
