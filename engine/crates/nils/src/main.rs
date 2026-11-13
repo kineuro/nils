@@ -31,6 +31,7 @@ mod ab;
 mod anchored;
 mod ask_cli;
 mod ask_doors;
+mod ask_scale;
 mod assist_cli;
 mod audit_cli;
 mod backup;
@@ -422,6 +423,12 @@ enum Command {
     Ask {
         #[command(subcommand)]
         command: ask_cli::AskCommand,
+    },
+    /// The ask on a registry of production size: build the scale registry, time a fixture directory on it and hold its answers against a kept reference
+    #[command(hide = true)]
+    AskScale {
+        #[command(subcommand)]
+        command: ask_scale::AskScaleCommand,
     },
     /// The assistant's stations from the command line (Wave 4c section 9.15): words to a document
     Assist {
@@ -2739,6 +2746,7 @@ fn main() -> ExitCode {
         Command::Session { command } => session_command(&home, command),
         Command::Synth(args) => synth(&home, args),
         Command::Ask { command } => ask_cli::ask_command(&home, command),
+        Command::AskScale { command } => ask_scale::ask_scale(&home, command),
         Command::Assist { command } => assist_cli::assist_command(command),
         Command::Custody { json, markdown } => custody(&home, json, markdown),
     };

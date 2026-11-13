@@ -1,0 +1,17 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# Axes of several values and the datasets of a copied stack, read with has.
+ast_version: 1
+name: fat suppressed FLAIR stacks, and the reformats a second dataset holds a copy of
+sets:
+  flair_fs:
+    grain: stack
+    where:
+      - ["has", {}, ["axis", {}, "modifier"], "FLAIR"]
+      - ["has", {}, ["axis", {}, "modifier"], "FatSat"]
+  copies:
+    grain: stack
+    where:
+      - ["has", {}, ["field", {}, "dataset"], "site-d"]
+      - ["has", {}, ["axis", {}, "construct"], "MPR"]
+  either: {grain: stack, algebra: {op: union, sets: [flair_fs, copies]}}
+out: {set: either, level: count}

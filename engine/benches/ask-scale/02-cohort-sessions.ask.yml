@@ -1,0 +1,9 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# A cohort, its subjects, their sessions.
+ast_version: 1
+name: the sessions of a cohort's subjects
+sets:
+  scope:  {grain: cohort,  where: [["=", {}, ["field", {}, "name"], "alpha"]]}
+  people: {grain: subject, of: scope}
+  visits: {grain: session, of: people}
+out: {set: visits, level: count}

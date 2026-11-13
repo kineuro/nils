@@ -1,0 +1,13 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# What a stack is not: an axis value, a list of values, a dataset.
+ast_version: 1
+name: stacks that are not T1w, hold no FLAIR or DIR and are not of one dataset
+sets:
+  scans:
+    grain: stack
+    where:
+      - ["<>", {}, ["axis", {}, "base"], "T1w"]
+      - ["not_in", {}, ["axis", {}, "modifier"], ["FLAIR", "DIR"]]
+      - ["<>", {}, ["field", {}, "dataset"], "site-b"]
+      - ["not", {}, ["=", {}, ["axis", {}, "post_contrast"], "given"]]
+out: {set: scans, level: count}

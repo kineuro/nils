@@ -1,0 +1,15 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# The datasets of a session's and a subject's stacks.
+ast_version: 1
+name: sessions of the small datasets whose subject is of the large one too
+sets:
+  people:
+    grain: subject
+    where:
+      - ["=", {}, ["field", {}, "dataset"], "site-a"]
+  visits:
+    grain: session
+    of: people
+    where:
+      - ["in", {}, ["field", {}, "dataset"], ["site-c", "site-d"]]
+out: {set: visits, level: count}

@@ -1,0 +1,16 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# One stack set: a dataset, an axis, the acquisition type and the voxel.
+ast_version: 1
+name: fine 3D T1w or FLAIR stacks of one dataset
+sets:
+  scans:
+    grain: stack
+    where:
+      - ["=",  {}, ["field", {}, "dataset"], "site-a"]
+      - ["=",  {}, ["derived", {}, "acquisition_type"], "3D"]
+      - ["<=", {}, ["derived", {}, "voxel"], 1.2]
+      - ["or", {},
+          ["=", {}, ["axis", {}, "base"], "T1w"],
+          ["and", {}, ["=", {}, ["axis", {}, "base"], "T2w"],
+                      ["has", {}, ["axis", {}, "modifier"], "FLAIR"]]]
+out: {set: scans, level: count}

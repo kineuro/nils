@@ -1,0 +1,27 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# Groups keyed by each value of an axis and by each dataset of a stack.
+ast_version: 1
+name: stacks per construct and dataset
+sets:
+  scans:
+    grain: stack
+    where:
+      - ["=", {}, ["derived", {}, "acquisition_type"], "3D"]
+  per:
+    grain: group
+    group:
+      of: scans
+      by:
+        - ["axis", {each: true}, "construct"]
+        - ["field", {}, "dataset"]
+out:
+  set: per
+  level: record
+  columns:
+    - ["field", {}, "construct"]
+    - ["field", {}, "dataset"]
+    - ["field", {}, "_rows"]
+    - ["field", {}, "_subjects"]
+  order:
+    - [["field", {}, "construct"], asc]
+    - [["field", {}, "dataset"], asc]

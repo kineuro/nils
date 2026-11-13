@@ -25,6 +25,10 @@ use nils_registry::schema::table;
 use nils_registry::{Error, Insert, Param, Registry, Store};
 use serde::{Deserialize, Serialize};
 
+mod scale;
+
+pub use scale::{COHORT, DATASETS, ScaleManifest, ScalePlan, build_scale};
+
 /// The vocabulary the registry is planted with: one disease with four
 /// courses, two scales, a diagnosis, a transition known to the year, and
 /// a sensitive kind with no rows, so the affordances can prove they never

@@ -1,0 +1,26 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# Derived fields held against values every way round, where the fields
+# they are derived from are missing on some stacks: negated, unequal,
+# largest and smallest side, the value written first.
+ast_version: 1
+name: stacks by what their acquisition type and voxel are not
+sets:
+  coarse:
+    grain: stack
+    where:
+      - ["not", {}, ["=", {}, ["derived", {}, "acquisition_type"], "3D"]]
+      - ["not", {}, ["<=", {}, ["derived", {}, "voxel"], 4.0]]
+  fine:
+    grain: stack
+    where:
+      - ["<>", {}, ["derived", {}, "acquisition_type"], "2D"]
+      - [">=", {}, ["derived", {}, "voxel_min"], 0.9]
+      - [">=", {}, 1.0, ["derived", {}, "voxel_max"]]
+  thick:
+    grain: stack
+    where:
+      - ["not", {}, [">", {}, ["derived", {}, "voxel"], 5.0]]
+      - ["not", {}, ["<", {}, ["derived", {}, "voxel_min"], 1.1]]
+      - ["not", {}, ["<>", {}, ["derived", {}, "acquisition_type"], "2D"]]
+  any: {grain: stack, algebra: {op: union, sets: [coarse, fine, thick]}}
+out: {set: any, level: count}
