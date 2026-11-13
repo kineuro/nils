@@ -14434,7 +14434,21 @@ fn name_assistant_changes(lines: &mut Vec<String>, dir: &Path) -> bool {
     if lines.iter().any(|line| line.starts_with(&prefix)) {
         return false;
     }
-    lines.push(format!("{prefix}{}", assistant_changes(dir).display()));
+    // beside the store, where a file names one in a folder of its own: the
+    // assistant's files stay together, and whatever keeps that folder keeps
+    // this one with it
+    let beside = lines
+        .iter()
+        .find_map(|line| line.strip_prefix("ASSISTANT_STORE="))
+        .map(str::trim)
+        .filter(|store| store.starts_with('/'))
+        .and_then(|store| Path::new(store).parent().map(Path::to_path_buf))
+        .filter(|folder| folder != dir);
+    let store = match beside {
+        Some(folder) => folder.join("changes.sqlite"),
+        None => assistant_changes(dir),
+    };
+    lines.push(format!("{prefix}{}", store.display()));
     true
 }
 
@@ -31661,6 +31675,24 @@ mod tests {
         assert!(write_assistant_env(&plan, None).is_ok());
         let kept = std::fs::read_to_string(&env_path).unwrap();
         assert!(kept.contains(named) && !kept.contains(&line), "{kept}");
+
+        // an install that keeps the assistant's stores in a folder of their
+        // own gets the changes beside them
+        let state = assistant.join("state");
+        let apart = format!(
+            "ASSISTANT_STORE={}\nASSISTANT_LADDER={}\n",
+            state.join("assistant.sqlite").display(),
+            state.join("ladder.sqlite").display()
+        );
+        std::fs::write(&env_path, &apart).unwrap();
+        mend_assistant_env(&plan);
+        assert_eq!(
+            std::fs::read_to_string(&env_path).unwrap(),
+            format!(
+                "{apart}ASSISTANT_CHANGES={}\n",
+                state.join("changes.sqlite").display()
+            )
+        );
 
         // changes an install already keeps where the assistant looked by
         // itself stay there
