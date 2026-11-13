@@ -1610,25 +1610,46 @@ fn level_prefix(grain: Grain, first: &str) -> bool {
     ancestors.contains(&first)
 }
 
-/// Whether a subject set carries `cohort.id` (rule 4, C40), as the compiler
-/// projects it: the set names a cohort set in its own `of`, or it is the
-/// algebra of sets whose left operand, whose frame an algebra keeps, does.
-fn cohort_edge(ask: &Ask, set: &Set, depth: usize) -> bool {
+/// What a subject set says of `cohort.id` (rule 4, C40).
+enum CohortEdge {
+    /// The set names a cohort set in its own `of`, or it is an intersect
+    /// or an except whose left operand, whose rows it keeps, carries it.
+    Carried,
+    /// The set is drawn of no cohort set.
+    Missing,
+    /// The set is a union, or keeps the rows of one. A union keeps what its
+    /// operands have in common (rule 4), and the edge is no binding: its
+    /// rows come from sets that need not be drawn of the same cohort set,
+    /// or of any, so no one cohort is each row's. The compiler projected
+    /// none and the statement failed where it ran (2026-11-13).
+    Union,
+}
+
+/// The cohort edge of a subject set, as the compiler projects it.
+fn cohort_edge(ask: &Ask, set: &Set, depth: usize) -> CohortEdge {
     // a cycle, which is refused as one, ends here
     if depth > ask.sets.len() {
-        return false;
+        return CohortEdge::Missing;
     }
     if let Some(a) = &set.algebra {
-        return a
-            .sets
-            .first()
-            .and_then(|left| ask.sets.get(left))
-            .is_some_and(|left| cohort_edge(ask, left, depth + 1));
+        if a.op == crate::ast::AlgOp::Union {
+            return CohortEdge::Union;
+        }
+        return match a.sets.first().and_then(|left| ask.sets.get(left)) {
+            Some(left) => cohort_edge(ask, left, depth + 1),
+            None => CohortEdge::Missing,
+        };
     }
-    set.of
+    let of_cohorts = set
+        .of
         .as_ref()
         .and_then(|of| ask.sets.get(of))
-        .is_some_and(|of| of.grain == Grain::Cohort)
+        .is_some_and(|of| of.grain == Grain::Cohort);
+    if of_cohorts {
+        CohortEdge::Carried
+    } else {
+        CohortEdge::Missing
+    }
 }
 
 /// The exposed names of `near` and `attach` partners beyond their sets'
@@ -1761,14 +1782,20 @@ fn resolve_field(
             if rest != "id" {
                 return Err("the cohort edge exposes cohort.id alone".into());
             }
-            return if cohort_edge(ask, set, 0) {
-                Ok(None)
-            } else {
-                Err(format!(
+            return match cohort_edge(ask, set, 0) {
+                CohortEdge::Carried => Ok(None),
+                CohortEdge::Missing => Err(format!(
                     "cohort.id is carried by a subject set drawn of a cohort set, and {set_name} is not: \
                      give {set_name} of: <a set of grain cohort>, or read cohort.id on the set that has one \
                      (from does not pass it on)"
-                ))
+                )),
+                CohortEdge::Union => Err(format!(
+                    "cohort.id is not carried by a union, and {set_name} is one or keeps the rows of one: \
+                     a union's rows come from sets that need not be drawn of the same cohort set, or of any. \
+                     Bind it on every operand (bind: {{cohort: [\"field\", {{}}, \"cohort.id\"]}}) and read \
+                     the binding, which a union keeps where all its operands have it; or use intersect, \
+                     which keeps its left operand's rows and their cohort"
+                )),
             };
         }
         return match names.field(first, rest) {

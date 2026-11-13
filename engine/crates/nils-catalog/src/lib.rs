@@ -312,6 +312,14 @@ fn fixed_fields() -> Vec<Field> {
             (_, "dataset") => (DATASET_TABLE, "name"),
             ("cohort", _) => ("cohort", path),
             ("subject", _) => ("subject", path),
+            // what a scheme says of a session sits beside the cache, one
+            // row a scheme, and is read by the scheme's digest
+            ("session", "label" | "months" | "nominal" | "flagged" | "reason") => {
+                ("session_label", path)
+            }
+            // whether a study of the session holds one: no column of its
+            // own, worked out from its studies where it is read
+            ("session", "has_primary") => ("session_cache_study", path),
             ("session", _) => ("session_cache", path),
             ("study", _) => ("study", path),
             ("series", _) => ("series", path),
@@ -484,15 +492,17 @@ fn fixed_fields() -> Vec<Field> {
             "session",
             "how many studies the session holds",
         ),
+        // quasi identifying, as the day it may be: a scheme that names a
+        // session by its day (the default) writes the day as the label
         f(
             "session",
             "label",
             "text",
-            Technical,
+            QuasiIdentifying,
             false,
-            true,
+            false,
             "session",
-            "the label the document's scheme gives the session",
+            "the label the document's scheme gives the session; under a scheme that names by the day, the day",
         ),
         f(
             "session",
