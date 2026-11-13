@@ -100,10 +100,18 @@ pub fn rebuild(store: &mut Store) -> Result<u64, Error> {
     let mine = store.qualified("stack_axis");
     store.execute(&format!("DELETE FROM {mine}"), &[])?;
     let rows = fresh(store, None);
-    store.execute(
+    let made = store.execute(
         &format!("INSERT INTO {mine} (stack_id, axes, excluded) {rows}"),
         &[],
-    )
+    )?;
+    // Postgres plans a question from what it last counted of a table, and
+    // of rows just written it has counted nothing: until its own sweep
+    // came by, a minute or more, the first questions after a rebuild
+    // would be planned for an empty table.
+    if let Store::Postgres { .. } = store {
+        store.batch(&format!("ANALYZE {mine}"))?;
+    }
+    Ok(made)
 }
 
 /// How the read model stands against `classification_axis`.

@@ -2931,6 +2931,20 @@ fn migration_118_makes_the_axes_of_a_stack_one_row_on_both_backends() {
             .unwrap();
         assert_eq!(ruled_out.len(), 1, "{name}");
         assert_eq!(ruled_out[0].int(0).unwrap(), 8, "{name}");
+        // on Postgres the planner has counted the rows the migration wrote
+        if name.starts_with("postgres") {
+            let counted = store
+                .query(
+                    &format!("SELECT reltuples > 0 FROM pg_class WHERE oid = '{x}'::regclass"),
+                    &[],
+                )
+                .unwrap();
+            assert_eq!(
+                counted[0].0[0],
+                nils_registry::store::Cell::Bool(true),
+                "{name}"
+            );
+        }
         // who could read the axis rows can read the row made of them
         if granted {
             let may = store
