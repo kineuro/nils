@@ -8,6 +8,12 @@
 //! faster, and may not change one row of its answer, on either backend.
 //! The same documents on the registry of production size are timed by hand
 //! with `nils ask-scale time`, against `reference.json`.
+//!
+//! Each document's diagnosis is held the same way: `funnel-small.json`
+//! keeps every stage's counts, the drops, the ties and the coarse dates as
+//! a statement per stage counted them, and the funnel counted in one pass
+//! per set answers the same, and the same as a statement per stage does
+//! now (`funnel.json` keeps the full size).
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -114,6 +120,9 @@ fn answers_as_kept(dsn: Option<&str>) {
             "1",
             "--reference",
             fixtures.join("reference-small.json").to_str().unwrap(),
+            "--reference-funnel",
+            fixtures.join("funnel-small.json").to_str().unwrap(),
+            "--check-funnel",
         ],
         None,
     );
@@ -123,6 +132,10 @@ fn answers_as_kept(dsn: Option<&str>) {
     for s in shapes {
         assert_eq!(s["same_as_reference"], true, "{s}");
         assert!(s["error"].is_null(), "{s}");
+        // its diagnosis is the one kept from before the funnel was counted
+        // in one pass, and the one a statement per stage counts now
+        assert_eq!(s["funnel"]["same_as_reference"], true, "{s}");
+        assert_eq!(s["funnel"]["same_as_by_stage"], true, "{s}");
     }
 }
 
