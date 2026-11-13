@@ -4,6 +4,10 @@ All notable changes to NILS v1 are recorded here. The format follows [Keep a Cha
 
 ## [Unreleased]
 
+## [1.0.0-beta.17] - 2026-11-13
+
+The seventeenth engine beta counts the funnel of a draft and of a diagnosis in one statement per set, where it was one per stage: on a registry of half a million stacks the funnel of a plain count takes under two seconds where it took over three, and every funnel of the scale fixture ends inside the draft's time. Every count is the same.
+
 ### Changed
 
 - The funnel of a set is counted in one statement. A draft (`POST /api/ask/draft`) and a diagnosis (`POST /api/ask/diagnose`) counted each stage with a statement of its own, the whole set read again under one clause more, so the funnel of a question of four clauses over half a million stacks took three to four and a half seconds where the question took half a second, and of fourteen made-up questions one to three did not have their funnel whole within `draft_timeout_ms`. The stages from a set's last relation through its `where` clauses are now counted by one read of the set: each row is given the number of clauses it meets in their order, and the stage after a clause is the rows, and the subjects, of that number or more. Sets that read the same rows (one grain, no source, relation or binding of their own) are counted by one read together. The same funnel takes one to two seconds, and all fourteen are whole within the time on both backends. Every count, what is held back of it, the drops and their unknown fields are what a statement per stage answers; a set whose stages cannot be counted this way (a group, the result of an algebra, a set with no `where`, a clause that reads `ordinal`, `prev`, `next` or `change`, a diagnosis that lists the keys of its stages) is counted a stage at a time as before, and so are the relations of a set before its last and its pick. When the time for the counts runs out during the one read, none of the stages it counts is a stage of the funnel, where a stage at a time kept those counted before the time ran out; `diagnosis.unavailable` says what was not counted, as before.
