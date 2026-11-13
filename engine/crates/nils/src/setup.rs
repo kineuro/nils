@@ -1681,8 +1681,12 @@ enum Reading {
 /// registry at another schema did answer, and is only not read as it stands:
 /// an install reads the places back once it has declared them, before any
 /// service is written, and an update, a repair and a restart say it and go
-/// on. A reapply stops on either, since following the registry is the whole
-/// of its work, and the engine it leaves running reads what it read before.
+/// on. Where it is behind this binary, the engine they start brings it up,
+/// and they read the places again then and start the engine once more where
+/// it was written without some of them ([`follow_registry`]); where it is
+/// ahead, nothing this binary starts changes that, and the mend is said. A
+/// reapply stops on either, since following the registry is the whole of its
+/// work, and the engine it leaves running reads what it read before.
 fn unread_sources(
     reading: Reading,
     read: &SourcesRead,
@@ -1726,9 +1730,21 @@ fn unread_sources(
                     "{at}; they are read back from it as {account} once this run has declared \
                      its places, before any service is written"
                 )),
-                Reading::Print => Ok(format!("{at}; here {recorded}")),
-                Reading::Update | Reading::Repair | Reading::Restart => Ok(format!(
+                Reading::Print if *ahead => Ok(format!("{at}; here {recorded}")),
+                Reading::Print => Ok(format!(
+                    "{at}; here {recorded}. A run for real that starts the engine reads them \
+                     again once the engine has brought the registry to this binary's schema, and \
+                     starts it once more where they are not the ones on record"
+                )),
+                Reading::Update | Reading::Repair | Reading::Restart if *ahead => Ok(format!(
                     "{at}; {recorded}. Once the engine runs on the registry, {mended}"
+                )),
+                // an install with no services starts no engine, and is left
+                // to whoever starts it, as it was
+                Reading::Update | Reading::Repair | Reading::Restart => Ok(format!(
+                    "{at}; {recorded}. The engine brings the registry to this binary's schema as \
+                     it starts: where this run starts it, the places are read again then, and \
+                     the engine is started once more where they are not the ones on record"
                 )),
                 Reading::Reapply => Err(format!(
                     "the engine was left as it is: {at}. Restart the engine, which brings its \
@@ -7728,6 +7744,9 @@ fn update_parts(state: &State, args: &SetupArgs, console: &mut Console) -> Resul
         println!("nothing was changed");
         return Ok(());
     }
+    // asked before anything is started, while the registry stands where it
+    // stood when its places were read
+    let behind = plan.service && registry_behind(state, read.as_ref());
     let services = do_it(
         &plan,
         console,
@@ -7736,6 +7755,14 @@ fn update_parts(state: &State, args: &SetupArgs, console: &mut Console) -> Resul
         true,
         &Answers::default(),
     )?;
+    // The engine started above brings a registry that stood behind this
+    // binary up to it, and is then given the source places it holds. Before
+    // the binary is replaced below, since the registry is read through it.
+    let followed = if behind {
+        engine_follows_registry(&plan, engine_came_up(&services), console)
+    } else {
+        Vec::new()
+    };
     // A container's engine is the image, and `do_it` pulled the new tag. A
     // machine's engine is this binary, and nothing above touches it, so
     // "update everything" would have moved every part except the one a
@@ -7744,7 +7771,20 @@ fn update_parts(state: &State, args: &SetupArgs, console: &mut Console) -> Resul
         update_engine_binary(args.channel.as_deref(), console);
     }
     summary(&plan, console, &services);
+    say_last(&followed);
     Ok(())
+}
+
+/// What a run says after its summary, so that it is the end of what a person
+/// reads: nothing where there is nothing to say.
+fn say_last(lines: &[String]) {
+    if lines.is_empty() {
+        return;
+    }
+    println!();
+    for line in lines {
+        println!("  {line}");
+    }
 }
 
 /// The engine binary itself, moved to the newest release. It goes last,
@@ -7857,6 +7897,8 @@ fn repair(state: &State, args: &SetupArgs, console: &mut Console) -> Result<(), 
         stages.push((Stage::Kvasir, "Kvasir configuration".to_string()));
     }
     stages.push((Stage::Services, "services".to_string()));
+    // asked before anything is started, as an update asks it
+    let behind = plan.service && registry_behind(state, read.as_ref());
     console.start_checklist("Repairing", stages);
     let mended = mend(&plan, state, console);
     console.finish_checklist(
@@ -7868,7 +7910,15 @@ fn repair(state: &State, args: &SetupArgs, console: &mut Console) -> Result<(), 
         },
     );
     let services = mended?;
+    // as after an update: the engine given the source places of a registry
+    // it has just brought up to this binary
+    let followed = if behind {
+        engine_follows_registry(&plan, engine_came_up(&services), console)
+    } else {
+        Vec::new()
+    };
     summary(&plan, console, &services);
+    say_last(&followed);
     Ok(())
 }
 
@@ -18358,11 +18408,261 @@ fn source_moves(checked_out: Option<&str>, fetched: Option<&str>, built: bool) -
     !built || checked_out.is_none() || fetched != checked_out
 }
 
+// ------------------------------ the engine, once its registry has caught up
+
+/// How long an update or a repair waits for the engine it started to bring a
+/// registry that stood behind this binary up to its schema, and how often it
+/// looks. The engine migrates its registry before it takes a request, and a
+/// run the desk asked for has to end either way, so past this the reapply is
+/// said to be owed rather than waited for.
+const FOLLOW_WAIT: std::time::Duration = std::time::Duration::from_secs(120);
+const FOLLOW_POLL: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// The registry's source places as it stands now: read as the engine's
+/// account where setup takes the registry's steps as it, and by this process
+/// on every other install, whose engine runs as the account running this.
+fn sources_now(state: &State) -> SourcesRead {
+    let registry = PathBuf::from(&state.dir).join("registry");
+    match AsAccount::of(state.system.as_ref(), am_root(), registry.clone()) {
+        Some(acting) => sources_as(&acting),
+        None => match sources_here(&home_on_machine(&Home::new(registry))) {
+            Ok(said) => sources_said(&said.to_string()),
+            Err(e) => SourcesRead::Unread(e.message),
+        },
+    }
+}
+
+/// Whether the registry stood behind this binary when a run read its source
+/// places to write the services from, so that the record stood in for them.
+/// It is the one such reading the run mends by itself: the engine it starts
+/// brings the registry up, and the places can be read then. Asked before
+/// anything is started. A run that read them in its own process was not told
+/// why it got the record's, so there the registry is asked where it stands.
+fn registry_behind(state: &State, read: Option<&(String, SourcesRead)>) -> bool {
+    let read = match read {
+        Some((_, read)) => read.clone(),
+        None => sources_now(state),
+    };
+    matches!(read, SourcesRead::Schema { ahead: false, .. })
+}
+
+/// Whether the engine's service was found running once the services were
+/// started, by the two looks every start ends with ([`unit_report`]). No
+/// word of it is a start that failed before anything was looked at, except
+/// under launchd, whose agents are loaded with nothing looking after: there
+/// the engine is taken to be coming up, and the wait on its registry finds
+/// out.
+fn engine_came_up(services: &[Service]) -> bool {
+    match services.iter().find(|s| s.unit == "nils-engine") {
+        Some(engine) => engine.running,
+        None => cfg!(target_os = "macos"),
+    }
+}
+
+/// What became of an engine started on a registry that stood behind this
+/// binary, with its service written from the setup's record.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Followed {
+    /// The service names every directory the registry has the engine read,
+    /// so nothing was written and nothing was started again.
+    Same,
+    /// The engine was reapplied: the source places its service gained, and
+    /// the ones it no longer names, each by name. A place that moved is in
+    /// both.
+    Reapplied {
+        gained: Vec<String>,
+        lost: Vec<String>,
+    },
+    /// The engine still reads the places of the record: why.
+    Owed(String),
+}
+
+/// The engine made to follow its registry once it has brought it up, after a
+/// run that wrote its service from the setup's record because the registry
+/// stood behind this binary.
+///
+/// `started` is the plan the services were written from. `read` reads the
+/// registry's source places now, `wait` waits a moment for the engine and
+/// says whether there is time left to look again, and `reapply` is the
+/// reapply of the engine, which writes its service from the registry and
+/// starts it again. An engine that did not come up is not waited for. The
+/// engine is reapplied only where the directories it reads would change, so
+/// a registry holding no place the record lacks costs no second start.
+fn follow_registry(
+    started: &Plan,
+    engine_up: bool,
+    read: &mut dyn FnMut() -> SourcesRead,
+    wait: &mut dyn FnMut() -> bool,
+    reapply: &mut dyn FnMut() -> Result<(), String>,
+) -> Followed {
+    let sources = loop {
+        let why = match read() {
+            SourcesRead::Read(sources) => break sources,
+            SourcesRead::NoRegistry => return Followed::Same,
+            // nothing this binary starts brings a registry back to its schema
+            SourcesRead::Schema { said, ahead: true } => {
+                return Followed::Owed(format!("the registry is at {said}"));
+            }
+            SourcesRead::Schema { said, ahead: false } => {
+                format!("the registry is still at {said}")
+            }
+            SourcesRead::Unread(why) => format!("the registry did not answer: {why}"),
+        };
+        if !engine_up {
+            return Followed::Owed(format!("the engine did not come up, and {why}"));
+        }
+        if !wait() {
+            return Followed::Owed(why);
+        }
+    };
+    let written = started.read_from();
+    let now = Plan {
+        sources,
+        ..started.clone()
+    }
+    .read_from();
+    let only_in = |these: &[(String, PathBuf)], those: &[(String, PathBuf)]| -> Vec<String> {
+        these
+            .iter()
+            .filter(|place| !those.contains(place))
+            .map(|(name, _)| name.clone())
+            .collect()
+    };
+    let (gained, lost) = (only_in(&now, &written), only_in(&written, &now));
+    if gained.is_empty() && lost.is_empty() {
+        return Followed::Same;
+    }
+    match reapply() {
+        Ok(()) => Followed::Reapplied { gained, lost },
+        Err(why) => Followed::Owed(why),
+    }
+}
+
+/// What a run says of it, as its last lines. `command` is what reapplies the
+/// engine of this install by hand, named where that is still owed.
+fn followed_words(followed: &Followed, command: &str) -> Vec<String> {
+    let places = |names: &[&String]| {
+        let listed: Vec<&str> = names.iter().map(|name| name.as_str()).collect();
+        format!(
+            "{} source place{} ({})",
+            names.len(),
+            if names.len() == 1 { "" } else { "s" },
+            listed.join(", ")
+        )
+    };
+    match followed {
+        Followed::Same => vec![
+            "the registry is at this binary's schema now, and the engine's service names every \
+             source place it holds, so the engine was not started again"
+                .to_string(),
+        ],
+        Followed::Reapplied { gained, lost } => {
+            let added: Vec<&String> = gained.iter().filter(|n| !lost.contains(n)).collect();
+            let moved: Vec<&String> = gained.iter().filter(|n| lost.contains(n)).collect();
+            let gone: Vec<&String> = lost.iter().filter(|n| !gained.contains(n)).collect();
+            let mut changes = Vec::new();
+            if !added.is_empty() {
+                changes.push(format!(
+                    "it was given {} added at the desk since the setup's record was written",
+                    places(&added)
+                ));
+            }
+            if !moved.is_empty() {
+                changes.push(format!(
+                    "it reads {} where the registry has them now",
+                    places(&moved)
+                ));
+            }
+            if !gone.is_empty() {
+                changes.push(format!(
+                    "it no longer reads {} the record held and the registry does not",
+                    places(&gone)
+                ));
+            }
+            vec![format!(
+                "the engine was started once more, on the registry's source places: {}",
+                changes.join("; ")
+            )]
+        }
+        Followed::Owed(why) => vec![
+            format!(
+                "the engine was not given the registry's source places, and reads the ones in \
+                 the setup's record until it is: {why}"
+            ),
+            format!(
+                "reapplying the engine is still owed. Once it runs on the registry, run: {command}"
+            ),
+        ],
+    }
+}
+
+/// What reapplies the engine of this install, as a person types it: the
+/// helper's word where the services are the machine's own, and the engine's
+/// own command where they are an account's.
+fn reapply_command(state: &State) -> String {
+    let own = "nils supervise reapply --part engine";
+    match (&state.helper, &state.system) {
+        (Some(helper), _) => format!("sudo {} reapply", helper.path),
+        (None, Some(_)) => format!("sudo {own}"),
+        (None, None) => own.to_string(),
+    }
+}
+
+/// The follow-up of an update or a repair that started the services on a
+/// registry behind this binary, taken on this machine, and what it says.
+/// The reapply is [`reapply_engine`] itself, as the helper's `reapply` and
+/// `nils supervise reapply --part engine` run it, on the record as it is
+/// now. Nothing here fails the run: the services are started by now, and
+/// what is still owed is said with the command that does it.
+fn engine_follows_registry(started: &Plan, engine_up: bool, console: &Console) -> Vec<String> {
+    let Some(state) = read_state() else {
+        return Vec::new();
+    };
+    let since = std::time::Instant::now();
+    // the wait's line is cleared before anything else is said
+    let waiting = std::cell::Cell::new(false);
+    let waited = || {
+        if waiting.replace(false) {
+            console.waited();
+        }
+    };
+    let followed = follow_registry(
+        started,
+        engine_up,
+        &mut || sources_now(&state),
+        &mut || {
+            if since.elapsed() >= FOLLOW_WAIT {
+                return false;
+            }
+            waiting.set(true);
+            console.waiting(
+                "waiting for the engine to bring its registry to this binary's schema",
+                since,
+            );
+            std::thread::sleep(FOLLOW_POLL);
+            true
+        },
+        &mut || {
+            waited();
+            reapply_engine(&state).map_err(|e| e.message)
+        },
+    );
+    waited();
+    followed_words(&followed, &reapply_command(&state))
+}
+
 /// After an update the services run what is now installed. The units are
 /// written again, since a container's names its image tag and the
 /// assistant's names its entry, and everything is restarted in the order the
 /// wizard starts it, with which of them are running said. An install made
 /// with no services is left for the person to restart.
+///
+/// An update that carries a migration finds the registry behind the binary
+/// it installed, and writes the engine's service from the setup's record,
+/// without the source places added at the desk since. The engine it starts
+/// brings the registry up, so the places are read again then and the engine
+/// reapplied where they differ ([`follow_registry`]), rather than left
+/// without them until somebody reapplies it by hand.
 pub(crate) fn restart_after_update(channel: Option<&str>) {
     let Some(state) = read_state() else {
         return;
@@ -18383,6 +18683,10 @@ pub(crate) fn restart_after_update(channel: Option<&str>) {
     {
         println!("{said}");
     }
+    // A registry behind this binary is brought up by the engine started
+    // below, so its places are read again once that is done; asked now,
+    // while it still stands where it stood.
+    let behind = registry_behind(&state, read.as_ref());
     // The paths the units hide are looked at again, since one can have come
     // within an account's reach, or out of root's, since the install. What
     // is closed already is left out, as setup leaves it out. What an account
@@ -18434,17 +18738,31 @@ pub(crate) fn restart_after_update(channel: Option<&str>) {
     }
     let console = Console::new(true);
     println!("restarting the services");
-    match start_everything(
+    let engine_up = match start_everything(
         &plan,
         &holding_llama_back(&state, llama_starts),
         &console,
         None,
     ) {
-        Ok(started) => print!("{}", started.text),
-        Err(e) => println!("the services were left alone: {}", e.message),
-    }
+        Ok(started) => {
+            print!("{}", started.text);
+            engine_came_up(&started.services)
+        }
+        Err(e) => {
+            println!("the services were left alone: {}", e.message);
+            false
+        }
+    };
     // and the supervisor, from the binary that is installed now
     start_supervisor(&plan, &state, &console);
+    // Last, so that what is still owed is the end of what an update says:
+    // the engine given the source places its registry holds, where it was
+    // started on the record's because the registry stood behind this binary.
+    if behind {
+        for line in engine_follows_registry(&plan, engine_up, &console) {
+            println!("{line}");
+        }
+    }
 }
 
 // ------------------------------------------------------- for the supervisor
@@ -28034,6 +28352,551 @@ mod tests {
             why.contains("cannot declare its places"),
             "a binary behind its registry cannot declare into it: {why}"
         );
+    }
+
+    /// A registry one schema behind the binary an update installed, as the
+    /// engine's account says it.
+    fn a_registry_behind() -> SourcesRead {
+        SourcesRead::Schema {
+            said: "schema version 117, behind this binary's 118".to_string(),
+            ahead: false,
+        }
+    }
+
+    /// The source place setup declared, as the setup's record holds it.
+    fn the_recorded_source() -> Vec<(String, PathBuf)> {
+        vec![("source".to_string(), PathBuf::from("/data/source"))]
+    }
+
+    /// The same, and four source places added at the desk since.
+    fn with_four_added_at_the_desk() -> Vec<(String, PathBuf)> {
+        let mut sources = the_recorded_source();
+        for (name, path) in [
+            ("scanner2", "/data/two"),
+            ("scanner3", "/data/three"),
+            ("scanner4", "/data/four"),
+            ("scanner5", "/data/five"),
+        ] {
+            sources.push((name.to_string(), PathBuf::from(path)));
+        }
+        sources
+    }
+
+    /// The machine as a follow-up meets it: what the registry answers at
+    /// each look, the last of them for every look after, how many waits
+    /// there is time for, and what a reapply of the engine comes to. It
+    /// counts the looks, the waits and the reapplies, each of which starts
+    /// the engine once more.
+    struct FakeHands {
+        answers: Vec<SourcesRead>,
+        patience: usize,
+        reapply: Result<(), String>,
+        looks: usize,
+        waits: usize,
+        reapplies: usize,
+    }
+
+    impl FakeHands {
+        fn answering(answers: Vec<SourcesRead>) -> FakeHands {
+            FakeHands {
+                answers,
+                patience: usize::MAX,
+                reapply: Ok(()),
+                looks: 0,
+                waits: 0,
+                reapplies: 0,
+            }
+        }
+
+        fn follow(&mut self, started: &Plan, engine_up: bool) -> Followed {
+            let (answers, patience, reapply) =
+                (self.answers.clone(), self.patience, self.reapply.clone());
+            let (looks, waits, reapplies) = (&mut self.looks, &mut self.waits, &mut self.reapplies);
+            follow_registry(
+                started,
+                engine_up,
+                &mut || {
+                    let at = (*looks).min(answers.len() - 1);
+                    *looks += 1;
+                    answers[at].clone()
+                },
+                &mut || {
+                    if *waits >= patience {
+                        return false;
+                    }
+                    *waits += 1;
+                    true
+                },
+                &mut || {
+                    *reapplies += 1;
+                    reapply.clone()
+                },
+            )
+        }
+    }
+
+    /// A deployment whose services were written from the setup's record.
+    fn started_from_the_record() -> Plan {
+        let mut plan = deployment();
+        plan.sources = the_recorded_source();
+        plan
+    }
+
+    /// The update that carries a migration: the registry stood behind the
+    /// binary, so the engine's service was written from the record, without
+    /// the four source places added at the desk. Once the engine has brought
+    /// the registry up they are read, the engine is reapplied, once, and the
+    /// update says so.
+    #[test]
+    fn an_update_on_a_registry_behind_gives_the_engine_the_places_added_at_the_desk() {
+        let started = started_from_the_record();
+        let state = deployed_state(&started);
+        assert!(registry_behind(
+            &state,
+            Some(&("nils".to_string(), a_registry_behind()))
+        ));
+
+        // the engine is still migrating at the first two looks
+        let mut hands = FakeHands::answering(vec![
+            a_registry_behind(),
+            a_registry_behind(),
+            SourcesRead::Read(with_four_added_at_the_desk()),
+        ]);
+        let followed = hands.follow(&started, true);
+        let added = ["scanner2", "scanner3", "scanner4", "scanner5"];
+        assert_eq!(
+            followed,
+            Followed::Reapplied {
+                gained: added.iter().map(|name| (*name).to_string()).collect(),
+                lost: Vec::new(),
+            }
+        );
+        assert_eq!(
+            (hands.looks, hands.waits, hands.reapplies),
+            (3, 2, 1),
+            "waited for while it migrated, then started once more and no oftener"
+        );
+
+        let said = followed_words(&followed, &reapply_command(&state));
+        assert_eq!(said.len(), 1, "{said:?}");
+        assert!(
+            said[0].contains("the engine was started once more")
+                && said[0].contains("4 source places (scanner2, scanner3, scanner4, scanner5)")
+                && said[0].contains("added at the desk since the setup's record was written"),
+            "{said:?}"
+        );
+        assert!(!said[0].contains("owed"), "{said:?}");
+
+        // what the reapply writes: the engine's service from a plan holding
+        // the registry's places names all five, where the one the update
+        // started named the recorded one alone
+        let engine = |plan: &Plan| {
+            systemd_units(plan, &state)
+                .into_iter()
+                .find(|(name, _)| name == "nils-engine.service")
+                .map(|(_, text)| text)
+                .expect("the engine's unit")
+        };
+        assert_eq!(engine(&started).matches("--ingest-root ").count(), 1);
+        let follows = Plan {
+            sources: with_four_added_at_the_desk(),
+            ..started.clone()
+        };
+        let unit = engine(&follows);
+        assert_eq!(unit.matches("--ingest-root ").count(), 5, "{unit}");
+        assert!(unit.contains("--ingest-root scanner5=/data/five"), "{unit}");
+
+        // a place the desk moved, and one the registry no longer holds
+        let mut hands = FakeHands::answering(vec![SourcesRead::Read(vec![
+            ("source".to_string(), PathBuf::from("/data/moved")),
+            ("scanner2".to_string(), PathBuf::from("/data/two")),
+        ])]);
+        let mut held = started.clone();
+        held.source = None;
+        held.sources = vec![
+            ("source".to_string(), PathBuf::from("/data/source")),
+            ("old".to_string(), PathBuf::from("/data/old")),
+        ];
+        let followed = hands.follow(&held, true);
+        assert_eq!(hands.reapplies, 1);
+        let said = followed_words(&followed, "");
+        assert!(
+            said[0].contains("it was given 1 source place (scanner2) added at the desk")
+                && said[0].contains("it reads 1 source place (source) where the registry has")
+                && said[0].contains("it no longer reads 1 source place (old)"),
+            "{said:?}"
+        );
+    }
+
+    /// The same update on an install nobody added a source place to: the
+    /// engine's service already names what the registry holds, so nothing is
+    /// written, the engine is not started a second time, and what is said is
+    /// that there was nothing to do.
+    #[test]
+    fn a_registry_behind_with_no_place_added_at_the_desk_starts_nothing_again() {
+        let started = started_from_the_record();
+        let mut hands = FakeHands::answering(vec![
+            a_registry_behind(),
+            SourcesRead::Read(the_recorded_source()),
+        ]);
+        let followed = hands.follow(&started, true);
+        assert_eq!(followed, Followed::Same);
+        assert_eq!((hands.looks, hands.waits, hands.reapplies), (2, 1, 0));
+        let said = followed_words(&followed, "sudo /usr/local/sbin/nils-manage reapply");
+        assert_eq!(said.len(), 1, "{said:?}");
+        assert!(said[0].contains("the engine was not started again"));
+        for alarming in ["owed", "nils-manage", "was not given", "did not"] {
+            assert!(!said[0].contains(alarming), "{alarming}: {said:?}");
+        }
+
+        // the same places in another order are the same places
+        let mut both = started.clone();
+        both.sources = vec![
+            ("source".to_string(), PathBuf::from("/data/source")),
+            ("scanner2".to_string(), PathBuf::from("/data/two")),
+            ("scanner3".to_string(), PathBuf::from("/data/three")),
+        ];
+        let mut hands = FakeHands::answering(vec![SourcesRead::Read(vec![
+            ("scanner3".to_string(), PathBuf::from("/data/three")),
+            ("source".to_string(), PathBuf::from("/data/source")),
+            ("scanner2".to_string(), PathBuf::from("/data/two")),
+        ])]);
+        assert_eq!(hands.follow(&both, true), Followed::Same);
+        assert_eq!((hands.waits, hands.reapplies), (0, 0));
+
+        // and running the update again finds a registry it reads, so there
+        // is nothing to follow at all
+        let state = deployed_state(&started);
+        for read in [
+            SourcesRead::Read(with_four_added_at_the_desk()),
+            SourcesRead::NoRegistry,
+            SourcesRead::Unread("it did not answer".to_string()),
+        ] {
+            assert!(
+                !registry_behind(&state, Some(&("nils".to_string(), read.clone()))),
+                "{read:?}"
+            );
+        }
+    }
+
+    /// An engine that does not bring its registry up within the wait, or
+    /// does not come up at all, does not stop the update and does not hold
+    /// it: the reapply is said to be owed, in the update's last lines, with
+    /// the command of this install that does it.
+    #[test]
+    fn an_engine_that_does_not_bring_its_registry_up_leaves_the_reapply_owed_and_named() {
+        let started = started_from_the_record();
+        let state = deployed_state(&started);
+
+        // still behind when the wait is over: three waits, four looks
+        let mut hands = FakeHands::answering(vec![a_registry_behind()]);
+        hands.patience = 3;
+        let followed = hands.follow(&started, true);
+        assert_eq!(
+            followed,
+            Followed::Owed(
+                "the registry is still at schema version 117, behind this binary's 118".to_string()
+            )
+        );
+        assert_eq!(
+            (hands.looks, hands.waits, hands.reapplies),
+            (4, 3, 0),
+            "the wait is bounded, and nothing is written from a registry not read"
+        );
+
+        // what the update says is words and never a failure: a follow-up
+        // comes to lines to print, whatever it met
+        let said: Vec<String> = followed_words(&followed, &reapply_command(&state));
+        assert_eq!(said.len(), 2, "{said:?}");
+        assert!(
+            said[0].contains("was not given the registry's source places")
+                && said[0].contains("schema version 117"),
+            "{said:?}"
+        );
+        if !cfg!(target_os = "macos") {
+            assert!(
+                said[1].contains("reapplying the engine is still owed")
+                    && said[1].ends_with("run: sudo /usr/local/sbin/nils-manage reapply"),
+                "the helper's word, on the services of a machine: {said:?}"
+            );
+            // which is a command line the helper answers to
+            let helper = state.helper.as_ref().expect("a deployment keeps one");
+            assert!(
+                helper_text(&started.dir, helper, &state)
+                    .contains("supervise reapply --part engine")
+            );
+        }
+
+        // an install whose services are an account's own has no helper
+        let own = State {
+            service: "systemd user units".to_string(),
+            system: None,
+            helper: None,
+            ..state.clone()
+        };
+        assert_eq!(
+            reapply_command(&own),
+            "nils supervise reapply --part engine"
+        );
+        let said = followed_words(&followed, &reapply_command(&own));
+        assert!(
+            said[1].ends_with("run: nils supervise reapply --part engine"),
+            "{said:?}"
+        );
+        // and the services of a machine written before there was a helper
+        let older = State {
+            helper: None,
+            ..state.clone()
+        };
+        assert_eq!(
+            reapply_command(&older),
+            "sudo nils supervise reapply --part engine"
+        );
+
+        // an engine that did not come up is looked at once and not waited for
+        let mut hands = FakeHands::answering(vec![a_registry_behind()]);
+        let followed = hands.follow(&started, false);
+        assert_eq!((hands.looks, hands.waits, hands.reapplies), (1, 0, 0));
+        let Followed::Owed(why) = &followed else {
+            panic!("{followed:?}");
+        };
+        assert!(
+            why.contains("the engine did not come up") && why.contains("schema version 117"),
+            "{why}"
+        );
+
+        // a registry that stops answering is waited for like one still behind
+        let mut hands =
+            FakeHands::answering(vec![SourcesRead::Unread("connection refused".to_string())]);
+        hands.patience = 2;
+        assert_eq!(
+            hands.follow(&started, true),
+            Followed::Owed("the registry did not answer: connection refused".to_string())
+        );
+        assert_eq!((hands.looks, hands.waits, hands.reapplies), (3, 2, 0));
+
+        // and a reapply that fails is owed with what it said
+        let mut hands =
+            FakeHands::answering(vec![SourcesRead::Read(with_four_added_at_the_desk())]);
+        hands.reapply = Err("the engine did not start again".to_string());
+        assert_eq!(
+            hands.follow(&started, true),
+            Followed::Owed("the engine did not start again".to_string())
+        );
+        assert_eq!(hands.reapplies, 1);
+    }
+
+    /// A registry ahead of the binary is what it was before: said, with the
+    /// mend left to whoever runs the engine that is on it, and nothing
+    /// followed, since no engine this binary starts brings it back.
+    #[test]
+    fn a_registry_ahead_of_the_binary_is_said_as_before_and_not_followed() {
+        let ahead = SourcesRead::Schema {
+            said: "schema version 119, ahead of this binary's 118".to_string(),
+            ahead: true,
+        };
+        let at = "the registry is at schema version 119, ahead of this binary's 118, so its \
+                  source places were not read as it stands";
+        let recorded = "the setup's record stands in for them, and it holds no source place \
+                        added at the desk since it was written";
+        for reading in [Reading::Update, Reading::Repair, Reading::Restart] {
+            assert_eq!(
+                unread_sources(reading, &ahead, "nils"),
+                Some(Ok(format!(
+                    "{at}; {recorded}. Once the engine runs on the registry, reapplying the \
+                     engine gives it every source place"
+                ))),
+                "{reading:?}"
+            );
+        }
+        assert_eq!(
+            unread_sources(Reading::Print, &ahead, "nils"),
+            Some(Ok(format!("{at}; here {recorded}")))
+        );
+        assert!(
+            unread_sources(Reading::Reapply, &ahead, "nils")
+                .unwrap()
+                .is_err()
+        );
+
+        let started = started_from_the_record();
+        let state = deployed_state(&started);
+        assert!(
+            !registry_behind(&state, Some(&("nils".to_string(), ahead.clone()))),
+            "an update on it follows nothing"
+        );
+        // and were it met after a start, it is neither waited for nor
+        // written from
+        let mut hands = FakeHands::answering(vec![ahead]);
+        let followed = hands.follow(&started, true);
+        assert!(matches!(followed, Followed::Owed(_)), "{followed:?}");
+        assert_eq!((hands.looks, hands.waits, hands.reapplies), (1, 0, 0));
+    }
+
+    /// `--print` on a registry behind the binary changes nothing, as ever,
+    /// and says what a run for real does; the runs for real no longer leave
+    /// the mend to the person.
+    #[test]
+    fn a_registry_behind_is_said_with_what_the_run_does_about_it() {
+        let behind = a_registry_behind();
+        let said = unread_sources(Reading::Print, &behind, "nils")
+            .unwrap()
+            .unwrap();
+        assert!(
+            said.contains("schema version 117")
+                && said.contains("here the setup's record stands in for them")
+                && said.contains("A run for real that starts the engine reads them again")
+                && said.contains("starts it once more where they are not the ones on record"),
+            "{said}"
+        );
+        for reading in [Reading::Update, Reading::Repair, Reading::Restart] {
+            let said = unread_sources(reading, &behind, "nils").unwrap().unwrap();
+            assert!(
+                said.contains("where this run starts it, the places are read again then")
+                    && said.contains("the engine is started once more where they are not"),
+                "{reading:?}: {said}"
+            );
+            assert!(
+                !said.contains("reapplying the engine gives"),
+                "{reading:?} no longer leaves the reapply to the person: {said}"
+            );
+        }
+    }
+
+    /// The engine is waited for only where the start found it running: one
+    /// that is not, or a start that reported nothing, is looked at once.
+    #[test]
+    fn the_engine_came_up_where_the_start_found_it_running() {
+        let service = |unit: &str, running: bool| Service {
+            unit: unit.to_string(),
+            running,
+            said: Vec::new(),
+        };
+        assert!(engine_came_up(&[
+            service("nils-engine", true),
+            service("nils-desk", false)
+        ]));
+        assert!(!engine_came_up(&[
+            service("nils-engine", false),
+            service("nils-desk", true)
+        ]));
+        // under launchd nothing looks at the agents, so the wait finds out
+        assert_eq!(engine_came_up(&[]), cfg!(target_os = "macos"));
+        assert_eq!(
+            engine_came_up(&[service("nils-desk", true)]),
+            cfg!(target_os = "macos")
+        );
+    }
+
+    /// An install whose services are an account's own reads its registry in
+    /// its own process, and a registry behind the binary gave it the
+    /// record's places without a word. It is asked where it stands, so the
+    /// same update is followed there: on a real registry, one schema behind
+    /// and then brought up, as the engine brings it up when it starts.
+    #[test]
+    fn a_registry_read_in_this_process_is_asked_where_it_stands_and_followed() {
+        use nils_registry::migrate::SCHEMA_VERSION;
+        let dir = std::fs::canonicalize(scratch("follow-own")).unwrap();
+        let home = Home::new(dir.join("registry"));
+        home.keys(None)
+            .add("nils", b"a test key, no site's")
+            .unwrap();
+        let mut registry = home
+            .clone()
+            .init(&registry_init(&BackendChoice::Sqlite, Scheme::DEFAULT))
+            .unwrap();
+        let (source, two) = (
+            dir.join("data").join("source"),
+            dir.join("data").join("two"),
+        );
+        let spec = |name: &str, path: &Path| PlaceSpec {
+            name: name.into(),
+            role: "source".into(),
+            path: path.to_path_buf(),
+            backup: None,
+            snapshots: false,
+            protected: false,
+            fast: false,
+        };
+        // the place setup declared, and one added since
+        declare_in(
+            &mut registry,
+            &[spec("source", &source), spec("scanner2", &two)],
+            &mut |_| {},
+        )
+        .unwrap();
+        let mut stand_at = |version: i64| {
+            let meta = registry.store().qualified("registry_meta");
+            registry
+                .store()
+                .batch(&format!(
+                    "UPDATE {meta} SET value = '{version}' WHERE key = 'schema_version'"
+                ))
+                .unwrap();
+        };
+
+        let mut started = plan(Runtime::Machine);
+        started.dir = dir.clone();
+        started.source = Some(source.clone());
+        started.sources = vec![("source".to_string(), source.clone())];
+        let state = state_of(&started, &[("engine", "binary")]);
+
+        // as the update finds it: the binary one schema on from the registry
+        stand_at(SCHEMA_VERSION - 1);
+        assert_eq!(
+            registry_sources(&dir),
+            None,
+            "not read as it stands, so the record stood in"
+        );
+        assert_eq!(
+            sources_now(&state),
+            SourcesRead::Schema {
+                said: format!(
+                    "schema version {}, behind this binary's {SCHEMA_VERSION}",
+                    SCHEMA_VERSION - 1
+                ),
+                ahead: false,
+            }
+        );
+        assert!(registry_behind(&state, None));
+
+        // the engine starts and brings its registry up at the second look
+        let (mut looks, mut reapplies) = (0, 0);
+        let followed = follow_registry(
+            &started,
+            true,
+            &mut || {
+                looks += 1;
+                if looks == 2 {
+                    stand_at(SCHEMA_VERSION);
+                }
+                sources_now(&state)
+            },
+            &mut || true,
+            &mut || {
+                reapplies += 1;
+                Ok(())
+            },
+        );
+        assert_eq!(
+            followed,
+            Followed::Reapplied {
+                gained: vec!["scanner2".to_string()],
+                lost: Vec::new(),
+            }
+        );
+        assert_eq!((looks, reapplies), (2, 1));
+
+        // and the update run again reads the registry, and follows nothing
+        assert!(!registry_behind(&state, None));
+        assert_eq!(
+            registry_sources(&dir),
+            Some(vec![
+                ("source".to_string(), source),
+                ("scanner2".to_string(), two)
+            ])
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
