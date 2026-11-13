@@ -16,7 +16,7 @@ use std::time::Instant;
 use clap::{Args, Subcommand};
 use nils_ask::affordance::{self, Setting};
 use nils_ask::ast::Ask;
-use nils_ask::exec::Bounds;
+use nils_ask::exec::{Bounds, ExecError};
 use nils_ask::handle;
 use nils_ask::run::{self, Request};
 use nils_ask::selection;
@@ -343,12 +343,65 @@ pub(crate) fn load_pack(dir: &std::path::Path, name: &str) -> Result<nils_pack::
         .map_err(|e| usage(format!("the pack {name} in {}: {e}", dir.display())))
 }
 
+/// The bounds of an answer a person waits for: the caps of the bounded path
+/// (Wave 4b §11.5), which the verbs that answer at once run under.
 fn bounds() -> Bounds {
     let caps = Caps::default();
     Bounds {
         timeout_ms: caps.sync_timeout_ms,
         max_rows: caps.sync_max_rows,
         max_bytes: caps.sync_max_bytes,
+    }
+}
+
+/// How long a job's statement may run where nothing names another time.
+const JOB_TIMEOUT_MS: u64 = 30 * 60 * 1000;
+
+/// The variable that names another time for a job's statement, in
+/// milliseconds. It is read where the statement runs: in the environment of
+/// the engine whose worker runs the job, or of the command at the keyboard.
+const JOB_TIMEOUT_VAR: &str = "NILS_ASK_JOB_TIMEOUT_MS";
+
+/// The time a job's statement has. Postgres takes a statement's timeout as
+/// a 32 bit count of milliseconds, so no time is longer than that.
+fn job_timeout_ms(named: Option<&str>) -> u64 {
+    named
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .filter(|ms| *ms > 0)
+        .unwrap_or(JOB_TIMEOUT_MS)
+        .min(i32::MAX as u64)
+}
+
+/// The bounds a job runs under (Wave 4b §12.2, the unbounded path): no row
+/// or byte cap, so its answer is whole, hashed and may be exported, pinned
+/// and promoted, and a job's time rather than an answer's. `nils ask run`
+/// beside the registry runs under them, whether a worker runs it for a door
+/// that queued it or a person typed it, since neither is a door a person
+/// waits at; so does a freeze that keeps every key. Before 2026-11-13 a
+/// queued question ran under the caps of the bounded path, and was stopped
+/// at their timeout with the advice to queue it as a job, which it was.
+fn job_bounds() -> Bounds {
+    Bounds {
+        timeout_ms: job_timeout_ms(std::env::var(JOB_TIMEOUT_VAR).ok().as_deref()),
+        max_rows: u64::MAX,
+        max_bytes: u64::MAX,
+    }
+}
+
+/// What a job says of a statement that ran past a job's time: that it was
+/// the job's time it ran past, and the two things left to do.
+fn past_a_jobs_time(ms: u64) -> String {
+    format!(
+        "the question ran past {ms} ms, the time a job has, and was stopped; narrow it (a cohort, a dataset or a tighter where on the set it opens with) and run it again, or give jobs longer with {JOB_TIMEOUT_VAR}, in milliseconds, in the environment of the engine that runs them"
+    )
+}
+
+/// A run's error as a job says it: a statement stopped by the timeout in a
+/// job's words, anything else as it reads.
+fn said_by_a_job(e: &run::RunError) -> String {
+    match e {
+        run::RunError::Exec(ExecError::Timeout(ms)) => past_a_jobs_time(*ms),
+        other => other.to_string(),
     }
 }
 
@@ -736,7 +789,9 @@ fn diagnose_cmd(home: &Home, args: AskDiagnoseArgs) -> Result<(), Exit> {
             let ask = ask_of(&mut l, &args.which)?;
             let scheme = l.scheme(&ask, args.which.document)?;
             let scope = scope();
-            let d = diagnose::diagnose(
+            // as the door: the timeout is for the diagnosis as a whole, and
+            // counts that run past it are said, on a diagnosis that is valid
+            let d = diagnose::diagnose_within(
                 &mut l.registry,
                 ask,
                 Vec::new(),
@@ -746,8 +801,13 @@ fn diagnose_cmd(home: &Home, args: AskDiagnoseArgs) -> Result<(), Exit> {
                 bounds(),
                 args.keys,
                 None,
+                Some(bounds().timeout_ms),
             )
             .map_err(|e| fail(e.to_string()))?;
+            let d = match args.which.document {
+                Some(id) => d.of_stored(id),
+                None => d,
+            };
             serde_json::to_value(d).unwrap_or_default()
         }
     };
@@ -781,6 +841,7 @@ fn diagnose_cmd(home: &Home, args: AskDiagnoseArgs) -> Result<(), Exit> {
     if let Some(why) = doc["zero_rows"].as_str() {
         println!("no rows: {why}");
     }
+    print_unavailable(&doc);
     println!("\nfunnel");
     for s in doc["funnel"].as_array().into_iter().flatten() {
         println!(
@@ -821,6 +882,24 @@ fn diagnose_cmd(home: &Home, args: AskDiagnoseArgs) -> Result<(), Exit> {
         println!("next   {}", text_of(n));
     }
     Ok(())
+}
+
+/// The line that says a diagnosis is valid and what of it was not counted
+/// because the counts ran past their time; nothing where all was counted.
+fn print_unavailable(diagnosis: &serde_json::Value) {
+    let u = &diagnosis["unavailable"];
+    if u.is_null() {
+        return;
+    }
+    println!(
+        "valid, not counted ({} after {} ms): {}",
+        text_of(&u["code"]),
+        u["budget_ms"],
+        u["parts"]
+            .as_array()
+            .map(|a| a.iter().map(text_of).collect::<Vec<_>>().join(", "))
+            .unwrap_or_default()
+    );
 }
 
 // ------------------------------------------------------------------ describe
@@ -1392,7 +1471,9 @@ fn ask_run(home: &Home, args: AskRunArgs) -> Result<(), Exit> {
             node: &node,
             pack_version: Some(&pack_version),
             scheme: &scheme,
-            bounds: bounds(),
+            // a job's bounds, queued or typed: not the caps of the door a
+            // person waits at
+            bounds: job_bounds(),
             page_rows: Caps::default().page_rows as usize,
             name: args.name.as_deref(),
             keep: args.keep,
@@ -1463,8 +1544,14 @@ fn ask_run(home: &Home, args: AskRunArgs) -> Result<(), Exit> {
             Ok(())
         }
         Err(e) => {
-            let _ = job::finish(registry.store(), job, State::Failed, Some(&e.to_string()));
-            Err(run_refused(e))
+            // a statement that ran past a job's time says so, and never to
+            // queue it as a job
+            let said = said_by_a_job(&e);
+            let _ = job::finish(registry.store(), job, State::Failed, Some(&said));
+            Err(match e {
+                run::RunError::Exec(ExecError::Timeout(_)) => fail(said),
+                other => run_refused(other),
+            })
         }
     }
 }
@@ -1671,8 +1758,15 @@ fn draft(home: &Home, args: AskDraftArgs) -> Result<(), Exit> {
                 bounds: bounds(),
                 values_cap: Caps::default().options_values as usize,
             };
-            let d = nils_ask::affordance::draft(&mut registry, &text, &s, None)
-                .map_err(|e| fail(e.to_string()))?;
+            // as the door: the counts have the draft's time together
+            let d = nils_ask::affordance::draft_within(
+                &mut registry,
+                &text,
+                &s,
+                None,
+                Some(Caps::default().draft_timeout_ms),
+            )
+            .map_err(|e| fail(e.to_string()))?;
             serde_json::to_value(d).unwrap_or_default()
         }
     };
@@ -1681,11 +1775,26 @@ fn draft(home: &Home, args: AskDraftArgs) -> Result<(), Exit> {
         return Ok(());
     }
     match doc["document"].as_i64() {
-        Some(id) => println!(
-            "nils ask draft   document {id}   hash {}   {} repairs",
-            text_of(&doc["hash"]),
-            doc["repairs"].as_array().map_or(0, Vec::len)
-        ),
+        Some(id) => {
+            println!(
+                "nils ask draft   document {id}   hash {}   {} repairs",
+                text_of(&doc["hash"]),
+                doc["repairs"].as_array().map_or(0, Vec::len)
+            );
+            // a valid document whose counts ran past the draft's time: what
+            // was not counted, its cost class, and how it is run as a job
+            let diagnosis = &doc["diagnosis"];
+            if !diagnosis["unavailable"].is_null() {
+                print_unavailable(diagnosis);
+                println!("cost    {}", text_of(&diagnosis["cost"]["class"]));
+                for n in diagnosis["next"].as_array().into_iter().flatten() {
+                    println!("next    {}", text_of(n));
+                }
+                println!(
+                    "next    nils ask run --document {id} runs it beside the registry, under a job's time"
+                );
+            }
+        }
         None => println!(
             "nils ask draft   not valid   {} repairs   {} issues",
             doc["repairs"].as_array().map_or(0, Vec::len),
@@ -1768,16 +1877,6 @@ pub(crate) struct Frozen {
     pub(crate) last: Option<i64>,
 }
 
-/// The bounds a whole freeze runs under: no row or byte cap, and a job's
-/// time rather than an answer's.
-fn whole_bounds() -> Bounds {
-    Bounds {
-        timeout_ms: 30 * 60 * 1000,
-        max_rows: u64::MAX,
-        max_bytes: u64::MAX,
-    }
-}
-
 /// Freeze a saved selection into a handle of its stacks or sessions, as
 /// much of it as `how` keeps. Record 55 (rulings of 2026-10-12, item 6): a
 /// dataset's or a cohort's main scans by role, `main:<role>@dataset:<name>`
@@ -1857,7 +1956,8 @@ pub(crate) fn freeze_doc(
             scheme: &scheme,
             bounds: match how {
                 Freeze::Answer => bounds(),
-                Freeze::Whole | Freeze::Page { .. } => whole_bounds(),
+                // a whole freeze is a job's work, under a job's bounds
+                Freeze::Whole | Freeze::Page { .. } => job_bounds(),
             },
             page_rows: Caps::default().page_rows as usize,
             name: None,
@@ -1875,7 +1975,10 @@ pub(crate) fn freeze_doc(
             reader: None,
         },
     )
-    .map_err(|e| usage(e.to_string()))?;
+    .map_err(|e| match how {
+        Freeze::Answer => usage(e.to_string()),
+        Freeze::Whole | Freeze::Page { .. } => usage(said_by_a_job(&e)),
+    })?;
     if out.answer.truncated {
         return Err(usage(format!(
             "selection {spec} reaches more than one answer holds; narrow it, or run a pipeline over it, which takes any number of stacks"
@@ -1892,4 +1995,52 @@ pub(crate) fn freeze_doc(
         keys,
         last,
     })
+}
+
+#[cfg(test)]
+mod job_bounds_tests {
+    use super::*;
+
+    /// 2026-11-13: `nils ask run` beside the registry is the job path, and
+    /// a queued question was stopped there at the timeout of the door a
+    /// person waits at. A job has its own time, far above an answer's, and
+    /// no row or byte cap, so its answer is whole.
+    #[test]
+    fn a_job_has_its_own_time_and_no_cap_on_its_answer() {
+        let answer = bounds();
+        assert_eq!(job_timeout_ms(None), 30 * 60 * 1000);
+        assert!(job_timeout_ms(None) > answer.timeout_ms);
+        // another time is named in milliseconds; what is no time is not one
+        assert_eq!(job_timeout_ms(Some(" 250 ")), 250);
+        assert_eq!(job_timeout_ms(Some("7200000")), 7_200_000);
+        for none in ["", "0", "-1", "soon", "1.5"] {
+            assert_eq!(job_timeout_ms(Some(none)), JOB_TIMEOUT_MS, "{none}");
+        }
+        // Postgres counts a statement's timeout in 32 bits
+        assert_eq!(job_timeout_ms(Some("99999999999999")), i32::MAX as u64);
+        let job = job_bounds();
+        assert_eq!((job.max_rows, job.max_bytes), (u64::MAX, u64::MAX));
+        assert!(answer.max_rows < job.max_rows);
+    }
+
+    /// A statement that ran past a job's time says whose time it was and
+    /// what is left to do, and never to queue it as a job.
+    #[test]
+    fn a_job_past_its_time_says_so_in_a_job_s_words() {
+        let stopped = run::RunError::Exec(ExecError::Timeout(1_800_000));
+        let said = said_by_a_job(&stopped);
+        assert!(
+            said.starts_with("the question ran past 1800000 ms, the time a job has"),
+            "{said}"
+        );
+        assert!(said.contains("narrow it"), "{said}");
+        assert!(said.contains(JOB_TIMEOUT_VAR), "{said}");
+        assert!(!said.contains("queue it"), "{said}");
+        // the executor's own words send nobody to the queue either
+        let plain = stopped.to_string();
+        assert_eq!(plain, "the question ran past 1800000 ms and was stopped");
+        // anything else reads as it did
+        let other = run::RunError::Message("no set x".into());
+        assert_eq!(said_by_a_job(&other), "no set x");
+    }
 }

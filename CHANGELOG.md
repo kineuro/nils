@@ -6,7 +6,15 @@ All notable changes to NILS v1 are recorded here. The format follows [Keep a Cha
 
 ### Fixed
 
+- A question queued as a job is no longer stopped at the limit of an answer. `POST /api/ask/jobs` queues `nils ask run`, which ran under the caps of `POST /api/ask/run`, so a statement slower than `sync_timeout_ms` (20 s) failed as a job too, with the advice to queue it as a job. `nils ask run` beside the registry, queued by a door or typed, now runs under a job's bounds: no row or byte cap, so its answer is whole and hashed where an answer past 5,000 rows was cut, and a job's time, 30 minutes for its statement, or `NILS_ASK_JOB_TIMEOUT_MS` (milliseconds) in the engine's environment. A statement past a job's time fails the job with words that say it was a job's time and what is left to do: narrow the question, or give jobs longer. A freeze that keeps every key runs under the same bounds.
+- A draft of a valid question whose counts are slow is no longer answered as an error. `POST /api/ask/draft` answered 504 when a count of the funnel ran past `sync_timeout_ms`, each count having that time to itself, and stored nothing, so a caller could not tell a document that is wrong from one that is right and slow and had no id to queue. The counts now have `draft_timeout_ms` together (5 s), and a document that validates is stored and answered with its id whether or not they came in time: the diagnosis is `valid: true` with its cost class and the stages counted so far, `unavailable` says what was not counted (`{code: "timeout", parts, budget_ms, why}`), and `next` names `POST /api/ask/jobs` with the document's id. `POST /api/ask/diagnose` answers the same way, with `sync_timeout_ms` for the diagnosis as a whole. `nils ask draft` and `nils ask diagnose` print the same facts.
 - The assistant's proposed changes have a store on an install. Its environment file named none, the assistant looked for one in a `data` folder under the folder it runs from and does not make that folder, so every proposal failed with a store that could not be opened. `nils setup` now writes `ASSISTANT_CHANGES` beside the assistant's other stores, and an install from before gains the line when `nils update` restarts its services or `nils setup` is run again; a line a site wrote, and a store an install already keeps at the old place, stay as they are.
+
+### Changed
+
+- A statement stopped at a door's limit answers 504 with a body a caller can act on: `{error, disclosure: "safe", code: "timeout", limit_ms, next}` and, for a stored document, `document_id`. It is the answer of the doors whose whole work is the statement (`POST /api/ask/run`, `/preview`, `/start` and the value sampler), and `next` names the job path. The words no longer call the job path unbounded.
+- `POST /api/ask/preview` takes `timeout_ms`, a shorter time than the door's own, for a caller that would rather hear soon that a preview is slow.
+- The caps carry `draft_timeout_ms`, in `capabilities.ask`, the guide and the catalog, and `--ask-caps` sets it.
 
 ## [1.0.0-beta.15] - 2026-11-12
 

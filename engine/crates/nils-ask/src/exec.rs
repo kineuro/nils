@@ -18,7 +18,9 @@ use crate::compile::Compiled;
 #[derive(Debug)]
 pub enum ExecError {
     Store(StoreError),
-    /// The timeout stopped the statement.
+    /// The timeout stopped the statement, after this many milliseconds.
+    /// What to do next is the caller's to say, since it is not the same
+    /// for an answer at a door, which a job may still give, and for a job.
     Timeout(u64),
 }
 
@@ -26,10 +28,9 @@ impl std::fmt::Display for ExecError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             ExecError::Store(e) => write!(f, "{e}"),
-            ExecError::Timeout(ms) => write!(
-                f,
-                "the question ran past {ms} ms and was stopped; queue it as a job"
-            ),
+            ExecError::Timeout(ms) => {
+                write!(f, "the question ran past {ms} ms and was stopped")
+            }
         }
     }
 }

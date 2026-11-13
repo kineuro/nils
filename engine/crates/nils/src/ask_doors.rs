@@ -398,10 +398,7 @@ fn run_err(e: RunError) -> Reply {
             | HandleError::Held(_)),
         ) => Reply::error(409, e.to_string()),
         e @ RunError::NameTaken(_) => Reply::error(409, e.to_string()),
-        RunError::Exec(ExecError::Timeout(ms)) => Reply::error(
-            504,
-            format!("the statement ran past {ms} ms; POST /api/ask/jobs runs it unbounded"),
-        ),
+        RunError::Exec(ExecError::Timeout(ms)) => timed_out(ms),
         RunError::Selection(SelectionError::NotFound(n, v)) => {
             Reply::error(404, SelectionError::NotFound(n, v).to_string())
         }
@@ -409,6 +406,43 @@ fn run_err(e: RunError) -> Reply {
         RunError::Measure(m) => issues_reply(400, "the document is refused", &[m.issue()]),
         other => Reply::error(500, other.to_string()),
     }
+}
+
+/// A statement stopped at the door's limit (504), said so that no caller
+/// reads it as a refusal of the document (2026-11-13): `code` is `timeout`,
+/// `limit_ms` the limit it ran past, and `next` the job path, which is not
+/// bound by a door's limit. The words name a limit and a door and never a
+/// row, so they are safe to show.
+fn timed_out(ms: u64) -> Reply {
+    Reply {
+        status: 504,
+        body: json!({
+            "error": format!(
+                "the statement ran past {ms} ms and was stopped; POST /api/ask/jobs runs it as a job, under a job's time"
+            ),
+            "disclosure": "safe",
+            "code": "timeout",
+            "limit_ms": ms,
+            "next": diagnose::job_next(None),
+        }),
+        headers: Vec::new(),
+        empty: false,
+        raw: None,
+        file: None,
+    }
+}
+
+/// A door's refusal of a stored document: where it is a timeout, it names
+/// the document, which is what the job path takes.
+fn of_stored(mut reply: Reply, stored: Option<i64>) -> Reply {
+    if let Some(id) = stored
+        && reply.status == 504
+        && reply.body["code"] == "timeout"
+    {
+        reply.body["document_id"] = json!(id);
+        reply.body["next"] = json!(diagnose::job_next(Some(id)));
+    }
+    reply
 }
 
 fn affordance_err(e: AffordanceError) -> Reply {
@@ -774,7 +808,7 @@ fn answer(
                     reader: Some(reader),
                 },
             )
-            .map_err(run_err)?;
+            .map_err(|e| of_stored(run_err(e), stored))?;
             let page_rows = caps.page_rows.max(1) as usize;
             let rows: Vec<Value> = out
                 .answer
@@ -917,6 +951,9 @@ fn answer(
         ["api", "ask", "draft"] if post => {
             // Wave 4c §6.4: authored text in, add only repair, a diagnosis,
             // a stored document when it validates. Words stay outside.
+            // 2026-11-13: the counts have `draft_timeout_ms` together, and
+            // a valid document is stored and answered whether or not they
+            // came in time; a slow statement is never a refused draft.
             let text = doc["text"]
                 .as_str()
                 .ok_or_else(|| Reply::error(400, "text: the document, as YAML or JSON"))?;
@@ -929,8 +966,14 @@ fn answer(
                 bounds,
                 values_cap: caps.options_values as usize,
             };
-            let drafted =
-                affordance::draft(registry, text, &s, Some(reader)).map_err(affordance_err)?;
+            let drafted = affordance::draft_within(
+                registry,
+                text,
+                &s,
+                Some(reader),
+                Some(caps.draft_timeout_ms),
+            )
+            .map_err(affordance_err)?;
             Ok(Reply::ok(
                 serde_json::to_value(drafted).unwrap_or(Value::Null),
             ))
@@ -1071,7 +1114,10 @@ fn answer(
             let (ask, stored) = document_of(registry, &doc)?;
             let scheme = scheme_of(registry, &ask, stored)?;
             let out_set = ask.out.set.clone();
-            let d = diagnose::diagnose(
+            // 2026-11-13: the door's limit is for the diagnosis as a whole,
+            // where each count had it to itself, and counts that run past
+            // it are said in `unavailable` on a diagnosis that is valid
+            let d = diagnose::diagnose_within(
                 registry,
                 ask,
                 Vec::new(),
@@ -1081,8 +1127,13 @@ fn answer(
                 bounds,
                 doc["keys"].as_bool().unwrap_or(false),
                 Some(reader),
+                Some(caps.sync_timeout_ms),
             )
             .map_err(run_err)?;
+            let d = match stored {
+                Some(id) => d.of_stored(id),
+                None => d,
+            };
             let d = match doc["by"].as_str() {
                 None | Some("set") => d,
                 Some("clause") => d.by_clause(&out_set),
@@ -1098,6 +1149,14 @@ fn answer(
         ["api", "ask", "preview"] if post => {
             let (ask, stored) = document_of(registry, &doc)?;
             let scheme = scheme_of(registry, &ask, stored)?;
+            // 2026-11-13: a caller that would rather hear soon that the
+            // preview is slow names a shorter time than the door's own
+            let bounds = Bounds {
+                timeout_ms: doc["timeout_ms"]
+                    .as_u64()
+                    .map_or(bounds.timeout_ms, |t| t.clamp(1, bounds.timeout_ms.max(1))),
+                ..bounds
+            };
             let s = Setting {
                 names: catalog,
                 scope: &scope,
@@ -1111,7 +1170,7 @@ fn answer(
                 .unwrap_or(caps.preview_rows)
                 .min(caps.page_rows_max);
             let p = affordance::preview(registry, &ask, rows, &s, Some(reader))
-                .map_err(affordance_err)?;
+                .map_err(|e| of_stored(affordance_err(e), stored))?;
             let declaration = affordance::describe(&ask, &s).ok().map(|d| {
                 nils_ask::describe::declaration(
                     &ask,
@@ -1309,7 +1368,7 @@ fn answer(
                 false,
                 Some(reader),
             )
-            .map_err(run_err)?;
+            .map_err(|e| of_stored(run_err(e), stored))?;
             if !diagnosis.valid {
                 return Err(issues_reply(400, "the opening document", &diagnosis.issues));
             }
