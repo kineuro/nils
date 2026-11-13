@@ -1236,6 +1236,9 @@ impl<'a> Builder<'a> {
                     .dated(Some(Dated::Day)),
             );
         }
+        if c.table == "session_cache_study" && c.column == "has_primary" {
+            return Some(self.session_has_primary());
+        }
         let alias = alias_of(&c.table)?;
         let prec = (c.table == "event" && c.column == "event_date")
             .then(|| "COALESCE(e.event_date_precision, 'day')".to_string());
@@ -1248,6 +1251,22 @@ impl<'a> Builder<'a> {
             holder: None,
             dated: dated_column(&c.table, &c.column),
         })
+    }
+
+    /// What a session's studies say of it together, which no table keeps:
+    /// `has_primary`, as the session resolver folds it (`nils-session`). A
+    /// session holds an original primary where a study of it says so; where
+    /// none does and one has not said (its stacks are not all
+    /// fingerprinted), nobody knows; where every study says no, it holds
+    /// none.
+    fn session_has_primary(&self) -> Term {
+        Term::plain(format!(
+            "(SELECT CASE WHEN SUM(CASE WHEN hy.has_original_primary <> 0 THEN 1 ELSE 0 END) > 0 THEN 1 \
+             WHEN COUNT(*) > 0 AND COUNT(hy.has_original_primary) = COUNT(*) THEN 0 END \
+             FROM {} hs JOIN {} hy ON hy.id = hs.study_id WHERE hs.session_id = sc.id)",
+            self.q("session_cache_study"),
+            self.q("study"),
+        ))
     }
 
     /// §4.4 rule 10: the stack is not one the pack ruled out, asked of the
