@@ -2879,6 +2879,84 @@ fn migration_69_lets_a_campaign_carry_suggestions_on_both_backends() {
     }
 }
 
+/// A registry from before the read model of the axes: migration 118 adds
+/// `stack_axis` and fills it from the axis rows the registry holds, a stack
+/// of several values, one the pack ruled out and one decided to nothing
+/// among them, so that the first question after an update reads rows that
+/// are already there.
+#[test]
+fn migration_118_makes_the_axes_of_a_stack_one_row_on_both_backends() {
+    for (name, _guard, mut store) in stores() {
+        migrate::migrate(&mut store, Kind::Registry).unwrap();
+        let (a, x, meta) = (
+            store.qualified("classification_axis"),
+            store.qualified("stack_axis"),
+            store.qualified("registry_meta"),
+        );
+        store
+            .batch(&format!(
+                "INSERT INTO {a} (stack_id, axis, value, confidence, tier) VALUES
+                   (7, 'base', 'T2w', 0.9, 'keywords'),
+                   (7, 'modifier', 'FLAIR', 0.9, 'keywords'),
+                   (7, 'modifier', 'FatSat', 0.9, 'keywords'),
+                   (8, 'disposition', 'excluded', 0.9, 'stated'),
+                   (9, 'construct', NULL, 1.0, 'decision');
+                 DROP TABLE {x};
+                 UPDATE {meta} SET value = '117' WHERE key = 'schema_version'"
+            ))
+            .unwrap();
+        // on Postgres, a role that may read the axis rows and nothing else
+        let reader = "nils_stack_axis_reader";
+        let granted = name.starts_with("postgres")
+            && store
+                .batch(&format!(
+                    "DROP ROLE IF EXISTS {reader}; CREATE ROLE {reader}; \
+                     GRANT SELECT ON {a} TO {reader}"
+                ))
+                .is_ok();
+        assert!(
+            !migrate::table_exists(&mut store, "stack_axis").unwrap(),
+            "{name}"
+        );
+        assert_eq!(
+            migrate::migrate(&mut store, Kind::Registry).unwrap(),
+            (118..=migrate::SCHEMA_VERSION).collect::<Vec<i64>>(),
+            "{name}"
+        );
+        let standing = nils_registry::stack_axis::verify(&mut store).unwrap();
+        assert!(standing.agrees(), "{name}: {standing:?}");
+        assert_eq!(standing.stacks, 3, "{name}");
+        let ruled_out = store
+            .query(&format!("SELECT stack_id FROM {x} WHERE excluded = 1"), &[])
+            .unwrap();
+        assert_eq!(ruled_out.len(), 1, "{name}");
+        assert_eq!(ruled_out[0].int(0).unwrap(), 8, "{name}");
+        // who could read the axis rows can read the row made of them
+        if granted {
+            let may = store
+                .query(
+                    &format!("SELECT has_table_privilege('{reader}', '{x}', 'SELECT')"),
+                    &[],
+                )
+                .unwrap();
+            assert_eq!(
+                may[0].0[0],
+                nils_registry::store::Cell::Bool(true),
+                "{name}"
+            );
+            store
+                .batch(&format!("DROP OWNED BY {reader}; DROP ROLE {reader}"))
+                .unwrap();
+        }
+        assert!(
+            migrate::migrate(&mut store, Kind::Registry)
+                .unwrap()
+                .is_empty(),
+            "{name}"
+        );
+    }
+}
+
 /// Record 48, after the first gold campaign: a registry whose answers were
 /// held to one per item, rater and round by a key its table declared gains
 /// the correction's column and the partial keys, every row kept with its

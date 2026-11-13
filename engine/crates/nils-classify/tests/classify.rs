@@ -111,6 +111,15 @@ fn one(reg: &mut Registry, sql: &str) -> i64 {
     rows(reg, sql)[0].int(0).unwrap()
 }
 
+/// The read model of the axes says what the axis rows say, for every
+/// stack: held after each writer of an axis has run (the sort's two
+/// phases, a pass, a re-sort, a fold).
+fn axes_agree(reg: &mut Registry, after: &str) {
+    let standing = nils_registry::stack_axis::verify(reg.store()).unwrap();
+    assert!(standing.agrees(), "after {after}: {standing:?}");
+    assert!(standing.stacks > 0, "after {after}: no stack has a row");
+}
+
 fn packs() -> PathBuf {
     common::shipped_mri()
 }
@@ -163,6 +172,7 @@ fn a_verdict_is_written_with_the_evidence_that_made_it() {
         let report =
             nils_classify::classify::classify(&mut reg, &pack, &Default::default(), &Cancel::new())
                 .unwrap();
+        axes_agree(&mut reg, &format!("{name}: a first sort"));
         assert_eq!(report.written, 1, "{name}");
         assert_eq!(report.no_pack, 0, "{name}");
         assert!(report.evidence > 0, "{name}");
@@ -260,6 +270,7 @@ fn a_decision_outranks_the_rule_and_survives_a_re_classification() {
         let again =
             nils_classify::classify::classify(&mut reg, &pack, &Default::default(), &Cancel::new())
                 .unwrap();
+        axes_agree(&mut reg, &format!("{name}: a re-sort under a decision"));
         assert_eq!(
             rows(
                 &mut reg,
@@ -439,6 +450,7 @@ fn the_reference_holds_what_a_rule_decided_and_not_what_a_pass_did() {
             1,
             "{name}: the one stack the rules decided is the whole reference"
         );
+        axes_agree(&mut reg, &format!("{name}: a pass"));
 
         // The same stack, with its base now attributed to the pass, which is
         // what the row looks like on the run after a fill.
@@ -1340,6 +1352,7 @@ fn a_stack_a_fold_keeps_is_judged_anew_by_the_next_sort() {
         s.reread_one = true;
         let read = digest(&s, &mut reg).unwrap();
         assert_eq!(read.written.unwrap().echo_stacks_folded, 5, "{name}");
+        axes_agree(&mut reg, &format!("{name}: a fold"));
         // nothing the sort said of the stacks of the study is left
         assert_eq!(
             one(
@@ -1353,6 +1366,7 @@ fn a_stack_a_fold_keeps_is_judged_anew_by_the_next_sort() {
         // and the next sort judges the stack that stays anew, with all its
         // frames, and notes no split on it
         assert_eq!(sort(&mut reg).split_notes, 6, "{name}");
+        axes_agree(&mut reg, &format!("{name}: the sort after a fold"));
         let fingerprint = rows(
             &mut reg,
             &format!(
@@ -3092,6 +3106,7 @@ fn a_re_sort_of_some_scans_judges_them_alone_and_loses_no_question() {
         };
         let re =
             nils_classify::classify::classify(&mut reg, &pack, &settings, &Cancel::new()).unwrap();
+        axes_agree(&mut reg, &format!("{name}: a re-sort of some scans"));
         assert_eq!(re.written, 1, "{name}: {re:?}");
         assert_ne!(re.job_id, whole.job_id, "{name}");
         let base = rows(

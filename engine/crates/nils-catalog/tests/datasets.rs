@@ -270,6 +270,8 @@ fn plant(l: &mut Lab) -> Planted {
             &given,
         )
         .unwrap();
+    // as every writer of an axis does, in its own transaction
+    nils_registry::stack_axis::rebuild(store).unwrap();
     let shared_session = *shared_session;
     refresh(l);
     Planted {

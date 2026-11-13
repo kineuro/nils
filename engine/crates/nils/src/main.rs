@@ -1940,6 +1940,20 @@ enum RepairCommand {
         #[arg(long)]
         json: bool,
     },
+    /// Hold the axes of every stack as one row (`stack_axis`, which a
+    /// question reads the axes of a stack from) against the axis rows they
+    /// are made of, and make them all again where one differs. Every writer
+    /// of an axis keeps the two together in one transaction, so a
+    /// difference is a write that went around the engine. The repair is
+    /// audited, and answers kept before it are not read again
+    StackAxis {
+        /// Say how the two stand, and write nothing
+        #[arg(long)]
+        dry_run: bool,
+        /// Machine-readable output
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -7314,6 +7328,78 @@ fn confirm(prompt: &str) -> Result<bool, Exit> {
     Ok(answer.trim().eq_ignore_ascii_case("yes"))
 }
 
+/// `nils repair stack-axis`: the read model of the axes held against the
+/// axis rows for every stack, and made again where they differ.
+fn repair_stack_axis(home: &Home, dry_run: bool, json: bool) -> Result<(), Exit> {
+    let mut registry = open(home)?;
+    let principal = actor();
+    let store = registry.store();
+    let found = nils_registry::stack_axis::verify(store)?;
+    let rebuild = !dry_run && !found.agrees();
+    if rebuild {
+        store.begin()?;
+        let done = (|| -> Result<(), nils_registry::store::Error> {
+            nils_registry::stack_axis::rebuild(store)?;
+            // an answer kept under the rows as they were is not this one
+            nils_registry::home::next_epoch_in(store)?;
+            nils_registry::audit::record_in(
+                store,
+                &nils_registry::audit::Entry {
+                    principal: &principal,
+                    action: nils_registry::audit::Action::RegistryRepair,
+                    scope: serde_json::json!({"repair": "stack-axis"}),
+                    policy: None,
+                    job_id: None,
+                    details: Some(serde_json::json!({
+                        "missing": found.missing,
+                        "extra": found.extra,
+                        "different": found.different,
+                    })),
+                },
+            )?;
+            Ok(())
+        })();
+        match done {
+            Ok(()) => store.commit()?,
+            Err(e) => {
+                store.rollback().ok();
+                return Err(fail(e.to_string()));
+            }
+        }
+    }
+    if json {
+        let doc = serde_json::json!({
+            "dry_run": dry_run,
+            "agrees": found.agrees(),
+            "stacks": found.stacks,
+            "missing": found.missing,
+            "extra": found.extra,
+            "different": found.different,
+            "sample": found.sample,
+            "rebuilt": rebuild,
+        });
+        println!("{}", serde_json::to_string_pretty(&doc).unwrap_or_default());
+    } else if found.agrees() {
+        println!(
+            "the axes of {} stacks are one row each, and every row says what its axis rows say",
+            found.stacks
+        );
+    } else {
+        println!(
+            "{} stacks have no row, {} rows are of a stack with no axis row and {} say something else than the axis rows; {}",
+            found.missing,
+            found.extra,
+            found.different,
+            if rebuild {
+                "every row was made again"
+            } else {
+                "nothing was written"
+            }
+        );
+    }
+    Ok(())
+}
+
 /// `nils quarantine list`: the paths a digest refused, with the class and
 /// the detail, joined to the root of their source.
 fn repair_command(home: &Home, command: RepairCommand) -> Result<(), Exit> {
@@ -7321,6 +7407,9 @@ fn repair_command(home: &Home, command: RepairCommand) -> Result<(), Exit> {
         RepairCommand::EmptyStacks { dry_run, json } => (dry_run, json),
         RepairCommand::SealedReview { dry_run, json } => {
             return repair_sealed_review(home, dry_run, json);
+        }
+        RepairCommand::StackAxis { dry_run, json } => {
+            return repair_stack_axis(home, dry_run, json);
         }
     };
     let mut registry = open(home)?;
@@ -8744,7 +8833,7 @@ fn custody_doc(home: &Home, registry: &mut Registry) -> Result<serde_json::Value
             "store": "classifications",
             "owner": "the pack's author for the rules, the reviewers for the decisions",
             "what": "what a pack decided about each stack, one row per axis, with the evidence that made it, every rule's vote on it and any decision a person recorded",
-            "where": "rows of stack_fingerprint, classification, classification_axis, classification_evidence, classification_voter, classification_vote and decision in the registry",
+            "where": "rows of stack_fingerprint, classification, classification_axis (and the same values a row a stack in stack_axis), classification_evidence, classification_voter, classification_vote and decision in the registry",
             "files": [],
             "holds": ["technical: the fields a pack reads, the axes, the tiers and confidences, the rule that fired, every clause that held and the value its rule said", "a person's words: the why on a decision"],
             "counts": { "fingerprints": fingerprints, "classified": classified, "decisions": decisions },

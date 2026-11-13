@@ -5,7 +5,8 @@
 //! registry, with its sessions and, on Postgres, its statistics; `time`
 //! compiles and runs every document of a fixture directory on it, a few
 //! times each, and prints how long the statement took and what it
-//! answered: the rows, the subjects, and the content hash of the answer.
+//! answered: the rows, the subjects, and the content hash of the answer,
+//! and how long the funnel a draft counts took under a draft's time.
 //!
 //! The answers are the reference a change to the compiler is held to: the
 //! generator is code and a seed, so a registry built again holds the same
@@ -21,8 +22,8 @@ use clap::{Args, Subcommand};
 use nils_ask::compile::{Context, compile};
 use nils_ask::exec::{self, Bounds};
 use nils_ask::validate::{Class, Scope};
-use nils_ask::{parse, prepare};
-use nils_catalog::Catalog;
+use nils_ask::{diagnose, parse, prepare};
+use nils_catalog::{Caps, Catalog};
 use nils_registry::Backend;
 use nils_registry::home::Home;
 use nils_registry::session::Scheme;
@@ -154,6 +155,7 @@ fn time(home: &Home, args: TimeArgs) -> Result<(), Exit> {
         let text =
             std::fs::read_to_string(path).map_err(|e| fail(format!("{}: {e}", path.display())))?;
         let ask = parse(&text).map_err(|e| usage(format!("{}: {e}", path.display())))?;
+        let drafted = ask.clone();
         // a verb of the command line holds every class; a fixture named
         // plain is read as a caller with none, so what is held back is timed
         let scope = if name.ends_with(".plain") {
@@ -232,15 +234,50 @@ fn time(home: &Home, args: TimeArgs) -> Result<(), Exit> {
             }
         }
         times.sort_unstable();
+        // the funnel a draft counts, under the door's bounds and the time
+        // a draft gives all its counts together: how long it took, and
+        // whether every count was made within it
+        let caps = Caps::default();
+        let started = Instant::now();
+        let funnel = diagnose::diagnose_within(
+            &mut registry,
+            drafted,
+            Vec::new(),
+            &catalog,
+            &scope,
+            &scheme,
+            Bounds {
+                timeout_ms: caps.sync_timeout_ms,
+                max_rows: caps.sync_max_rows,
+                max_bytes: caps.sync_max_bytes,
+            },
+            false,
+            None,
+            Some(caps.draft_timeout_ms),
+        );
+        let funnel_ms = started.elapsed().as_millis();
+        let funnel = match funnel {
+            Ok(d) => json!({
+                "ms": funnel_ms,
+                "stages": d.funnel.len(),
+                "whole": d.unavailable.is_none(),
+            }),
+            Err(e) => json!({"ms": funnel_ms, "error": e.to_string()}),
+        };
         let answered = answer.clone().unwrap_or(Value::Null);
-        let same = reference.as_ref().map(|r| {
-            let kept = &r[&backend][&name];
-            let same = !answered.is_null() && *kept == answered;
-            if !same {
-                differ.push(format!("{name}: kept {kept}, answered {answered}"));
-            }
-            same
-        });
+        // a fixture the reference keeps no answer of on this backend (one
+        // that did not end when the reference was taken) is held to nothing
+        let same = reference
+            .as_ref()
+            .map(|r| &r[&backend][&name])
+            .filter(|kept| !kept.is_null())
+            .map(|kept| {
+                let same = !answered.is_null() && *kept == answered;
+                if !same {
+                    differ.push(format!("{name}: kept {kept}, answered {answered}"));
+                }
+                same
+            });
         answers.insert(name.clone(), answered.clone());
         shapes.push(json!({
             "fixture": name,
@@ -250,6 +287,7 @@ fn time(home: &Home, args: TimeArgs) -> Result<(), Exit> {
             "max_ms": times.last(),
             "answer": answered,
             "same_as_reference": same,
+            "funnel": funnel,
             "error": error,
         }));
     }

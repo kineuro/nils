@@ -9283,6 +9283,9 @@ fn a_person_s_pick_of_nothing_is_no_pick_to_the_preflight_and_the_release() {
             )
             .unwrap();
     }
+    // axis rows written by hand: their stacks' rows follow, as with every
+    // writer of an axis
+    nils_registry::stack_axis::rebuild(&mut store).unwrap();
     // the earlier run's pick on P1's occasion, which says where it looked
     let earlier = store
         .query(

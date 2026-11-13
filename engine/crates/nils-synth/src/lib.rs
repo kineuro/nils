@@ -780,7 +780,9 @@ pub fn build(registry: &mut Registry, plan: &Plan) -> Result<Manifest, Error> {
 
     let store = registry.store();
     store.begin()?;
-    let result = write(store, &folk, plan, &now, &mut manifest);
+    // the axes are written a row a value, and the read model of them once
+    let result = write(store, &folk, plan, &now, &mut manifest)
+        .and_then(|()| nils_registry::stack_axis::rebuild(store).map(|_| ()));
     match result {
         Ok(()) => {}
         Err(e) => {

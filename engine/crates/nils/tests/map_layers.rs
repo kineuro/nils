@@ -149,6 +149,9 @@ impl Home {
             }
             store.execute(&sql, &[]).unwrap();
         }
+        // axis rows written by hand: their stacks' rows follow, as with
+        // every writer of an axis
+        nils_registry::stack_axis::rebuild(&mut store).unwrap();
     }
 }
 

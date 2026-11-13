@@ -1182,6 +1182,24 @@ fn build_registry() -> Vec<Table> {
         )
         .unique(&["stack_id", "axis", "value"])
         .index(&["axis", "value"]),
+        // The axes of a stack as one row, a read model of
+        // `classification_axis` that every writer of it keeps in the same
+        // transaction (`crate::stack_axis`): `axes` is one object, each
+        // axis with the array of its values, and `excluded` is 1 where the
+        // pack ruled the stack out, the few rows the partial key lists. A
+        // question reads an axis of every stack of a set from here, one
+        // row a stack, where the rows of `classification_axis` were a
+        // lookup per stack and axis.
+        Table::new(
+            "stack_axis",
+            vec![
+                req("stack_id", Type::Int),
+                req("axes", Type::Json),
+                req("excluded", Type::Int),
+            ],
+        )
+        .keyed_by("stack_id")
+        .unique_where("excluded", &["stack_id"], "excluded = 1"),
         Table::new(
             "classification_evidence",
             vec![

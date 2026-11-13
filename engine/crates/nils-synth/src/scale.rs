@@ -250,7 +250,10 @@ pub fn build_scale(registry: &mut Registry, plan: &ScalePlan) -> Result<ScaleMan
     let now = nils_registry::time::now_iso();
     let store = registry.store();
     store.begin()?;
-    if let Err(e) = write(store, plan, &now, &mut manifest) {
+    // the axes are written a row a value, and the read model of them once
+    if let Err(e) = write(store, plan, &now, &mut manifest)
+        .and_then(|()| nils_registry::stack_axis::rebuild(store).map(|_| ()))
+    {
         store.rollback().ok();
         return Err(e);
     }

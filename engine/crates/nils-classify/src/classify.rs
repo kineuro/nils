@@ -1968,6 +1968,8 @@ fn run(
                     &Insert::new(axis_t, &["stack_id", "axis", "value", "confidence", "tier"]),
                     &axes,
                 )?;
+                // the read model of the axes follows in the same transaction
+                nils_registry::stack_axis::refresh(store, &ids)?;
                 store.insert(
                     &Insert::new(
                         ev_t,
@@ -2262,6 +2264,7 @@ fn dispose(
                     &Insert::new(axis_t, &["stack_id", "axis", "value", "confidence", "tier"]),
                     &axes,
                 )?;
+                nils_registry::stack_axis::refresh(store, &judged)?;
                 store.insert(
                     &Insert::new(
                         ev_t,

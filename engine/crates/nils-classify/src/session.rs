@@ -458,6 +458,11 @@ pub fn run(
             ),
             &axis_rows_out,
         )?;
+        // the read model of the axes follows in the same transaction
+        let mut written: Vec<i64> = touched.iter().map(|(stack, _)| *stack).collect();
+        written.sort_unstable();
+        written.dedup();
+        nils_registry::stack_axis::refresh(store, &written)?;
         if !evidence.is_empty() {
             store.insert(
                 &Insert::new(

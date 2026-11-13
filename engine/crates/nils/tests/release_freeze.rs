@@ -261,6 +261,11 @@ impl Lab {
         let mut store = self.store();
         let sql = self.tables(&store, sql);
         store.batch(&sql).unwrap();
+        // an axis row written by hand: its stack's row follows, as with
+        // every writer of an axis
+        if sql.contains("classification_axis") {
+            nils_registry::stack_axis::rebuild(&mut store).unwrap();
+        }
     }
 
     /// `{table}` written in the store's schema.

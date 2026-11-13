@@ -260,6 +260,9 @@ fn a_silent_ge_swi_is_decided_from_its_session_and_flagged() {
             .iter()
             .find(|p| p.kind == "session_context")
             .unwrap_or_else(|| panic!("{name}: the session pass ran: {:?}", report.passes));
+        // the session pass wrote axes: the read model of them followed
+        let standing = nils_registry::stack_axis::verify(reg.store()).unwrap();
+        assert!(standing.agrees(), "{name}: {standing:?}");
         assert_eq!(ran.targets, 4, "{name}: the four unprefixed acquisitions");
         assert_eq!(ran.decided, 1, "{name}: {ran:?}");
         assert_eq!(
