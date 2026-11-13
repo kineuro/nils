@@ -1,0 +1,1950 @@
+{
+  "sqlite": {
+    "01-stack-count": {
+      "valid": true,
+      "issues": [],
+      "repairs": [],
+      "warnings": [],
+      "zero_rows": null,
+      "drops": [
+        {
+          "set": "scans",
+          "clause": "where dataset = site-a",
+          "before": 516612,
+          "after": 491807,
+          "nulls": 52
+        },
+        {
+          "set": "scans",
+          "clause": "where acquisition_type = 3D",
+          "before": 491807,
+          "after": 178814,
+          "nulls": 0
+        },
+        {
+          "set": "scans",
+          "clause": "where voxel <= 1.2",
+          "before": 178814,
+          "after": 124300,
+          "nulls": 0
+        },
+        {
+          "set": "scans",
+          "clause": "where base = T1w or base = T2w and modifier has FLAIR",
+          "before": 124300,
+          "after": 95718,
+          "nulls": 0
+        }
+      ],
+      "ties": [],
+      "unresolved": [],
+      "coarse": [],
+      "cost": {
+        "sets": 1,
+        "near": 0,
+        "groups": 0,
+        "algebra": 0,
+        "class": "small"
+      },
+      "funnel": [
+        {
+          "set": "scans",
+          "grain": "stack",
+          "stage": "source",
+          "rows": 516612,
+          "subjects": 5900,
+          "on_path": false
+        },
+        {
+          "set": "scans",
+          "grain": "stack",
+          "stage": "where dataset = site-a",
+          "rows": 491807,
+          "subjects": 4571,
+          "on_path": false
+        },
+        {
+          "set": "scans",
+          "grain": "stack",
+          "stage": "where acquisition_type = 3D",
+          "rows": 178814,
+          "subjects": 4571,
+          "on_path": false
+        },
+        {
+          "set": "scans",
+          "grain": "stack",
+          "stage": "where voxel <= 1.2",
+          "rows": 124300,
+          "subjects": 4565,
+          "on_path": false
+        },
+        {
+          "set": "scans",
+          "grain": "stack",
+          "stage": "where base = T1w or base = T2w and modifier has FLAIR",
+          "rows": 95718,
+          "subjects": 4560,
+          "on_path": false
+        }
+      ],
+      "by": "set",
+      "next": []
+    },
+    "02-cohort-sessions": {
+      "valid": true,
+      "issues": [],
+      "repairs": [],
+      "warnings": [],
+      "zero_rows": null,
+      "drops": [],
+      "ties": [],
+      "unresolved": [],
+      "coarse": [],
+      "cost": {
+        "sets": 3,
+        "near": 0,
+        "groups": 0,
+        "algebra": 0,
+        "class": "small"
+      },
+      "funnel": [
+        {
+          "set": "scope",
+          "grain": "cohort",
+          "stage": "source",
+          "rows": 591,
+          "subjects": 591,
+          "on_path": true
+        },
+        {
+          "set": "scope",
+          "grain": "cohort",
+          "stage": "where name = alpha",
+          "rows": 1,
+          "subjects": 1,
+          "on_path": true
+        },
+        {
+          "set": "people",
+          "grain": "subject",
+          "stage": "source",
+          "rows": 4389,
+          "subjects": 4389,
+          "on_path": true
+        },
+        {
+          "set": "visits",
+          "grain": "session",
+          "stage": "source",
+          "rows": 28462,
+          "subjects": 4389,
+          "on_path": true
+        }
+      ],
+      "by": "set",
+      "next": []
+    },
+    "03-repeat-visits": {
+      "valid": true,
+      "issues": [],
+      "repairs": [],
+      "warnings": [
+        {
+          "code": "not_releasable",
+          "path": "keep[0]",
+          "message": "runs is at grain group, which does not reach the release; its handle is a table to read and export, never to release",
+          "next": "keep a subject, session or stack set for a release"
+        }
+      ],
+      "zero_rows": null,
+      "drops": [],
+      "ties": [],
+      "unresolved": [],
+      "coarse": [],
+      "cost": {
+        "sets": 6,
+        "near": 0,
+        "groups": 2,
+        "algebra": 0,
+        "class": "medium"
+      },
+      "funnel": [
+        {
+          "set": "scope",
+          "grain": "cohort",
+          "stage": "source",
+          "rows": 591,
+          "subjects": 591,
+          "on_path": true
+        },
+        {
+          "set": "scope",
+          "grain": "cohort",
+          "stage": "where name = alpha",
+          "rows": 1,
+          "subjects": 1,
+          "on_path": true
+        },
+        {
+          "set": "people",
+          "grain": "subject",
+          "stage": "source",
+          "rows": 4389,
+          "subjects": 4389,
+          "on_path": true
+        },
+        {
+          "set": "visits",
+          "grain": "session",
+          "stage": "source",
+          "rows": 28462,
+          "subjects": 4389,
+          "on_path": true
+        },
+        {
+          "set": "scans",
+          "grain": "stack",
+          "stage": "source",
+          "rows": 488488,
+          "subjects": 4389,
+          "on_path": false
+        },
+        {
+          "set": "scans",
+          "grain": "stack",
+          "stage": "where dataset = site-a",
+          "rows": 488442,
+          "subjects": 4389,
+          "on_path": false
+        },
+        {
+          "set": "scans",
+          "grain": "stack",
+          "stage": "where acquisition_type = 3D",
+          "rows": 177591,
+          "subjects": 4389,
+          "on_path": false
+        },
+        {
+          "set": "scans",
+          "grain": "stack",
+          "stage": "where voxel <= 1.2",
+          "rows": 123464,
+          "subjects": 4389,
+          "on_path": false
+        },
+        {
+          "set": "scans",
+          "grain": "stack",
+          "stage": "where base = T1w or base = T2w and modifier has FLAIR",
+          "rows": 95080,
+          "subjects": 4389,
+          "on_path": false
+        }
+      ],
+      "by": "set",
+      "next": [
+        "read the warnings; a selection_outdated warning carries an update move"
+      ]
+    },
+    "04-negation": {
+      "valid": true,
+      "issues": [],
+      "repairs": [],
+      "warnings": [],
+      "zero_rows": null,
+      "drops": [
+        {
+          "set": "scans",
+          "clause": "where base <> T1w",
+          "before": 516612,
+          "after": 379254,
+          "nulls": 0
+        },
+        {
+          "set": "scans",
+          "clause": "where modifier not among [FLAIR, DIR]",
+          "before": 379254,
+          "after": 311356,
+          "nulls": 0
+        },
+        {
+          "set": "scans",
+          "clause": "where dataset <> site-b",
+          "before": 311356,
+          "after": 297195,
+          "nulls": 33
+        },
+        {
+          "set": "scans",
+          "clause": "where not post_contrast = given",
+          "before": 297195,
+          "after": 297195,
+          "nulls": 0
+        }
+      ],
+      "ties": [],
+      "unresolved": [],
+      "coarse": [],
+      "cost": {
+        "sets": 1,
+        "near": 0,
+        "groups": 0,
+        "algebra": 0,
+        "class": "small"
+      },
+      "funnel": [
+        {
+          "set": "scans",
+          "grain": "stack",
+          "stage": "source",
+          "rows": 516612,
+          "subjects": 5900,
+          "on_path": false
+        },
+        {
+          "set": "scans",
+          "grain": "stack",
+          "stage": "where base <> T1w",
+          "rows": 379254,
+          "subjects": 5900,
+          "on_path": false
+        },
+        {
+          "set": "scans",
+          "grain": "stack",
+          "stage": "where modifier not among [FLAIR, DIR]",
+          "rows": 311356,
+          "subjects": 5899,
+          "on_path": false
+        },
+        {
+          "set": "scans",
+          "grain": "stack",
+          "stage": "where dataset <> site-b",
+          "rows": 297195,
+          "subjects": 4636,
+          "on_path": false
+        },
+        {
+          "set": "scans",
+          "grain": "stack",
+          "stage": "where not post_contrast = given",
+          "rows": 297195,
+          "subjects": 4636,
+          "on_path": false
+        }
+      ],
+      "by": "set",
+      "next": []
+    },
+    "05-has": {
+      "valid": true,
+      "issues": [],
+      "repairs": [],
+      "warnings": [],
+      "zero_rows": null,
+      "drops": [],
+      "ties": [],
+      "unresolved": [],
+      "coarse": [],
+      "cost": {
+        "sets": 3,
+        "near": 0,
+        "groups": 0,
+        "algebra": 1,
+        "class": "small"
+      },
+      "funnel": [
+        {
+          "set": "flair_fs",
+          "grain": "stack",
+          "stage": "source",
+          "rows": 516612,
+          "subjects": 5900,
+          "on_path": false
+        },
+        {
+          "set": "flair_fs",
+          "grain": "stack",
+          "stage": "where modifier has FLAIR",
+          "rows": 63960,
+          "subjects": 5678,
+          "on_path": false
+        },
+        {
+          "set": "flair_fs",
+          "grain": "stack",
+          "stage": "where modifier has FatSat",
+          "rows": 8106,
+          "subjects": 3712,
+          "on_path": false
+        },
+        {
+          "set": "copies",
+          "grain": "stack",
+          "stage": "source",
+          "rows": 516612,
+          "subjects": 5900,
+          "on_path": false
+        },
+        {
+          "set": "copies",
+          "grain": "stack",
+          "stage": "where dataset has site-d",
+          "rows": 613,
+          "subjects": 613,
+          "on_path": false
+        },
+        {
+          "set": "copies",
+          "grain": "stack",
+          "stage": "where construct has MPR",
+          "rows": 33,
+          "subjects": 33,
+          "on_path": false
+        },
+        {
+          "set": "either",
+          "grain": "stack",
+          "stage": "source",
+          "rows": 8139,
+          "subjects": 3716,
+          "on_path": false
+        }
+      ],
+      "by": "set",
+      "next": []
+    },
+    "06-in-lists": {
+      "valid": true,
+      "issues": [],
+      "repairs": [],
+      "warnings": [],
+      "zero_rows": null,
+      "drops": [
+        {
+          "set": "scans",
+          "clause": "where technique among [MPRAGE, SP-GRE, SPACE]",
+          "before": 516612,
+          "after": 125644,
+          "nulls": 0
+        },
+        {
+          "set": "scans",
+          "clause": "where base among [T1w, T2starw, T2w]",
+          "before": 125644,
+          "after": 125644,
+          "nulls": 0
+        },
+        {
+          "set": "scans",
+          "clause": "where station_name among [STN01, STN02, STN03, STN07, STN11]",
+          "before": 125644,
+          "after": 25341,
+          "nulls": 0
+        },
+        {
+          "set": "scans",
+          "clause": "where dataset among [site-a, site-c]",
+          "before": 25341,
+          "after": 24110,
+          "nulls": 2
+        }
+      ],
+      "ties": [],
+      "unresolved": [],
+      "coarse": [],
+      "cost": {
+        "sets": 1,
+        "near": 0,
+        "groups": 0,
+        "algebra": 0,
+        "class": "small"
+      },
+      "funnel": [
+        {
+          "set": "scans",
+          "grain": "stack",
+          "stage": "source",
+          "rows": 516612,
+          "subjects": 5900,
+          "on_path": false
+        },
+        {
+          "set": "scans",
+          "grain": "stack",
+          "stage": "where technique among [MPRAGE, SP-GRE, SPACE]",
+          "rows": 125644,
+          "subjects": 5860,
+          "on_path": false
+        },
+        {
+          "set": "scans",
+          "grain": "stack",
+          "stage": "where base among [T1w, T2starw, T2w]",
+          "rows": 125644,
+          "subjects": 5860,
+          "on_path": false
+        },
+        {
+          "set": "scans",
+          "grain": "stack",
+          "stage": "where station_name among [STN01, STN02, STN03, STN07, STN11]",
+          "rows": 25341,
+          "subjects": 1766,
+          "on_path": false
+        },
+        {
+          "set": "scans",
+          "grain": "stack",
+          "stage": "where dataset among [site-a, site-c]",
+          "rows": 24110,
+          "subjects": 1507,
+          "on_path": false
+        }
+      ],
+      "by": "set",
+      "next": []
+    },
+    "07-subjects-by-stacks": {
+      "valid": true,
+      "issues": [],
+      "repairs": [],
+      "warnings": [],
+      "zero_rows": null,
+      "drops": [],
+      "ties": [],
+      "unresolved": [],
+      "coarse": [],
+      "cost": {
+        "sets": 2,
+        "near": 0,
+        "groups": 0,
+        "algebra": 0,
+        "class": "small"
+      },
+      "funnel": [
+        {
+          "set": "wanted",
+          "grain": "stack",
+          "stage": "source",
+          "rows": 516612,
+          "subjects": 5900,
+          "on_path": false
+        },
+        {
+          "set": "wanted",
+          "grain": "stack",
+          "stage": "where modifier has FLAIR and post_contrast = given and acquisition_type = 3D or modifier has DIR",
+          "rows": 5287,
+          "subjects": 2989,
+          "on_path": false
+        },
+        {
+          "set": "people",
+          "grain": "subject",
+          "stage": "source",
+          "rows": 5900,
+          "subjects": 5900,
+          "on_path": true
+        },
+        {
+          "set": "people",
+          "grain": "subject",
+          "stage": "has wanted",
+          "rows": 1436,
+          "subjects": 1436,
+          "on_path": true
+        }
+      ],
+      "by": "set",
+      "next": []
+    },
+    "08-stack-list": {
+      "valid": true,
+      "issues": [],
+      "repairs": [],
+      "warnings": [],
+      "zero_rows": null,
+      "drops": [
+        {
+          "set": "scans",
+          "clause": "where modifier has DIR",
+          "before": 516612,
+          "after": 3938,
+          "nulls": 0
+        }
+      ],
+      "ties": [],
+      "unresolved": [],
+      "coarse": [],
+      "cost": {
+        "sets": 1,
+        "near": 0,
+        "groups": 0,
+        "algebra": 0,
+        "class": "small"
+      },
+      "funnel": [
+        {
+          "set": "scans",
+          "grain": "stack",
+          "stage": "source",
+          "rows": 516612,
+          "subjects": 5900,
+          "on_path": false
+        },
+        {
+          "set": "scans",
+          "grain": "stack",
+          "stage": "where modifier has DIR",
+          "rows": 3938,
+          "subjects": 2464,
+          "on_path": false
+        }
+      ],
+      "by": "set",
+      "next": []
+    },
+    "09-group-by-axes": {
+      "valid": true,
+      "issues": [],
+      "repairs": [],
+      "warnings": [],
+      "zero_rows": null,
+      "drops": [],
+      "ties": [],
+      "unresolved": [],
+      "coarse": [],
+      "cost": {
+        "sets": 2,
+        "near": 0,
+        "groups": 1,
+        "algebra": 0,
+        "class": "medium"
+      },
+      "funnel": [
+        {
+          "set": "scans",
+          "grain": "stack",
+          "stage": "source",
+          "rows": 516612,
+          "subjects": 5900,
+          "on_path": false
+        }
+      ],
+      "by": "set",
+      "next": []
+    },
+    "10-group-each-dataset": {
+      "valid": true,
+      "issues": [],
+      "repairs": [],
+      "warnings": [],
+      "zero_rows": null,
+      "drops": [],
+      "ties": [],
+      "unresolved": [],
+      "coarse": [],
+      "cost": {
+        "sets": 2,
+        "near": 0,
+        "groups": 1,
+        "algebra": 0,
+        "class": "medium"
+      },
+      "funnel": [
+        {
+          "set": "scans",
+          "grain": "stack",
+          "stage": "source",
+          "rows": 516612,
+          "subjects": 5900,
+          "on_path": false
+        },
+        {
+          "set": "scans",
+          "grain": "stack",
+          "stage": "where acquisition_type = 3D",
+          "rows": 187861,
+          "subjects": 5889,
+          "on_path": false
+        }
+      ],
+      "by": "set",
+      "next": []
+    },
+    "11-few-subjects": {
+      "valid": true,
+      "issues": [],
+      "repairs": [],
+      "warnings": [],
+      "zero_rows": null,
+      "drops": [
+        {
+          "set": "scans",
+          "clause": "where base = T1w",
+          "before": 344,
+          "after": 101,
+          "nulls": 0
+        }
+      ],
+      "ties": [],
+      "unresolved": [],
+      "coarse": [],
+      "cost": {
+        "sets": 2,
+        "near": 0,
+        "groups": 0,
+        "algebra": 0,
+        "class": "small"
+      },
+      "funnel": [
+        {
+          "set": "people",
+          "grain": "subject",
+          "stage": "source",
+          "rows": 5900,
+          "subjects": 5900,
+          "on_path": true
+        },
+        {
+          "set": "people",
+          "grain": "subject",
+          "stage": "where code among [SC000010, SC000200, SC001500, SC003000, SC005000]",
+          "rows": 5,
+          "subjects": 5,
+          "on_path": true
+        },
+        {
+          "set": "scans",
+          "grain": "stack",
+          "stage": "source",
+          "rows": 344,
+          "subjects": 5,
+          "on_path": false
+        },
+        {
+          "set": "scans",
+          "grain": "stack",
+          "stage": "where base = T1w",
+          "rows": 101,
+          "subjects": 5,
+          "on_path": false
+        }
+      ],
+      "by": "set",
+      "next": []
+    },
+    "12-sessions-and-subjects-by-dataset": {
+      "valid": true,
+      "issues": [],
+      "repairs": [],
+      "warnings": [],
+      "zero_rows": null,
+      "drops": [
+        {
+          "set": "visits",
+          "clause": "where dataset among [site-c, site-d]",
+          "before": 28647,
+          "after": 613,
+          "nulls": 0
+        }
+      ],
+      "ties": [],
+      "unresolved": [],
+      "coarse": [],
+      "cost": {
+        "sets": 2,
+        "near": 0,
+        "groups": 0,
+        "algebra": 0,
+        "class": "small"
+      },
+      "funnel": [
+        {
+          "set": "people",
+          "grain": "subject",
+          "stage": "source",
+          "rows": 5900,
+          "subjects": 5900,
+          "on_path": true
+        },
+        {
+          "set": "people",
+          "grain": "subject",
+          "stage": "where dataset = site-a",
+          "rows": 4571,
+          "subjects": 4571,
+          "on_path": true
+        },
+        {
+          "set": "visits",
+          "grain": "session",
+          "stage": "source",
+          "rows": 28647,
+          "subjects": 4571,
+          "on_path": true
+        },
+        {
+          "set": "visits",
+          "grain": "session",
+          "stage": "where dataset among [site-c, site-d]",
+          "rows": 613,
+          "subjects": 613,
+          "on_path": true
+        }
+      ],
+      "by": "set",
+      "next": []
+    },
+    "13-stations.plain": {
+      "valid": true,
+      "issues": [],
+      "repairs": [],
+      "warnings": [],
+      "zero_rows": null,
+      "drops": [],
+      "ties": [],
+      "unresolved": [],
+      "coarse": [],
+      "cost": {
+        "sets": 2,
+        "near": 0,
+        "groups": 1,
+        "algebra": 0,
+        "class": "medium"
+      },
+      "funnel": [
+        {
+          "set": "scans",
+          "grain": "stack",
+          "stage": "source",
+          "rows": 516612,
+          "subjects": 5900,
+          "on_path": false
+        },
+        {
+          "set": "scans",
+          "grain": "stack",
+          "stage": "where modifier has FLAIR",
+          "rows": 63960,
+          "subjects": 5678,
+          "on_path": false
+        },
+        {
+          "set": "scans",
+          "grain": "stack",
+          "stage": "where acquisition_type = 3D",
+          "rows": 35767,
+          "subjects": 5340,
+          "on_path": false
+        },
+        {
+          "set": "scans",
+          "grain": "stack",
+          "stage": "where voxel <= 1",
+          "rows": 28839,
+          "subjects": 5063,
+          "on_path": false
+        }
+      ],
+      "by": "set",
+      "next": []
+    },
+    "14-derived-negated": {
+      "valid": true,
+      "issues": [],
+      "repairs": [],
+      "warnings": [],
+      "zero_rows": null,
+      "drops": [],
+      "ties": [],
+      "unresolved": [],
+      "coarse": [],
+      "cost": {
+        "sets": 4,
+        "near": 0,
+        "groups": 0,
+        "algebra": 1,
+        "class": "medium"
+      },
+      "funnel": [
+        {
+          "set": "thick",
+          "grain": "stack",
+          "stage": "source",
+          "rows": 516612,
+          "subjects": 5900,
+          "on_path": false
+        },
+        {
+          "set": "thick",
+          "grain": "stack",
+          "stage": "where not voxel > 5",
+          "rows": 447671,
+          "subjects": 5900,
+          "on_path": false
+        },
+        {
+          "set": "thick",
+          "grain": "stack",
+          "stage": "where not voxel_min < 1.1",
+          "rows": 112267,
+          "subjects": 5651,
+          "on_path": false
+        },
+        {
+          "set": "thick",
+          "grain": "stack",
+          "stage": "where not acquisition_type <> 2D",
+          "rows": 86742,
+          "subjects": 5486,
+          "on_path": false
+        },
+        {
+          "set": "fine",
+          "grain": "stack",
+          "stage": "source",
+          "rows": 516612,
+          "subjects": 5900,
+          "on_path": false
+        },
+        {
+          "set": "fine",
+          "grain": "stack",
+          "stage": "where acquisition_type <> 2D",
+          "rows": 187861,
+          "subjects": 5889,
+          "on_path": false
+        },
+        {
+          "set": "fine",
+          "grain": "stack",
+          "stage": "where voxel_min >= 0.9",
+          "rows": 135997,
+          "subjects": 5828,
+          "on_path": false
+        },
+        {
+          "set": "fine",
+          "grain": "stack",
+          "stage": "where 1 >= voxel_max",
+          "rows": 77281,
+          "subjects": 5658,
+          "on_path": false
+        },
+        {
+          "set": "coarse",
+          "grain": "stack",
+          "stage": "source",
+          "rows": 516612,
+          "subjects": 5900,
+          "on_path": false
+        },
+        {
+          "set": "coarse",
+          "grain": "stack",
+          "stage": "where not acquisition_type = 3D",
+          "rows": 323633,
+          "subjects": 5900,
+          "on_path": false
+        },
+        {
+          "set": "coarse",
+          "grain": "stack",
+          "stage": "where not voxel <= 4",
+          "rows": 157655,
+          "subjects": 5735,
+          "on_path": false
+        },
+        {
+          "set": "any",
+          "grain": "stack",
+          "stage": "source",
+          "rows": 282609,
+          "subjects": 5892,
+          "on_path": false
+        }
+      ],
+      "by": "set",
+      "next": []
+    }
+  },
+  "postgres": {
+    "01-stack-count": {
+      "valid": true,
+      "issues": [],
+      "repairs": [],
+      "warnings": [],
+      "zero_rows": null,
+      "drops": [
+        {
+          "set": "scans",
+          "clause": "where dataset = site-a",
+          "before": 516612,
+          "after": 491807,
+          "nulls": 52
+        },
+        {
+          "set": "scans",
+          "clause": "where acquisition_type = 3D",
+          "before": 491807,
+          "after": 178814,
+          "nulls": 0
+        },
+        {
+          "set": "scans",
+          "clause": "where voxel <= 1.2",
+          "before": 178814,
+          "after": 125927,
+          "nulls": 0
+        },
+        {
+          "set": "scans",
+          "clause": "where base = T1w or base = T2w and modifier has FLAIR",
+          "before": 125927,
+          "after": 96867,
+          "nulls": 0
+        }
+      ],
+      "ties": [],
+      "unresolved": [],
+      "coarse": [],
+      "cost": {
+        "sets": 1,
+        "near": 0,
+        "groups": 0,
+        "algebra": 0,
+        "class": "small"
+      },
+      "funnel": [
+        {
+          "set": "scans",
+          "grain": "stack",
+          "stage": "source",
+          "rows": 516612,
+          "subjects": 5900,
+          "on_path": false
+        },
+        {
+          "set": "scans",
+          "grain": "stack",
+          "stage": "where dataset = site-a",
+          "rows": 491807,
+          "subjects": 4571,
+          "on_path": false
+        },
+        {
+          "set": "scans",
+          "grain": "stack",
+          "stage": "where acquisition_type = 3D",
+          "rows": 178814,
+          "subjects": 4571,
+          "on_path": false
+        },
+        {
+          "set": "scans",
+          "grain": "stack",
+          "stage": "where voxel <= 1.2",
+          "rows": 125927,
+          "subjects": 4566,
+          "on_path": false
+        },
+        {
+          "set": "scans",
+          "grain": "stack",
+          "stage": "where base = T1w or base = T2w and modifier has FLAIR",
+          "rows": 96867,
+          "subjects": 4561,
+          "on_path": false
+        }
+      ],
+      "by": "set",
+      "next": []
+    },
+    "02-cohort-sessions": {
+      "valid": true,
+      "issues": [],
+      "repairs": [],
+      "warnings": [],
+      "zero_rows": null,
+      "drops": [],
+      "ties": [],
+      "unresolved": [],
+      "coarse": [],
+      "cost": {
+        "sets": 3,
+        "near": 0,
+        "groups": 0,
+        "algebra": 0,
+        "class": "small"
+      },
+      "funnel": [
+        {
+          "set": "scope",
+          "grain": "cohort",
+          "stage": "source",
+          "rows": 591,
+          "subjects": 591,
+          "on_path": true
+        },
+        {
+          "set": "scope",
+          "grain": "cohort",
+          "stage": "where name = alpha",
+          "rows": 1,
+          "subjects": 1,
+          "on_path": true
+        },
+        {
+          "set": "people",
+          "grain": "subject",
+          "stage": "source",
+          "rows": 4389,
+          "subjects": 4389,
+          "on_path": true
+        },
+        {
+          "set": "visits",
+          "grain": "session",
+          "stage": "source",
+          "rows": 28462,
+          "subjects": 4389,
+          "on_path": true
+        }
+      ],
+      "by": "set",
+      "next": []
+    },
+    "03-repeat-visits": {
+      "valid": true,
+      "issues": [],
+      "repairs": [],
+      "warnings": [
+        {
+          "code": "not_releasable",
+          "path": "keep[0]",
+          "message": "runs is at grain group, which does not reach the release; its handle is a table to read and export, never to release",
+          "next": "keep a subject, session or stack set for a release"
+        }
+      ],
+      "zero_rows": null,
+      "drops": [],
+      "ties": [],
+      "unresolved": [],
+      "coarse": [],
+      "cost": {
+        "sets": 6,
+        "near": 0,
+        "groups": 2,
+        "algebra": 0,
+        "class": "medium"
+      },
+      "funnel": [
+        {
+          "set": "scope",
+          "grain": "cohort",
+          "stage": "source",
+          "rows": 591,
+          "subjects": 591,
+          "on_path": true
+        },
+        {
+          "set": "scope",
+          "grain": "cohort",
+          "stage": "where name = alpha",
+          "rows": 1,
+          "subjects": 1,
+          "on_path": true
+        },
+        {
+          "set": "people",
+          "grain": "subject",
+          "stage": "source",
+          "rows": 4389,
+          "subjects": 4389,
+          "on_path": true
+        },
+        {
+          "set": "visits",
+          "grain": "session",
+          "stage": "source",
+          "rows": 28462,
+          "subjects": 4389,
+          "on_path": true
+        },
+        {
+          "set": "scans",
+          "grain": "stack",
+          "stage": "source",
+          "rows": 488488,
+          "subjects": 4389,
+          "on_path": false
+        },
+        {
+          "set": "scans",
+          "grain": "stack",
+          "stage": "where dataset = site-a",
+          "rows": 488442,
+          "subjects": 4389,
+          "on_path": false
+        },
+        {
+          "set": "scans",
+          "grain": "stack",
+          "stage": "where acquisition_type = 3D",
+          "rows": 177591,
+          "subjects": 4389,
+          "on_path": false
+        },
+        {
+          "set": "scans",
+          "grain": "stack",
+          "stage": "where voxel <= 1.2",
+          "rows": 125081,
+          "subjects": 4389,
+          "on_path": false
+        },
+        {
+          "set": "scans",
+          "grain": "stack",
+          "stage": "where base = T1w or base = T2w and modifier has FLAIR",
+          "rows": 96223,
+          "subjects": 4389,
+          "on_path": false
+        }
+      ],
+      "by": "set",
+      "next": [
+        "read the warnings; a selection_outdated warning carries an update move"
+      ]
+    },
+    "04-negation": {
+      "valid": true,
+      "issues": [],
+      "repairs": [],
+      "warnings": [],
+      "zero_rows": null,
+      "drops": [
+        {
+          "set": "scans",
+          "clause": "where base <> T1w",
+          "before": 516612,
+          "after": 379254,
+          "nulls": 0
+        },
+        {
+          "set": "scans",
+          "clause": "where modifier not among [FLAIR, DIR]",
+          "before": 379254,
+          "after": 311356,
+          "nulls": 0
+        },
+        {
+          "set": "scans",
+          "clause": "where dataset <> site-b",
+          "before": 311356,
+          "after": 297195,
+          "nulls": 33
+        },
+        {
+          "set": "scans",
+          "clause": "where not post_contrast = given",
+          "before": 297195,
+          "after": 297195,
+          "nulls": 0
+        }
+      ],
+      "ties": [],
+      "unresolved": [],
+      "coarse": [],
+      "cost": {
+        "sets": 1,
+        "near": 0,
+        "groups": 0,
+        "algebra": 0,
+        "class": "small"
+      },
+      "funnel": [
+        {
+          "set": "scans",
+          "grain": "stack",
+          "stage": "source",
+          "rows": 516612,
+          "subjects": 5900,
+          "on_path": false
+        },
+        {
+          "set": "scans",
+          "grain": "stack",
+          "stage": "where base <> T1w",
+          "rows": 379254,
+          "subjects": 5900,
+          "on_path": false
+        },
+        {
+          "set": "scans",
+          "grain": "stack",
+          "stage": "where modifier not among [FLAIR, DIR]",
+          "rows": 311356,
+          "subjects": 5899,
+          "on_path": false
+        },
+        {
+          "set": "scans",
+          "grain": "stack",
+          "stage": "where dataset <> site-b",
+          "rows": 297195,
+          "subjects": 4636,
+          "on_path": false
+        },
+        {
+          "set": "scans",
+          "grain": "stack",
+          "stage": "where not post_contrast = given",
+          "rows": 297195,
+          "subjects": 4636,
+          "on_path": false
+        }
+      ],
+      "by": "set",
+      "next": []
+    },
+    "05-has": {
+      "valid": true,
+      "issues": [],
+      "repairs": [],
+      "warnings": [],
+      "zero_rows": null,
+      "drops": [],
+      "ties": [],
+      "unresolved": [],
+      "coarse": [],
+      "cost": {
+        "sets": 3,
+        "near": 0,
+        "groups": 0,
+        "algebra": 1,
+        "class": "small"
+      },
+      "funnel": [
+        {
+          "set": "flair_fs",
+          "grain": "stack",
+          "stage": "source",
+          "rows": 516612,
+          "subjects": 5900,
+          "on_path": false
+        },
+        {
+          "set": "flair_fs",
+          "grain": "stack",
+          "stage": "where modifier has FLAIR",
+          "rows": 63960,
+          "subjects": 5678,
+          "on_path": false
+        },
+        {
+          "set": "flair_fs",
+          "grain": "stack",
+          "stage": "where modifier has FatSat",
+          "rows": 8106,
+          "subjects": 3712,
+          "on_path": false
+        },
+        {
+          "set": "copies",
+          "grain": "stack",
+          "stage": "source",
+          "rows": 516612,
+          "subjects": 5900,
+          "on_path": false
+        },
+        {
+          "set": "copies",
+          "grain": "stack",
+          "stage": "where dataset has site-d",
+          "rows": 613,
+          "subjects": 613,
+          "on_path": false
+        },
+        {
+          "set": "copies",
+          "grain": "stack",
+          "stage": "where construct has MPR",
+          "rows": 33,
+          "subjects": 33,
+          "on_path": false
+        },
+        {
+          "set": "either",
+          "grain": "stack",
+          "stage": "source",
+          "rows": 8139,
+          "subjects": 3716,
+          "on_path": false
+        }
+      ],
+      "by": "set",
+      "next": []
+    },
+    "06-in-lists": {
+      "valid": true,
+      "issues": [],
+      "repairs": [],
+      "warnings": [],
+      "zero_rows": null,
+      "drops": [
+        {
+          "set": "scans",
+          "clause": "where technique among [MPRAGE, SP-GRE, SPACE]",
+          "before": 516612,
+          "after": 125644,
+          "nulls": 0
+        },
+        {
+          "set": "scans",
+          "clause": "where base among [T1w, T2starw, T2w]",
+          "before": 125644,
+          "after": 125644,
+          "nulls": 0
+        },
+        {
+          "set": "scans",
+          "clause": "where station_name among [STN01, STN02, STN03, STN07, STN11]",
+          "before": 125644,
+          "after": 25341,
+          "nulls": 0
+        },
+        {
+          "set": "scans",
+          "clause": "where dataset among [site-a, site-c]",
+          "before": 25341,
+          "after": 24110,
+          "nulls": 2
+        }
+      ],
+      "ties": [],
+      "unresolved": [],
+      "coarse": [],
+      "cost": {
+        "sets": 1,
+        "near": 0,
+        "groups": 0,
+        "algebra": 0,
+        "class": "small"
+      },
+      "funnel": [
+        {
+          "set": "scans",
+          "grain": "stack",
+          "stage": "source",
+          "rows": 516612,
+          "subjects": 5900,
+          "on_path": false
+        },
+        {
+          "set": "scans",
+          "grain": "stack",
+          "stage": "where technique among [MPRAGE, SP-GRE, SPACE]",
+          "rows": 125644,
+          "subjects": 5860,
+          "on_path": false
+        },
+        {
+          "set": "scans",
+          "grain": "stack",
+          "stage": "where base among [T1w, T2starw, T2w]",
+          "rows": 125644,
+          "subjects": 5860,
+          "on_path": false
+        },
+        {
+          "set": "scans",
+          "grain": "stack",
+          "stage": "where station_name among [STN01, STN02, STN03, STN07, STN11]",
+          "rows": 25341,
+          "subjects": 1766,
+          "on_path": false
+        },
+        {
+          "set": "scans",
+          "grain": "stack",
+          "stage": "where dataset among [site-a, site-c]",
+          "rows": 24110,
+          "subjects": 1507,
+          "on_path": false
+        }
+      ],
+      "by": "set",
+      "next": []
+    },
+    "07-subjects-by-stacks": {
+      "valid": true,
+      "issues": [],
+      "repairs": [],
+      "warnings": [],
+      "zero_rows": null,
+      "drops": [],
+      "ties": [],
+      "unresolved": [],
+      "coarse": [],
+      "cost": {
+        "sets": 2,
+        "near": 0,
+        "groups": 0,
+        "algebra": 0,
+        "class": "small"
+      },
+      "funnel": [
+        {
+          "set": "wanted",
+          "grain": "stack",
+          "stage": "source",
+          "rows": 516612,
+          "subjects": 5900,
+          "on_path": false
+        },
+        {
+          "set": "wanted",
+          "grain": "stack",
+          "stage": "where modifier has FLAIR and post_contrast = given and acquisition_type = 3D or modifier has DIR",
+          "rows": 5287,
+          "subjects": 2989,
+          "on_path": false
+        },
+        {
+          "set": "people",
+          "grain": "subject",
+          "stage": "source",
+          "rows": 5900,
+          "subjects": 5900,
+          "on_path": true
+        },
+        {
+          "set": "people",
+          "grain": "subject",
+          "stage": "has wanted",
+          "rows": 1436,
+          "subjects": 1436,
+          "on_path": true
+        }
+      ],
+      "by": "set",
+      "next": []
+    },
+    "08-stack-list": {
+      "valid": true,
+      "issues": [],
+      "repairs": [],
+      "warnings": [],
+      "zero_rows": null,
+      "drops": [
+        {
+          "set": "scans",
+          "clause": "where modifier has DIR",
+          "before": 516612,
+          "after": 3938,
+          "nulls": 0
+        }
+      ],
+      "ties": [],
+      "unresolved": [],
+      "coarse": [],
+      "cost": {
+        "sets": 1,
+        "near": 0,
+        "groups": 0,
+        "algebra": 0,
+        "class": "small"
+      },
+      "funnel": [
+        {
+          "set": "scans",
+          "grain": "stack",
+          "stage": "source",
+          "rows": 516612,
+          "subjects": 5900,
+          "on_path": false
+        },
+        {
+          "set": "scans",
+          "grain": "stack",
+          "stage": "where modifier has DIR",
+          "rows": 3938,
+          "subjects": 2464,
+          "on_path": false
+        }
+      ],
+      "by": "set",
+      "next": []
+    },
+    "09-group-by-axes": {
+      "valid": true,
+      "issues": [],
+      "repairs": [],
+      "warnings": [],
+      "zero_rows": null,
+      "drops": [],
+      "ties": [],
+      "unresolved": [],
+      "coarse": [],
+      "cost": {
+        "sets": 2,
+        "near": 0,
+        "groups": 1,
+        "algebra": 0,
+        "class": "medium"
+      },
+      "funnel": [
+        {
+          "set": "scans",
+          "grain": "stack",
+          "stage": "source",
+          "rows": 516612,
+          "subjects": 5900,
+          "on_path": false
+        }
+      ],
+      "by": "set",
+      "next": []
+    },
+    "10-group-each-dataset": {
+      "valid": true,
+      "issues": [],
+      "repairs": [],
+      "warnings": [],
+      "zero_rows": null,
+      "drops": [],
+      "ties": [],
+      "unresolved": [],
+      "coarse": [],
+      "cost": {
+        "sets": 2,
+        "near": 0,
+        "groups": 1,
+        "algebra": 0,
+        "class": "medium"
+      },
+      "funnel": [
+        {
+          "set": "scans",
+          "grain": "stack",
+          "stage": "source",
+          "rows": 516612,
+          "subjects": 5900,
+          "on_path": false
+        },
+        {
+          "set": "scans",
+          "grain": "stack",
+          "stage": "where acquisition_type = 3D",
+          "rows": 187861,
+          "subjects": 5889,
+          "on_path": false
+        }
+      ],
+      "by": "set",
+      "next": []
+    },
+    "11-few-subjects": {
+      "valid": true,
+      "issues": [],
+      "repairs": [],
+      "warnings": [],
+      "zero_rows": null,
+      "drops": [
+        {
+          "set": "scans",
+          "clause": "where base = T1w",
+          "before": 344,
+          "after": 101,
+          "nulls": 0
+        }
+      ],
+      "ties": [],
+      "unresolved": [],
+      "coarse": [],
+      "cost": {
+        "sets": 2,
+        "near": 0,
+        "groups": 0,
+        "algebra": 0,
+        "class": "small"
+      },
+      "funnel": [
+        {
+          "set": "people",
+          "grain": "subject",
+          "stage": "source",
+          "rows": 5900,
+          "subjects": 5900,
+          "on_path": true
+        },
+        {
+          "set": "people",
+          "grain": "subject",
+          "stage": "where code among [SC000010, SC000200, SC001500, SC003000, SC005000]",
+          "rows": 5,
+          "subjects": 5,
+          "on_path": true
+        },
+        {
+          "set": "scans",
+          "grain": "stack",
+          "stage": "source",
+          "rows": 344,
+          "subjects": 5,
+          "on_path": false
+        },
+        {
+          "set": "scans",
+          "grain": "stack",
+          "stage": "where base = T1w",
+          "rows": 101,
+          "subjects": 5,
+          "on_path": false
+        }
+      ],
+      "by": "set",
+      "next": []
+    },
+    "12-sessions-and-subjects-by-dataset": {
+      "valid": true,
+      "issues": [],
+      "repairs": [],
+      "warnings": [],
+      "zero_rows": null,
+      "drops": [
+        {
+          "set": "visits",
+          "clause": "where dataset among [site-c, site-d]",
+          "before": 28647,
+          "after": 613,
+          "nulls": 0
+        }
+      ],
+      "ties": [],
+      "unresolved": [],
+      "coarse": [],
+      "cost": {
+        "sets": 2,
+        "near": 0,
+        "groups": 0,
+        "algebra": 0,
+        "class": "small"
+      },
+      "funnel": [
+        {
+          "set": "people",
+          "grain": "subject",
+          "stage": "source",
+          "rows": 5900,
+          "subjects": 5900,
+          "on_path": true
+        },
+        {
+          "set": "people",
+          "grain": "subject",
+          "stage": "where dataset = site-a",
+          "rows": 4571,
+          "subjects": 4571,
+          "on_path": true
+        },
+        {
+          "set": "visits",
+          "grain": "session",
+          "stage": "source",
+          "rows": 28647,
+          "subjects": 4571,
+          "on_path": true
+        },
+        {
+          "set": "visits",
+          "grain": "session",
+          "stage": "where dataset among [site-c, site-d]",
+          "rows": 613,
+          "subjects": 613,
+          "on_path": true
+        }
+      ],
+      "by": "set",
+      "next": []
+    },
+    "13-stations.plain": {
+      "valid": true,
+      "issues": [],
+      "repairs": [],
+      "warnings": [],
+      "zero_rows": null,
+      "drops": [],
+      "ties": [],
+      "unresolved": [],
+      "coarse": [],
+      "cost": {
+        "sets": 2,
+        "near": 0,
+        "groups": 1,
+        "algebra": 0,
+        "class": "medium"
+      },
+      "funnel": [
+        {
+          "set": "scans",
+          "grain": "stack",
+          "stage": "source",
+          "rows": 516612,
+          "subjects": 5900,
+          "on_path": false
+        },
+        {
+          "set": "scans",
+          "grain": "stack",
+          "stage": "where modifier has FLAIR",
+          "rows": 63960,
+          "subjects": 5678,
+          "on_path": false
+        },
+        {
+          "set": "scans",
+          "grain": "stack",
+          "stage": "where acquisition_type = 3D",
+          "rows": 35767,
+          "subjects": 5340,
+          "on_path": false
+        },
+        {
+          "set": "scans",
+          "grain": "stack",
+          "stage": "where voxel <= 1",
+          "rows": 29133,
+          "subjects": 5070,
+          "on_path": false
+        }
+      ],
+      "by": "set",
+      "next": []
+    },
+    "14-derived-negated": {
+      "valid": true,
+      "issues": [],
+      "repairs": [],
+      "warnings": [],
+      "zero_rows": null,
+      "drops": [],
+      "ties": [],
+      "unresolved": [],
+      "coarse": [],
+      "cost": {
+        "sets": 4,
+        "near": 0,
+        "groups": 0,
+        "algebra": 1,
+        "class": "medium"
+      },
+      "funnel": [
+        {
+          "set": "thick",
+          "grain": "stack",
+          "stage": "source",
+          "rows": 516612,
+          "subjects": 5900,
+          "on_path": false
+        },
+        {
+          "set": "thick",
+          "grain": "stack",
+          "stage": "where not voxel > 5",
+          "rows": 452836,
+          "subjects": 5900,
+          "on_path": false
+        },
+        {
+          "set": "thick",
+          "grain": "stack",
+          "stage": "where not voxel_min < 1.1",
+          "rows": 114039,
+          "subjects": 5653,
+          "on_path": false
+        },
+        {
+          "set": "thick",
+          "grain": "stack",
+          "stage": "where not acquisition_type <> 2D",
+          "rows": 88226,
+          "subjects": 5493,
+          "on_path": false
+        },
+        {
+          "set": "fine",
+          "grain": "stack",
+          "stage": "source",
+          "rows": 516612,
+          "subjects": 5900,
+          "on_path": false
+        },
+        {
+          "set": "fine",
+          "grain": "stack",
+          "stage": "where acquisition_type <> 2D",
+          "rows": 187861,
+          "subjects": 5889,
+          "on_path": false
+        },
+        {
+          "set": "fine",
+          "grain": "stack",
+          "stage": "where voxel_min >= 0.9",
+          "rows": 137377,
+          "subjects": 5829,
+          "on_path": false
+        },
+        {
+          "set": "fine",
+          "grain": "stack",
+          "stage": "where 1 >= voxel_max",
+          "rows": 78366,
+          "subjects": 5661,
+          "on_path": false
+        },
+        {
+          "set": "coarse",
+          "grain": "stack",
+          "stage": "source",
+          "rows": 516612,
+          "subjects": 5900,
+          "on_path": false
+        },
+        {
+          "set": "coarse",
+          "grain": "stack",
+          "stage": "where not acquisition_type = 3D",
+          "rows": 323633,
+          "subjects": 5900,
+          "on_path": false
+        },
+        {
+          "set": "coarse",
+          "grain": "stack",
+          "stage": "where not voxel <= 4",
+          "rows": 157655,
+          "subjects": 5735,
+          "on_path": false
+        },
+        {
+          "set": "any",
+          "grain": "stack",
+          "stage": "source",
+          "rows": 285178,
+          "subjects": 5892,
+          "on_path": false
+        }
+      ],
+      "by": "set",
+      "next": []
+    }
+  }
+}

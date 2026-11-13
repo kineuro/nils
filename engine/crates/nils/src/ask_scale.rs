@@ -36,7 +36,7 @@ pub(crate) enum AskScaleCommand {
     /// Build the scale registry into an empty registry, with its sessions
     Build(BuildArgs),
     /// Time every document of a fixture directory and say what each answered
-    Time(TimeArgs),
+    Time(Box<TimeArgs>),
 }
 
 #[derive(Debug, Args)]
@@ -77,12 +77,21 @@ pub(crate) struct TimeArgs {
     /// Write each fixture's statement beside its name in this directory
     #[arg(long, value_name = "DIR")]
     sql: Option<PathBuf>,
+    /// Keep each fixture's whole diagnosis on this backend in this file:
+    /// the funnel's stages, the drops, the ties and the coarse dates,
+    /// counted with no time for the whole
+    #[arg(long, value_name = "FILE")]
+    record_funnel: Option<PathBuf>,
+    /// Fail where a fixture's whole diagnosis differs from what this file
+    /// keeps
+    #[arg(long, value_name = "FILE")]
+    reference_funnel: Option<PathBuf>,
 }
 
 pub(crate) fn ask_scale(home: &Home, cmd: AskScaleCommand) -> Result<(), Exit> {
     match cmd {
         AskScaleCommand::Build(args) => build(home, args),
-        AskScaleCommand::Time(args) => time(home, args),
+        AskScaleCommand::Time(args) => time(home, *args),
     }
 }
 
@@ -133,6 +142,8 @@ fn time(home: &Home, args: TimeArgs) -> Result<(), Exit> {
         serde_json::from_str(&text).map_err(|e| usage(format!("{}: {e}", path.display())))
     };
     let reference = args.reference.as_ref().map(&read).transpose()?;
+    let funnel_reference = args.reference_funnel.as_ref().map(&read).transpose()?;
+    let mut funnels = serde_json::Map::new();
     let mut files: Vec<PathBuf> = std::fs::read_dir(&args.fixtures)
         .map_err(|e| usage(format!("{}: {e}", args.fixtures.display())))?
         .filter_map(|e| e.ok().map(|e| e.path()))
@@ -264,6 +275,44 @@ fn time(home: &Home, args: TimeArgs) -> Result<(), Exit> {
             }),
             Err(e) => json!({"ms": funnel_ms, "error": e.to_string()}),
         };
+        // the diagnosis whole, with no time for all its counts: what a
+        // change to how the funnel is counted may not change
+        let mut funnel = funnel;
+        if args.record_funnel.is_some() || funnel_reference.is_some() {
+            let whole = diagnose::diagnose(
+                &mut registry,
+                parse(&text).map_err(|e| usage(format!("{}: {e}", path.display())))?,
+                Vec::new(),
+                &catalog,
+                &scope,
+                &scheme,
+                Bounds {
+                    timeout_ms: args.timeout_ms,
+                    max_rows: caps.sync_max_rows,
+                    max_bytes: caps.sync_max_bytes,
+                },
+                false,
+                None,
+            );
+            let whole = match whole {
+                Ok(d) => serde_json::to_value(&d).unwrap_or(Value::Null),
+                Err(e) => json!({"error": e.to_string()}),
+            };
+            if let Some(kept) = funnel_reference
+                .as_ref()
+                .map(|r| &r[&backend][&name])
+                .filter(|kept| !kept.is_null())
+            {
+                let same = *kept == whole;
+                if !same {
+                    differ.push(format!(
+                        "{name}: the diagnosis differs: kept {kept}, counted {whole}"
+                    ));
+                }
+                funnel["same_as_reference"] = json!(same);
+            }
+            funnels.insert(name.clone(), whole);
+        }
         let answered = answer.clone().unwrap_or(Value::Null);
         // a fixture the reference keeps no answer of on this backend (one
         // that did not end when the reference was taken) is held to nothing
@@ -290,6 +339,24 @@ fn time(home: &Home, args: TimeArgs) -> Result<(), Exit> {
             "funnel": funnel,
             "error": error,
         }));
+    }
+    if let Some(path) = &args.record_funnel {
+        let mut kept = if path.exists() {
+            read(path)?
+        } else {
+            json!({})
+        };
+        let mut mine = kept[&backend].as_object().cloned().unwrap_or_default();
+        mine.extend(funnels);
+        kept[&backend] = Value::Object(mine);
+        std::fs::write(
+            path,
+            format!(
+                "{}\n",
+                serde_json::to_string_pretty(&kept).unwrap_or_default()
+            ),
+        )
+        .map_err(|e| fail(format!("{}: {e}", path.display())))?;
     }
     if let Some(path) = &args.record {
         let mut kept = if path.exists() {

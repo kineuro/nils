@@ -28,6 +28,7 @@ The sixteenth engine beta makes a question over stacks answer in a second or two
 
 - `nils repair stack-axis` holds the read model against the axis rows for every stack and makes every row again where one differs; `--dry-run` says how they stand and writes nothing. A difference is a write that went around the engine.
 - `nils ask-scale build` and `nils ask-scale time` (hidden): a made-up registry of production size on either backend, and the time and the answer of every document of a directory on it, held against a kept reference.
+- `nils ask-scale time` takes `--record-funnel` and `--reference-funnel`: the whole diagnosis of every document (each stage's counts, the drops, the ties and the coarse dates) kept in a file, and held against a kept one.
 
 
 ## [1.0.0-beta.15] - 2026-11-12
