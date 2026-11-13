@@ -880,3 +880,60 @@ fn a_stack_a_fold_clears_keeps_the_row_of_a_bare_stack() {
         agrees(store, name, "a fold's clearing");
     }
 }
+
+/// A refresh names its stacks to Postgres as one list, so the planner
+/// expects a row a stack named and ties each to its sources by their keys.
+/// Asked for the union of what each source has of them, it expected the
+/// sum of three guesses and read the whole of `stack` for every 500
+/// stacks, which on a registry of half a million made a sort's refresh
+/// four times as long. What the planner expects does not depend on the
+/// registry's size, which is why it is held here and not the plan.
+#[test]
+fn a_refresh_is_planned_for_the_stacks_it_names() {
+    for mut l in labs() {
+        let name = l.name;
+        let store = l.registry.store();
+        let ids: Vec<i64> = (1..=40).collect();
+        for id in &ids {
+            stack(store, *id, 100 + *id);
+        }
+        fingerprint(
+            store,
+            &ids.iter()
+                .map(|id| printed(*id, 100 + *id, (Some("3D"), None, None, None, Some(1.0))))
+                .collect::<Vec<_>>(),
+        );
+        let axes: Vec<(i64, &str, Option<&str>)> = ids
+            .iter()
+            .flat_map(|id| {
+                [
+                    (*id, "base", Some("T1w")),
+                    (*id, "modifier", Some("FLAIR")),
+                    (*id, "modifier", Some("FatSat")),
+                    (*id, "construct", None),
+                    (*id, "disposition", Some("acquisition")),
+                ]
+            })
+            .collect();
+        put(store, &axes);
+        // a stack named twice is one row
+        let mut named = ids.clone();
+        named.extend([3, 7, 7]);
+        stack_axis::refresh(store, &named).unwrap();
+        agrees(store, name, "a refresh that names a stack twice");
+        if let Store::Postgres { .. } = store {
+            store.batch("ANALYZE").unwrap();
+            let rows = stack_axis::fresh_rows(store, &ids);
+            let plan = store
+                .query(&format!("EXPLAIN (FORMAT JSON) {rows}"), &[])
+                .unwrap();
+            let plan: Value = serde_json::from_str(plan[0].text(0).unwrap()).unwrap();
+            let expected = plan[0]["Plan"]["Plan Rows"].as_f64().unwrap();
+            assert!(
+                expected <= ids.len() as f64,
+                "{name}: the planner expects {expected} rows for {} stacks: {plan}",
+                ids.len()
+            );
+        }
+    }
+}

@@ -143,20 +143,50 @@ fn fresh(store: &Store, ids: Option<&str>) -> String {
         ),
     };
     let hot: String = HOT.iter().map(|c| format!(", f.{c} AS {c}")).collect();
+    // The stacks to make a row for: every id one of the sources has. Where
+    // the stacks are named, Postgres is given them as one list and asked
+    // which of them a source has, and not the union of what each source
+    // has of them: the union it takes for the sum of three guesses (9,400
+    // rows for 500 stacks of ten axis rows each), and it then reads the
+    // whole of `stack` to tie them, once for every 500 stacks a sort
+    // writes. A refresh of 50,000 stacks on a registry of half a million
+    // took 5.3 s so and takes 1.8 s by the list, where the refresh of the
+    // axes alone took 1.4 s (2026-11-13). SQLite reads the union by the
+    // keys either way.
+    let (ids_of, has_one) = match (store, ids) {
+        (Store::Postgres { .. }, Some(i)) => (
+            format!("SELECT unnest(ARRAY[{i}]::bigint[]) AS stack_id"),
+            " WHERE st.id IS NOT NULL OR f.stack_id IS NOT NULL OR a.stack_id IS NOT NULL",
+        ),
+        _ => (
+            format!(
+                "SELECT id AS stack_id FROM {stack}{of_stack} \
+                 UNION SELECT stack_id FROM {fingerprint}{of_row} \
+                 UNION SELECT ax.stack_id FROM {axis} ax{scope}",
+                of_stack = among("id"),
+                of_row = among("stack_id"),
+            ),
+            "",
+        ),
+    };
     format!(
         "SELECT k.stack_id AS stack_id, st.series_id AS series_id, \
          COALESCE(a.axes, {none}) AS axes, COALESCE(a.excluded, 0) AS excluded, \
          CASE WHEN f.stack_id IS NULL THEN 0 ELSE 1 END AS fingerprinted{hot} \
-         FROM (SELECT id AS stack_id FROM {stack}{of_stack} \
-         UNION SELECT stack_id FROM {fingerprint}{of_row} \
-         UNION SELECT ax.stack_id FROM {axis} ax{scope}) k \
+         FROM ({ids_of}) k \
          LEFT JOIN {stack} st ON st.id = k.stack_id \
          LEFT JOIN {fingerprint} f ON f.stack_id = k.stack_id \
-         LEFT JOIN ({axes}) a ON a.stack_id = k.stack_id",
+         LEFT JOIN ({axes}) a ON a.stack_id = k.stack_id{has_one}",
         none = no_axes(store),
-        of_stack = among("id"),
-        of_row = among("stack_id"),
     )
+}
+
+/// The statement that reads the rows of these stacks from their sources,
+/// as [`refresh`] writes them: for a test that holds what the planner
+/// makes of it.
+#[doc(hidden)]
+pub fn fresh_rows(store: &Store, stacks: &[i64]) -> String {
+    fresh(store, Some(&list(stacks)))
 }
 
 /// The columns of a row, in the order [`fresh`] gives them.
@@ -177,6 +207,10 @@ fn columns() -> String {
 pub fn refresh(store: &mut Store, stacks: &[i64]) -> Result<(), Error> {
     let mine = store.qualified("stack_axis");
     let columns = columns();
+    // each stack once: a row is made for each id named
+    let mut stacks = stacks.to_vec();
+    stacks.sort_unstable();
+    stacks.dedup();
     for chunk in stacks.chunks(500) {
         let ids = list(chunk);
         store.execute(
