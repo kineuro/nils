@@ -1563,7 +1563,7 @@ fn ask_run(home: &Home, args: AskRunArgs) -> Result<(), Exit> {
 fn run_refused(e: run::RunError) -> Exit {
     match e {
         run::RunError::Ask(a) => refused(a),
-        run::RunError::Compile(c) => refused(nils_ask::Error::Invalid(vec![c.issue()])),
+        run::RunError::Compile(c) => refused(nils_ask::Error::Invalid(c.issues())),
         run::RunError::Measure(m) => refused(nils_ask::Error::Invalid(vec![m.issue()])),
         other => fail(other.to_string()),
     }

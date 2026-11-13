@@ -1221,3 +1221,161 @@ fn the_sampler_refuses_a_name_that_is_no_field_with_the_next_step() {
         assert!(!sample.items.is_empty(), "{}: {sample:?}", l.name);
     }
 }
+
+/// What the compiler alone refuses, a path the validator resolves through
+/// two ancestors and no layer projects, as a document reading it in a
+/// group's keys or in the answer's columns and order.
+fn out_of_reach(by: &[&str], columns: &[&str], order: &[&str]) -> String {
+    let refs =
+        |paths: &[&str]| -> Vec<Value> { paths.iter().map(|p| json!(["field", {}, p])).collect() };
+    let mut sets = json!({
+        "cohorts": {"grain": "cohort"},
+        "people": {"grain": "subject", "of": "cohorts"},
+        "visits": {"grain": "session", "of": "people"},
+        "scans": {"grain": "stack", "of": "visits"}
+    });
+    let out = if by.is_empty() {
+        json!({"set": "scans", "level": "record", "columns": refs(columns),
+            "order": refs(order).into_iter().map(|c| json!([c, "asc"])).collect::<Vec<_>>()})
+    } else {
+        sets["by_reach"] = json!({"grain": "group", "group": {"of": "scans", "by": refs(by)}});
+        json!({"set": "by_reach", "level": "aggregate", "columns": [["field", {}, "_rows"]]})
+    };
+    json!({"ast_version": 1, "name": "scans by what no layer projects", "sets": sets, "out": out})
+        .to_string()
+}
+
+/// 2026-11-13, on each backend: a draft whose group read three keys the
+/// compiler could not was refused three times, each time naming the first
+/// key left, and a model spent a turn on each. What the compiler refuses of
+/// one group's keys, and of the answer's columns and order, is one refusal:
+/// every key at its own path, each with the message and the next step it
+/// has alone. A document that compiles drafts and runs as it did.
+#[test]
+fn the_compiler_names_every_key_it_cannot_read_in_one_refusal() {
+    let unreachable = [
+        "visits.people.cohort.id",
+        "visits.people.sex",
+        "visits.people.code",
+    ];
+    for mut l in labs() {
+        let scope = common::quasi();
+        let scheme = Scheme::default();
+        let s = Setting {
+            names: &l.catalog,
+            scope: &scope,
+            scheme: &scheme,
+            principal: "author",
+            bounds: bounds(),
+            values_cap: 50,
+        };
+        let before = document_count(&mut l.registry);
+        let mut issues_of = |text: &str| -> Vec<nils_ask::Issue> {
+            let drafted = affordance::draft(&mut l.registry, text, &s, None)
+                .unwrap_or_else(|e| panic!("{}: {e}", l.name));
+            assert!(!drafted.diagnosis.valid, "{}: {text}", l.name);
+            assert!(drafted.document.is_none() && drafted.hash.is_none());
+            assert!(drafted.diagnosis.funnel.is_empty(), "{}", l.name);
+            drafted.diagnosis.issues
+        };
+        // each key alone, as it was refused before: its message and its next
+        let alone: Vec<nils_ask::Issue> = unreachable
+            .iter()
+            .map(|key| {
+                let issues = issues_of(&out_of_reach(&[key], &[], &[]));
+                assert_eq!(issues.len(), 1, "{}: {issues:?}", l.name);
+                let i = issues[0].clone();
+                assert_eq!(i.code, nils_ask::Code::NotCompilable, "{}", l.name);
+                assert_eq!(i.path, "sets.by_reach.group.by[0]", "{}", l.name);
+                assert_eq!(i.message, format!("{key} is not projected in this layer"));
+                i
+            })
+            .collect();
+        // the three in one group: one refusal, each at its own path
+        let issues = issues_of(&out_of_reach(&unreachable, &[], &[]));
+        let expected: Vec<nils_ask::Issue> = alone
+            .iter()
+            .enumerate()
+            .map(|(n, i)| nils_ask::Issue {
+                path: format!("sets.by_reach.group.by[{n}]"),
+                ..i.clone()
+            })
+            .collect();
+        assert_eq!(issues, expected, "{}", l.name);
+        // a key that reads beside two that do not: the two, at their places
+        let issues = issues_of(&out_of_reach(
+            &[unreachable[0], "subject.sex", unreachable[2]],
+            &[],
+            &[],
+        ));
+        let paths: Vec<&str> = issues.iter().map(|i| i.path.as_str()).collect();
+        assert_eq!(
+            paths,
+            ["sets.by_reach.group.by[0]", "sets.by_reach.group.by[2]"],
+            "{}",
+            l.name
+        );
+        // the answer's columns and its order, in the one refusal too
+        let issues = issues_of(&out_of_reach(
+            &[],
+            &[unreachable[0], "subject.sex", unreachable[1]],
+            &["subject.sex", unreachable[2]],
+        ));
+        let told: Vec<(&str, String)> = issues
+            .iter()
+            .map(|i| (i.path.as_str(), i.message.clone()))
+            .collect();
+        let not_projected = |key: &str| format!("{key} is not projected in this layer");
+        assert_eq!(
+            told,
+            [
+                ("out.columns[0]", not_projected(unreachable[0])),
+                ("out.columns[2]", not_projected(unreachable[1])),
+                ("out.order[1]", not_projected(unreachable[2])),
+            ],
+            "{}",
+            l.name
+        );
+        assert!(
+            issues
+                .iter()
+                .all(|i| i.code == nils_ask::Code::NotCompilable && i.next == alone[0].next),
+            "{}: {issues:?}",
+            l.name
+        );
+        // the doors that compile without counting say the same three
+        let text = out_of_reach(&unreachable, &[], &[]);
+        let ask = parse(&text).unwrap();
+        assert_eq!(
+            affordance::compile_issues(&mut l.registry, &ask, &s),
+            expected,
+            "{}",
+            l.name
+        );
+        let refused =
+            nils_ask::run::explain(&mut l.registry, ask, &l.catalog, &scope, &scheme).unwrap_err();
+        let words = refused.to_string();
+        assert_eq!(
+            words,
+            format!(
+                "the ask is refused:\n  {}\n  {}\n  {}",
+                expected[0], expected[1], expected[2]
+            ),
+            "{}",
+            l.name
+        );
+        assert_eq!(document_count(&mut l.registry), before, "{}", l.name);
+        // keys every layer projects: the group drafts, is stored and runs
+        let reads = out_of_reach(&["visits.first", "subject.sex"], &[], &[]);
+        let drafted = affordance::draft(&mut l.registry, &reads, &s, None)
+            .unwrap_or_else(|e| panic!("{}: {e}", l.name));
+        assert!(
+            drafted.diagnosis.valid && drafted.document.is_some(),
+            "{}: {:?}",
+            l.name,
+            drafted.diagnosis.issues
+        );
+        let (_, answer) = common::run_ask(&mut l, parse(&reads).unwrap());
+        assert!(!answer.rows.is_empty(), "{}", l.name);
+    }
+}

@@ -5406,3 +5406,157 @@ fn the_sampler_answers_404_and_the_next_step_for_a_name_that_is_no_field() {
         }
     }
 }
+
+/// 2026-11-13, on each backend: a draft whose group read three keys that
+/// are "not projected in this layer" was refused three times, each refusal
+/// naming one key, and the model that wrote it spent a turn on each. Every
+/// door that compiles names all of a group's keys the compiler cannot read
+/// in one refusal, each at its own path with the message and the next step
+/// it had alone: the draft in its diagnosis, validate and run as a 400. And
+/// `cohort.id` on a subject set drawn `from` another, which the validator
+/// passed and the compiler then refused, is refused by the validator, every
+/// reader of it in the one answer.
+#[test]
+fn a_refusal_names_every_key_of_a_group_that_cannot_be_read() {
+    let document = |by: serde_json::Value| {
+        serde_json::json!({
+            "ast_version": 1,
+            "name": "scans by what no layer projects",
+            "sets": {
+                "cohorts": {"grain": "cohort"},
+                "people": {"grain": "subject", "of": "cohorts"},
+                "some": {"grain": "subject", "from": "people"},
+                "visits": {"grain": "session", "of": "people"},
+                "scans": {"grain": "stack", "of": "visits"},
+                "by_reach": {"grain": "group", "group": {"of": "scans", "by": by}},
+                "by_cohort": {"grain": "group", "group": {"of": "some", "by": [
+                    ["field", {}, "sex"]
+                ]}}
+            },
+            "out": {"set": "by_reach", "level": "aggregate", "columns": [["field", {}, "_rows"]]}
+        })
+    };
+    let keys = [
+        "visits.people.cohort.id",
+        "visits.people.sex",
+        "visits.people.code",
+    ];
+    let three = document(serde_json::json!([
+        ["field", {}, keys[0]],
+        ["field", {}, keys[1]],
+        ["field", {}, keys[2]]
+    ]));
+    let expected: Vec<serde_json::Value> = keys
+        .iter()
+        .enumerate()
+        .map(|(n, key)| {
+            serde_json::json!({
+                "code": "not_compilable",
+                "path": format!("sets.by_reach.group.by[{n}]"),
+                "message": format!("{key} is not projected in this layer"),
+                "next": "change the document as the message says; validate compiles what run would",
+            })
+        })
+        .collect();
+    // the cohort edge on a set drawn from another, three readers of it
+    let mut edge = document(serde_json::json!([["field", {}, "subject.sex"]]));
+    edge["sets"]["by_cohort"]["group"]["by"] = serde_json::json!([
+        ["field", {}, "cohort.id"],
+        ["field", {}, "sex"],
+        ["field", {}, "cohort.id"]
+    ]);
+    edge["out"] = serde_json::json!({"set": "by_cohort", "level": "aggregate",
+        "columns": [["field", {}, "cohort.id"], ["field", {}, "_rows"]]});
+    let edge_paths = ["sets.by_cohort.group.by[0]", "sets.by_cohort.group.by[2]"];
+    for (backend, home, dsn) in backends("nils_ask_serve_keys_test") {
+        let server = Server::start(&home, 7, &[]);
+        let post = |door: &str, request: serde_json::Value| {
+            server.request("POST", door, Some(&body(request)), None)
+        };
+        // the draft door: one diagnosis, the three keys
+        let (status, drafted) = post(
+            "/api/ask/draft",
+            serde_json::json!({"text": three.to_string()}),
+        );
+        assert_eq!(status, 200, "{backend}: {drafted}");
+        let d = &drafted["diagnosis"];
+        assert_eq!(d["valid"], false, "{backend}: {drafted}");
+        assert_eq!(drafted["document"], serde_json::Value::Null, "{backend}");
+        assert_eq!(
+            d["issues"],
+            serde_json::json!(expected),
+            "{backend}: {drafted}"
+        );
+        // validate and run: one 400, the three keys and their next steps
+        for door in ["/api/ask/validate", "/api/ask/run"] {
+            let (status, refused) = post(door, serde_json::json!({"document": three}));
+            assert_eq!(status, 400, "{backend} {door}: {refused}");
+            assert_eq!(
+                refused["error"], "the document is refused",
+                "{backend} {door}"
+            );
+            assert_eq!(refused["disclosure"], "safe", "{backend} {door}");
+            assert_eq!(
+                refused["issues"],
+                serde_json::json!(expected),
+                "{backend} {door}: {refused}"
+            );
+            assert_eq!(
+                refused["next"].as_array().map(Vec::len),
+                Some(3),
+                "{backend} {door}: {refused}"
+            );
+        }
+        // the cohort edge, decided by the validator: every reader at once
+        let (status, drafted) = post(
+            "/api/ask/draft",
+            serde_json::json!({"text": edge.to_string()}),
+        );
+        assert_eq!(status, 200, "{backend}: {drafted}");
+        let issues = drafted["diagnosis"]["issues"].as_array().unwrap();
+        let paths: Vec<&str> = issues.iter().map(|i| i["path"].as_str().unwrap()).collect();
+        assert_eq!(paths, edge_paths, "{backend}: {drafted}");
+        for i in issues {
+            assert_eq!(i["code"], "unknown_field", "{backend}: {drafted}");
+            assert!(
+                i["message"].as_str().unwrap().starts_with(
+                    "cohort.id is carried by a subject set drawn of a cohort set, and some is not: "
+                ),
+                "{backend}: {drafted}"
+            );
+        }
+        // the same group over the set that has the edge drafts and is stored
+        let mut sound = edge.clone();
+        sound["sets"]["by_cohort"]["group"]["of"] = serde_json::json!("people");
+        let (status, drafted) = post(
+            "/api/ask/draft",
+            serde_json::json!({"text": sound.to_string()}),
+        );
+        assert_eq!(status, 200, "{backend}: {drafted}");
+        assert_eq!(drafted["diagnosis"]["valid"], true, "{backend}: {drafted}");
+        assert!(
+            drafted["document"].as_i64().is_some(),
+            "{backend}: {drafted}"
+        );
+        let (status, ran) = post("/api/ask/run", serde_json::json!({"document": sound}));
+        assert_eq!(status, 200, "{backend}: {ran}");
+        assert!(
+            ran["row_count"].as_i64().is_some_and(|n| n >= 1),
+            "{backend}: {ran}"
+        );
+        // and so does the set drawn from another once it names a cohort set
+        // in its own `of`, as the refusal says to write
+        let mut own = edge.clone();
+        own["sets"]["some"]["of"] = serde_json::json!("cohorts");
+        let (status, ran) = post("/api/ask/run", serde_json::json!({"document": own}));
+        assert_eq!(status, 200, "{backend}: {ran}");
+        assert!(
+            ran["row_count"].as_i64().is_some_and(|n| n >= 1),
+            "{backend}: {ran}"
+        );
+        server.finish();
+        if let Some(dsn) = &dsn {
+            drop_schema(dsn, "nils_ask_serve_keys_test");
+        }
+    }
+}

@@ -406,7 +406,7 @@ fn run_err(e: RunError) -> Reply {
         // what only the compiler refuses, a parameter without a value for
         // one, is refused as a validation refusal is, at the path the
         // compiler names, and no longer answers 500 (2026-10-12)
-        RunError::Compile(c) => issues_reply(400, "the document is refused", &[c.issue()]),
+        RunError::Compile(c) => issues_reply(400, "the document is refused", &c.issues()),
         RunError::Forbidden(m) => Reply::error(403, m),
         RunError::Handle(HandleError::NotFound(id)) => Reply::error(404, format!("no handle {id}")),
         RunError::Handle(
