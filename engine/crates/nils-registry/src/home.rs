@@ -401,6 +401,7 @@ impl Home {
             meta,
             migrated: Vec::new(),
             swept: None,
+            mended: None,
         })
     }
 
@@ -410,6 +411,18 @@ impl Home {
     /// the key is ([`crate::shape_sweep`]); a sweep that cannot run or fails
     /// changes nothing about the open and is tried again at the next.
     pub fn open(&self) -> Result<Registry, HomeError> {
+        self.open_mending(true)
+    }
+
+    /// [`Home::open`] without its look at the triggers of the read model:
+    /// for the repair that is to say how they stand (`nils repair
+    /// stack-axis`), which an open that mended them first would leave
+    /// nothing to say of, and whose dry run writes nothing.
+    pub fn open_as_found(&self) -> Result<Registry, HomeError> {
+        self.open_mending(false)
+    }
+
+    fn open_mending(&self, mend: bool) -> Result<Registry, HomeError> {
         let config = self.read_config()?;
         let mut store = self.open_store(&config, Kind::Registry)?;
         let migrated = match migrate::standing(&mut store, Kind::Registry)? {
@@ -427,6 +440,43 @@ impl Home {
                 )));
             }
         };
+        // The triggers that keep a stack's row of the read model
+        // (`crate::stack_axis`): one read of the catalogue, and where they
+        // are not set (dropped, switched off, or a copy's that write
+        // another schema's rows) they are set again and every row made
+        // again before anything is read or written, since a question would
+        // otherwise count stale rows and say nothing. It is said once, on
+        // stderr, and audited. A registry opens either way.
+        let looked = if mend {
+            crate::stack_axis::mend(
+                &mut store,
+                &crate::principal::Principal::current().to_string(),
+            )
+        } else {
+            Ok(None)
+        };
+        let mended = match looked {
+            Ok(mended) => mended,
+            Err(e) => {
+                eprintln!(
+                    "nils: the triggers that keep the stacks' rows of the read model could not be looked for: {e}; run nils repair stack-axis"
+                );
+                None
+            }
+        };
+        if let Some(m) = &mended {
+            match (&m.rows, &m.error) {
+                (Some(rows), _) => eprintln!(
+                    "nils: the triggers that keep the stacks' rows of the read model were not set: {}. They are set again and the {rows} rows were made again from the stacks, the fingerprints and the axis rows.",
+                    m.found.in_words()
+                ),
+                (None, error) => eprintln!(
+                    "nils: the triggers that keep the stacks' rows of the read model are not set: {}. Setting them failed ({}), so questions over stacks may count rows that are behind; run nils repair stack-axis.",
+                    m.found.in_words(),
+                    error.as_deref().unwrap_or("no reason given")
+                ),
+            }
+        }
         let meta = read_meta(&mut store)?;
         let mut registry = Registry {
             home: self.clone(),
@@ -435,6 +485,7 @@ impl Home {
             meta,
             migrated,
             swept: None,
+            mended,
         };
         if registry.meta.never_kept_by_shape.is_none()
             && let Ok(Some(swept)) = crate::shape_sweep::run(&mut registry)
@@ -601,6 +652,7 @@ pub struct Registry {
     meta: Meta,
     migrated: Vec<i64>,
     swept: Option<crate::shape_sweep::Swept>,
+    mended: Option<crate::stack_axis::Mended>,
 }
 
 impl fmt::Debug for Registry {
@@ -642,6 +694,14 @@ impl Registry {
     /// which is every open but the first after the update.
     pub fn swept(&self) -> Option<crate::shape_sweep::Swept> {
         self.swept
+    }
+
+    /// What this open found of the triggers that keep the stacks' rows of
+    /// the read model and did about it ([`crate::stack_axis::mend`]); none
+    /// where they were set, which is every open of a registry nobody
+    /// reached around the engine.
+    pub fn mended(&self) -> Option<&crate::stack_axis::Mended> {
+        self.mended.as_ref()
     }
 
     pub fn keys(&self) -> KeyStore {

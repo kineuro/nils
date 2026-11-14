@@ -168,7 +168,9 @@ pub fn clear(store: &mut Store, stacks: &[i64]) -> Result<(), Error> {
             delete_where(store, t, "stack_id", stacks)?;
         }
     }
-    Ok(())
+    // their rows of the read model say what is left: a stack, with no
+    // fingerprint and no axis yet
+    crate::stack_axis::refresh(store, stacks)
 }
 
 /// A question about a stack no person answered, as a fold clears it.

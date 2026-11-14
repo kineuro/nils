@@ -1182,23 +1182,34 @@ fn build_registry() -> Vec<Table> {
         )
         .unique(&["stack_id", "axis", "value"])
         .index(&["axis", "value"]),
-        // The axes of a stack as one row, a read model of
+        // One row a stack, what a question reads of every stack of a set
+        // (`crate::stack_axis`). The axes are a read model of
         // `classification_axis` that every writer of it keeps in the same
-        // transaction (`crate::stack_axis`): `axes` is one object, each
-        // axis with the array of its values, and `excluded` is 1 where the
-        // pack ruled the stack out, the few rows the partial key lists. A
-        // question reads an axis of every stack of a set from here, one
-        // row a stack, where the rows of `classification_axis` were a
-        // lookup per stack and axis.
+        // transaction: `axes` is one object, each axis with the array of
+        // its values, and `excluded` is 1 where the pack ruled the stack
+        // out, the few rows the partial key lists. The stack's series,
+        // whether it has a fingerprint and the fingerprint columns a
+        // question filters stacks on are kept by triggers on `stack` and
+        // `stack_fingerprint` (schema 119). A stack set is read from
+        // here, one row a stack, where it was a join of the stack, its
+        // fingerprint and a lookup per axis.
         Table::new(
             "stack_axis",
             vec![
                 req("stack_id", Type::Int),
                 req("axes", Type::Json),
                 req("excluded", Type::Int),
+                col("series_id", Type::Int),
+                req("fingerprinted", Type::Int),
+                col("acquisition_type_filled", Type::Text),
+                col("mr_acquisition_type", Type::Text),
+                col("pixel_spacing_row", Type::Double),
+                col("pixel_spacing_col", Type::Double),
+                col("slice_thickness", Type::Double),
             ],
         )
         .keyed_by("stack_id")
+        .index(&["series_id"])
         .unique_where("excluded", &["stack_id"], "excluded = 1"),
         Table::new(
             "classification_evidence",

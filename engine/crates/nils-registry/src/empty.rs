@@ -40,6 +40,12 @@ pub enum Row {
     /// that stays with them, and a sweep removes it with an empty stack,
     /// which holds no file.
     Follows,
+    /// The stack's row of the read model (`crate::stack_axis`), made of
+    /// the stack, its fingerprint and its axis rows: no list deletes it.
+    /// It is made again from what is left of them once they are gone,
+    /// which leaves a stack that goes with no row and one that stays with
+    /// the row of a stack nothing was said of yet.
+    Read,
 }
 
 /// Every table with a `stack_id` column, and what a sweep does to it.
@@ -51,8 +57,9 @@ pub const STACK_TABLES: &[(&str, Row)] = &[
     ("stack_fingerprint", Row::Goes),
     ("classification", Row::Goes),
     ("classification_axis", Row::Goes),
-    // the same rows, one a stack (`crate::stack_axis`)
-    ("stack_axis", Row::Goes),
+    // the same rows, one a stack, beside its series and its fingerprint
+    // columns (`crate::stack_axis`)
+    ("stack_axis", Row::Read),
     ("classification_evidence", Row::Goes),
     ("classification_vote", Row::Goes),
     ("pick_stack", Row::Keeps("a pick names it")),
@@ -97,6 +104,9 @@ pub const SERIES_TABLES: &[(&str, Row)] = &[
     ("stack", Row::Holds),
     ("instance", Row::Holds),
     ("stack_fingerprint", Row::Goes),
+    // a stack's row names its series (`crate::stack_axis`): a series that
+    // is swept holds no stack, so there is no row of it
+    ("stack_axis", Row::Read),
     ("series_private", Row::Goes),
     ("series_mr", Row::Goes),
     ("series_ct", Row::Goes),
@@ -265,7 +275,9 @@ pub fn remove_stacks(
             delete_where(store, t, "stack_id", gone)?;
         }
     }
-    delete_where(store, "stack", "id", gone)
+    delete_where(store, "stack", "id", gone)?;
+    // nothing is left of them for a row of the read model to say
+    crate::stack_axis::refresh(store, gone)
 }
 
 pub(crate) fn delete_where(

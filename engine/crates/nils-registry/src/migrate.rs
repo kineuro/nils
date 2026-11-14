@@ -11,7 +11,7 @@ use crate::schema::{self, ID_TYPES, Table, linkage_tables, registry_tables};
 use crate::store::{Error, Param, Store};
 
 /// The version this binary writes.
-pub const SCHEMA_VERSION: i64 = 118;
+pub const SCHEMA_VERSION: i64 = 119;
 
 /// Which of the two stores a migration runs against.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -526,7 +526,71 @@ pub static MIGRATIONS: &[Migration] = &[
         version: 118,
         apply: the_axes_of_a_stack_are_one_row,
     },
+    Migration {
+        version: 119,
+        apply: a_stack_set_is_read_from_one_row,
+    },
 ];
+
+/// The row of a stack carries its series and the fingerprint columns a
+/// question filters stacks on (`crate::stack_axis`, 2026-11-13), so that a
+/// stack set is one read of `stack_axis` where it joined the stack, its
+/// fingerprint and the row of its axes, row by row. The table is made
+/// again as it is declared now (the new columns, one of them required,
+/// and the index by series), triggers on `stack` and `stack_fingerprint`
+/// are set that keep the new columns from here on, and every row is made
+/// from its sources: one pass over the stacks, their fingerprints and the
+/// axis rows, some tens of seconds on a registry of half a million stacks.
+/// A registry that came through migration 118 under this binary has the
+/// table as declared already, with its triggers and rows, and is left as
+/// it is.
+fn a_stack_set_is_read_from_one_row(store: &mut Store, kind: Kind) -> Result<(), Error> {
+    if kind != Kind::Registry {
+        return Ok(());
+    }
+    if column_exists(store, "stack_axis", "fingerprinted")? {
+        return crate::stack_axis::ensure_triggers(store);
+    }
+    // who may read the table as it was may read it as it is
+    let readers = readers_of(store, "stack_axis")?;
+    let mine = store.qualified("stack_axis");
+    store.batch(&format!("DROP TABLE {mine}"))?;
+    add_tables(store, kind, &["stack_axis"])?;
+    crate::stack_axis::rebuild(store)?;
+    grant_read(store, "stack_axis", &readers)
+}
+
+/// The roles, other than the one connected, that may read a table: none on
+/// SQLite, which has no roles.
+fn readers_of(store: &mut Store, table: &str) -> Result<Vec<String>, Error> {
+    if let Store::Sqlite(_) = store {
+        return Ok(Vec::new());
+    }
+    let schema = store.schema().unwrap_or("public").to_string();
+    store
+        .query(
+            "SELECT DISTINCT grantee FROM information_schema.role_table_grants \
+             WHERE table_schema = $1 AND table_name = $2 \
+             AND privilege_type = 'SELECT' AND grantee <> current_user",
+            &[Param::from(schema), Param::from(table)],
+        )?
+        .iter()
+        .map(|r| r.text(0).map(str::to_string))
+        .collect()
+}
+
+/// Let each of these roles read a table.
+fn grant_read(store: &mut Store, table: &str, readers: &[String]) -> Result<(), Error> {
+    let mine = store.qualified(table);
+    for role in readers {
+        let who = match role.as_str() {
+            "PUBLIC" => "PUBLIC".to_string(),
+            role => format!("\"{}\"", role.replace('"', "\"\"")),
+        };
+        store.batch(&format!("GRANT SELECT ON {mine} TO {who}"))?;
+    }
+    Ok(())
+}
 
 /// The axes of a stack as one row (`stack_axis`, `crate::stack_axis`): the
 /// read model a question reads an axis of every stack of a set from. The
@@ -544,24 +608,8 @@ fn the_axes_of_a_stack_are_one_row(store: &mut Store, kind: Kind) -> Result<(), 
     // (`--ask-dsn`), granted table by table: who may read the axis rows may
     // read the row made of them, or the first question after the update
     // would be refused.
-    if let Store::Postgres { .. } = store {
-        let schema = store.schema().unwrap_or("public").to_string();
-        let readers = store.query(
-            "SELECT DISTINCT grantee FROM information_schema.role_table_grants \
-             WHERE table_schema = $1 AND table_name = 'classification_axis' \
-             AND privilege_type = 'SELECT' AND grantee <> current_user",
-            &[Param::from(schema)],
-        )?;
-        let mine = store.qualified("stack_axis");
-        for r in &readers {
-            let who = match r.text(0)? {
-                "PUBLIC" => "PUBLIC".to_string(),
-                role => format!("\"{}\"", role.replace('"', "\"\"")),
-            };
-            store.batch(&format!("GRANT SELECT ON {mine} TO {who}"))?;
-        }
-    }
-    Ok(())
+    let readers = readers_of(store, "classification_axis")?;
+    grant_read(store, "stack_axis", &readers)
 }
 
 /// The `subject-code` id type says what it holds (2026-11-11): the code of a

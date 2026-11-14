@@ -750,10 +750,10 @@ fn what_the_ask_prints_as_its_predicate_is_what_a_reader_can_reproduce() {
         None,
     );
     let sql = out.ok("explain").to_string();
-    // the predicate reads the stacks the read model of the axes says the
-    // pack ruled out (`stack_axis.excluded`)
+    // the predicate reads what the stack's own row of the read model says:
+    // not one the pack ruled out (`stack_axis.excluded`)
     assert!(
-        sql.contains("NOT EXISTS") && sql.contains("stack_axis") && sql.contains("excluded = 1"),
+        sql.contains("stack_axis xa") && sql.contains("xa.excluded = 0"),
         "the printed query carries the standing predicate: {sql}"
     );
 
@@ -778,11 +778,11 @@ fn what_the_ask_prints_as_its_predicate_is_what_a_reader_can_reproduce() {
         readers_own as usize, answered,
         "the predicate a reader reproduces is the one the ask applied"
     );
-    // and as the printed query writes it, over the row made of the axis rows
+    // and as the printed query writes it, over the stacks' own rows of the
+    // read model
     let as_printed = store
         .query(
-            "SELECT COUNT(*) FROM stack st WHERE NOT EXISTS \
-             (SELECT 1 FROM stack_axis a WHERE a.stack_id = st.id AND a.excluded = 1)",
+            "SELECT COUNT(*) FROM stack_axis xa WHERE xa.fingerprinted = 1 AND xa.excluded = 0",
             &[],
         )
         .unwrap()[0]
