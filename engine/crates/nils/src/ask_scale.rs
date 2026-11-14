@@ -91,6 +91,10 @@ pub(crate) struct TimeArgs {
     /// stage, and fail where the two differ
     #[arg(long)]
     check_funnel: bool,
+    /// How many readers a funnel's statements are counted on beside the
+    /// registry's own connection, as the draft door counts them
+    #[arg(long, default_value_t = 4)]
+    beside: usize,
 }
 
 pub(crate) fn ask_scale(home: &Home, cmd: AskScaleCommand) -> Result<(), Exit> {
@@ -262,15 +266,22 @@ fn time(home: &Home, args: TimeArgs) -> Result<(), Exit> {
         // counted in one pass per set, as a draft counts it, and by a
         // statement per stage, each the least of the runs
         let mut funnel = json!({});
-        for (in_one_pass, ms, whole) in [
-            (true, "ms", "whole"),
-            (false, "by_stage_ms", "by_stage_whole"),
+        // as a draft counts it: one pass per set, and the statements that
+        // are left at the same time on readers beside; then the same on
+        // one connection, and by a statement per stage
+        let mut beside: Vec<nils_registry::Store> = (0..args.beside)
+            .map_while(|_| registry.open_ask_reader(None).ok())
+            .collect();
+        for (how, ms, whole) in [
+            (2, "ms", "whole"),
+            (1, "alone_ms", "alone_whole"),
+            (0, "by_stage_ms", "by_stage_whole"),
         ] {
             let mut least: Option<(u128, Value)> = None;
             for _ in 0..args.runs.max(1) {
                 let started = Instant::now();
-                let counted = if in_one_pass {
-                    diagnose::diagnose_within(
+                let counted = if how > 0 {
+                    diagnose::diagnose_beside(
                         &mut registry,
                         drafted.clone(),
                         Vec::new(),
@@ -281,6 +292,7 @@ fn time(home: &Home, args: TimeArgs) -> Result<(), Exit> {
                         false,
                         None,
                         Some(caps.draft_timeout_ms),
+                        if how == 2 { &mut beside[..] } else { &mut [] },
                     )
                 } else {
                     diagnose::diagnose_by_stage(
@@ -313,7 +325,7 @@ fn time(home: &Home, args: TimeArgs) -> Result<(), Exit> {
         // the diagnosis whole, with no time for all its counts: what a
         // change to how the funnel is counted may not change
         if args.record_funnel.is_some() || funnel_reference.is_some() || args.check_funnel {
-            let whole = diagnose::diagnose(
+            let whole = diagnose::diagnose_beside(
                 &mut registry,
                 parse(&text).map_err(|e| usage(format!("{}: {e}", path.display())))?,
                 Vec::new(),
@@ -327,6 +339,8 @@ fn time(home: &Home, args: TimeArgs) -> Result<(), Exit> {
                 },
                 false,
                 None,
+                None,
+                &mut beside[..],
             );
             let whole = match whole {
                 Ok(d) => serde_json::to_value(&d).unwrap_or(Value::Null),

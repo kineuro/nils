@@ -8,7 +8,7 @@
 //! named set, so an author sees where subjects fall out. The leave one out
 //! variant is a job's.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::time::Instant;
 
 use nils_registry::home::Registry;
@@ -465,6 +465,73 @@ pub fn sets_passed() -> (usize, usize) {
     PASSED.get()
 }
 
+/// A count level document without what its count does not read: the
+/// bindings no clause of any of its sets names, by themselves or through
+/// another binding, and then the sets nothing reads. A binding is kept
+/// where its name is written anywhere else in the document, as a path, the
+/// end of one or the start of one, which keeps more than are read and
+/// never drops one that is. None where there is nothing to drop.
+fn lean(ask: &Ask) -> Option<Ask> {
+    let mut doc = ask.clone();
+    let mut dropped = false;
+    loop {
+        let mut again = false;
+        let names: Vec<(String, String)> = doc
+            .sets
+            .iter()
+            .flat_map(|(s, set)| set.bind.names().map(move |b| (s.clone(), b.to_string())))
+            .collect();
+        for (s, b) in names {
+            let mut without = doc.clone();
+            if let Some(set) = without.sets.get_mut(&s) {
+                set.bind.0.retain(|(n, _)| *n != b);
+            }
+            let Ok(text) = serde_json::to_string(&without) else {
+                return None;
+            };
+            let read = [
+                format!("\"{b}\""),
+                format!(".{b}\""),
+                format!("\"{b}."),
+                format!(".{b}."),
+            ]
+            .iter()
+            .any(|form| text.contains(form.as_str()));
+            if !read {
+                doc = without;
+                dropped = true;
+                again = true;
+            }
+        }
+        if !again {
+            break;
+        }
+    }
+    if !dropped {
+        return None;
+    }
+    // the sets nothing reads now
+    loop {
+        let read: BTreeSet<String> = doc
+            .sets
+            .values()
+            .flat_map(|s| {
+                s.reads()
+                    .into_iter()
+                    .map(str::to_string)
+                    .collect::<Vec<_>>()
+            })
+            .chain([doc.out.set.clone()])
+            .collect();
+        let before = doc.sets.len();
+        doc.sets.retain(|name, _| read.contains(name));
+        if doc.sets.len() == before {
+            break;
+        }
+    }
+    Some(doc)
+}
+
 /// What one pass counted of a set: the stage before its first `where` and
 /// the stage after each clause, and, for the answer's set, the rows each
 /// clause's field is unknown on among the rows the clause met.
@@ -506,6 +573,138 @@ struct Counter<'a> {
     scope: &'a Scope,
     /// The time the counts have as a whole, where the caller gave one.
     budget: Option<Budget>,
+    /// Whether a stage's own statement is counted lean ([`lean`]); the
+    /// reference path counts each as it is written.
+    lean: bool,
+    /// The statements listed and not run, or the answers already had
+    /// ([`Ahead`]).
+    ahead: &'a mut Ahead,
+}
+
+/// How the funnel's statements are had where a diagnosis may count several
+/// at the same time ([`diagnose_beside`]). The diagnosis is gone through
+/// twice. The first time nothing is run: every statement asked for is
+/// listed, and answered with noughts, which takes the diagnosis down the
+/// path it takes when every statement answers. The statements listed are
+/// then run at the same time, each on a connection of its own. The second
+/// time is the diagnosis as it always was, which finds the answer of a
+/// statement it asks for among those already had, and runs any it does not
+/// find: a statement the first time did not foresee is run where it was
+/// always run, so what is shown is what a diagnosis one statement at a
+/// time shows.
+#[derive(Default)]
+enum Ahead {
+    /// One statement at a time, as before.
+    #[default]
+    None,
+    /// The first time: the statements asked for, in the order asked.
+    Listed(Vec<Compiled>),
+    /// The second time: what the statements run ahead answered, by their
+    /// text and parameters.
+    Had(HashMap<(String, String), Had>),
+}
+
+/// What a statement run ahead came to.
+enum Had {
+    Answered(Box<Answer>),
+    /// It ran past the time left for the counts.
+    TimedOut,
+}
+
+fn key_of(c: &Compiled) -> (String, String) {
+    (c.sql.clone(), format!("{:?}", c.params))
+}
+
+/// The answer of a statement that is listed and not run: one row of
+/// noughts, wide enough for any count or pass to read.
+fn noughts() -> Answer {
+    Answer {
+        columns: Vec::new(),
+        rows: vec![nils_registry::store::Row(vec![
+            nils_registry::store::Cell::Int(0);
+            1024
+        ])],
+        truncated: false,
+        content_hash: None,
+        elapsed_ms: 0,
+        shaped: Vec::new(),
+        held_back: Vec::new(),
+        held_counts: Vec::new(),
+        rows_held: false,
+    }
+}
+
+/// Run the statements listed, each on one of the connections, until all
+/// are run or the time for the counts is spent. The reader's own
+/// connection takes them from the first listed on, so that the stages
+/// shown when the time runs out are the first ones; the connections
+/// beside take them from the last listed back, since the last stages of a
+/// funnel read every set before them and are the long ones, and a long
+/// one started late is the one that does not end in time. A statement
+/// that fails otherwise is not had, and the diagnosis runs it itself and
+/// says what it says.
+fn run_ahead(
+    jobs: Vec<Compiled>,
+    own: &mut Store,
+    beside: &mut [Store],
+    bounds: Bounds,
+    budget: Option<(Instant, u64)>,
+) -> HashMap<(String, String), Had> {
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let mut seen = BTreeSet::new();
+    let jobs: Vec<Compiled> = jobs
+        .into_iter()
+        .filter(|c| seen.insert(key_of(c)))
+        .collect();
+    // the statements not yet taken: from `left.0` up to `left.1`
+    let left: Mutex<(usize, usize)> = Mutex::new((0, jobs.len()));
+    let spent = AtomicBool::new(false);
+    let had: Mutex<HashMap<(String, String), Had>> = Mutex::new(HashMap::new());
+    let work = |store: &mut Store, from_first: bool| {
+        loop {
+            let i = {
+                let Ok(mut left) = left.lock() else { return };
+                if left.0 >= left.1 || spent.load(Ordering::SeqCst) {
+                    return;
+                }
+                if from_first {
+                    left.0 += 1;
+                    left.0 - 1
+                } else {
+                    left.1 -= 1;
+                    left.1
+                }
+            };
+            let mut b = bounds;
+            if let Some((started, ms)) = budget {
+                let left = ms.saturating_sub(started.elapsed().as_millis() as u64);
+                if left == 0 {
+                    spent.store(true, Ordering::SeqCst);
+                    return;
+                }
+                b.timeout_ms = left.min(bounds.timeout_ms);
+            }
+            let came = match crate::exec::run(store, &jobs[i], b) {
+                Ok(a) => Some(Had::Answered(Box::new(a))),
+                Err(ExecError::Timeout(_)) if budget.is_some() => {
+                    spent.store(true, Ordering::SeqCst);
+                    Some(Had::TimedOut)
+                }
+                Err(_) => None,
+            };
+            if let (Some(came), Ok(mut had)) = (came, had.lock()) {
+                had.insert(key_of(&jobs[i]), came);
+            }
+        }
+    };
+    std::thread::scope(|threads| {
+        for store in beside.iter_mut() {
+            threads.spawn(|| work(store, false));
+        }
+        work(own, true);
+    });
+    had.into_inner().unwrap_or_default()
 }
 
 /// The time a diagnosis has for all its counts together: each statement runs
@@ -550,7 +749,24 @@ impl Counter<'_> {
             }
             self.runner.bounds.timeout_ms = left.min(b.statement_ms);
         }
-        match self.runner.answer(registry, ask, validated, None, None) {
+        let compiled = self.runner.compiled(registry, ask, validated, None, None)?;
+        let had = match &mut *self.ahead {
+            Ahead::None => None,
+            Ahead::Listed(jobs) => {
+                jobs.push(compiled.clone());
+                return Ok(Some((compiled, noughts())));
+            }
+            Ahead::Had(had) => match had.get(&key_of(&compiled)) {
+                Some(Had::Answered(a)) => Some(Ok((**a).clone())),
+                Some(Had::TimedOut) => Some(Err(RunError::Exec(ExecError::Timeout(0)))),
+                None => None,
+            },
+        };
+        let answered = match had {
+            Some(answered) => answered,
+            None => self.runner.execute(registry, &compiled),
+        };
+        match answered.map(|a| (compiled, a)) {
             Ok(answered) => Ok(Some(answered)),
             Err(RunError::Exec(ExecError::Timeout(_))) if self.budget.is_some() => {
                 if let Some(b) = &mut self.budget {
@@ -1042,9 +1258,28 @@ impl Counter<'_> {
 
     /// A count level variant's rows and subjects, as the ask answers them
     /// under the caller's scope.
+    ///
+    /// The statement that counts them is the variant without the bindings
+    /// nothing in it reads, and without the sets nothing reads then
+    /// ([`lean`]): no binding chooses a row, so the count is the same, and
+    /// a stage that stops before the clause a binding was written for does
+    /// not make it (a signature for every candidate of a pick, a hidden
+    /// group for a `same` the stage has not reached). As in a pass, what
+    /// the count shows is decided from the variant as it was written,
+    /// validated under the caller's scope; the lean one is read under a
+    /// scope that holds nothing back and the hold-back applied to what it
+    /// counts ([`shown`]'s rule).
     fn count(&mut self, registry: &mut Registry, ask: &Ask) -> Result<Count, RunError> {
         let v = validate(ask, self.names, self.scope).map_err(AskError::Invalid)?;
         let quasi = v.quasi_sets.contains(&ask.out.set);
+        if self.lean
+            && let Some(count) = self.count_lean(registry, ask, &v)?
+        {
+            return Ok(count);
+        }
+        if self.spent() {
+            return Ok(Count::default());
+        }
         let Some((_, a)) = self.answer(registry, ask, &v)? else {
             return Ok(Count::default());
         };
@@ -1060,6 +1295,71 @@ impl Counter<'_> {
             subjects: cell(1)?,
             quasi,
         })
+    }
+
+    /// [`Counter::count`] by the lean statement; none where the variant
+    /// has nothing to drop, is of a set whose count is not a plain count
+    /// of rows and subjects, or where the lean one does not validate or
+    /// answer, and then the variant is counted as it is written.
+    fn count_lean(
+        &mut self,
+        registry: &mut Registry,
+        ask: &Ask,
+        written: &Validated,
+    ) -> Result<Option<Count>, RunError> {
+        let Some(set) = ask.sets.get(&ask.out.set) else {
+            return Ok(None);
+        };
+        let plain = matches!(
+            set.grain,
+            Grain::Cohort
+                | Grain::Subject
+                | Grain::Session
+                | Grain::Stack
+                | Grain::Instance
+                | Grain::Event
+        ) && set.algebra.is_none();
+        let Some(doc) = lean(ask).filter(|_| plain) else {
+            return Ok(None);
+        };
+        let whole = Scope {
+            federated: false,
+            classes: self
+                .scope
+                .classes
+                .iter()
+                .copied()
+                .chain([Class::QuasiIdentifying, Class::Sensitive])
+                .collect(),
+            unsealed: self.scope.unsealed,
+        };
+        let Ok(vv) = validate(&doc, self.names, &whole) else {
+            return Ok(None);
+        };
+        let answered = match self.answer(registry, &doc, &vv) {
+            Ok(Some((_, a))) if !a.truncated && !a.rows_held => a,
+            _ => return Ok(None),
+        };
+        let Some(row) = answered.rows.first() else {
+            return Ok(None);
+        };
+        let (Some(rows), Some(subjects)) = (row.opt_int(0)?, row.opt_int(1)?) else {
+            return Ok(None);
+        };
+        let quasi = written.quasi_sets.contains(&ask.out.set);
+        let small = written.small_cells.contains(&ask.out.set);
+        let who = if set.grain == Grain::Cohort {
+            rows
+        } else {
+            subjects
+        };
+        let held =
+            (small && rows != 0 && rows < MEASURE_K) || (quasi && who != 0 && who < MEASURE_K);
+        Ok(Some(Count {
+            rows: (!held).then_some(rows),
+            subjects: (!held).then_some(subjects),
+            quasi,
+        }))
     }
 
     /// The subject keys of a record level variant, bounded by the cap,
@@ -1149,7 +1449,49 @@ pub fn diagnose_within(
     budget_ms: Option<u64>,
 ) -> Result<Diagnosis, RunError> {
     diagnose_as(
+        registry,
+        ask,
+        repairs,
+        names,
+        scope,
+        scheme,
+        bounds,
+        with_keys,
+        reader,
+        budget_ms,
+        true,
+        &mut [],
+    )
+}
+
+/// [`diagnose_within`] with connections to count beside the reader's own
+/// (2026-11-14). The stages of a set through its `where` are one
+/// statement, and every stage after them is a statement of its own that
+/// makes the sets it reads again: a question of two picks, two attaches,
+/// a `has` and a `same` is a dozen statements that each make the picks,
+/// 15 s one after another where the question itself takes 3. They do not
+/// depend on each other, so here they are run at the same time, one on
+/// each of `beside` and one on the reader, and the diagnosis reads what
+/// they answered ([`Ahead`]): the same statements, the same numbers. The
+/// time for the counts is the time on the clock. With no connection
+/// beside it is [`diagnose_within`].
+#[allow(clippy::too_many_arguments)]
+pub fn diagnose_beside(
+    registry: &mut Registry,
+    ask: Ask,
+    repairs: Vec<Repair>,
+    names: &dyn Names,
+    scope: &Scope,
+    scheme: &Scheme,
+    bounds: Bounds,
+    with_keys: bool,
+    reader: Option<&mut Store>,
+    budget_ms: Option<u64>,
+    beside: &mut [Store],
+) -> Result<Diagnosis, RunError> {
+    diagnose_as(
         registry, ask, repairs, names, scope, scheme, bounds, with_keys, reader, budget_ms, true,
+        beside,
     )
 }
 
@@ -1171,7 +1513,18 @@ pub fn diagnose_by_stage(
     budget_ms: Option<u64>,
 ) -> Result<Diagnosis, RunError> {
     diagnose_as(
-        registry, ask, repairs, names, scope, scheme, bounds, with_keys, reader, budget_ms, false,
+        registry,
+        ask,
+        repairs,
+        names,
+        scope,
+        scheme,
+        bounds,
+        with_keys,
+        reader,
+        budget_ms,
+        false,
+        &mut [],
     )
 }
 
@@ -1185,9 +1538,10 @@ fn diagnose_as(
     scheme: &Scheme,
     bounds: Bounds,
     with_keys: bool,
-    reader: Option<&mut Store>,
+    mut reader: Option<&mut Store>,
     budget_ms: Option<u64>,
     in_one_pass: bool,
+    beside: &mut [Store],
 ) -> Result<Diagnosis, RunError> {
     let cost = cost_of(&ask);
     // the diagnosis compiles what it counts, so what the compiler refuses
@@ -1212,6 +1566,91 @@ fn diagnose_as(
     } else {
         validate(&ask, names, scope).map_err(AskError::Invalid)?
     };
+    // Where there are connections to count beside this one, the statements
+    // are listed first, run at the same time, and the diagnosis then reads
+    // what they answered ([`Ahead`]). A diagnosis that lists keys counts
+    // one statement at a time, and so does the reference path.
+    let started = Instant::now();
+    let mut ahead = Ahead::None;
+    if in_one_pass && !with_keys && !beside.is_empty() {
+        let mut listed = Ahead::Listed(Vec::new());
+        // what the listing comes to is not the diagnosis: it read noughts
+        let _ = counted(
+            registry,
+            &ask,
+            &validated,
+            repairs.clone(),
+            warnings.clone(),
+            cost.clone(),
+            names,
+            scope,
+            scheme,
+            bounds,
+            with_keys,
+            lend(&mut reader),
+            None,
+            in_one_pass,
+            &mut listed,
+        );
+        if let Ahead::Listed(jobs) = listed {
+            let own: &mut Store = match lend(&mut reader) {
+                Some(r) => r,
+                None => registry.store(),
+            };
+            ahead = Ahead::Had(run_ahead(
+                jobs,
+                own,
+                beside,
+                bounds,
+                budget_ms.map(|ms| (started, ms)),
+            ));
+        }
+    }
+    counted(
+        registry,
+        &ask,
+        &validated,
+        repairs,
+        warnings,
+        cost,
+        names,
+        scope,
+        scheme,
+        bounds,
+        with_keys,
+        reader,
+        budget_ms.map(|ms| (started, ms)),
+        in_one_pass,
+        &mut ahead,
+    )
+}
+
+/// A reborrow of the door's reader for one more use.
+#[allow(clippy::needless_option_as_deref)]
+fn lend<'b>(reader: &'b mut Option<&mut Store>) -> Option<&'b mut Store> {
+    reader.as_deref_mut()
+}
+
+/// The counts of a diagnosis whose document is valid: the funnel, the
+/// drops, the ties and the coarse dates.
+#[allow(clippy::too_many_arguments)]
+fn counted(
+    registry: &mut Registry,
+    ask: &Ask,
+    validated: &Validated,
+    repairs: Vec<Repair>,
+    warnings: Vec<Issue>,
+    cost: Cost,
+    names: &dyn Names,
+    scope: &Scope,
+    scheme: &Scheme,
+    bounds: Bounds,
+    with_keys: bool,
+    reader: Option<&mut Store>,
+    budget: Option<(Instant, u64)>,
+    in_one_pass: bool,
+    ahead: &mut Ahead,
+) -> Result<Diagnosis, RunError> {
     let mut counter = Counter {
         runner: Runner {
             names,
@@ -1222,8 +1661,10 @@ fn diagnose_as(
         },
         names,
         scope,
-        budget: budget_ms.map(|ms| Budget {
-            started: Instant::now(),
+        lean: in_one_pass,
+        ahead,
+        budget: budget.map(|(started, ms)| Budget {
+            started,
             ms,
             statement_ms: bounds.timeout_ms,
             part: 0,
@@ -1289,12 +1730,12 @@ fn diagnose_as(
                         together.push(other.clone());
                     }
                 }
-                let mut counted = counter.pass(registry, &ask, &together)?;
+                let mut counted = counter.pass(registry, ask, &together)?;
                 if counted.is_none() && together.len() > 1 && !counter.spent() {
                     // the sets do not count together: each by itself
                     alone = true;
                     together.truncate(1);
-                    counted = counter.pass(registry, &ask, &together)?;
+                    counted = counter.pass(registry, ask, &together)?;
                 }
                 passed.insert(name.clone(), None);
                 let counted = counted.unwrap_or_default();
@@ -1314,10 +1755,10 @@ fn diagnose_as(
             let (mut count, mut keys) = if let Some(count) = counted {
                 (count, Vec::new())
             } else if with_keys {
-                let v = variant(&ask, name, &step, Level::Record);
+                let v = variant(ask, name, &step, Level::Record);
                 counter.keys(registry, &v)?
             } else {
-                let v = variant(&ask, name, &step, Level::Count);
+                let v = variant(ask, name, &step, Level::Count);
                 (counter.count(registry, &v)?, Vec::new())
             };
             // the time for the counts is spent: this stage and every one
@@ -1390,7 +1831,7 @@ fn diagnose_as(
                         .checked_sub(1)
                         .map(|q| all[q].0.clone())
                         .unwrap_or(Step::Source);
-                    let mut v = variant(&ask, &ask.out.set, &previous, Level::Count);
+                    let mut v = variant(ask, &ask.out.set, &previous, Level::Count);
                     if let Some(s) = v.sets.get_mut(&ask.out.set) {
                         s.where_.push(
                             Clause::new("is_null").arg(crate::ast::Arg::Clause(Clause::field(p))),
@@ -1416,8 +1857,8 @@ fn diagnose_as(
         if name.contains("__") || set.pick.is_none() {
             continue;
         }
-        let mut v = keys_level(&ask, name);
-        for r in readers_of(&ask, name) {
+        let mut v = keys_level(ask, name);
+        for r in readers_of(ask, name) {
             v.sets.remove(&r);
         }
         v.out.columns = vec![Clause::field("pick.tied")];
@@ -1446,8 +1887,8 @@ fn diagnose_as(
         if name.contains("__") || set.grain != Grain::Event {
             continue;
         }
-        let mut v = count_level(&ask, name);
-        for r in readers_of(&ask, name) {
+        let mut v = count_level(ask, name);
+        for r in readers_of(ask, name) {
             v.sets.remove(&r);
         }
         if let Some(s) = v.sets.get_mut(name) {
