@@ -87,6 +87,18 @@
       "subjects": 5892,
       "hash": "8a4e818697d7035b4896ba09cd16593969c51e0e8d80bad6daeaaf61e202c702",
       "held": false
+    },
+    "15-alike-sessions": {
+      "rows": 1550,
+      "subjects": 1550,
+      "hash": "637c25b56e454373a837fc8456fe6293a2d9baf58daeeaf46c0f02cc89dc2d65",
+      "held": false
+    },
+    "16-alike-sessions-grouped": {
+      "rows": 1693,
+      "subjects": 1693,
+      "hash": "df16582154ac8763f40e349096f5f5f7121f2d3c120faaef63bc982ca8185a65",
+      "held": false
     }
   },
   "sqlite": {
@@ -166,6 +178,18 @@
       "rows": 282609,
       "subjects": 5892,
       "hash": "bb637859fc6b30c378171d2dacb001e69b9f9b4df1e0ce2bc9db572b22b918bd",
+      "held": false
+    },
+    "15-alike-sessions": {
+      "rows": 1573,
+      "subjects": 1573,
+      "hash": "082a1b6114eb716147572ea1281df4e9257f26e3d70d2aacfcf95f6d4554785b",
+      "held": false
+    },
+    "16-alike-sessions-grouped": {
+      "rows": 1720,
+      "subjects": 1720,
+      "hash": "7b59cb7139327e7c722d89eb4bac8c4281c8f932a7905738340e6af9f417af60",
       "held": false
     }
   }

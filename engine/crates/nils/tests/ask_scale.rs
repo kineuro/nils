@@ -128,7 +128,7 @@ fn answers_as_kept(dsn: Option<&str>) {
     );
     let doc: serde_json::Value = serde_json::from_str(&out).unwrap();
     let shapes = doc["shapes"].as_array().unwrap();
-    assert!(shapes.len() >= 14, "{out}");
+    assert!(shapes.len() >= 16, "{out}");
     for s in shapes {
         assert_eq!(s["same_as_reference"], true, "{s}");
         assert!(s["error"].is_null(), "{s}");
