@@ -1281,18 +1281,31 @@ impl<'a> Builder<'a> {
                 };
                 let mut standing = Vec::new();
                 let stack = if grain == Grain::Stack {
+                    // The two clauses below are true of nearly every stack,
+                    // and SQLite is told so: a registry on SQLite has no
+                    // statistics, and its planner took `fingerprinted = 1
+                    // AND excluded = 0` for a key of few rows, made an index
+                    // of the two for the statement and read every stack
+                    // again for every session. A question of picks and
+                    // attaches over the sessions of a cohort ran past 120 s
+                    // on the scale registry, where it takes 2 to 3 s
+                    // (2026-11-14). A column under a unary plus is one
+                    // SQLite does not look a row up by, and reads the same.
+                    // Postgres has statistics and keeps the plain column,
+                    // which it has them for.
+                    let held = if self.sql.is_pg() { "" } else { "+" };
                     // A stack set holds the stacks that have a fingerprint,
                     // as it did when it was tied to the fingerprint's own
                     // row: the read model says which they are.
                     if !BY_JOIN.get() {
-                        standing.push("xa.fingerprinted = 1".into());
+                        standing.push(format!("{held}xa.fingerprinted = 1"));
                     }
                     // §4.4 rule 10 and §14.2: a stack the pack ruled out is
                     // not a stack any set sees, and a document cannot switch
                     // it off. Describe prints this predicate, so the query
                     // has to carry it or the two disagree by exactly the
                     // excluded stacks. The stack's row says so itself.
-                    standing.push("xa.excluded = 0".into());
+                    standing.push(format!("{held}xa.excluded = 0"));
                     "xa.stack_id"
                 } else {
                     "i.stack_id"

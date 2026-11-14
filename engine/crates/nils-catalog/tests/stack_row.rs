@@ -328,3 +328,44 @@ fn a_stack_set_reads_from_the_row_what_it_read_through_the_join() {
         );
     }
 }
+
+/// SQLite reads a stack set from the stacks' rows or by a key of them,
+/// never by what the set holds of every row. `fingerprinted = 1` and
+/// `excluded = 0` are true of nearly every stack. A registry on SQLite has
+/// no statistics, so the planner took the two for a key of few rows, made
+/// an index of them for the statement and read every stack again for every
+/// session. The question is the scale fixture's document 15, picks and
+/// attaches over the sessions of a cohort, which met it; the plan does not
+/// depend on how many rows a registry holds, so a small one shows it.
+#[test]
+fn sqlite_takes_no_standing_clause_of_a_stack_set_for_a_key() {
+    let text = std::fs::read_to_string(
+        common::root().join("engine/benches/ask-scale/15-alike-sessions.ask.yml"),
+    )
+    .unwrap();
+    for mut l in labs() {
+        if l.name != "sqlite" {
+            continue;
+        }
+        let (compiled, _) = ask_of(&mut l, &text);
+        let plan: Vec<String> = l
+            .registry
+            .store()
+            .query(
+                &format!("EXPLAIN QUERY PLAN {}", compiled.sql),
+                &compiled.params,
+            )
+            .unwrap()
+            .iter()
+            .map(|r| r.text(3).unwrap().to_string())
+            .collect();
+        let of_row: Vec<&String> = plan.iter().filter(|step| step.contains(" xa ")).collect();
+        assert!(!of_row.is_empty(), "{plan:#?}");
+        for step in of_row {
+            assert!(
+                !step.contains("fingerprinted=?") && !step.contains("excluded=?"),
+                "the stacks' rows are read by a standing clause: {step}\n{plan:#?}"
+            );
+        }
+    }
+}
