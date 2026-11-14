@@ -4,6 +4,10 @@ All notable changes to NILS v1 are recorded here. The format follows [Keep a Cha
 
 ## [Unreleased]
 
+## [1.0.0-beta.19] - 2026-11-14
+
+The nineteenth engine beta: the count of a group set says how many subjects are under its groups, a question that picks and attaches is planned from its own rows, and a draft counts the statements of its funnel at the same time.
+
 ### Added
 
 - The scale fixture holds the question an assistant drafts for sessions alike, with picks, attaches, `has` and `same`, and its grouped form (documents 15 and 16), and `nils ask-scale time` times a funnel as a draft counts it (`--beside`, four readers), on one connection (`alone_ms`) and by a statement per stage.
