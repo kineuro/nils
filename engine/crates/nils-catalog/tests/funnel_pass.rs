@@ -21,7 +21,7 @@
 mod common;
 
 use common::{Lab, quasi, root};
-use nils_ask::diagnose::{diagnose, diagnose_by_stage, sets_passed};
+use nils_ask::diagnose::{diagnose, diagnose_beside, diagnose_by_stage, sets_passed};
 use nils_ask::exec::Bounds;
 use nils_ask::parse;
 use nils_ask::validate::Scope;
@@ -244,5 +244,177 @@ fn sets_of_the_same_rows_counted_together_answer_the_same() {
                 );
             }
         }
+    }
+}
+
+/// The shape an assistant drafts for sessions alike (two picks, two
+/// attaches and a `where` between the partners, a `has` and a `same`), and
+/// its grouped form: the scale fixture's documents 15 and 16, over every
+/// subject of this registry.
+const RELATIONS: [(&str, &str); 2] = [
+    (
+        "picks, attaches, has and same",
+        r#"
+ast_version: 1
+name: subjects with two sessions alike in their best T1w and FLAIR
+sets:
+  people: {grain: subject}
+  visits: {grain: session, of: people}
+  t1:
+    grain: stack
+    of: visits
+    where:
+      - ["=",  {}, ["axis", {}, "base"], "T1w"]
+      - ["<=", {}, ["derived", {}, "voxel"], 5.0]
+    bind:
+      sig: ["derived", {level: loose}, "signature"]
+    pick: {per: session, n: 1,
+           by: [[["field", {}, "n_instances"], desc], [["field", {}, "id"], asc]]}
+  flair:
+    grain: stack
+    of: visits
+    where:
+      - ["=",   {}, ["axis", {}, "base"], "T2w"]
+      - ["has", {}, ["axis", {}, "modifier"], "FLAIR"]
+    bind:
+      sig: ["derived", {level: loose}, "signature"]
+    pick: {per: session, n: 1,
+           by: [[["field", {}, "n_instances"], desc], [["field", {}, "id"], asc]]}
+  good:
+    grain: session
+    from: visits
+    attach:
+      - {as: t1,    set: t1}
+      - {as: flair, set: flair}
+    where:
+      - ["=", {}, ["field", {}, "t1.station_name"], ["field", {}, "flair.station_name"]]
+  answer:
+    grain: subject
+    from: people
+    has:
+      - {set: good, min: 1, as: n_good}
+    same:
+      - {as: alike, over: good, min: 1,
+         by: [["field", {}, "t1.manufacturer_model_name"], ["field", {}, "t1.station_name"],
+              ["field", {}, "t1.sig"], ["field", {}, "flair.sig"]]}
+out: {set: answer, level: count}
+"#,
+    ),
+    (
+        "the same as a group of the sessions",
+        r#"
+ast_version: 1
+name: runs of sessions alike in their best T1w and FLAIR, by subject
+sets:
+  people: {grain: subject}
+  visits: {grain: session, of: people}
+  t1:
+    grain: stack
+    of: visits
+    where:
+      - ["=",  {}, ["axis", {}, "base"], "T1w"]
+    bind:
+      sig: ["derived", {level: loose}, "signature"]
+    pick: {per: session, n: 1,
+           by: [[["field", {}, "n_instances"], desc], [["field", {}, "id"], asc]]}
+  flair:
+    grain: stack
+    of: visits
+    where:
+      - ["=",   {}, ["axis", {}, "base"], "T2w"]
+      - ["has", {}, ["axis", {}, "modifier"], "FLAIR"]
+    bind:
+      sig: ["derived", {level: loose}, "signature"]
+    pick: {per: session, n: 1,
+           by: [[["field", {}, "n_instances"], desc], [["field", {}, "id"], asc]]}
+  good:
+    grain: session
+    from: visits
+    attach:
+      - {as: t1,    set: t1}
+      - {as: flair, set: flair}
+  runs:
+    grain: group
+    group:
+      of: good
+      by:
+        - ["field", {}, "subject.id"]
+        - ["field", {}, "t1.station_name"]
+        - ["field", {}, "t1.sig"]
+        - ["field", {}, "flair.sig"]
+    bind:
+      n: ["count", {set: good}]
+    where:
+      - [">=", {}, ["field", {}, "n"], 1]
+keep: [runs]
+out: {set: runs, level: count}
+"#,
+    ),
+];
+
+/// A diagnosis whose statements are counted at the same time on readers
+/// beside, each stage's own statement without the bindings it does not
+/// read, is the diagnosis a statement per stage gives as each is written:
+/// for every document the repository keeps and for the two shapes of
+/// relations, at both details, on both backends. The statements counted
+/// beside are the diagnosis's own, so what is held is that none is lost,
+/// mixed up or read twice, and that a lean count is the count.
+#[test]
+fn a_funnel_counted_beside_is_the_funnel_a_stage_at_a_time() {
+    let mut documents = documents();
+    documents.extend(
+        RELATIONS
+            .iter()
+            .map(|(what, text)| (what.to_string(), text.to_string())),
+    );
+    for mut l in labs() {
+        let name = l.name;
+        let scheme = Scheme::default();
+        let mut beside: Vec<nils_registry::Store> = (0..3)
+            .map(|_| l.registry.open_ask_reader(None).unwrap())
+            .collect();
+        let mut counted = 0;
+        for (file, text) in &documents {
+            let Ok(ask) = parse(text) else { continue };
+            for (detail, scope) in [("quasi", quasi()), ("plain", Scope::default())] {
+                let at_once = diagnose_beside(
+                    &mut l.registry,
+                    ask.clone(),
+                    Vec::new(),
+                    &l.catalog,
+                    &scope,
+                    &scheme,
+                    bounds(),
+                    false,
+                    None,
+                    None,
+                    &mut beside,
+                );
+                let at_once = match at_once {
+                    Ok(d) => serde_json::to_value(&d).unwrap(),
+                    Err(e) => json!({"error": e.to_string()}),
+                };
+                let by_stage = both_ways(&mut l, &ask, &scope);
+                assert_eq!(at_once, by_stage[1], "{name}: {file} at detail {detail}");
+                counted += usize::from(at_once["valid"] == json!(true));
+                if RELATIONS.iter().any(|(what, _)| what == file) {
+                    // the shapes are ones this registry has rows for, with
+                    // their picks and their attaches as stages
+                    assert_eq!(at_once["valid"], json!(true), "{name}: {file}: {at_once}");
+                    let stages: Vec<&str> = at_once["funnel"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .filter_map(|s| s["stage"].as_str())
+                        .collect();
+                    assert!(stages.contains(&"pick"), "{name}: {file}: {stages:?}");
+                    assert!(
+                        stages.iter().any(|s| s.starts_with("attach ")),
+                        "{name}: {file}: {stages:?}"
+                    );
+                }
+            }
+        }
+        assert!(counted >= 40, "{name}: {counted}");
     }
 }

@@ -16,7 +16,7 @@ use serde_json::Value;
 
 use crate::ast::{Ask, Level};
 use crate::describe::{Description, describe as describe_pure, set_sentence};
-use crate::diagnose::{Diagnosis, diagnose_within};
+use crate::diagnose::{Diagnosis, diagnose_beside};
 use crate::document::{self, Document, DocumentError};
 use crate::exec::Bounds;
 use crate::handle::cell_json;
@@ -356,10 +356,23 @@ pub fn draft_within(
     reader: Option<&mut Store>,
     budget_ms: Option<u64>,
 ) -> Result<Drafted, AffordanceError> {
+    draft_beside(registry, text, s, reader, budget_ms, &mut [])
+}
+
+/// [`draft_within`] with connections to count the funnel's statements on
+/// beside the reader (`crate::diagnose::diagnose_beside`).
+pub fn draft_beside(
+    registry: &mut Registry,
+    text: &str,
+    s: &Setting<'_>,
+    reader: Option<&mut Store>,
+    budget_ms: Option<u64>,
+    beside: &mut [Store],
+) -> Result<Drafted, AffordanceError> {
     let (ask, repairs) = parse_repaired(text)?;
     // the diagnosis refuses what the validator and the compiler refuse
     // before it counts anything, and stores nothing then
-    let diagnosis = diagnose_within(
+    let diagnosis = diagnose_beside(
         registry,
         ask.clone(),
         repairs.clone(),
@@ -370,6 +383,7 @@ pub fn draft_within(
         false,
         reader,
         budget_ms,
+        beside,
     )?;
     let (diagnosis, document, hash) = if diagnosis.valid {
         let prepared = prepare(ask.clone(), s.names, s.scope)?;

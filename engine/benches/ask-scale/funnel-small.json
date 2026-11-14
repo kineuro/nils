@@ -971,6 +971,413 @@
       ],
       "by": "set",
       "next": []
+    },
+    "15-alike-sessions": {
+      "valid": true,
+      "issues": [],
+      "repairs": [],
+      "warnings": [],
+      "zero_rows": null,
+      "drops": [
+        {
+          "set": "answer",
+          "clause": "where alike.largest >= 2",
+          "before": 104,
+          "after": 46,
+          "nulls": 0
+        }
+      ],
+      "ties": [
+        [
+          "flair",
+          0
+        ],
+        [
+          "t1",
+          0
+        ]
+      ],
+      "unresolved": [],
+      "coarse": [],
+      "cost": {
+        "sets": 7,
+        "near": 0,
+        "groups": 0,
+        "algebra": 0,
+        "class": "medium"
+      },
+      "funnel": [
+        {
+          "set": "scope",
+          "grain": "cohort",
+          "stage": "source",
+          "rows": 16,
+          "subjects": 16,
+          "on_path": true
+        },
+        {
+          "set": "scope",
+          "grain": "cohort",
+          "stage": "where name = alpha",
+          "rows": 1,
+          "subjects": 1,
+          "on_path": true
+        },
+        {
+          "set": "people",
+          "grain": "subject",
+          "stage": "source",
+          "rows": 111,
+          "subjects": 111,
+          "on_path": true
+        },
+        {
+          "set": "visits",
+          "grain": "session",
+          "stage": "source",
+          "rows": 759,
+          "subjects": 111,
+          "on_path": true
+        },
+        {
+          "set": "flair",
+          "grain": "stack",
+          "stage": "source",
+          "rows": 13542,
+          "subjects": 111,
+          "on_path": false
+        },
+        {
+          "set": "flair",
+          "grain": "stack",
+          "stage": "where base = T2w",
+          "rows": 3411,
+          "subjects": 111,
+          "on_path": false
+        },
+        {
+          "set": "flair",
+          "grain": "stack",
+          "stage": "where modifier has FLAIR",
+          "rows": 1689,
+          "subjects": 111,
+          "on_path": false
+        },
+        {
+          "set": "flair",
+          "grain": "stack",
+          "stage": "where acquisition_type = 3D",
+          "rows": 922,
+          "subjects": 111,
+          "on_path": false
+        },
+        {
+          "set": "flair",
+          "grain": "stack",
+          "stage": "where voxel <= 1.2",
+          "rows": 916,
+          "subjects": 111,
+          "on_path": false
+        },
+        {
+          "set": "flair",
+          "grain": "stack",
+          "stage": "pick",
+          "rows": 504,
+          "subjects": 111,
+          "on_path": false
+        },
+        {
+          "set": "t1",
+          "grain": "stack",
+          "stage": "source",
+          "rows": 13542,
+          "subjects": 111,
+          "on_path": false
+        },
+        {
+          "set": "t1",
+          "grain": "stack",
+          "stage": "where base = T1w",
+          "rows": 3620,
+          "subjects": 111,
+          "on_path": false
+        },
+        {
+          "set": "t1",
+          "grain": "stack",
+          "stage": "where acquisition_type = 3D",
+          "rows": 2392,
+          "subjects": 111,
+          "on_path": false
+        },
+        {
+          "set": "t1",
+          "grain": "stack",
+          "stage": "where voxel <= 1.2",
+          "rows": 1773,
+          "subjects": 111,
+          "on_path": false
+        },
+        {
+          "set": "t1",
+          "grain": "stack",
+          "stage": "pick",
+          "rows": 632,
+          "subjects": 111,
+          "on_path": false
+        },
+        {
+          "set": "good",
+          "grain": "session",
+          "stage": "source",
+          "rows": 759,
+          "subjects": 111,
+          "on_path": true
+        },
+        {
+          "set": "good",
+          "grain": "session",
+          "stage": "attach t1",
+          "rows": 632,
+          "subjects": 111,
+          "on_path": true
+        },
+        {
+          "set": "good",
+          "grain": "session",
+          "stage": "attach flair",
+          "rows": 420,
+          "subjects": 111,
+          "on_path": true
+        },
+        {
+          "set": "good",
+          "grain": "session",
+          "stage": "where t1.station_name = flair.station_name",
+          "rows": 420,
+          "subjects": 111,
+          "on_path": true
+        },
+        {
+          "set": "answer",
+          "grain": "subject",
+          "stage": "source",
+          "rows": 111,
+          "subjects": 111,
+          "on_path": true
+        },
+        {
+          "set": "answer",
+          "grain": "subject",
+          "stage": "has good",
+          "rows": 104,
+          "subjects": 104,
+          "on_path": true
+        },
+        {
+          "set": "answer",
+          "grain": "subject",
+          "stage": "where alike.largest >= 2",
+          "rows": 46,
+          "subjects": 46,
+          "on_path": true
+        }
+      ],
+      "by": "set",
+      "next": []
+    },
+    "16-alike-sessions-grouped": {
+      "valid": true,
+      "issues": [],
+      "repairs": [],
+      "warnings": [
+        {
+          "code": "not_releasable",
+          "path": "keep[0]",
+          "message": "runs is at grain group, which does not reach the release; its handle is a table to read and export, never to release",
+          "next": "keep a subject, session or stack set for a release"
+        }
+      ],
+      "zero_rows": null,
+      "drops": [],
+      "ties": [
+        [
+          "flair",
+          0
+        ],
+        [
+          "t1",
+          0
+        ]
+      ],
+      "unresolved": [],
+      "coarse": [],
+      "cost": {
+        "sets": 7,
+        "near": 0,
+        "groups": 1,
+        "algebra": 0,
+        "class": "medium"
+      },
+      "funnel": [
+        {
+          "set": "scope",
+          "grain": "cohort",
+          "stage": "source",
+          "rows": 16,
+          "subjects": 16,
+          "on_path": true
+        },
+        {
+          "set": "scope",
+          "grain": "cohort",
+          "stage": "where name = alpha",
+          "rows": 1,
+          "subjects": 1,
+          "on_path": true
+        },
+        {
+          "set": "people",
+          "grain": "subject",
+          "stage": "source",
+          "rows": 111,
+          "subjects": 111,
+          "on_path": true
+        },
+        {
+          "set": "visits",
+          "grain": "session",
+          "stage": "source",
+          "rows": 759,
+          "subjects": 111,
+          "on_path": true
+        },
+        {
+          "set": "flair",
+          "grain": "stack",
+          "stage": "source",
+          "rows": 13542,
+          "subjects": 111,
+          "on_path": false
+        },
+        {
+          "set": "flair",
+          "grain": "stack",
+          "stage": "where base = T2w",
+          "rows": 3411,
+          "subjects": 111,
+          "on_path": false
+        },
+        {
+          "set": "flair",
+          "grain": "stack",
+          "stage": "where modifier has FLAIR",
+          "rows": 1689,
+          "subjects": 111,
+          "on_path": false
+        },
+        {
+          "set": "flair",
+          "grain": "stack",
+          "stage": "where acquisition_type = 3D",
+          "rows": 922,
+          "subjects": 111,
+          "on_path": false
+        },
+        {
+          "set": "flair",
+          "grain": "stack",
+          "stage": "where voxel <= 1.2",
+          "rows": 916,
+          "subjects": 111,
+          "on_path": false
+        },
+        {
+          "set": "flair",
+          "grain": "stack",
+          "stage": "pick",
+          "rows": 504,
+          "subjects": 111,
+          "on_path": false
+        },
+        {
+          "set": "t1",
+          "grain": "stack",
+          "stage": "source",
+          "rows": 13542,
+          "subjects": 111,
+          "on_path": false
+        },
+        {
+          "set": "t1",
+          "grain": "stack",
+          "stage": "where base = T1w",
+          "rows": 3620,
+          "subjects": 111,
+          "on_path": false
+        },
+        {
+          "set": "t1",
+          "grain": "stack",
+          "stage": "where acquisition_type = 3D",
+          "rows": 2392,
+          "subjects": 111,
+          "on_path": false
+        },
+        {
+          "set": "t1",
+          "grain": "stack",
+          "stage": "where voxel <= 1.2",
+          "rows": 1773,
+          "subjects": 111,
+          "on_path": false
+        },
+        {
+          "set": "t1",
+          "grain": "stack",
+          "stage": "pick",
+          "rows": 632,
+          "subjects": 111,
+          "on_path": false
+        },
+        {
+          "set": "good",
+          "grain": "session",
+          "stage": "source",
+          "rows": 759,
+          "subjects": 111,
+          "on_path": true
+        },
+        {
+          "set": "good",
+          "grain": "session",
+          "stage": "attach t1",
+          "rows": 632,
+          "subjects": 111,
+          "on_path": true
+        },
+        {
+          "set": "good",
+          "grain": "session",
+          "stage": "attach flair",
+          "rows": 420,
+          "subjects": 111,
+          "on_path": true
+        },
+        {
+          "set": "good",
+          "grain": "session",
+          "stage": "where t1.station_name = flair.station_name",
+          "rows": 420,
+          "subjects": 111,
+          "on_path": true
+        }
+      ],
+      "by": "set",
+      "next": [
+        "read the warnings; a selection_outdated warning carries an update move"
+      ]
     }
   },
   "postgres": {
@@ -1945,6 +2352,413 @@
       ],
       "by": "set",
       "next": []
+    },
+    "15-alike-sessions": {
+      "valid": true,
+      "issues": [],
+      "repairs": [],
+      "warnings": [],
+      "zero_rows": null,
+      "drops": [
+        {
+          "set": "answer",
+          "clause": "where alike.largest >= 2",
+          "before": 104,
+          "after": 45,
+          "nulls": 0
+        }
+      ],
+      "ties": [
+        [
+          "flair",
+          0
+        ],
+        [
+          "t1",
+          0
+        ]
+      ],
+      "unresolved": [],
+      "coarse": [],
+      "cost": {
+        "sets": 7,
+        "near": 0,
+        "groups": 0,
+        "algebra": 0,
+        "class": "medium"
+      },
+      "funnel": [
+        {
+          "set": "scope",
+          "grain": "cohort",
+          "stage": "source",
+          "rows": 16,
+          "subjects": 16,
+          "on_path": true
+        },
+        {
+          "set": "scope",
+          "grain": "cohort",
+          "stage": "where name = alpha",
+          "rows": 1,
+          "subjects": 1,
+          "on_path": true
+        },
+        {
+          "set": "people",
+          "grain": "subject",
+          "stage": "source",
+          "rows": 111,
+          "subjects": 111,
+          "on_path": true
+        },
+        {
+          "set": "visits",
+          "grain": "session",
+          "stage": "source",
+          "rows": 759,
+          "subjects": 111,
+          "on_path": true
+        },
+        {
+          "set": "flair",
+          "grain": "stack",
+          "stage": "source",
+          "rows": 13542,
+          "subjects": 111,
+          "on_path": false
+        },
+        {
+          "set": "flair",
+          "grain": "stack",
+          "stage": "where base = T2w",
+          "rows": 3411,
+          "subjects": 111,
+          "on_path": false
+        },
+        {
+          "set": "flair",
+          "grain": "stack",
+          "stage": "where modifier has FLAIR",
+          "rows": 1689,
+          "subjects": 111,
+          "on_path": false
+        },
+        {
+          "set": "flair",
+          "grain": "stack",
+          "stage": "where acquisition_type = 3D",
+          "rows": 922,
+          "subjects": 111,
+          "on_path": false
+        },
+        {
+          "set": "flair",
+          "grain": "stack",
+          "stage": "where voxel <= 1.2",
+          "rows": 921,
+          "subjects": 111,
+          "on_path": false
+        },
+        {
+          "set": "flair",
+          "grain": "stack",
+          "stage": "pick",
+          "rows": 505,
+          "subjects": 111,
+          "on_path": false
+        },
+        {
+          "set": "t1",
+          "grain": "stack",
+          "stage": "source",
+          "rows": 13542,
+          "subjects": 111,
+          "on_path": false
+        },
+        {
+          "set": "t1",
+          "grain": "stack",
+          "stage": "where base = T1w",
+          "rows": 3620,
+          "subjects": 111,
+          "on_path": false
+        },
+        {
+          "set": "t1",
+          "grain": "stack",
+          "stage": "where acquisition_type = 3D",
+          "rows": 2392,
+          "subjects": 111,
+          "on_path": false
+        },
+        {
+          "set": "t1",
+          "grain": "stack",
+          "stage": "where voxel <= 1.2",
+          "rows": 1791,
+          "subjects": 111,
+          "on_path": false
+        },
+        {
+          "set": "t1",
+          "grain": "stack",
+          "stage": "pick",
+          "rows": 635,
+          "subjects": 111,
+          "on_path": false
+        },
+        {
+          "set": "good",
+          "grain": "session",
+          "stage": "source",
+          "rows": 759,
+          "subjects": 111,
+          "on_path": true
+        },
+        {
+          "set": "good",
+          "grain": "session",
+          "stage": "attach t1",
+          "rows": 635,
+          "subjects": 111,
+          "on_path": true
+        },
+        {
+          "set": "good",
+          "grain": "session",
+          "stage": "attach flair",
+          "rows": 423,
+          "subjects": 111,
+          "on_path": true
+        },
+        {
+          "set": "good",
+          "grain": "session",
+          "stage": "where t1.station_name = flair.station_name",
+          "rows": 423,
+          "subjects": 111,
+          "on_path": true
+        },
+        {
+          "set": "answer",
+          "grain": "subject",
+          "stage": "source",
+          "rows": 111,
+          "subjects": 111,
+          "on_path": true
+        },
+        {
+          "set": "answer",
+          "grain": "subject",
+          "stage": "has good",
+          "rows": 104,
+          "subjects": 104,
+          "on_path": true
+        },
+        {
+          "set": "answer",
+          "grain": "subject",
+          "stage": "where alike.largest >= 2",
+          "rows": 45,
+          "subjects": 45,
+          "on_path": true
+        }
+      ],
+      "by": "set",
+      "next": []
+    },
+    "16-alike-sessions-grouped": {
+      "valid": true,
+      "issues": [],
+      "repairs": [],
+      "warnings": [
+        {
+          "code": "not_releasable",
+          "path": "keep[0]",
+          "message": "runs is at grain group, which does not reach the release; its handle is a table to read and export, never to release",
+          "next": "keep a subject, session or stack set for a release"
+        }
+      ],
+      "zero_rows": null,
+      "drops": [],
+      "ties": [
+        [
+          "flair",
+          0
+        ],
+        [
+          "t1",
+          0
+        ]
+      ],
+      "unresolved": [],
+      "coarse": [],
+      "cost": {
+        "sets": 7,
+        "near": 0,
+        "groups": 1,
+        "algebra": 0,
+        "class": "medium"
+      },
+      "funnel": [
+        {
+          "set": "scope",
+          "grain": "cohort",
+          "stage": "source",
+          "rows": 16,
+          "subjects": 16,
+          "on_path": true
+        },
+        {
+          "set": "scope",
+          "grain": "cohort",
+          "stage": "where name = alpha",
+          "rows": 1,
+          "subjects": 1,
+          "on_path": true
+        },
+        {
+          "set": "people",
+          "grain": "subject",
+          "stage": "source",
+          "rows": 111,
+          "subjects": 111,
+          "on_path": true
+        },
+        {
+          "set": "visits",
+          "grain": "session",
+          "stage": "source",
+          "rows": 759,
+          "subjects": 111,
+          "on_path": true
+        },
+        {
+          "set": "flair",
+          "grain": "stack",
+          "stage": "source",
+          "rows": 13542,
+          "subjects": 111,
+          "on_path": false
+        },
+        {
+          "set": "flair",
+          "grain": "stack",
+          "stage": "where base = T2w",
+          "rows": 3411,
+          "subjects": 111,
+          "on_path": false
+        },
+        {
+          "set": "flair",
+          "grain": "stack",
+          "stage": "where modifier has FLAIR",
+          "rows": 1689,
+          "subjects": 111,
+          "on_path": false
+        },
+        {
+          "set": "flair",
+          "grain": "stack",
+          "stage": "where acquisition_type = 3D",
+          "rows": 922,
+          "subjects": 111,
+          "on_path": false
+        },
+        {
+          "set": "flair",
+          "grain": "stack",
+          "stage": "where voxel <= 1.2",
+          "rows": 921,
+          "subjects": 111,
+          "on_path": false
+        },
+        {
+          "set": "flair",
+          "grain": "stack",
+          "stage": "pick",
+          "rows": 505,
+          "subjects": 111,
+          "on_path": false
+        },
+        {
+          "set": "t1",
+          "grain": "stack",
+          "stage": "source",
+          "rows": 13542,
+          "subjects": 111,
+          "on_path": false
+        },
+        {
+          "set": "t1",
+          "grain": "stack",
+          "stage": "where base = T1w",
+          "rows": 3620,
+          "subjects": 111,
+          "on_path": false
+        },
+        {
+          "set": "t1",
+          "grain": "stack",
+          "stage": "where acquisition_type = 3D",
+          "rows": 2392,
+          "subjects": 111,
+          "on_path": false
+        },
+        {
+          "set": "t1",
+          "grain": "stack",
+          "stage": "where voxel <= 1.2",
+          "rows": 1791,
+          "subjects": 111,
+          "on_path": false
+        },
+        {
+          "set": "t1",
+          "grain": "stack",
+          "stage": "pick",
+          "rows": 635,
+          "subjects": 111,
+          "on_path": false
+        },
+        {
+          "set": "good",
+          "grain": "session",
+          "stage": "source",
+          "rows": 759,
+          "subjects": 111,
+          "on_path": true
+        },
+        {
+          "set": "good",
+          "grain": "session",
+          "stage": "attach t1",
+          "rows": 635,
+          "subjects": 111,
+          "on_path": true
+        },
+        {
+          "set": "good",
+          "grain": "session",
+          "stage": "attach flair",
+          "rows": 423,
+          "subjects": 111,
+          "on_path": true
+        },
+        {
+          "set": "good",
+          "grain": "session",
+          "stage": "where t1.station_name = flair.station_name",
+          "rows": 423,
+          "subjects": 111,
+          "on_path": true
+        }
+      ],
+      "by": "set",
+      "next": [
+        "read the warnings; a selection_outdated warning carries an update move"
+      ]
     }
   }
 }

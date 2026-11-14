@@ -271,6 +271,21 @@ impl Runner<'_> {
         after: Option<i64>,
         limit: Option<u64>,
     ) -> Result<(Compiled, Answer), RunError> {
+        let compiled = self.compiled(registry, ask, validated, after, limit)?;
+        let answer = self.execute(registry, &compiled)?;
+        Ok((compiled, answer))
+    }
+
+    /// The statement of a document as it stands, for the connection it
+    /// would run on.
+    pub(crate) fn compiled(
+        &mut self,
+        registry: &mut Registry,
+        ask: &Ask,
+        validated: &Validated,
+        after: Option<i64>,
+        limit: Option<u64>,
+    ) -> Result<Compiled, RunError> {
         // record 55 K7, small lists at plain (the ruling of 2026-10-13): a
         // handle whose list was held back holds no row, and a set read from
         // it would answer none where there were some, on every door
@@ -296,9 +311,21 @@ impl Runner<'_> {
             limit,
             withhold_sealed: !self.unsealed,
         };
-        let compiled = compile(ask, validated, &ctx)?;
-        let answer = execute(store, &compiled, self.bounds)?;
-        Ok((compiled, answer))
+        Ok(compile(ask, validated, &ctx)?)
+    }
+
+    /// Run a statement on the door's reader, or the registry's own
+    /// connection.
+    pub(crate) fn execute(
+        &mut self,
+        registry: &mut Registry,
+        compiled: &Compiled,
+    ) -> Result<Answer, RunError> {
+        let store: &mut Store = match self.reader.as_deref_mut() {
+            Some(r) => r,
+            None => registry.store(),
+        };
+        Ok(execute(store, compiled, self.bounds)?)
     }
 }
 

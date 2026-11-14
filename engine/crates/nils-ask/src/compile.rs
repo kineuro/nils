@@ -2620,6 +2620,43 @@ impl<'a> Builder<'a> {
                 break;
             }
         }
+        // The bindings that wait for the pick: where a set picks, a binding
+        // the pick does not order by, that reads no row but its own, is
+        // made for the rows the pick keeps and not for every candidate. A
+        // signature is made of a dozen lookups, and a set that picks one
+        // stack a session of three made it three times to keep one.
+        let windowed = |c: &Clause| {
+            let mut all = Vec::new();
+            c.walk(&mut all);
+            all.iter()
+                .any(|cl| matches!(cl.op.as_str(), "ordinal" | "prev" | "next" | "change"))
+        };
+        let mut waits: Vec<bool> = binds
+            .iter()
+            .enumerate()
+            .map(|(i, (b, c))| {
+                set.pick.as_ref().is_some_and(|pk| {
+                    !early[i] && !windowed(c) && !pk.by.iter().any(|o| reads(&o.0, b))
+                })
+            })
+            .collect();
+        loop {
+            // one a binding made before the pick reads is made before it too
+            let mut changed = false;
+            for i in 0..binds.len() {
+                if !waits[i] {
+                    for j in 0..binds.len() {
+                        if waits[j] && reads(binds[i].1, binds[j].0) {
+                            waits[j] = false;
+                            changed = true;
+                        }
+                    }
+                }
+            }
+            if !changed {
+                break;
+            }
+        }
         // a list read as a list before `where` is cut is made first
         let mut read_early: Vec<&Clause> = Vec::new();
         for n in &set.near {
@@ -2657,7 +2694,21 @@ impl<'a> Builder<'a> {
                 &mut terms,
             )?;
         }
-        // attach: the one row of a descendant set picked per this grain
+        // attach: the one row of a descendant set picked per this grain.
+        // On Postgres the rows the partners are attached to are planned
+        // by themselves first (`OFFSET 0` keeps a subquery whole). A
+        // required partner is an inner join, and a planner free to order
+        // it with the set's own joins starts from the partners: it takes
+        // two picked sets tied by their key for a handful of rows (8 where
+        // there were 14,901), and then meets the set's source, a
+        // materialized set with no index, by reading all of it for every
+        // row: 424 million comparisons and 39 s of a 45 s question on the
+        // scale registry (2026-11-14). Planned first, the set's own rows
+        // are counted from its tables, and the partners are hashed or
+        // merged to them.
+        if !set.attach.is_empty() && self.sql.is_pg() {
+            layer.push_str(" OFFSET 0");
+        }
         for (i, a) in set.attach.iter().enumerate() {
             layer = self.attach_layer(set, a, &format!("{path}.attach[{i}]"), layer, &mut terms)?;
         }
@@ -2723,7 +2774,7 @@ impl<'a> Builder<'a> {
         // the rest, on the rows that are left
         for late in [false, true] {
             for (i, (b, c)) in binds.iter().enumerate() {
-                if early[i] == late {
+                if early[i] == late || waits[i] {
                     continue;
                 }
                 let bp = format!("{path}.bind.{b}");
@@ -2733,7 +2784,12 @@ impl<'a> Builder<'a> {
                 }
                 let expr = self.expr(c, &terms, "q", &bp)?;
                 let col = column_name(b);
-                layer = format!("SELECT q.*, {} AS {col} FROM ({layer}) q", expr.sql);
+                layer = match self.grouped_aggregate(c, &expr.sql) {
+                    Some((joined, value)) => {
+                        format!("SELECT q.*, {value} AS {col} FROM ({layer}) q LEFT JOIN {joined}")
+                    }
+                    None => format!("SELECT q.*, {} AS {col} FROM ({layer}) q", expr.sql),
+                };
                 frame.bindings.push(((*b).clone(), col.clone()));
                 terms.push((
                     (*b).clone(),
@@ -2772,17 +2828,6 @@ impl<'a> Builder<'a> {
                     );
                 }
             }
-        }
-        // a binding keeps the place it was written at, for a union's columns
-        let order: Vec<&String> = binds.iter().map(|(b, _)| *b).collect();
-        let place = |b: &str| order.iter().position(|o| o.as_str() == b);
-        if !order.is_empty() {
-            let first = frame
-                .bindings
-                .iter()
-                .position(|(b, _)| place(b).is_some())
-                .unwrap_or(frame.bindings.len());
-            frame.bindings[first..].sort_by_key(|(b, _)| place(b).unwrap_or(usize::MAX));
         }
         // pick
         if let Some(pk) = &set.pick {
@@ -2835,6 +2880,45 @@ impl<'a> Builder<'a> {
                     terms.push((n.into(), Term::plain(c.into())));
                 }
             }
+        }
+        // the bindings that waited for the pick, on the rows it kept
+        for (i, (b, c)) in binds.iter().enumerate() {
+            if !waits[i] {
+                continue;
+            }
+            let bp = format!("{path}.bind.{b}");
+            let expr = self.expr(c, &terms, "q", &bp)?;
+            let col = column_name(b);
+            layer = match self.grouped_aggregate(c, &expr.sql) {
+                Some((joined, value)) => {
+                    format!("SELECT q.*, {value} AS {col} FROM ({layer}) q LEFT JOIN {joined}")
+                }
+                None => format!("SELECT q.*, {} AS {col} FROM ({layer}) q", expr.sql),
+            };
+            frame.bindings.push(((*b).clone(), col.clone()));
+            terms.push((
+                (*b).clone(),
+                Term {
+                    sql: col,
+                    prec: expr.prec,
+                    ci: None,
+                    param: None,
+                    members: expr.members,
+                    holder: None,
+                    dated: expr.dated,
+                },
+            ));
+        }
+        // a binding keeps the place it was written at, for a union's columns
+        let order: Vec<&String> = binds.iter().map(|(b, _)| *b).collect();
+        let place = |b: &str| order.iter().position(|o| o.as_str() == b);
+        if !order.is_empty() {
+            let first = frame
+                .bindings
+                .iter()
+                .position(|(b, _)| place(b).is_some())
+                .unwrap_or(frame.bindings.len());
+            frame.bindings[first..].sort_by_key(|(b, _)| place(b).unwrap_or(usize::MAX));
         }
         frame.terms = terms;
         self.frames.insert(name.to_string(), frame);
@@ -3685,6 +3769,48 @@ impl<'a> Builder<'a> {
             .map(|i| format!("kh{i}_{passes}"))
             .collect();
         (layer, flags)
+    }
+
+    /// A binding that is one aggregate over a child set, as a join: the
+    /// child grouped once by the key that ties it to this set, and each row
+    /// given its group's value. As an expression the aggregate is a lookup
+    /// per row, `(SELECT agg FROM child ch WHERE ch.key = q.k)`, and a
+    /// child is a set of the statement, which has no index: every row of
+    /// this set read every row of the child (3.4 s of a question whose
+    /// subjects each asked for the largest of 12,753 groups, 2026-11-14).
+    /// The join's relation and the value to read from it; none where the
+    /// binding is more than the aggregate, or the aggregate is not of the
+    /// plain form, and then it stays the lookup. A count of no rows is 0
+    /// either way, and any other aggregate of none is null.
+    fn grouped_aggregate(&self, c: &Clause, lookup: &str) -> Option<(String, String)> {
+        if !matches!(
+            c.op.as_str(),
+            "count" | "distinct" | "min" | "max" | "sum" | "avg"
+        ) {
+            return None;
+        }
+        let target = c.opts.get("set").and_then(Value::as_str)?;
+        let from = format!(" FROM {} ch WHERE ", cte_name(target));
+        let at = lookup.rfind(&from)?;
+        let agg = lookup[..at].strip_prefix("(SELECT ")?;
+        let key = lookup[at + from.len()..].strip_suffix(" = q.k)")?;
+        let plain = key.strip_prefix("ch.").is_some_and(|k| {
+            !k.is_empty() && k.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+        });
+        if !plain {
+            return None;
+        }
+        let value = match c.op.as_str() {
+            "count" | "distinct" => "COALESCE(g.v, 0)",
+            _ => "g.v",
+        };
+        Some((
+            format!(
+                "(SELECT {key} AS hk, {agg} AS v FROM {} ch GROUP BY {key}) g ON g.hk = q.k",
+                cte_name(target)
+            ),
+            value.to_string(),
+        ))
     }
 
     fn aggregate(&self, op: &str, inner: Option<&str>, path: &str) -> R<String> {

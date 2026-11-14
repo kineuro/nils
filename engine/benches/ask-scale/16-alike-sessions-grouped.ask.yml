@@ -1,0 +1,59 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# The grouped form of document 15, which a model writes as often: the best
+# fine 3D T1w and the best fine 3D FLAIR of each session of a cohort, the
+# sessions that have both from one scanner, and the subjects with two such
+# sessions that agree in the model, the station and both signatures, as a
+# group of those sessions by subject and the four keys that holds two.
+ast_version: 1
+name: runs of sessions alike in their best T1w and FLAIR, by subject
+sets:
+  scope:  {grain: cohort,  where: [["=", {}, ["field", {}, "name"], "alpha"]]}
+  people: {grain: subject, of: scope}
+  visits: {grain: session, of: people}
+  t1:
+    grain: stack
+    of: visits
+    where:
+      - ["=",  {}, ["axis", {}, "base"], "T1w"]
+      - ["=",  {}, ["derived", {}, "acquisition_type"], "3D"]
+      - ["<=", {}, ["derived", {}, "voxel"], 1.2]
+    bind:
+      sig: ["derived", {level: loose}, "signature"]
+    pick: {per: session, n: 1,
+           by: [[["field", {}, "n_instances"], desc], [["field", {}, "id"], asc]]}
+  flair:
+    grain: stack
+    of: visits
+    where:
+      - ["=",   {}, ["axis", {}, "base"], "T2w"]
+      - ["has", {}, ["axis", {}, "modifier"], "FLAIR"]
+      - ["=",   {}, ["derived", {}, "acquisition_type"], "3D"]
+      - ["<=",  {}, ["derived", {}, "voxel"], 1.2]
+    bind:
+      sig: ["derived", {level: loose}, "signature"]
+    pick: {per: session, n: 1,
+           by: [[["field", {}, "n_instances"], desc], [["field", {}, "id"], asc]]}
+  good:
+    grain: session
+    from: visits
+    attach:
+      - {as: t1,    set: t1}
+      - {as: flair, set: flair}
+    where:
+      - ["=", {}, ["field", {}, "t1.station_name"], ["field", {}, "flair.station_name"]]
+  runs:
+    grain: group
+    group:
+      of: good
+      by:
+        - ["field", {}, "subject.id"]
+        - ["field", {}, "t1.manufacturer_model_name"]
+        - ["field", {}, "t1.station_name"]
+        - ["field", {}, "t1.sig"]
+        - ["field", {}, "flair.sig"]
+    bind:
+      n: ["count", {set: good}]
+    where:
+      - [">=", {}, ["field", {}, "n"], 2]
+keep: [runs]
+out: {set: runs, level: count}

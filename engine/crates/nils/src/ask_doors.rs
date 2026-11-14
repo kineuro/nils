@@ -37,6 +37,21 @@ pub(crate) struct AskState {
     pack: Option<Pack>,
 }
 
+/// How many statements of a funnel a draft or a diagnosis counts at the
+/// same time beside its own reader.
+const BESIDE: usize = 4;
+
+/// Readers for the statements of one funnel, opened as the door's own is
+/// (the same role, read only) and closed with the request: a draft's stage
+/// counts do not depend on each other, and one after another they take
+/// several times the question. Fewer where a connection is refused, and
+/// none is no error: the funnel is then counted on the door's reader alone.
+fn readers_beside(registry: &Registry, doors: &Doors) -> Vec<Store> {
+    (0..BESIDE)
+        .map_while(|_| registry.open_ask_reader(doors.ask_dsn.as_deref()).ok())
+        .collect()
+}
+
 impl AskState {
     /// What the pack tells a model (§12.3), or none when it says nothing.
     pub(crate) fn model(
@@ -994,12 +1009,14 @@ fn answer(
                 bounds,
                 values_cap: caps.options_values as usize,
             };
-            let drafted = affordance::draft_within(
+            let mut beside = readers_beside(registry, doors);
+            let drafted = affordance::draft_beside(
                 registry,
                 text,
                 &s,
                 Some(reader),
                 Some(caps.draft_timeout_ms),
+                &mut beside,
             )
             .map_err(affordance_err)?;
             Ok(Reply::ok(
@@ -1145,7 +1162,8 @@ fn answer(
             // 2026-11-13: the door's limit is for the diagnosis as a whole,
             // where each count had it to itself, and counts that run past
             // it are said in `unavailable` on a diagnosis that is valid
-            let d = diagnose::diagnose_within(
+            let mut beside = readers_beside(registry, doors);
+            let d = diagnose::diagnose_beside(
                 registry,
                 ask,
                 Vec::new(),
@@ -1156,6 +1174,7 @@ fn answer(
                 doc["keys"].as_bool().unwrap_or(false),
                 Some(reader),
                 Some(caps.sync_timeout_ms),
+                &mut beside,
             )
             .map_err(run_err)?;
             let d = match stored {
