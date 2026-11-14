@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 //! The count of a group set answers its groups and the subjects under
-//! them. `subjects` was the number of groups, so a set of 1,749 groups that
-//! 1,283 subjects made read as 1,749 subjects. It is the distinct subjects
+//! them. `subjects` was the number of groups, so a set of seven groups that
+//! five subjects made read as seven subjects. It is the distinct subjects
 //! of the rows the groups that survive hold: one subject of two groups is
 //! one, a group the set's own `where` drops takes its subjects with it
 //! unless another group holds them, a group of a group is read down to the

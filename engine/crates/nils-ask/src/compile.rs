@@ -5454,8 +5454,8 @@ impl<'a> Builder<'a> {
     /// is the distinct subjects of the rows those groups hold, read through
     /// what each group keeps of its rows ([`Members`]), down through every
     /// group under it to the rows with a subject; a subject of two groups
-    /// is one subject. It was the number of groups, so a set of 1,749
-    /// groups of 1,283 subjects said 1,749 subjects (2026-11-14). Where the
+    /// is one subject. It was the number of groups, so a set of seven
+    /// groups of five subjects said seven subjects (2026-11-14). Where the
     /// rows under the groups have no subject (a group over cohorts), it is
     /// null: there is no such number, and the number of groups is not it.
     ///

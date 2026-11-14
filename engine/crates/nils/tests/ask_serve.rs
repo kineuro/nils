@@ -5562,8 +5562,8 @@ fn a_refusal_names_every_key_of_a_group_that_cannot_be_read() {
 }
 
 /// 2026-11-14, on each backend: the count of a group set said its groups
-/// twice, once as `rows` and once as `subjects`, so a card read 1,749
-/// subjects where 1,283 made the groups. At every door that answers the
+/// twice, once as `rows` and once as `subjects`, so a card read seven
+/// subjects where five made the groups. At every door that answers the
 /// count (a run and its handle's rows, a preview, the profile a card is
 /// drawn from) `subjects` is the distinct subjects under the groups that
 /// survive, and for groups of rows with no subject it is null, and the
