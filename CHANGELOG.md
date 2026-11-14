@@ -4,6 +4,10 @@ All notable changes to NILS v1 are recorded here. The format follows [Keep a Cha
 
 ## [Unreleased]
 
+## [1.0.0-beta.20] - 2026-11-14
+
+The twentieth engine beta: a set of stacks is read from one row a stack that the database keeps (schema 119, a migration of some seconds), and installs take the assistant at 1.0.0-alpha.35.
+
 ### Changed
 
 - A set of stacks is read from one row a stack. `stack_axis`, the row that holds a stack's axes, also holds its series, whether it has a fingerprint and the fingerprint columns a question filters stacks on: the acquisition type as filled and as read, the two pixel spacings and the slice thickness (schema 119). A stack set was the stack tied to its fingerprint and to that row, row by row, before a clause could be held against it; it is now that one table read and tied to its series, and the stack's own table and its fingerprint are joined only where a question names another column of theirs. A count of stacks by dataset, acquisition type, voxel size and axes over half a million stacks takes 0.2 to 0.4 seconds on either backend where it took 0.5 to 0.7, and questions that tie many stacks to their fingerprints (subjects by their stacks, a union of stack sets, stacks beside a second dataset's copies) take a quarter to two thirds of their time. A set that reads another column of the fingerprint or of the stack's own table (a signature, a station) joins them as before, and gains less or nothing. Every answer is the one it was: a stack with no fingerprint is in no set, as the join left it out, and an unknown spacing or acquisition type reads as it read on each backend.
