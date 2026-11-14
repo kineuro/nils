@@ -225,6 +225,47 @@ impl Sql {
         }
     }
 
+    /// The keys `x` of a group's rows as one value, each once: an array on
+    /// Postgres, a JSON array on SQLite. A row with none adds none.
+    fn keys_of(self, x: &str) -> String {
+        if self.is_pg() {
+            format!("array_agg(DISTINCT {x}) FILTER (WHERE {x} IS NOT NULL)")
+        } else {
+            format!("json_group_array(DISTINCT {x}) FILTER (WHERE {x} IS NOT NULL)")
+        }
+    }
+
+    /// How many keys a value of [`Sql::keys_of`] holds.
+    fn keys_held(self, keys: &str) -> String {
+        if self.is_pg() {
+            format!("CAST(COALESCE(cardinality({keys}), 0) AS BIGINT)")
+        } else {
+            format!("json_array_length({keys})")
+        }
+    }
+
+    /// The keys of [`Sql::keys_of`] as rows again, beside the row that
+    /// holds them: the join, the key it reads, and what is true of one row
+    /// of each holder (its first key, or the row of a holder with none,
+    /// which stays).
+    fn each_key(self, keys: &str, alias: &str) -> (String, String, String) {
+        if self.is_pg() {
+            (
+                format!(
+                    " LEFT JOIN LATERAL unnest({keys}) WITH ORDINALITY AS {alias}(v, n) ON TRUE"
+                ),
+                format!("{alias}.v"),
+                format!("({alias}.n IS NULL OR {alias}.n = 1)"),
+            )
+        } else {
+            (
+                format!(" LEFT JOIN json_each({keys}) {alias} ON 1 = 1"),
+                format!("{alias}.value"),
+                format!("({alias}.key IS NULL OR {alias}.key = 0)"),
+            )
+        }
+    }
+
     /// H8, the projection casts.
     pub fn as_bigint(self, x: &str) -> String {
         if self.is_pg() {
@@ -520,7 +561,24 @@ struct Frame {
     /// Record 55 K7, small counts at plain: per size of the count rule, the
     /// column that is 1 where the group's counts by it are held back.
     count_flags: Vec<String>,
+    /// What a group counted at count level keeps of the rows under each of
+    /// its groups, in the column [`MEMBERS`].
+    members: Option<Members>,
 }
+
+/// What the column [`MEMBERS`] of a group's row holds, for the count of the
+/// subjects under the groups that survive.
+#[derive(Debug, Clone, PartialEq)]
+enum Members {
+    /// The subjects of the group's rows.
+    Subjects,
+    /// The keys of the group's rows in the set named, itself a group that
+    /// keeps its members.
+    Groups(String),
+}
+
+/// The column of a group's layer that holds its members.
+const MEMBERS: &str = "km";
 
 fn column_name(binding: &str) -> String {
     format!("b_{}", binding.replace('.', "__"))
@@ -676,6 +734,30 @@ struct Builder<'a> {
     /// the parameters the sets bind.
     list_guard: Option<String>,
     list_guard_params: usize,
+    /// The groups whose members a count level answer of a group set reads:
+    /// the answer's set and every group under it ([`counted_groups`]).
+    counted_groups: Vec<String>,
+    /// The count is read for its rows alone ([`Validated::counting_rows`]).
+    rows_only: bool,
+}
+
+/// The groups a count level answer of a group set counts the subjects of:
+/// the answer's set, the group it groups, and so on down to the first set
+/// that is no group. None where the answer is not the count of a group.
+fn counted_groups(ask: &Ask) -> Vec<String> {
+    let mut out = Vec::new();
+    if ask.out.level != crate::ast::Level::Count {
+        return out;
+    }
+    let mut name = &ask.out.set;
+    while let Some(g) = ask.sets.get(name).and_then(|s| s.group.as_ref()) {
+        if out.contains(name) {
+            break;
+        }
+        out.push(name.clone());
+        name = &g.of;
+    }
+    out
 }
 
 const AGGREGATES: &[&str] = &["count", "distinct", "min", "max", "sum", "avg", "list"];
@@ -3348,13 +3430,33 @@ impl<'a> Builder<'a> {
                 e
             }
         };
+        // A count of this set, or of a group over it, counts the subjects
+        // under the groups that survive: each group keeps the subjects of
+        // its rows, or the keys of its rows where they are groups that do.
+        let mut kept: Option<String> = None;
+        if self.counted_groups.iter().any(|g| g == name) {
+            let (keys, members) = if child.has_subj {
+                ("ch.subj", Some(Members::Subjects))
+            } else if child.members.is_some() {
+                ("ch.k", Some(Members::Groups(g.of.clone())))
+            } else {
+                ("", None)
+            };
+            if members.is_some() {
+                let keys = self.sql.keys_of(keys);
+                cols.push(format!("{keys} AS {MEMBERS}"));
+                kept = Some(keys);
+            }
+            frame.members = members;
+        }
         cols.push(format!("{} AS _rows", held("COUNT(*)".into())));
         cols.push(format!(
             "{} AS _subjects",
-            held(if child.has_subj {
-                "COUNT(DISTINCT ch.subj)".into()
-            } else {
-                "COUNT(DISTINCT ch.k)".into()
+            held(match (&kept, child.has_subj) {
+                // the subjects kept are the subjects counted: read once
+                (Some(keys), _) => self.sql.keys_held(keys),
+                (None, true) => "COUNT(DISTINCT ch.subj)".into(),
+                (None, false) => "COUNT(DISTINCT ch.k)".into(),
             })
         ));
         // Record 55 K7, small counts at plain (the ruling of 2026-10-12):
@@ -5346,6 +5448,102 @@ impl<'a> Builder<'a> {
         Some(format!("(SELECT {who} FROM {} x)", cte_name(&out.set)))
     }
 
+    /// The count of a group set: its groups, and the subjects under them.
+    ///
+    /// `rows` is the groups that survive the set's own `where`. `subjects`
+    /// is the distinct subjects of the rows those groups hold, read through
+    /// what each group keeps of its rows ([`Members`]), down through every
+    /// group under it to the rows with a subject; a subject of two groups
+    /// is one subject. It was the number of groups, so a set of 1,749
+    /// groups of 1,283 subjects said 1,749 subjects (2026-11-14). Where the
+    /// rows under the groups have no subject (a group over cohorts), it is
+    /// null: there is no such number, and the number of groups is not it.
+    ///
+    /// What is held back is held as before, by the number a reader sees.
+    /// Record 55 K7, small counts at plain (the ruling of 2026-10-12): a
+    /// count of a group set a quasi identifying field chose or keyed is
+    /// held where its groups hold 1 to 4 subjects, the subjects counted
+    /// here; where the rows have no subject, by the rows under it, as it
+    /// was. A set filtered on a measure below detail quasi shows its count
+    /// for none or `MEASURE_K` groups and more, as it did.
+    fn group_count(&mut self, frame: &Frame) -> String {
+        let out = &self.ask.out;
+        let k = crate::validate::MEASURE_K;
+        // from each group down to its subjects, a join a level
+        let mut joins = String::new();
+        let mut subject: Option<String> = None;
+        let mut holder = "o".to_string();
+        let mut members = frame.members.clone();
+        // true of one row of each group, however many rows its members make
+        let mut once: Vec<String> = Vec::new();
+        let mut depth = 0;
+        while let Some(m) = members.take() {
+            let (join, key, first) = self
+                .sql
+                .each_key(&format!("{holder}.{MEMBERS}"), &format!("m{depth}"));
+            joins.push_str(&join);
+            once.push(first);
+            match m {
+                Members::Subjects => subject = Some(key),
+                Members::Groups(child) => {
+                    holder = format!("g{depth}");
+                    joins.push_str(&format!(
+                        " LEFT JOIN {} {holder} ON {holder}.k = {key}",
+                        cte_name(&child)
+                    ));
+                    members = self.frames.get(&child).and_then(|f| f.members.clone());
+                }
+            }
+            depth += 1;
+        }
+        let counted = match &subject {
+            Some(s) => format!(
+                "SELECT COUNT(CASE WHEN {} THEN 1 END) AS n_rows, COUNT(DISTINCT {s}) AS n_subjects FROM {} o{joins}",
+                once.join(" AND "),
+                cte_name(&out.set)
+            ),
+            None => format!(
+                "SELECT COUNT(*) AS n_rows, {} AS n_subjects FROM {} o",
+                self.sql.as_bigint("NULL"),
+                cte_name(&out.set)
+            ),
+        };
+        let mut shown: Vec<String> = Vec::new();
+        if self.small_cells.contains(&out.set) {
+            shown.push(format!("(c.n_rows = 0 OR c.n_rows >= {k})"));
+        }
+        let quasi = self.quasi_subjects(frame);
+        if let Some(under) = &quasi {
+            let n = if subject.is_some() {
+                "c.n_subjects"
+            } else {
+                under.as_str()
+            };
+            shown.push(format!("({n} = 0 OR {n} >= {k})"));
+        }
+        let held = |e: String| -> String {
+            if shown.is_empty() {
+                e
+            } else {
+                format!("CASE WHEN {} THEN {e} END", shown.join(" AND "))
+            }
+        };
+        self.answer_columns = vec!["rows".into(), "subjects".into()];
+        if quasi.is_some() {
+            // subjects that are not counted are not a count held back
+            self.count_columns = if subject.is_some() {
+                vec![0, 1]
+            } else {
+                vec![0]
+            };
+        }
+        format!(
+            "SELECT {} AS rows_, {} AS subjects_ FROM ({counted}) c",
+            held(self.sql.as_bigint("c.n_rows")),
+            held(self.sql.as_bigint("c.n_subjects")),
+        )
+    }
+
     /// The final SELECT over the answer's set.
     fn answer(&mut self) -> R<String> {
         let out = &self.ask.out;
@@ -5357,10 +5555,21 @@ impl<'a> Builder<'a> {
         let mut shaped_columns = Vec::new();
         let mut held_columns = Vec::new();
         let mut count_columns = Vec::new();
+        let grouped = self
+            .ask
+            .sets
+            .get(&out.set)
+            .is_some_and(|s| s.group.is_some());
         match out.level {
+            crate::ast::Level::Count if grouped && !self.rows_only => {
+                return Ok(self.group_count(&frame));
+            }
             crate::ast::Level::Count => {
                 let subjects = if frame.has_subj {
                     "COUNT(DISTINCT o.subj)"
+                } else if grouped {
+                    // a count read for its rows alone: no subject is counted
+                    "NULL"
                 } else {
                     "COUNT(*)"
                 };
@@ -5398,7 +5607,7 @@ impl<'a> Builder<'a> {
                 );
                 self.answer_columns = vec!["rows".into(), "subjects".into()];
                 if quasi.is_some() {
-                    self.count_columns = vec![0, 1];
+                    self.count_columns = if grouped { vec![0] } else { vec![0, 1] };
                 }
                 return Ok(sql);
             }
@@ -5580,6 +5789,16 @@ pub fn compile(ask: &Ask, validated: &Validated, ctx: &Context<'_>) -> R<Compile
         }
     }
     *reads.entry(ask.out.set.clone()).or_insert(0) += 1;
+    // the count of a group set reads each group under it once more, for
+    // the subjects of the groups that survive
+    let counted = if validated.rows_only {
+        Vec::new()
+    } else {
+        counted_groups(ask)
+    };
+    for under in counted.iter().skip(1) {
+        *reads.entry(under.clone()).or_insert(0) += 1;
+    }
     let mut b = Builder {
         ctx,
         ask,
@@ -5604,6 +5823,8 @@ pub fn compile(ask: &Ask, validated: &Validated, ctx: &Context<'_>) -> R<Compile
         count_columns: Vec::new(),
         list_guard: None,
         list_guard_params: 0,
+        counted_groups: counted,
+        rows_only: validated.rows_only,
     };
     for name in &validated.order {
         b.current = Some(ask.sets[name].grain);
