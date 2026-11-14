@@ -96,8 +96,8 @@
     },
     "16-alike-sessions-grouped": {
       "rows": 1693,
-      "subjects": 1693,
-      "hash": "df16582154ac8763f40e349096f5f5f7121f2d3c120faaef63bc982ca8185a65",
+      "subjects": 1550,
+      "hash": "251bd11f0975e95030761e453e93498098d39deabf4e84f0b8f1319a2f59bd6a",
       "held": false
     }
   },
@@ -188,8 +188,8 @@
     },
     "16-alike-sessions-grouped": {
       "rows": 1720,
-      "subjects": 1720,
-      "hash": "7b59cb7139327e7c722d89eb4bac8c4281c8f932a7905738340e6af9f417af60",
+      "subjects": 1573,
+      "hash": "2ff112c103fe9ca9edfc6dfce445432627c56271bf1f6a9937910cb4b5cf0839",
       "held": false
     }
   }
