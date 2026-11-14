@@ -251,9 +251,19 @@ fn out_of_shared_memory(e: &StoreError) -> bool {
 /// statement is run once more without them: a slower answer, where the
 /// first run gave none.
 pub fn run(store: &mut Store, compiled: &Compiled, bounds: Bounds) -> Result<Answer, ExecError> {
+    let started = Instant::now();
     match run_as(store, compiled, bounds, false) {
         Err(ExecError::Store(e)) if out_of_shared_memory(&e) => {
-            run_as(store, compiled, bounds, true)
+            // the second try has what the first left of the statement's
+            // time: with the whole of it again, a statement that failed
+            // late ran for up to twice its limit, and a funnel counted
+            // within a draft's time came back after it (2026-11-14)
+            let mut left = bounds;
+            left.timeout_ms = bounds
+                .timeout_ms
+                .saturating_sub(started.elapsed().as_millis() as u64)
+                .max(1);
+            run_as(store, compiled, left, true)
         }
         other => other,
     }
