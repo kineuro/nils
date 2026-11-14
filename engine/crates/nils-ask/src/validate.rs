@@ -452,6 +452,10 @@ pub struct Validated {
     /// [`MEASURE_K`] subjects, and those held beside them so that none is
     /// found by subtraction.
     pub counts: CountRule,
+    /// A count the engine makes for itself and reads the rows of alone
+    /// ([`Validated::counting_rows`]): the count of a group set then counts
+    /// no subjects, and answers null for them.
+    pub rows_only: bool,
 }
 
 /// Record 55 K7, small counts at plain (the ruling of 2026-10-12): how the
@@ -479,6 +483,16 @@ impl Validated {
     pub fn counting_all(mut self) -> Validated {
         self.quasi_sets.clear();
         self.counts = CountRule::default();
+        self
+    }
+
+    /// The same validation for a count the engine reads the rows of alone:
+    /// how many members a set holds, each once, as the groups of it by its
+    /// key. The subjects under the groups of a group set cost a pass over
+    /// its rows that such a count has no use for; it answers null for them.
+    /// What is held back is held as it would be.
+    pub fn counting_rows(mut self) -> Validated {
+        self.rows_only = true;
         self
     }
 }

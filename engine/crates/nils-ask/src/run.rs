@@ -523,7 +523,17 @@ fn run_at(registry: &mut Registry, req: Request<'_>, depth: usize) -> Result<Out
                 let v = validate(&counted, req.names, req.scope).map_err(AskError::Invalid)?;
                 let small = v.quasi_sets.contains(set);
                 let (_, a) = runner.answer(registry, &counted, &v.counting_all(), None, None)?;
-                let subjects = a.rows.first().map(|r| r.int(1)).transpose()?.unwrap_or(0);
+                // the distinct subjects of the set named; for a group set
+                // the subjects under its groups, where it was the number of
+                // groups. A set whose rows have no subject (the groups of
+                // cohorts) counts none, and a share over it is of its rows.
+                let subjects = match a.rows.first() {
+                    Some(r) => match r.opt_int(1)? {
+                        Some(n) => n,
+                        None => r.int(0)?,
+                    },
+                    None => 0,
+                };
                 if small && subjects > 0 && subjects < crate::validate::MEASURE_K {
                     small_over.insert(set.to_string());
                     over.insert(set.to_string(), 0.0);

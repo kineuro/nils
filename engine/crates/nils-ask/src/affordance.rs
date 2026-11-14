@@ -281,6 +281,39 @@ pub fn preview(
     })
 }
 
+/// How many rows the document's answer holds, for a count the engine makes
+/// for itself: the members of a set, each once, as the groups of it by its
+/// key. Null where the ask holds the count back, as [`preview`] answers it.
+/// Nothing else is counted: the subjects under the groups of a group set
+/// cost a pass over its rows this count has no use for.
+pub fn count_rows(
+    registry: &mut Registry,
+    ask: &Ask,
+    s: &Setting<'_>,
+    reader: Option<&mut Store>,
+) -> Result<Option<i64>, AffordanceError> {
+    let prepared = prepare(ask.clone(), s.names, s.scope)?;
+    let mut ask = prepared.ask;
+    let inlined = crate::run::inline_selections(registry, &mut ask)?;
+    let validated = if inlined.is_empty() {
+        prepared.validated
+    } else {
+        validate(&ask, s.names, s.scope).map_err(AskError::Invalid)?
+    };
+    let mut runner = Runner {
+        names: s.names,
+        scheme: s.scheme,
+        bounds: s.bounds,
+        reader,
+        unsealed: s.scope.unsealed,
+    };
+    let (_, answer) = runner.answer(registry, &ask, &validated.counting_rows(), None, None)?;
+    Ok(match answer.rows.first() {
+        Some(r) => r.opt_int(0).map_err(RunError::from)?,
+        None => None,
+    })
+}
+
 /// What `draft` returns: the repairs, the diagnosis, and the document's
 /// handle when it validated.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -523,7 +556,8 @@ pub fn values(
     // into their shapes before they are counted, so its counts are the
     // shapes', read whole (record 55 K7's small counts are the ask's)
     prepared.validated = prepared.validated.counting_all();
-    counted.validated = counted.validated.counting_all();
+    // how many values there are is how many groups: its rows alone
+    counted.validated = counted.validated.counting_all().counting_rows();
     let mut runner = Runner {
         names: s.names,
         scheme: s.scheme,

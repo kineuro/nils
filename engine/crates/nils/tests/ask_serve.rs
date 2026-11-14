@@ -5560,3 +5560,142 @@ fn a_refusal_names_every_key_of_a_group_that_cannot_be_read() {
         }
     }
 }
+
+/// 2026-11-14, on each backend: the count of a group set said its groups
+/// twice, once as `rows` and once as `subjects`, so a card read seven
+/// subjects where five made the groups. At every door that answers the
+/// count (a run and its handle's rows, a preview, the profile a card is
+/// drawn from) `subjects` is the distinct subjects under the groups that
+/// survive, and for groups of rows with no subject it is null, and the
+/// profile leaves it out.
+#[test]
+fn the_count_of_a_group_set_says_its_subjects_at_every_door() {
+    let cells = serde_json::json!({
+        "ast_version": 1,
+        "name": "subjects seen twice",
+        "sets": {
+            "scans": {"grain": "stack"},
+            "cells": {"grain": "group",
+                "group": {"of": "scans", "by": [["field", {}, "subject.id"], ["field", {}, "session.id"]]},
+                "where": [[">=", {}, ["field", {}, "_rows"], 2]]}
+        },
+        "out": {"set": "cells", "level": "count"}
+    });
+    // the same groups listed, for what their rows say
+    let mut listed = cells.clone();
+    listed["out"] = serde_json::json!({"set": "cells", "level": "aggregate",
+        "columns": [["field", {}, "subject.id"]], "limit": 5000});
+    let cohorts = serde_json::json!({
+        "ast_version": 1,
+        "name": "cohorts by name",
+        "sets": {
+            "all": {"grain": "cohort"},
+            "names": {"grain": "group", "group": {"of": "all", "by": [["field", {}, "name"]]}}
+        },
+        "out": {"set": "names", "level": "count"}
+    });
+    for (backend, home, dsn) in backends("nils_ask_serve_groups_test") {
+        let server = Server::start(&home, 9, &[]);
+        let post = |door: &str, request: serde_json::Value| {
+            let (status, answer) = server.request("POST", door, Some(&body(request)), None);
+            assert_eq!(status, 200, "{backend} {door}: {answer}");
+            answer
+        };
+        let rows = post("/api/ask/run", serde_json::json!({"document": listed}));
+        let at = rows["columns"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .position(|c| c == "subject.id")
+            .unwrap();
+        let groups = rows["rows"].as_array().unwrap();
+        let subjects: std::collections::BTreeSet<i64> =
+            groups.iter().map(|r| r[at].as_i64().unwrap()).collect();
+        let (groups, subjects) = (groups.len() as i64, subjects.len() as i64);
+        assert!(groups > subjects && subjects > 0, "{backend}: {rows}");
+        // a run, and the rows of its handle
+        let ran = post("/api/ask/run", serde_json::json!({"document": cells}));
+        assert_eq!(
+            ran["columns"],
+            serde_json::json!(["rows", "subjects"]),
+            "{backend}"
+        );
+        assert_eq!(
+            ran["rows"],
+            serde_json::json!([[groups, subjects]]),
+            "{backend}: {ran}"
+        );
+        let (status, page) = server.request(
+            "GET",
+            &format!("/api/ask/handles/{}/rows?page=0", ran["handle"]),
+            None,
+            None,
+        );
+        assert_eq!(status, 200, "{backend}: {page}");
+        assert_eq!(
+            page["rows"],
+            serde_json::json!([[groups, subjects]]),
+            "{backend}: {page}"
+        );
+        // a preview
+        let previewed = post("/api/ask/preview", serde_json::json!({"document": cells}));
+        assert_eq!(
+            previewed["rows"],
+            serde_json::json!([[groups, subjects]]),
+            "{backend}: {previewed}"
+        );
+        // the profile a card is drawn from
+        let profile = post("/api/ask/profile", serde_json::json!({"document": cells}));
+        assert_eq!(profile["grain"], "group", "{backend}: {profile}");
+        assert_eq!(
+            profile["counts"],
+            serde_json::json!({"rows": groups, "subjects": subjects}),
+            "{backend}: {profile}"
+        );
+        // groups of rows with no subject: null, and no count in the profile
+        let ran = post("/api/ask/run", serde_json::json!({"document": cohorts}));
+        let named = ran["rows"][0][0].as_i64().unwrap();
+        assert!(named >= 2, "{backend}: {ran}");
+        assert_eq!(
+            ran["rows"],
+            serde_json::json!([[named, null]]),
+            "{backend}: {ran}"
+        );
+        assert_eq!(ran["held_back"], serde_json::json!([]), "{backend}: {ran}");
+        let profile = post("/api/ask/profile", serde_json::json!({"document": cohorts}));
+        assert_eq!(
+            profile["counts"],
+            serde_json::json!({"rows": named}),
+            "{backend}: {profile}"
+        );
+        // a subject set's profile counts its sessions and stacks as it did
+        let people = serde_json::json!({
+            "ast_version": 1,
+            "sets": {"people": {"grain": "subject"}},
+            "out": {"set": "people", "level": "count"}
+        });
+        let profile = post("/api/ask/profile", serde_json::json!({"document": people}));
+        let counts = &profile["counts"];
+        let stacks = post(
+            "/api/ask/run",
+            serde_json::json!({"document": {
+                "ast_version": 1,
+                "sets": {"people": {"grain": "subject"}, "scans": {"grain": "stack", "of": "people"}},
+                "out": {"set": "scans", "level": "count"}
+            }}),
+        );
+        assert_eq!(
+            counts["stacks"], stacks["rows"][0][0],
+            "{backend}: {profile}"
+        );
+        assert!(
+            counts["subjects"].as_i64().is_some_and(|n| n > 0)
+                && counts["sessions"].as_i64().is_some_and(|n| n > 0),
+            "{backend}: {profile}"
+        );
+        server.finish();
+        if let Some(dsn) = &dsn {
+            drop_schema(dsn, "nils_ask_serve_groups_test");
+        }
+    }
+}

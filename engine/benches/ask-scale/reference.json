@@ -18,8 +18,8 @@
     },
     "03-repeat-visits": {
       "rows": 3469,
-      "subjects": 3469,
-      "hash": "2dc74efac626f66c62cf5e5d6b229dcc904b808b58e34499fbc9dc23d11494e3",
+      "subjects": 3445,
+      "hash": "efb9517ede58e86afb78c7ac1e14ecc41f595344f704fff4ed426d287c9be35f",
       "held": false
     },
     "04-negation": {
@@ -104,8 +104,8 @@
     },
     "03-repeat-visits": {
       "rows": 3452,
-      "subjects": 3452,
-      "hash": "369f82a4a51ca96ca28a1d743a64a4da050713cecf44e7d8407d01e5710e81c2",
+      "subjects": 3429,
+      "hash": "948502728c31fe54acad7e91ba48fd3374ccffa10513a337c3936e55bc553413",
       "held": false
     },
     "04-negation": {

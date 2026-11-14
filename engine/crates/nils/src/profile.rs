@@ -148,7 +148,15 @@ impl Reading<'_, '_> {
             name.clone(),
             json!({"grain": "group", "group": {"of": of, "by": [["field", {}, "id"]]}}),
         ));
-        Ok(self.count(&sets, &name)?.0)
+        let mut doc = self.base.clone();
+        for (set, body) in &sets {
+            doc["sets"][set] = body.clone();
+        }
+        doc["out"] = json!({"set": name, "level": "count"});
+        let ask = parse(&doc.to_string()).map_err(|e| e.to_string())?;
+        // the rows alone: the subjects under these groups are not asked for
+        affordance::count_rows(self.registry, &ask, self.setting, Some(&mut *self.reader))
+            .map_err(|e| e.to_string())
     }
 
     /// How many members a companion set holds, each once.
@@ -246,7 +254,13 @@ pub(crate) fn document(
     } else {
         part(
             r.count(&[], t)
-                .map(|(rows, subjects)| json!({"rows": rows, "subjects": subjects})),
+                .map(|(rows, subjects)| match (rows, subjects) {
+                    // rows that have no subject (the groups of cohorts): there is no
+                    // such count to show, where a count held back is null beside
+                    // rows held back
+                    (Some(_), None) => json!({"rows": rows}),
+                    _ => json!({"rows": rows, "subjects": subjects}),
+                }),
         )
     };
 
