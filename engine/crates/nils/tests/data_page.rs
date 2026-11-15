@@ -194,6 +194,28 @@ impl Worked {
         panic!("{path} never stopped counting: {doc}");
     }
 
+    /// Wait until the engine has a job of `kind` and every one of them is
+    /// over, a minute at most.
+    fn over(&self, kind: &str) {
+        for _ in 0..600 {
+            let doc = self.get("/api/jobs?all=1", OPS);
+            let mut of_kind = doc["jobs"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|j| j["kind"] == kind)
+                .peekable();
+            if of_kind.peek().is_some()
+                && of_kind
+                    .all(|j| matches!(j["state"].as_str(), Some("done" | "failed" | "cancelled")))
+            {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        panic!("no {kind} job was over");
+    }
+
     /// The dataset's jobs once every kind of `kinds` has one and all are
     /// over, two minutes at most.
     fn settled(&self, dataset: &str, kinds: &[&str]) -> Vec<Value> {
@@ -384,6 +406,12 @@ fn round(pg: Option<(String, String)>) {
             "pyramid",
         ],
     );
+    // the chain's last step is a score, which is no job of the dataset's
+    // steps and is queued only once the pick run is over, so the jobs above
+    // may settle before it begins. Its claim fails every running job whose
+    // process is gone, as any claim does, and so would fail the previews'
+    // row written as running by hand below: the chain is waited for whole
+    server.over("score");
     let id_of = |kind: &str| -> i64 {
         jobs.iter()
             .find(|j| j["kind"] == kind)
