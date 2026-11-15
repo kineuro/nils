@@ -4,6 +4,10 @@ All notable changes to NILS v1 are recorded here. The format follows [Keep a Cha
 
 ## [Unreleased]
 
+## [1.0.0-beta.21] - 2026-11-15
+
+The twenty-first engine beta: the ask measures the time between two dates in calendar months and years and warns of a difference written the wrong way round or a sequence read over the wrong rows, and installs take the assistant at 1.0.0-alpha.36.
+
 ### Added
 
 - The ask says how far apart two dates are in calendar units. `months_between` and `years_between` answer the whole calendar months and years from the second date to the first, the later date first as `days_between` reads them: a month is whole on the day of the month the earlier date falls on and a year on its month and day, as `age_at` counts a birthday, the same on SQLite and Postgres. "At least five years apart" is `[">=", {}, ["years_between", {}, <later>, <earlier>], 5]`; a window's `year` and `shift`'s stay the forgiving 366 days, which made five years 1830 days. Both are in the catalog's function table, the schema and the spec (§5.5), and the gate holds them on both backends (`hooks-calendar-gap`).
