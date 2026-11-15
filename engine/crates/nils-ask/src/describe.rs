@@ -146,6 +146,8 @@ pub fn clause_text(c: &Clause) -> String {
         "case" => format!("{} if {} else {}", arg(1), arg(0), arg(2)),
         "concat" => c.args.iter().map(literal).collect::<Vec<_>>().join(" + "),
         "days_between" => format!("days from {} to {}", arg(1), arg(0)),
+        "months_between" => format!("whole months from {} to {}", arg(1), arg(0)),
+        "years_between" => format!("whole years from {} to {}", arg(1), arg(0)),
         "shift" => format!(
             "{} shifted {} {}s",
             arg(0),

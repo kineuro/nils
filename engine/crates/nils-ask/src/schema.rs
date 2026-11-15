@@ -80,6 +80,8 @@ pub const OPS: &[&str] = &[
     "case",
     "concat",
     "days_between",
+    "months_between",
+    "years_between",
     "shift",
     "age_at",
     "bucket",

@@ -4,6 +4,16 @@ All notable changes to NILS v1 are recorded here. The format follows [Keep a Cha
 
 ## [Unreleased]
 
+### Added
+
+- The ask says how far apart two dates are in calendar units. `months_between` and `years_between` answer the whole calendar months and years from the second date to the first, the later date first as `days_between` reads them: a month is whole on the day of the month the earlier date falls on and a year on its month and day, as `age_at` counts a birthday, the same on SQLite and Postgres. "At least five years apart" is `[">=", {}, ["years_between", {}, <later>, <earlier>], 5]`; a window's `year` and `shift`'s stay the forgiving 366 days, which made five years 1830 days. Both are in the catalog's function table, the schema and the spec (§5.5), and the gate holds them on both backends (`hooks-calendar-gap`).
+- A diagnosis warns of a date difference written the wrong way round (`reversed_dates`). Where a `where` clause holds `days_between`, `months_between` or `years_between` above a positive bound, keeps no row, and keeps rows with the two dates the other way round, the warning names the clause and the order: "days_between(a, b) is a minus b: put the later date first". The second count is run only for a stage that kept nothing; a group set, which the funnel has no stages for, costs one count of the stage where it has such a clause.
+
+### Fixed
+
+- A group's value may hold totals of its child. `span_days: ["days_between", {}, ["max", {set: visits}, ...], ["min", {set: visits}, ...]]` in a group's `bind` was refused with "group has no descendants to count", while the two totals bound by themselves and the difference of the two fields worked. Each total inside a value of a group's `bind` or `where` is now bound by itself before it (`span_days__max`, `span_days__min`) and the value reads the bindings, so the stored document is the form that worked and every rule about a group's totals, the ones that hold values and counts back below detail quasi among them, reads it as before. A refusal inside such a total is told at the binding it was written in.
+- The refusal of a date function with too few dates says the order: "days_between reads two dates, the later first".
+
 ## [1.0.0-beta.20] - 2026-11-14
 
 The twentieth engine beta: a set of stacks is read from one row a stack that the database keeps (schema 119, a migration of some seconds), and installs take the assistant at 1.0.0-alpha.35.

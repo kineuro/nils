@@ -197,6 +197,36 @@ impl Sql {
         }
     }
 
+    /// H3 again, between any two days: the whole calendar months from `b`
+    /// to `a`, a month being whole on the day of the month `b` falls on (so
+    /// 31 January to 28 February is none, and to 1 March is one), or the
+    /// whole calendar years, which are not twelve of those: a year is whole on
+    /// the month and day `b` falls on, as an age is. Below nought where `a`
+    /// is the earlier, counted down as a floor is (a day short of a month
+    /// before is -1). Each date is read twice, so a parameter comes as two
+    /// placeholders.
+    pub fn units_between(self, unit: &str, a: (&str, &str), b: (&str, &str)) -> String {
+        let (a1, a2) = a;
+        let (b1, b2) = b;
+        if unit == "year" {
+            // an age at `a` of one born on `b`
+            return self.age_at((b1, b2), (a1, a2));
+        }
+        if self.is_pg() {
+            format!(
+                "((EXTRACT(YEAR FROM {a1})::int * 12 + EXTRACT(MONTH FROM {a1})::int) \
+                 - (EXTRACT(YEAR FROM {b1})::int * 12 + EXTRACT(MONTH FROM {b1})::int) \
+                 - CASE WHEN to_char({a2}, 'DD') < to_char({b2}, 'DD') THEN 1 ELSE 0 END)"
+            )
+        } else {
+            format!(
+                "((CAST(strftime('%Y', {a1}) AS INTEGER) * 12 + CAST(strftime('%m', {a1}) AS INTEGER)) \
+                 - (CAST(strftime('%Y', {b1}) AS INTEGER) * 12 + CAST(strftime('%m', {b1}) AS INTEGER)) \
+                 - CASE WHEN strftime('%d', {a2}) < strftime('%d', {b2}) THEN 1 ELSE 0 END)"
+            )
+        }
+    }
+
     /// H4, a rounded key: an integer at a literal scale, never `10^n`.
     pub fn rounded_key(self, x: &str, places: u32) -> String {
         let scale = 10i64.pow(places);
@@ -2126,7 +2156,13 @@ impl<'a> Builder<'a> {
                     "a cohort counts its subjects through the membership edge; count a subject set with of",
                 ));
             }
-            Grain::Instance | Grain::Event | Grain::Group | Grain::Pair => {
+            Grain::Group => {
+                return Err(err(
+                    path,
+                    "a group set totals only its own child, the set its group.of names: bind each total by itself (first_day: [\"min\", {set: <child>}, [\"field\", {}, \"<date>\"]]) and read the bindings as fields",
+                ));
+            }
+            Grain::Instance | Grain::Event | Grain::Pair => {
                 return Err(err(path, format!("{parent} has no descendants to count")));
             }
         };
@@ -4220,7 +4256,8 @@ impl<'a> Builder<'a> {
 
     /// The date a function reads (2026-10-12): a text it is given, as a
     /// literal or a parameter, is read as a day, and an instant as the day
-    /// it falls on, so `days_between`, `age_at`, `shift`, `bucket` and
+    /// it falls on, so `days_between`, `months_between`, `years_between`,
+    /// `age_at`, `shift`, `bucket` and
     /// `part` count days on both backends.
     fn date_arg(&mut self, a: &Arg, terms: &[(String, Term)], alias: &str, at: &str) -> R<Term> {
         if let Some(text) = self.loose_text(a) {
@@ -5386,6 +5423,32 @@ impl<'a> Builder<'a> {
                     at,
                 )?;
                 plain(self.sql.days_between(&a.sql, &b.sql))
+            }
+            "months_between" | "years_between" => {
+                let a = self.date_arg(
+                    c.args
+                        .first()
+                        .ok_or_else(|| err(at, format!("{op} needs two dates")))?,
+                    terms,
+                    alias,
+                    at,
+                )?;
+                let b = self.date_arg(
+                    c.args
+                        .get(1)
+                        .ok_or_else(|| err(at, format!("{op} needs two dates")))?,
+                    terms,
+                    alias,
+                    at,
+                )?;
+                let a2 = self.again(&a);
+                let b2 = self.again(&b);
+                let unit = if op == "years_between" {
+                    "year"
+                } else {
+                    "month"
+                };
+                plain(self.sql.units_between(unit, (&a.sql, &a2), (&b.sql, &b2)))
             }
             "shift" => {
                 let d = self.date_arg(

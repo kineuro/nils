@@ -335,6 +335,9 @@ pub enum Code {
     StaleOptions,
     /// What the compiler refuses: validate compiles what run would (Wave 4c).
     NotCompilable,
+    /// A diagnosis's warning: a filter on a date difference keeps nothing
+    /// and keeps rows with its two dates the other way round.
+    ReversedDates,
 }
 
 impl Code {
@@ -360,6 +363,7 @@ impl Code {
             Code::Truncated => "truncated",
             Code::StaleOptions => "stale_options",
             Code::NotCompilable => "not_compilable",
+            Code::ReversedDates => "reversed_dates",
         }
     }
 
@@ -367,7 +371,10 @@ impl Code {
     pub fn is_warning(self) -> bool {
         matches!(
             self,
-            Code::SelectionOutdated | Code::BindingDropped | Code::NotReleasable
+            Code::SelectionOutdated
+                | Code::BindingDropped
+                | Code::NotReleasable
+                | Code::ReversedDates
         )
     }
 }
@@ -685,6 +692,8 @@ const FUNCTIONS: &[&str] = &[
     "case",
     "concat",
     "days_between",
+    "months_between",
+    "years_between",
     "shift",
     "age_at",
     "bucket",
@@ -998,7 +1007,14 @@ pub fn validate(ask: &Ask, names: &dyn Names, scope: &Scope) -> Result<Validated
     if errors.is_empty() {
         Ok(out)
     } else {
-        Err(errors)
+        // a total the desugar bound by itself is refused where it was written
+        Err(errors
+            .into_iter()
+            .map(|mut i| {
+                i.path = crate::sugar::written_path(ask, &i.path);
+                i
+            })
+            .collect())
     }
 }
 
@@ -1903,7 +1919,9 @@ fn check_clause(
         let written: Vec<&Arg> = match (cl.op.as_str(), cl.args.first(), cl.args.get(1)) {
             (op, Some(l), Some(r)) if COMPARISONS.contains(&op) && dated(l) => one_or_list(r),
             (op, Some(l), Some(r)) if COMPARISONS.contains(&op) && dated(r) => one_or_list(l),
-            ("days_between", ..) => cl.args.iter().take(2).collect(),
+            ("days_between" | "months_between" | "years_between", ..) => {
+                cl.args.iter().take(2).collect()
+            }
             ("age_at", ..) => cl.args.get(1).into_iter().collect(),
             ("shift" | "bucket" | "part", ..) => cl.args.first().into_iter().collect(),
             _ => Vec::new(),
@@ -2455,6 +2473,7 @@ fn check_aggregate_form(cl: &Clause, op: &str, path: &str, issues: &mut Vec<Issu
 fn form_of(op: &str) -> Option<(&'static str, &'static [&'static str], usize)> {
     const VALUE: &str = "[\"field\", {}, \"<field>\"]";
     const DATE: &str = "[\"field\", {}, \"<date>\"]";
+    const LATER: &str = "[\"field\", {}, \"<later date>\"]";
     const CLAUSE: &str = "<clause>";
     Some(match op {
         "=" | "<>" | ">" | ">=" | "<" | "<=" | "~=" => ("two values", &[VALUE, "<value>"], 2),
@@ -2480,7 +2499,9 @@ fn form_of(op: &str) -> Option<(&'static str, &'static [&'static str], usize)> {
             &[CLAUSE, "<then>", "<else>"],
             2,
         ),
-        "days_between" => ("two dates", &[DATE, DATE], 2),
+        "days_between" | "months_between" | "years_between" => {
+            ("two dates, the later first", &[LATER, DATE], 2)
+        }
         "shift" => ("a date and a count", &[DATE, "<count>"], 2),
         "age_at" => (
             "a birth date and a day",
