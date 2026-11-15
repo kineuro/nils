@@ -1987,14 +1987,15 @@ const GAPS: [&str; 3] = ["days_between", "months_between", "years_between"];
 enum Gap {
     /// In the clause itself, as its argument at this place.
     Here(usize),
-    /// In a binding of the same set, which the clause reads by name.
-    Bound(String),
+    /// In a binding the clause reads by name: of this set, or of the set
+    /// named, which this one is drawn from.
+    Bound(String, String),
 }
 
 /// A `where` clause that keeps the rows whose date difference is at least,
 /// or more than, a positive bound: where the difference is written, and
 /// the function that makes it. None for any other clause.
-fn gap_filter(ask: &Ask, set: &Set, c: &Clause) -> Option<(Gap, String)> {
+fn gap_filter(ask: &Ask, set_name: &str, set: &Set, c: &Clause) -> Option<(Gap, String)> {
     let (value, bound) = match c.op.as_str() {
         ">" | ">=" => (0, 1),
         "<" | "<=" => (1, 0),
@@ -2021,9 +2022,32 @@ fn gap_filter(ask: &Ask, set: &Set, c: &Clause) -> Option<(Gap, String)> {
         return Some((Gap::Here(value), x.op.clone()));
     }
     let name = x.ref_name().filter(|_| x.op == "field")?;
-    let made = set.bind.get(name)?;
-    GAPS.contains(&made.op.as_str())
-        .then(|| (Gap::Bound(name.to_string()), made.op.clone()))
+    // the binding is this set's, or passed on by the set it is drawn from;
+    // one a `where` of that set reads is left, since the other way round
+    // would change the rows that set keeps as well
+    let (mut owner, mut of) = (set_name, set);
+    for _ in 0..8 {
+        if let Some(made) = of.bind.get(name) {
+            let read_there = owner != set_name
+                && of.where_.iter().any(|w| {
+                    let mut paths = BTreeSet::new();
+                    paths_in(w, &mut paths);
+                    paths.contains(name)
+                });
+            return (GAPS.contains(&made.op.as_str()) && !read_there).then(|| {
+                (
+                    Gap::Bound(owner.to_string(), name.to_string()),
+                    made.op.clone(),
+                )
+            });
+        }
+        let Some(Src::Set(from)) = &of.from else {
+            return None;
+        };
+        owner = from;
+        of = ask.sets.get(from)?;
+    }
+    None
 }
 
 /// A date difference written the wrong way round. `days_between(a, b)` is
@@ -2031,7 +2055,8 @@ fn gap_filter(ask: &Ask, set: &Set, c: &Clause) -> Option<(Gap, String)> {
 /// nought or less, a filter for at least so many days keeps nothing, and
 /// nothing in the counts says why. For each `where` clause that holds a
 /// date difference (`days_between`, `months_between`, `years_between`,
-/// written in the clause or bound in the same set) above a positive bound
+/// written in the clause, bound in the same set, or bound in a set this
+/// one is drawn from) above a positive bound
 /// and keeps no row, the same stage is counted once more with the two
 /// dates the other way round, and where that keeps rows the clause is
 /// warned about, with the order to write.
@@ -2060,7 +2085,7 @@ fn reversed_dates(
             continue;
         }
         for (i, c) in set.where_.iter().enumerate() {
-            let Some((gap, function)) = gap_filter(ask, set, c) else {
+            let Some((gap, function)) = gap_filter(ask, name, set, c) else {
                 continue;
             };
             let step = Step::Where(i);
@@ -2076,13 +2101,18 @@ fn reversed_dates(
                 continue;
             }
             let mut v = variant(ask, name, &step, Level::Count);
-            let swapped = v.sets.get_mut(name).and_then(|s| match &gap {
-                Gap::Here(at) => match s.where_.get_mut(i)?.args.get_mut(*at)? {
-                    Arg::Clause(x) => Some(x),
-                    _ => None,
-                },
-                Gap::Bound(b) => s.bind.0.iter_mut().find(|(n, _)| n == b).map(|(_, x)| x),
-            });
+            let swapped = match &gap {
+                Gap::Here(at) => v.sets.get_mut(name).and_then(|s| {
+                    match s.where_.get_mut(i)?.args.get_mut(*at)? {
+                        Arg::Clause(x) => Some(x),
+                        _ => None,
+                    }
+                }),
+                Gap::Bound(owner, b) => v
+                    .sets
+                    .get_mut(owner)
+                    .and_then(|s| s.bind.0.iter_mut().find(|(n, _)| n == b).map(|(_, x)| x)),
+            };
             match swapped {
                 Some(x) if x.args.len() == 2 => x.args.swap(0, 1),
                 _ => continue,
@@ -2090,7 +2120,7 @@ fn reversed_dates(
             if counter.count(registry, &v)?.rows.is_some_and(|n| n > 0) {
                 let at = match &gap {
                     Gap::Here(_) => format!("sets.{name}.where[{i}]"),
-                    Gap::Bound(b) => format!("sets.{name}.bind.{b}"),
+                    Gap::Bound(owner, b) => format!("sets.{owner}.bind.{b}"),
                 };
                 found.push(Issue {
                     code: Code::ReversedDates,

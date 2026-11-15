@@ -371,8 +371,8 @@ is a `min` over that event set.
     `ambiguous_parent`, `unknown_value`, `unknown_level`, `forbidden_field`,
     `federated_scope`, `scheme_mismatch`, `selection_outdated`,
     `binding_dropped`, `missing_order`, `not_releasable`, `truncated`,
-    `stale_options`, and one warning only a diagnosis gives, `reversed_dates`
-    (§10). Repair inserts a missing `{}`, wraps a lone clause and
+    `stale_options`, the warning `sequence_before_where` (§5.4), and one
+    warning only a diagnosis gives, `reversed_dates` (§10). Repair inserts a missing `{}`, wraps a lone clause and
     maps operator and unit aliases; it never rewrites a value and never guesses
     among candidates.
 15. Sensitivity is one policy evaluated in the catalog per (principal, role,
@@ -491,6 +491,31 @@ adjacency, "a PPMS row immediately followed by an SPMS row"; without, "an SPMS
 row with any earlier PPMS row". The tie rule for same-date rows is the key,
 and it is attributed as an engine rule plus an ask rule because the event table
 has no unique key on (subject, kind, date).
+
+Which rows a sequence counts follows from the order inside a set (rule 5:
+source, near, attach, has, same, bind, where, pick). The relations come before
+`bind`, so in a set with a `has` the row before is the one before among the
+rows `has` kept: "the previous session that holds such a scan" is one set with
+the `has` and the `prev`. A `where` comes after `bind`, so a `where` of the
+same set cuts the rows after the sequence counted them: `prev` beside `where:
+first >= 2005-01-01` is the row before among all the set's rows, also one
+before that day. To count among the rows a `where` keeps, the `where` goes in
+a set of its own and the sequence in a set drawn `from` it:
+
+```yaml
+sets:
+  kept:  {grain: session, where: [[">=", {}, ["field", {}, "first"], "2005-01-01"]]}
+  gaps:
+    grain: session
+    from: kept
+    bind:
+      before: ["prev", {}, ["field", {}, "first"]]
+```
+
+A `where` clause that reads the sequence (`n = 1`, a gap above a bound) is
+what the order is for. One that reads nothing of it, in a set that binds a
+sequence, is valid and is warned about at validation (`sequence_before_where`),
+with the two sets to write.
 
 ### 5.5 How far apart two dates are
 
@@ -789,7 +814,8 @@ must not guess them (C20, D36):
 - **diagnose**: taxonomy errors with `sets.<name>.<slot>[i]` paths and the
   next call; repairs applied; warnings, among them `reversed_dates` where a
   `where` clause holds a date difference (`days_between`, `months_between`,
-  `years_between`, in the clause or bound in the same set) above a positive
+  `years_between`, in the clause, bound in the same set or in a set it is
+  drawn from) above a positive
   bound, keeps no row, and keeps rows with the two dates the other way
   round, counted only for a stage that kept nothing; a one line zero-row explanation in
   domain words; per clause and per null drop counts; ties per pick; unresolved

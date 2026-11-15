@@ -540,3 +540,247 @@ out: {set: visits, level: count}
         );
     }
 }
+
+/// The session before, in a set that keeps only some sessions (`has`), is
+/// the one before among the sessions kept: a set's order is source, near,
+/// attach, has, bind, where, so a sequence counts the rows `has` left. It
+/// is the same bound in a set drawn from the kept one, and what the kept
+/// sessions' own days say; a `where` of the same set comes after, and cuts
+/// none of the rows the sequence counts.
+#[test]
+fn the_session_before_is_the_one_before_among_the_rows_has_kept() {
+    let first = json!(["field", {}, "first"]);
+    let gap = json!(["days_between", {}, first, ["prev", {}, first]]);
+    let mut tried = 0;
+    // the scans of the sessions of every other year, of every third, and
+    // of one technique: sets that keep some sessions and not others
+    let years = |every: i64| -> Value {
+        let listed: Vec<i64> = (1990..2040).filter(|y| y % every == 0).collect();
+        json!(["in", {}, ["part", {"unit": "year"}, ["field", {}, "session.first"]], listed])
+    };
+    for (technique, chosen) in [
+        ("every other year", years(2)),
+        ("every third year", years(3)),
+        ("FLAIR", json!(["=", {}, ["axis", {}, "modifier"], "FLAIR"])),
+    ] {
+        let scans = json!({"grain": "stack", "where": [chosen]});
+        let holds = json!([{"set": "scans", "min": 1}]);
+        let sets = json!({
+            "visits": {"grain": "session"},
+            "scans": scans,
+            "in_one": {"grain": "session", "from": "visits", "has": holds,
+                "bind": {"n": ["ordinal", {}], "gap": gap}},
+            "kept": {"grain": "session", "from": "visits", "has": holds},
+            "in_two": {"grain": "session", "from": "kept",
+                "bind": {"n": ["ordinal", {}], "gap": gap}},
+            "filtered": {"grain": "session", "from": "visits", "has": holds,
+                "bind": {"gap": gap},
+                "where": [[">=", {}, ["field", {}, "gap"], 1]]}
+        });
+        for mut l in labs() {
+            let all = listed(&mut l, &sets, "visits", "record", &["subject.id", "first"]);
+            let columns = ["subject.id", "first", "n", "gap"];
+            let one = listed(&mut l, &sets, "in_one", "record", &columns);
+            let two = listed(&mut l, &sets, "in_two", "record", &columns);
+            if one.is_empty() || one.len() == all.len() {
+                continue;
+            }
+            assert_eq!(one, two, "{}: {technique}", l.name);
+            // against the kept sessions' own days
+            let mut days: BTreeMap<String, Vec<Day>> = BTreeMap::new();
+            for r in &one {
+                days.entry(r["subject.id"].to_string())
+                    .or_default()
+                    .push(ymd(&r["first"]));
+            }
+            days.values_mut().for_each(|d| d.sort_unstable());
+            // the two readings differ here: some kept session comes right
+            // after one of its subject's that was not kept
+            let mut source: BTreeMap<String, Vec<Day>> = BTreeMap::new();
+            for r in &all {
+                source
+                    .entry(r["subject.id"].to_string())
+                    .or_default()
+                    .push(ymd(&r["first"]));
+            }
+            source.values_mut().for_each(|d| d.sort_unstable());
+            let skipped = source
+                .iter()
+                .filter(|(subject, of)| {
+                    let kept = days.get(*subject).cloned().unwrap_or_default();
+                    of.windows(2)
+                        .any(|w| kept.contains(&w[1]) && !kept.contains(&w[0]) && kept[0] < w[0])
+                })
+                .count();
+            if skipped == 0 {
+                continue;
+            }
+            tried += 1;
+            let mut later = 0;
+            for r in &one {
+                let of = &days[&r["subject.id"].to_string()];
+                let at = of.iter().position(|d| *d == ymd(&r["first"])).unwrap();
+                assert_eq!(r["n"], json!(at + 1), "{}: {r:?}", l.name);
+                if at == 0 {
+                    assert!(r["gap"].is_null(), "{}: {r:?}", l.name);
+                } else {
+                    later += 1;
+                    let d = day_number(of[at]) - day_number(of[at - 1]);
+                    assert_eq!(r["gap"], json!(d), "{}: {r:?}", l.name);
+                }
+            }
+            assert_eq!(count(&mut l, &sets, "filtered"), later, "{}", l.name);
+            // and the funnel's stage is the same count
+            let text = doc(&sets, json!({"set": "filtered", "level": "count"}));
+            for d in diagnosed(&mut l, &text) {
+                let stage = d
+                    .funnel
+                    .iter()
+                    .rfind(|s| s.set == "filtered")
+                    .unwrap_or_else(|| panic!("{}: no stage", l.name));
+                assert_eq!(stage.rows, Some(later), "{}: {}", l.name, stage.stage);
+            }
+        }
+    }
+    assert!(
+        tried > 0,
+        "no set of scans kept some sessions and not others"
+    );
+}
+
+/// A `where` of the set that binds a sequence comes after it. A clause
+/// that reads nothing of the sequence is warned about, with the two sets
+/// to write; a clause that reads it, or a set with `has` alone, is not.
+#[test]
+fn a_where_beside_a_sequence_it_does_not_read_is_warned_of() {
+    let l = common::lab(
+        "sqlite",
+        nils_registry::Backend::Sqlite,
+        None,
+        "nils_date_gaps_test",
+    );
+    let first = json!(["field", {}, "first"]);
+    let warned = |set: Value| -> Vec<(String, String, String)> {
+        let sets = json!({"scans": {"grain": "stack"}, "visits": set});
+        let text = doc(&sets, json!({"set": "visits", "level": "count"}));
+        prepare(parse(&text).unwrap(), &l.catalog, &quasi())
+            .unwrap_or_else(|e| panic!("{e}"))
+            .validated
+            .warnings
+            .iter()
+            .filter(|w| w.code == Code::SequenceBeforeWhere)
+            .map(|w| (w.path.clone(), w.message.clone(), w.next.clone()))
+            .collect()
+    };
+    let bind = json!({
+        "before": ["prev", {}, first],
+        "gap": ["days_between", {}, first, ["field", {}, "before"]]
+    });
+    // the clause reads the sequence, through another binding: what it is for
+    assert_eq!(
+        warned(json!({"grain": "session", "bind": bind,
+            "where": [[">=", {}, ["field", {}, "gap"], 183]]})),
+        []
+    );
+    // has comes before bind, so the sequence is over the rows it kept
+    assert_eq!(
+        warned(
+            json!({"grain": "session", "has": [{"set": "scans", "min": 1}], "bind": bind,
+            "where": [[">=", {}, ["field", {}, "gap"], 183]]})
+        ),
+        []
+    );
+    // a clause on the day alone cuts the rows after the sequence counted them
+    let w = warned(json!({"grain": "session", "bind": bind,
+        "where": [[">=", {}, first, "2005-01-01"], [">=", {}, ["field", {}, "gap"], 183]]}));
+    assert_eq!(w.len(), 1, "{w:?}");
+    assert_eq!(w[0].0, "sets.visits.where[0]");
+    assert!(
+        w[0].1
+            .starts_with("prev in before counts the set's rows before where keeps its rows"),
+        "{}",
+        w[0].1
+    );
+    assert!(
+        w[0].2
+            .contains("visits_kept: {grain: session, where: [<this clause>]}")
+            && w[0]
+                .2
+                .contains("visits: {grain: session, from: visits_kept, bind: {before: ...}}"),
+        "{}",
+        w[0].2
+    );
+    // no sequence, nothing to say
+    assert_eq!(
+        warned(json!({"grain": "session", "where": [[">=", {}, first, "2005-01-01"]]})),
+        []
+    );
+}
+
+/// The warning says what happens: the one set and the two sets it names
+/// answer different rows, each what the calendar says of its reading.
+#[test]
+fn a_where_cuts_the_rows_after_the_sequence_counted_them() {
+    let first = json!(["field", {}, "first"]);
+    let gap = json!(["days_between", {}, first, ["prev", {}, first]]);
+    let late = json!([">=", {}, first, "2005-01-01"]);
+    let sets = json!({
+        "in_one": {"grain": "session", "bind": {"gap": gap}, "where": [late]},
+        "kept": {"grain": "session", "where": [late]},
+        "in_two": {"grain": "session", "from": "kept", "bind": {"gap": gap}}
+    });
+    for mut l in labs() {
+        let one = listed(
+            &mut l,
+            &sets,
+            "in_one",
+            "record",
+            &["subject.id", "first", "gap"],
+        );
+        let two = listed(
+            &mut l,
+            &sets,
+            "in_two",
+            "record",
+            &["subject.id", "first", "gap"],
+        );
+        assert_eq!(one.len(), two.len(), "{}", l.name);
+        // among all the sessions a kept one's first gap is to a session
+        // before the day; among the kept it has none
+        let firsts =
+            |rows: &[BTreeMap<String, Value>]| rows.iter().filter(|r| r["gap"].is_null()).count();
+        assert!(firsts(&one) < firsts(&two), "{}", l.name);
+        let subjects = two
+            .iter()
+            .map(|r| r["subject.id"].to_string())
+            .collect::<std::collections::BTreeSet<_>>()
+            .len();
+        assert_eq!(firsts(&two), subjects, "{}", l.name);
+    }
+}
+
+/// A gap bound in the set a filter's set is drawn from is followed there.
+#[test]
+fn a_reversed_gap_bound_in_the_set_drawn_from_is_warned_of() {
+    let first = json!(["field", {}, "first"]);
+    let sets = json!({
+        "gaps": {"grain": "session", "bind": {
+            "before": ["prev", {}, first],
+            "gap": ["days_between", {}, ["field", {}, "before"], first]}},
+        "apart": {"grain": "session", "from": "gaps",
+            "where": [[">=", {}, ["field", {}, "gap"], 1]]}
+    });
+    for mut l in labs() {
+        let text = doc(&sets, json!({"set": "apart", "level": "count"}));
+        for d in diagnosed(&mut l, &text) {
+            let w = reversed(&d);
+            assert_eq!(w.len(), 1, "{}: {:?}", l.name, d.warnings);
+            assert_eq!(w[0].0, "sets.apart.where[0]", "{}", l.name);
+            assert_eq!(
+                w[0].2, "swap the two dates of the days_between at sets.gaps.bind.gap",
+                "{}",
+                l.name
+            );
+        }
+    }
+}

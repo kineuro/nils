@@ -338,6 +338,9 @@ pub enum Code {
     /// A diagnosis's warning: a filter on a date difference keeps nothing
     /// and keeps rows with its two dates the other way round.
     ReversedDates,
+    /// A set counts its rows in order (`ordinal`, `prev`, `next`) and then
+    /// cuts them by a `where` clause that reads nothing of that count.
+    SequenceBeforeWhere,
 }
 
 impl Code {
@@ -364,6 +367,7 @@ impl Code {
             Code::StaleOptions => "stale_options",
             Code::NotCompilable => "not_compilable",
             Code::ReversedDates => "reversed_dates",
+            Code::SequenceBeforeWhere => "sequence_before_where",
         }
     }
 
@@ -375,6 +379,7 @@ impl Code {
                 | Code::BindingDropped
                 | Code::NotReleasable
                 | Code::ReversedDates
+                | Code::SequenceBeforeWhere
         )
     }
 }
@@ -992,6 +997,7 @@ pub fn validate(ask: &Ask, names: &dyn Names, scope: &Scope) -> Result<Validated
 
     measures_within_detail(ask, scope, &mut issues);
     rows_within_detail(ask, scope, &mut issues);
+    sequence_before_where(ask, &mut issues);
     out.small_cells = small_cells(ask, scope);
     let rule = shapes_of(ask, names, scope, &out);
     out.shaped = rule.shaped;
@@ -2862,6 +2868,72 @@ fn measures_within_detail(ask: &Ask, scope: &Scope, issues: &mut Vec<Issue>) {
     for (i, o) in ask.out.order.iter().enumerate() {
         if let Some(f) = per_row(&o.0, false, in_group) {
             refuse(issues, format!("out.order[{i}]"), f);
+        }
+    }
+}
+
+/// A sequence and a `where` in one set. Inside a set the order is source,
+/// near, attach, has, bind, where, pick (rule 5), so `ordinal`, `prev` and
+/// `next` count the rows the set's relations kept (`has` among them) and a
+/// `where` of the same set cuts them afterwards: "the session before, among
+/// those from 2020 on" written as one set reads the session before among
+/// all of them, and nothing said so. Where a set binds a sequence and has
+/// a `where` clause that reads no binding made from one, the clause is
+/// warned about, with the two sets to write instead. A clause that reads
+/// the sequence (`n = 1`, a gap above a bound) is what the order is for.
+fn sequence_before_where(ask: &Ask, issues: &mut Vec<Issue>) {
+    const SEQUENCES: [&str; 3] = ["ordinal", "prev", "next"];
+    let sequence_in = |c: &Clause| -> Option<String> {
+        let mut all = Vec::new();
+        c.walk(&mut all);
+        all.iter()
+            .find(|x| SEQUENCES.contains(&x.op.as_str()))
+            .map(|x| x.op.clone())
+    };
+    let reads = |c: &Clause, names: &BTreeSet<&str>| -> bool {
+        let mut all = Vec::new();
+        c.walk(&mut all);
+        all.iter().any(|x| {
+            x.op == "field"
+                && x.ref_name().is_some_and(|p| {
+                    names.contains(p) || names.iter().any(|n| p.starts_with(&format!("{n}.")))
+                })
+        })
+    };
+    for (name, set) in &ask.sets {
+        if name.contains("__") || set.where_.is_empty() || set.grain == Grain::Group {
+            continue;
+        }
+        // the bindings made from a sequence, by themselves or through another
+        let mut made: BTreeSet<&str> = BTreeSet::new();
+        let mut first: Option<(&str, String)> = None;
+        for (b, c) in &set.bind.0 {
+            let own = sequence_in(c);
+            if own.is_some() || reads(c, &made) {
+                made.insert(b.as_str());
+            }
+            if let (None, Some(op)) = (&first, own) {
+                first = Some((b.as_str(), op));
+            }
+        }
+        let Some((binding, op)) = first else {
+            continue;
+        };
+        for (i, c) in set.where_.iter().enumerate() {
+            if sequence_in(c).is_some() || reads(c, &made) {
+                continue;
+            }
+            let grain = set.grain;
+            issues.push(issue(
+                Code::SequenceBeforeWhere,
+                format!("sets.{name}.where[{i}]"),
+                format!(
+                    "{op} in {binding} counts the set's rows before where keeps its rows (a set's order is its relations, has among them, then bind, then where), so it is the row among all of them, not among those this clause keeps"
+                ),
+                format!(
+                    "to count among the rows this clause keeps, put the clause in a set of its own and draw this one from it: {name}_kept: {{grain: {grain}, where: [<this clause>]}} with this set's source and relations, then {name}: {{grain: {grain}, from: {name}_kept, bind: {{{binding}: ...}}}}; leave it where the count over all the rows is meant"
+                ),
+            ));
         }
     }
 }
