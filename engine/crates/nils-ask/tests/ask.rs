@@ -1845,7 +1845,7 @@ fn a_clause_the_compiler_cannot_read_is_refused_with_its_form() {
         ),
         (
             json!(["days_between", {}, ["field", {}, "first"]]),
-            "days_between reads two dates; it has one",
+            "days_between reads two dates, the later first; it has one",
             r#"write ["days_between", {}, ["field",{},"first"], ["field", {}, "<date>"]]"#,
         ),
         (

@@ -165,6 +165,23 @@ gate:
       file: fixtures/hooks-sequence.ask.json
       outcome: passes
       note: The sequences over one subject, ordered by day then precision then key.
+    - name: hooks-calendar-gap
+      family: conformance
+      question: The days, the whole months and the whole years from a subject's previous session
+      file: fixtures/hooks-calendar-gap.ask.json
+      outcome: passes
+      note: >-
+        `months_between` and `years_between` beside `days_between`, the later
+        date first: a month is whole on the day of the month the earlier date
+        falls on and a year on its month and day, the same on both backends.
+    - name: group-span-of-totals
+      family: conformance
+      question: The subjects whose first and last sessions are at least a year apart
+      file: fixtures/group-span-of-totals.ask.json
+      outcome: passes
+      note: >-
+        A group's value made of two totals of its child in one clause, the
+        days and the whole years between the latest and the earliest session.
 
     # --- 2026-10-12: a date written as text, which Postgres refused
     - name: dates-written-as-text

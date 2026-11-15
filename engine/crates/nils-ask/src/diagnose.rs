@@ -23,7 +23,7 @@ use crate::describe::clause_text;
 use crate::exec::{Answer, Bounds, ExecError};
 use crate::repair::Repair;
 use crate::run::{RunError, Runner, count_level, inline_selections, keys_level};
-use crate::validate::{Class, Issue, MEASURE_K, Names, Scope, Validated, validate};
+use crate::validate::{Class, Code, Issue, MEASURE_K, Names, Scope, Validated, validate};
 use crate::{Error as AskError, prepare};
 
 /// One stage of the funnel. Record 55 K7, small counts at plain (the
@@ -1903,6 +1903,9 @@ fn counted(
             coarse.push((name.clone(), rows));
         }
     }
+    // a filter on a date difference written the wrong way round
+    let mut warnings = warnings;
+    warnings.extend(reversed_dates(&mut counter, registry, ask, &stage_counts)?);
     // unresolved values
     let mut unresolved = Vec::new();
     for (name, decl) in &ask.values {
@@ -1970,6 +1973,171 @@ fn counted(
         next,
         unavailable,
     })
+}
+
+/// The rows and the subjects each stage of the funnel kept, by set and
+/// stage.
+type StageCounts = BTreeMap<(String, String), (Option<i64>, Option<i64>)>;
+
+/// The functions that answer how far apart two dates are, the first less
+/// the second.
+const GAPS: [&str; 3] = ["days_between", "months_between", "years_between"];
+
+/// Where the date difference a `where` clause holds to a bound is written.
+enum Gap {
+    /// In the clause itself, as its argument at this place.
+    Here(usize),
+    /// In a binding the clause reads by name: of this set, or of the set
+    /// named, which this one is drawn from.
+    Bound(String, String),
+}
+
+/// A `where` clause that keeps the rows whose date difference is at least,
+/// or more than, a positive bound: where the difference is written, and
+/// the function that makes it. None for any other clause.
+fn gap_filter(ask: &Ask, set_name: &str, set: &Set, c: &Clause) -> Option<(Gap, String)> {
+    let (value, bound) = match c.op.as_str() {
+        ">" | ">=" => (0, 1),
+        "<" | "<=" => (1, 0),
+        _ => return None,
+    };
+    let positive = match c.args.get(bound)? {
+        Arg::Int(n) => *n > 0,
+        Arg::Number(n) => *n > 0.0,
+        Arg::Clause(p) if p.op == "param" => ask
+            .params
+            .get(p.ref_name()?)
+            .and_then(|d| d.value.as_ref())
+            .and_then(Value::as_f64)
+            .is_some_and(|n| n > 0.0),
+        _ => false,
+    };
+    let Arg::Clause(x) = c.args.get(value)? else {
+        return None;
+    };
+    if !positive || c.args.len() != 2 {
+        return None;
+    }
+    if GAPS.contains(&x.op.as_str()) {
+        return Some((Gap::Here(value), x.op.clone()));
+    }
+    let name = x.ref_name().filter(|_| x.op == "field")?;
+    // the binding is this set's, or passed on by the set it is drawn from;
+    // one a `where` of that set reads is left, since the other way round
+    // would change the rows that set keeps as well
+    let (mut owner, mut of) = (set_name, set);
+    for _ in 0..8 {
+        if let Some(made) = of.bind.get(name) {
+            let read_there = owner != set_name
+                && of.where_.iter().any(|w| {
+                    let mut paths = BTreeSet::new();
+                    paths_in(w, &mut paths);
+                    paths.contains(name)
+                });
+            return (GAPS.contains(&made.op.as_str()) && !read_there).then(|| {
+                (
+                    Gap::Bound(owner.to_string(), name.to_string()),
+                    made.op.clone(),
+                )
+            });
+        }
+        let Some(Src::Set(from)) = &of.from else {
+            return None;
+        };
+        owner = from;
+        of = ask.sets.get(from)?;
+    }
+    None
+}
+
+/// A date difference written the wrong way round. `days_between(a, b)` is
+/// `a` less `b`, so with the earlier date first every difference is
+/// nought or less, a filter for at least so many days keeps nothing, and
+/// nothing in the counts says why. For each `where` clause that holds a
+/// date difference (`days_between`, `months_between`, `years_between`,
+/// written in the clause, bound in the same set, or bound in a set this
+/// one is drawn from) above a positive bound
+/// and keeps no row, the same stage is counted once more with the two
+/// dates the other way round, and where that keeps rows the clause is
+/// warned about, with the order to write.
+///
+/// The second count is run only for a stage that kept nothing. A stage of
+/// a set the funnel counts is known from the funnel; a group set has no
+/// stages there, so a group set with such a clause costs one count of the
+/// stage. While the statements are being listed to run ahead every count
+/// reads nought, so nothing but a group's stage is asked for then, and the
+/// second count is run in its turn. A count held back warns of nothing,
+/// and the time these counts run past is not taken from the parts counted
+/// before them.
+fn reversed_dates(
+    counter: &mut Counter<'_>,
+    registry: &mut Registry,
+    ask: &Ask,
+    stage_counts: &StageCounts,
+) -> Result<Vec<Issue>, RunError> {
+    let mut found = Vec::new();
+    if counter.spent() {
+        return Ok(found);
+    }
+    let listing = matches!(counter.ahead, Ahead::Listed(_));
+    for (name, set) in &ask.sets {
+        if name.contains("__") {
+            continue;
+        }
+        for (i, c) in set.where_.iter().enumerate() {
+            let Some((gap, function)) = gap_filter(ask, name, set, c) else {
+                continue;
+            };
+            let step = Step::Where(i);
+            let kept = if set.grain == Grain::Group {
+                let v = variant(ask, name, &step, Level::Count);
+                counter.count(registry, &v)?.rows
+            } else {
+                stage_counts
+                    .get(&(name.clone(), format!("where {}", clause_text(c))))
+                    .and_then(|c| c.0)
+            };
+            if listing || kept != Some(0) || counter.spent() {
+                continue;
+            }
+            let mut v = variant(ask, name, &step, Level::Count);
+            let swapped = match &gap {
+                Gap::Here(at) => v.sets.get_mut(name).and_then(|s| {
+                    match s.where_.get_mut(i)?.args.get_mut(*at)? {
+                        Arg::Clause(x) => Some(x),
+                        _ => None,
+                    }
+                }),
+                Gap::Bound(owner, b) => v
+                    .sets
+                    .get_mut(owner)
+                    .and_then(|s| s.bind.0.iter_mut().find(|(n, _)| n == b).map(|(_, x)| x)),
+            };
+            match swapped {
+                Some(x) if x.args.len() == 2 => x.args.swap(0, 1),
+                _ => continue,
+            }
+            if counter.count(registry, &v)?.rows.is_some_and(|n| n > 0) {
+                let at = match &gap {
+                    Gap::Here(_) => format!("sets.{name}.where[{i}]"),
+                    Gap::Bound(owner, b) => format!("sets.{owner}.bind.{b}"),
+                };
+                found.push(Issue {
+                    code: Code::ReversedDates,
+                    path: format!("sets.{name}.where[{i}]"),
+                    message: format!(
+                        "this filter keeps no rows, and with the two dates the other way round it keeps some: {function}(a, b) is a minus b: put the later date first"
+                    ),
+                    next: format!("swap the two dates of the {function} at {at}"),
+                });
+            }
+        }
+    }
+    // these counts are a hint: the time they ran past is not the counts'
+    if let Some(b) = &mut counter.budget {
+        b.spent_in = None;
+    }
+    Ok(found)
 }
 
 /// The next call where the counts ran past their time: the job path, by the

@@ -1,0 +1,129 @@
+{
+  "ast_version": 1,
+  "name": "The days, the whole months and the whole years from a subject's previous session",
+  "sets": {
+    "s": {
+      "grain": "session",
+      "bind": {
+        "before": [
+          "prev",
+          {},
+          [
+            "field",
+            {},
+            "first"
+          ]
+        ],
+        "gap_days": [
+          "days_between",
+          {},
+          [
+            "field",
+            {},
+            "first"
+          ],
+          [
+            "field",
+            {},
+            "before"
+          ]
+        ],
+        "gap_months": [
+          "months_between",
+          {},
+          [
+            "field",
+            {},
+            "first"
+          ],
+          [
+            "field",
+            {},
+            "before"
+          ]
+        ],
+        "gap_years": [
+          "years_between",
+          {},
+          [
+            "field",
+            {},
+            "first"
+          ],
+          [
+            "field",
+            {},
+            "before"
+          ]
+        ]
+      },
+      "where": [
+        [
+          ">=",
+          {},
+          [
+            "field",
+            {},
+            "gap_months"
+          ],
+          6
+        ]
+      ]
+    }
+  },
+  "out": {
+    "set": "s",
+    "level": "record",
+    "columns": [
+      [
+        "field",
+        {},
+        "subject.id"
+      ],
+      [
+        "field",
+        {},
+        "first"
+      ],
+      [
+        "field",
+        {},
+        "before"
+      ],
+      [
+        "field",
+        {},
+        "gap_days"
+      ],
+      [
+        "field",
+        {},
+        "gap_months"
+      ],
+      [
+        "field",
+        {},
+        "gap_years"
+      ]
+    ],
+    "order": [
+      [
+        [
+          "field",
+          {},
+          "subject.id"
+        ],
+        "asc"
+      ],
+      [
+        [
+          "field",
+          {},
+          "first"
+        ],
+        "asc"
+      ]
+    ],
+    "limit": 20
+  }
+}

@@ -13,6 +13,10 @@
 //! - `same` becomes a hidden group set keyed by this set's key and the `by`
 //!   tuple, two aggregates on this set (`<as>.largest`, `<as>.groups`) and
 //!   the bound.
+//! - a total inside a value of a group set (a `bind` or a `where` clause
+//!   that is not itself a total, such as the days between the latest and
+//!   the earliest date of the group's rows) becomes a binding of its own
+//!   before it, `<binding>__<op>`, and the value reads that binding.
 //! - `change` and `share` stay as clause ops of the core: their meaning is
 //!   fixed (§4.3) and the compiler emits them; nothing about them is a
 //!   rewrite of the document.
@@ -67,8 +71,86 @@ pub fn desugar(ask: &mut Ask) -> Result<(), SugarError> {
         every(ask, name)?;
         pairs(ask, name)?;
         same(ask, name)?;
+        group_totals(ask, name);
     }
     Ok(())
+}
+
+/// The totals a group set makes of its own child.
+const TOTALS: &[&str] = &["count", "distinct", "min", "max", "sum", "avg", "list"];
+
+/// Every total over `child` inside `c` that is not inside another total,
+/// taken out and left as a field named by `name`, which is told the total
+/// and answers the binding that now holds it.
+fn lift_totals(c: &mut Clause, child: &str, name: &mut dyn FnMut(&Clause) -> String) {
+    fn arg(a: &mut Arg, child: &str, name: &mut dyn FnMut(&Clause) -> String) {
+        match a {
+            Arg::Clause(inner) => {
+                let total = TOTALS.contains(&inner.op.as_str());
+                if total && inner.opts.get("set").and_then(Value::as_str) == Some(child) {
+                    let binding = name(inner);
+                    *inner = Clause::field(&binding);
+                } else if !total {
+                    lift_totals(inner, child, name);
+                }
+            }
+            Arg::List(items) => items.iter_mut().for_each(|i| arg(i, child, name)),
+            _ => {}
+        }
+    }
+    c.args.iter_mut().for_each(|a| arg(a, child, name));
+}
+
+/// A total inside a value of a group set. A group's binding is either a
+/// total of its child (`["max", {set: visits}, ...]`) or a value made from
+/// the group's names, and a value that held a total, such as
+/// `["days_between", {}, ["max", ...], ["min", ...]]`, was refused by the
+/// compiler. Each such total over the group's own child becomes a binding
+/// of its own, placed before the one that reads it and named
+/// `<binding>__<op>` (`where<n>__<op>` for a `where` clause), so the value
+/// is the form that always worked and every rule about a group's totals
+/// reads it as one. A total over any other set is left, to be refused
+/// where it stands.
+fn group_totals(ask: &mut Ask, name: &str) {
+    let Some(set) = ask.sets.get_mut(name) else {
+        return;
+    };
+    let Some(child) = set.group.as_ref().map(|g| g.of.clone()) else {
+        return;
+    };
+    let mut taken: Vec<String> = set.bind.names().map(str::to_string).collect();
+    let mut lifted = |c: &mut Clause, owner: &str| -> Vec<(String, Clause)> {
+        let mut made: Vec<(String, Clause)> = Vec::new();
+        if TOTALS.contains(&c.op.as_str()) {
+            return made;
+        }
+        lift_totals(c, &child, &mut |total| {
+            // the same total read twice is one binding
+            if let Some((b, _)) = made.iter().find(|(_, t)| t == total) {
+                return b.clone();
+            }
+            let base = format!("{owner}__{}", total.op);
+            let mut binding = base.clone();
+            let mut n = 1;
+            while taken.contains(&binding) {
+                n += 1;
+                binding = format!("{base}{n}");
+            }
+            taken.push(binding.clone());
+            made.push((binding.clone(), total.clone()));
+            binding
+        });
+        made
+    };
+    let mut bind: Vec<(String, Clause)> = Vec::new();
+    for (b, mut c) in std::mem::take(&mut set.bind.0) {
+        bind.extend(lifted(&mut c, &b));
+        bind.push((b, c));
+    }
+    for (i, c) in set.where_.iter_mut().enumerate() {
+        bind.extend(lifted(c, &format!("where{}", i + 1)));
+    }
+    set.bind.0 = bind;
 }
 
 fn hidden(set: &str, what: &str) -> String {
@@ -391,4 +473,28 @@ fn same(ask: &mut Ask, name: &str) -> Result<(), SugarError> {
         }
     }
     Ok(())
+}
+
+/// The path a document's author wrote for a path of the desugared one: a
+/// total [`group_totals`] bound by itself (`sets.g.bind.span__max`) is
+/// named by the binding or the `where` clause it was written in
+/// (`sets.g.bind.span`, `sets.g.where[0]`). Any other path is itself.
+pub fn written_path(ask: &Ask, path: &str) -> String {
+    let written = || -> Option<String> {
+        let (set, binding) = path.strip_prefix("sets.")?.split_once(".bind.")?;
+        let group = ask.sets.get(set).filter(|s| s.group.is_some())?;
+        let (owner, total) = binding.rsplit_once("__")?;
+        let op = total.trim_end_matches(|c: char| c.is_ascii_digit());
+        if !TOTALS.contains(&op) {
+            return None;
+        }
+        if group.bind.get(owner).is_some() {
+            return Some(format!("sets.{set}.bind.{owner}"));
+        }
+        let n: usize = owner.strip_prefix("where")?.parse().ok()?;
+        (1..=group.where_.len())
+            .contains(&n)
+            .then(|| format!("sets.{set}.where[{}]", n - 1))
+    };
+    written().unwrap_or_else(|| path.to_string())
 }

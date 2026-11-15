@@ -1,0 +1,125 @@
+{
+  "ast_version": 1,
+  "name": "The subjects whose first and last sessions are at least a year apart",
+  "sets": {
+    "visits": {
+      "grain": "session"
+    },
+    "spans": {
+      "grain": "group",
+      "group": {
+        "of": "visits",
+        "by": [
+          [
+            "field",
+            {},
+            "subject.id"
+          ]
+        ]
+      },
+      "bind": {
+        "span_days": [
+          "days_between",
+          {},
+          [
+            "max",
+            {
+              "set": "visits"
+            },
+            [
+              "field",
+              {},
+              "first"
+            ]
+          ],
+          [
+            "min",
+            {
+              "set": "visits"
+            },
+            [
+              "field",
+              {},
+              "first"
+            ]
+          ]
+        ],
+        "span_years": [
+          "years_between",
+          {},
+          [
+            "max",
+            {
+              "set": "visits"
+            },
+            [
+              "field",
+              {},
+              "first"
+            ]
+          ],
+          [
+            "min",
+            {
+              "set": "visits"
+            },
+            [
+              "field",
+              {},
+              "first"
+            ]
+          ]
+        ]
+      },
+      "where": [
+        [
+          ">=",
+          {},
+          [
+            "field",
+            {},
+            "span_years"
+          ],
+          1
+        ]
+      ]
+    }
+  },
+  "out": {
+    "set": "spans",
+    "level": "aggregate",
+    "columns": [
+      [
+        "field",
+        {},
+        "subject.id"
+      ],
+      [
+        "field",
+        {},
+        "_rows"
+      ],
+      [
+        "field",
+        {},
+        "span_days"
+      ],
+      [
+        "field",
+        {},
+        "span_years"
+      ]
+    ],
+    "order": [
+      [
+        [
+          "field",
+          {},
+          "subject.id"
+        ],
+        "asc"
+      ]
+    ],
+    "limit": 20
+  }
+}

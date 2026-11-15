@@ -229,8 +229,9 @@ the stored day opens a session under the document's scheme digest, raising
 
 **bind** carries arithmetic (`+ - * /` with a Double cast so SQLite never
 divides integers), `abs`, `round`, `coalesce`, `case`, `concat`; the time
-functions `days_between`, `shift`, `age_at` (birthday exact whole years),
-`bucket` (truncation, returns text) and `part {unit: year | month | day | dow |
+functions `days_between`, `months_between`, `years_between` (the whole
+calendar months and years between two dates, §5.5), `shift`, `age_at`
+(birthday exact whole years), `bucket` (truncation, returns text) and `part {unit: year | month | day | dow |
 hour}` (extraction, returns an integer); the per subject sequences `ordinal`,
 `prev`, `next`; the aggregates `count`, `distinct`, `min`, `max`, `sum`, `avg`,
 `list` over a related child or dated set; and the derived fields from the pack
@@ -370,7 +371,8 @@ is a `min` over that event set.
     `ambiguous_parent`, `unknown_value`, `unknown_level`, `forbidden_field`,
     `federated_scope`, `scheme_mismatch`, `selection_outdated`,
     `binding_dropped`, `missing_order`, `not_releasable`, `truncated`,
-    `stale_options`. Repair inserts a missing `{}`, wraps a lone clause and
+    `stale_options`, the warnings `sequence_before_where` and `sequence_inherited` (§5.4), and one
+    warning only a diagnosis gives, `reversed_dates` (§10). Repair inserts a missing `{}`, wraps a lone clause and
     maps operator and unit aliases; it never rewrites a value and never guesses
     among candidates.
 15. Sensitivity is one policy evaluated in the catalog per (principal, role,
@@ -489,6 +491,98 @@ adjacency, "a PPMS row immediately followed by an SPMS row"; without, "an SPMS
 row with any earlier PPMS row". The tie rule for same-date rows is the key,
 and it is attributed as an engine rule plus an ask rule because the event table
 has no unique key on (subject, kind, date).
+
+Which rows a sequence counts follows from the order inside a set (rule 5:
+source, near, attach, has, same, bind, where, pick). The relations come before
+`bind`, so in a set with a `has` the row before is the one before among the
+rows `has` kept: "the previous session that holds such a scan" is one set with
+the `has` and the `prev`. A `where` comes after `bind`, so a `where` of the
+same set cuts the rows after the sequence counted them: `prev` beside `where:
+first >= 2005-01-01` is the row before among all the set's rows, also one
+before that day. To count among the rows a `where` keeps, the `where` goes in
+a set of its own and the sequence in a set drawn `from` it:
+
+```yaml
+sets:
+  kept:  {grain: session, where: [[">=", {}, ["field", {}, "first"], "2005-01-01"]]}
+  gaps:
+    grain: session
+    from: kept
+    bind:
+      before: ["prev", {}, ["field", {}, "first"]]
+```
+
+A `where` clause that reads the sequence (`n = 1`, a gap above a bound) is
+what the order is for. One that reads nothing of it, in a set that binds a
+sequence, is valid and is warned about at validation (`sequence_before_where`),
+with the two sets to write.
+
+A set drawn `from` another has that set's bindings as they were made, so a
+sequence bound upstream stays the place or the row before among the rows of
+the set that bound it: where a set between them keeps only some rows (a
+`where`, a bounded `has`, a `near` or an `attach` that drops, a `pick`) and a
+`where` or a `pick`'s order then reads the inherited binding, validation warns
+(`sequence_inherited`), naming both sets, and the sequence is bound again in
+the set that filters on it or in a set drawn from the one that cut the rows.
+
+### 5.5 How far apart two dates are
+
+Three functions answer it, each with the later date first, as
+`days_between(a, b)` is `a` minus `b`:
+
+| function | answers | on a leap day or a short month |
+|---|---|---|
+| `days_between(a, b)` | the days from `b` to `a` | counts every day |
+| `months_between(a, b)` | the whole calendar months from `b` to `a` | a month is whole on the day of the month `b` falls on: 31 January to 28 February is 0, to 1 March is 1 |
+| `years_between(a, b)` | the whole calendar years from `b` to `a` | a year is whole on the month and day `b` falls on, as `age_at` counts a birthday: 29 February 2020 to 28 February 2025 is 4, to 1 March 2025 is 5 |
+
+"At least five years apart" is `[">=", {}, ["years_between", {}, <later>,
+<earlier>], 5]`, and "at least six months apart" the same with
+`months_between` and 6. These are calendar units. A window's `month` and
+`year` (§5.1) and `shift`'s are the forgiving day counts, 31 and 366 days, so
+`5 years` as a window is 1830 days, four more than five calendar years: a gap
+between two dates is asked with these functions, and a window stays a window.
+
+With the earlier date first all three answer nought or less (the whole units
+counted down, so one day short of a month before is -1), a filter for at
+least so many keeps nothing, and diagnose says so (§10).
+
+**First to last.** The span of a subject's sessions is a group's value, the
+latest less the earliest:
+
+```yaml
+sets:
+  visits: {grain: session}
+  spans:
+    grain: group
+    group: {of: visits, by: [["field", {}, "subject.id"]]}
+    bind:
+      span_years: ["years_between", {}, ["max", {set: visits}, ["field", {}, "first"]], ["min", {set: visits}, ["field", {}, "first"]]]
+    where:
+      - [">=", {}, ["field", {}, "span_years"], 5]
+out: {set: spans, level: count}
+```
+
+A group's binding is a total of its own child or a value made from the
+group's names. A value that holds totals of the child, as above, is sugar:
+desugar binds each total by itself before it, named `<binding>__<op>`
+(`span_years__max`, `span_years__min`; `where<n>__<op>` for a total written
+in the group's `where`), and the value reads those bindings, so the stored
+document says the form every rule about a group's totals already reads.
+
+**One to the next.** Consecutive sessions are a sequence (§5.4):
+
+```yaml
+sets:
+  visits:
+    grain: session
+    bind:
+      before: ["prev", {}, ["field", {}, "first"]]
+      gap_months: ["months_between", {}, ["field", {}, "first"], ["field", {}, "before"]]
+    where:
+      - [">=", {}, ["field", {}, "gap_months"], 6]
+out: {set: visits, level: count}
+```
 
 ## 6. Comparability
 
@@ -726,7 +820,12 @@ must not guess them (C20, D36):
   response only, and apply refuses a stale list with `stale_options` naming the
   re-call.
 - **diagnose**: taxonomy errors with `sets.<name>.<slot>[i]` paths and the
-  next call; repairs applied; warnings; a one line zero-row explanation in
+  next call; repairs applied; warnings, among them `reversed_dates` where a
+  `where` clause holds a date difference (`days_between`, `months_between`,
+  `years_between`, in the clause, bound in the same set or in a set it is
+  drawn from) above a positive
+  bound, keeps no row, and keeps rows with the two dates the other way
+  round, counted only for a stage that kept nothing; a one line zero-row explanation in
   domain words; per clause and per null drop counts; ties per pick; unresolved
   values rows; rows coarser than a clause's unit; the cost class; and the
   **funnel** (Q1): the count of subjects surviving each named set from the
@@ -789,7 +888,7 @@ uncast NUMERIC.
 | hook | SQLite (bundled 3.53) | Postgres 16 |
 |---|---|---|
 | H1 `days_between` | `CAST(julianday(a) - julianday(b) AS INTEGER)` | `(a - b)` |
-| H2 `shift(d, n, unit)` | `date(d, '+n days')` (months and years are days, §5.1) | `d + n` |
+| H2 `shift(d, n, unit)` | `date(d, '+n days')` (months and years are days, §5.1; calendar gaps are H12) | `d + n` |
 | H3 `age_at` | strftime year plus a `%m%d` comparison | EXTRACT plus `to_char(d, 'MMDD')` |
 | H4 rounded key and display | `CAST(round(x * 100.0) AS INTEGER)` with a literal scale, never `10^n`; `round(x, n)` | the same integer scaling; `round(x::numeric, n)::double precision` |
 | H5 sorted list | `group_concat(x, ',' ORDER BY x)` | `string_agg(x::text, ',' ORDER BY x)` |
@@ -799,8 +898,9 @@ uncast NUMERIC.
 | H9 timeout and cancel | a watchdog thread on rusqlite's interrupt handle | `SET LOCAL statement_timeout` inside the read transaction |
 | H10 `bucket` and `part` | `strftime`, text for bucket, `CAST(... AS INTEGER)` for part | `to_char`, `EXTRACT(...)::int` |
 | H11 least and greatest | multi-argument `MIN` / `MAX` | `LEAST` / `GREATEST` |
+| H12 `months_between`, `years_between` | strftime years and months as integers less a `%d` comparison; years as H3 | EXTRACT plus `to_char(d, 'DD')`; years as H3 |
 
-The eleven hooks are not the portability contract; they are the current
+The hooks are not the portability contract; they are the current
 enumeration of one. The contract is: **one fixture exercising every hook and
 every disputed construct executes on both backends and its content hashes
 agree** (§13.3). Two independent readings found disjoint defects in this
@@ -1075,7 +1175,9 @@ Retention for a store is never shorter than for the object that cites it.
 - Stack sets read `disposition != excluded`; `acquisition` is never a silent
   default (Q16).
 - Cohort membership reads the open interval; there is no `as_of` (Q5).
-- Windows: `month` is 31 days, `year` is 366, both ends inclusive (Q2).
+- Windows: `month` is 31 days, `year` is 366, both ends inclusive (Q2). A gap
+  between two dates in calendar units is `months_between` or `years_between`
+  (§5.5), never a window's day count.
 - Precision is stored per row; comparisons are forgiving unless `strict`
   (Q3).
 - Comparability is a level from the pack; `loose` is the level describe
