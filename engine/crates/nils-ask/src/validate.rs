@@ -341,6 +341,9 @@ pub enum Code {
     /// A set counts its rows in order (`ordinal`, `prev`, `next`) and then
     /// cuts them by a `where` clause that reads nothing of that count.
     SequenceBeforeWhere,
+    /// A set filters or orders by a count of rows in order that a set it
+    /// is drawn from made, after a set between them kept only some rows.
+    SequenceInherited,
 }
 
 impl Code {
@@ -368,6 +371,7 @@ impl Code {
             Code::NotCompilable => "not_compilable",
             Code::ReversedDates => "reversed_dates",
             Code::SequenceBeforeWhere => "sequence_before_where",
+            Code::SequenceInherited => "sequence_inherited",
         }
     }
 
@@ -380,6 +384,7 @@ impl Code {
                 | Code::NotReleasable
                 | Code::ReversedDates
                 | Code::SequenceBeforeWhere
+                | Code::SequenceInherited
         )
     }
 }
@@ -998,6 +1003,7 @@ pub fn validate(ask: &Ask, names: &dyn Names, scope: &Scope) -> Result<Validated
     measures_within_detail(ask, scope, &mut issues);
     rows_within_detail(ask, scope, &mut issues);
     sequence_before_where(ask, &mut issues);
+    sequence_inherited(ask, &mut issues);
     out.small_cells = small_cells(ask, scope);
     let rule = shapes_of(ask, names, scope, &out);
     out.shaped = rule.shaped;
@@ -2932,6 +2938,152 @@ fn sequence_before_where(ask: &Ask, issues: &mut Vec<Issue>) {
                 ),
                 format!(
                     "to count among the rows this clause keeps, put the clause in a set of its own and draw this one from it: {name}_kept: {{grain: {grain}, where: [<this clause>]}} with this set's source and relations, then {name}: {{grain: {grain}, from: {name}_kept, bind: {{{binding}: ...}}}}; leave it where the count over all the rows is meant"
+                ),
+            ));
+        }
+    }
+}
+
+/// A sequence read after the rows it counted were cut. A set drawn `from`
+/// another has that set's bindings as they were made: an `ordinal` or a
+/// `prev` bound in `visits` is the place or the row before among the rows
+/// of `visits`, and stays so in a set drawn from it that keeps only some
+/// of them. Filtered there, "the session before" is one that may no
+/// longer be among the rows, and nothing said so: a count of subjects
+/// with two kept sessions close together was wrong that way.
+///
+/// Where a `where` clause or a `pick`'s order of a set reads a binding
+/// made from a sequence (by itself or through other bindings) in a set it
+/// is drawn from, and a set on the way from that one down to this one
+/// keeps only some rows (a `where`, a bounded `has`, a `near` or an
+/// `attach` that drops, a `pick`; for this set itself its relations,
+/// which come before its `where`), the clause is warned about, naming the
+/// set that made the binding and the first one that cut its rows, with
+/// the set to write. With nothing between that keeps only some rows the
+/// binding is still what it says, and nothing is warned.
+fn sequence_inherited(ask: &Ask, issues: &mut Vec<Issue>) {
+    const SEQUENCES: [&str; 3] = ["ordinal", "prev", "next"];
+    let sequence_in = |c: &Clause| -> Option<String> {
+        let mut all = Vec::new();
+        c.walk(&mut all);
+        all.iter()
+            .find(|x| SEQUENCES.contains(&x.op.as_str()))
+            .map(|x| x.op.clone())
+    };
+    let fields = |c: &Clause| -> Vec<String> {
+        let mut all = Vec::new();
+        c.walk(&mut all);
+        all.iter()
+            .filter(|x| x.op == "field")
+            .filter_map(|x| x.ref_name().map(str::to_string))
+            .collect()
+    };
+    let relations_drop = |s: &Set| {
+        s.has.iter().any(|h| h.min.is_some() || h.max.is_some())
+            || s.near.iter().any(|n| !n.optional)
+            || s.attach.iter().any(|a| !a.optional)
+    };
+    // the sets a set is drawn from, nearest first
+    let chain = |name: &str| -> Vec<String> {
+        let mut out = Vec::new();
+        let mut at = name;
+        while let Some(Src::Set(from)) = ask.sets.get(at).and_then(|s| s.from.as_ref()) {
+            if out.len() > 32 || out.iter().any(|o| o == from) || from == name {
+                break;
+            }
+            out.push(from.clone());
+            at = from;
+        }
+        out
+    };
+    // the bindings a set has that a sequence made: each with the set that
+    // made it and the function, its own after those passed on to it
+    let made_in = |name: &str| -> BTreeMap<String, (String, String)> {
+        let mut made: BTreeMap<String, (String, String)> = BTreeMap::new();
+        let mut sets = chain(name);
+        sets.reverse();
+        sets.push(name.to_string());
+        for owner in sets {
+            let Some(set) = ask.sets.get(&owner) else {
+                continue;
+            };
+            for (b, c) in &set.bind.0 {
+                if let Some(op) = sequence_in(c) {
+                    made.insert(b.clone(), (owner.clone(), op));
+                } else if let Some(through) = fields(c).iter().find_map(|f| made.get(f)) {
+                    // a value made from one is as old as the one it reads
+                    made.insert(b.clone(), through.clone());
+                } else {
+                    made.remove(b);
+                }
+            }
+        }
+        made
+    };
+    for (name, set) in &ask.sets {
+        if name.contains("__") || !matches!(set.from, Some(Src::Set(_))) {
+            continue;
+        }
+        let made = made_in(name);
+        if made.is_empty() {
+            continue;
+        }
+        let above = chain(name);
+        let read: Vec<(String, &Clause)> = set
+            .where_
+            .iter()
+            .enumerate()
+            .map(|(i, c)| (format!("sets.{name}.where[{i}]"), c))
+            .chain(set.pick.iter().flat_map(|pk| {
+                pk.by
+                    .iter()
+                    .enumerate()
+                    .map(|(i, o)| (format!("sets.{name}.pick.by[{i}]"), &o.0))
+            }))
+            .collect();
+        for (path, c) in read {
+            let Some((binding, (owner, op))) = fields(c)
+                .into_iter()
+                .find_map(|f| made.get(&f).map(|m| (f, m.clone())))
+            else {
+                continue;
+            };
+            if owner == *name {
+                continue;
+            }
+            // the sets between, from the one drawn from the maker down to
+            // this one: the first that keeps only some rows
+            let Some(at) = above.iter().position(|a| *a == owner) else {
+                continue;
+            };
+            let cut = above[..at]
+                .iter()
+                .rev()
+                .find(|between| {
+                    ask.sets.get(*between).is_some_and(|s| {
+                        relations_drop(s) || !s.where_.is_empty() || s.pick.is_some()
+                    })
+                })
+                .cloned()
+                .or_else(|| relations_drop(set).then(|| name.clone()));
+            let Some(cut) = cut else {
+                continue;
+            };
+            let grain = set.grain;
+            let here = if cut == *name {
+                "this set's own relations kept".to_string()
+            } else {
+                format!("{cut} kept")
+            };
+            let from = above.first().cloned().unwrap_or_default();
+            issues.push(issue(
+                Code::SequenceInherited,
+                path,
+                format!(
+                    "{binding} was counted among the rows of {owner} ({op}), before {here} only some of them, so it is not the one among the rows here"
+                ),
+                format!(
+                    "bind it again in this set, where bind comes after the relations and before where: {name}: {{grain: {grain}, from: {from}, bind: {{{binding}_here: <the clause of {owner}.{binding}>}}, where: [<the clauses, reading {binding}_here>]}}; or bind it in a set drawn from {cut} and draw this one from that"
                 ),
             ));
         }

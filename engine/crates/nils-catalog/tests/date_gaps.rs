@@ -784,3 +784,125 @@ fn a_reversed_gap_bound_in_the_set_drawn_from_is_warned_of() {
         }
     }
 }
+
+/// A sequence bound in a set and read in a set drawn from it, after a set
+/// between them kept only some rows: warned about, naming the set that
+/// made it and the one that cut its rows. Bound where it is read, or in a
+/// set drawn from the one that cut, or with nothing cut between, it is
+/// not.
+#[test]
+fn an_inherited_sequence_read_after_its_rows_were_cut_is_warned_of() {
+    let l = common::lab(
+        "sqlite",
+        nils_registry::Backend::Sqlite,
+        None,
+        "nils_date_gaps_test",
+    );
+    let first = json!(["field", {}, "first"]);
+    let bind = json!({
+        "n": ["ordinal", {}],
+        "gap": ["days_between", {}, first, ["prev", {}, first]]
+    });
+    let close = json!([
+        [">", {}, ["field", {}, "n"], 1],
+        ["<", {}, ["field", {}, "gap"], 180],
+        ["not_null", {}, ["field", {}, "gap"]]
+    ]);
+    let warned = |mut sets: Value| -> Vec<(String, String, String)> {
+        sets["people"] = json!({"grain": "subject"});
+        sets["scans"] = json!({"grain": "stack", "of": "visits",
+            "where": [["=", {}, ["axis", {}, "modifier"], "FLAIR"]]});
+        sets["found"] = json!({"grain": "subject", "from": "people",
+            "has": [{"set": "pairs", "min": 1}]});
+        let text = doc(&sets, json!({"set": "found", "level": "count"}));
+        let p =
+            prepare(parse(&text).unwrap(), &l.catalog, &quasi()).unwrap_or_else(|e| panic!("{e}"));
+        assert!(
+            !p.validated
+                .warnings
+                .iter()
+                .any(|w| w.code == Code::SequenceBeforeWhere),
+            "{:?}",
+            p.validated.warnings
+        );
+        p.validated
+            .warnings
+            .iter()
+            .filter(|w| w.code == Code::SequenceInherited)
+            .map(|w| (w.path.clone(), w.message.clone(), w.next.clone()))
+            .collect()
+    };
+    let holds = json!([{"set": "scans", "min": 1}]);
+    // the shape that answered a wrong count
+    let w = warned(json!({
+        "visits": {"grain": "session", "of": "people", "bind": bind},
+        "holding": {"grain": "session", "from": "visits", "has": holds},
+        "pairs": {"grain": "session", "from": "holding", "where": close}
+    }));
+    let paths: Vec<&str> = w.iter().map(|x| x.0.as_str()).collect();
+    assert_eq!(
+        paths,
+        [
+            "sets.pairs.where[0]",
+            "sets.pairs.where[1]",
+            "sets.pairs.where[2]"
+        ]
+    );
+    assert_eq!(
+        w[0].1,
+        "n was counted among the rows of visits (ordinal), before holding kept only some of them, so it is not the one among the rows here"
+    );
+    assert_eq!(
+        w[1].1,
+        "gap was counted among the rows of visits (prev), before holding kept only some of them, so it is not the one among the rows here"
+    );
+    assert!(
+        w[1].2.contains(
+            "pairs: {grain: session, from: holding, bind: {gap_here: <the clause of visits.gap>}"
+        ) && w[1]
+            .2
+            .ends_with("or bind it in a set drawn from holding and draw this one from that"),
+        "{}",
+        w[1].2
+    );
+    // the set that reads it keeps only some rows by its own has
+    let w = warned(json!({
+        "visits": {"grain": "session", "of": "people", "bind": bind},
+        "pairs": {"grain": "session", "from": "visits", "has": holds, "where": close}
+    }));
+    assert_eq!(w.len(), 3, "{w:?}");
+    assert!(
+        w[1].1
+            .contains("before this set's own relations kept only some of them"),
+        "{}",
+        w[1].1
+    );
+    // bound in the set that reads it
+    assert_eq!(
+        warned(json!({
+            "visits": {"grain": "session", "of": "people"},
+            "holding": {"grain": "session", "from": "visits", "has": holds},
+            "pairs": {"grain": "session", "from": "holding", "bind": bind, "where": close}
+        })),
+        []
+    );
+    // bound in a set drawn from the one that cut the rows
+    assert_eq!(
+        warned(json!({
+            "visits": {"grain": "session", "of": "people"},
+            "holding": {"grain": "session", "from": "visits", "has": holds},
+            "gaps": {"grain": "session", "from": "holding", "bind": bind},
+            "pairs": {"grain": "session", "from": "gaps", "where": close}
+        })),
+        []
+    );
+    // nothing between keeps only some rows
+    assert_eq!(
+        warned(json!({
+            "visits": {"grain": "session", "of": "people", "bind": bind},
+            "all": {"grain": "session", "from": "visits"},
+            "pairs": {"grain": "session", "from": "all", "where": close}
+        })),
+        []
+    );
+}

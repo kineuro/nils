@@ -371,7 +371,7 @@ is a `min` over that event set.
     `ambiguous_parent`, `unknown_value`, `unknown_level`, `forbidden_field`,
     `federated_scope`, `scheme_mismatch`, `selection_outdated`,
     `binding_dropped`, `missing_order`, `not_releasable`, `truncated`,
-    `stale_options`, the warning `sequence_before_where` (§5.4), and one
+    `stale_options`, the warnings `sequence_before_where` and `sequence_inherited` (§5.4), and one
     warning only a diagnosis gives, `reversed_dates` (§10). Repair inserts a missing `{}`, wraps a lone clause and
     maps operator and unit aliases; it never rewrites a value and never guesses
     among candidates.
@@ -516,6 +516,14 @@ A `where` clause that reads the sequence (`n = 1`, a gap above a bound) is
 what the order is for. One that reads nothing of it, in a set that binds a
 sequence, is valid and is warned about at validation (`sequence_before_where`),
 with the two sets to write.
+
+A set drawn `from` another has that set's bindings as they were made, so a
+sequence bound upstream stays the place or the row before among the rows of
+the set that bound it: where a set between them keeps only some rows (a
+`where`, a bounded `has`, a `near` or an `attach` that drops, a `pick`) and a
+`where` or a `pick`'s order then reads the inherited binding, validation warns
+(`sequence_inherited`), naming both sets, and the sequence is bound again in
+the set that filters on it or in a set drawn from the one that cut the rows.
 
 ### 5.5 How far apart two dates are
 
