@@ -4326,6 +4326,15 @@ fn nils_review_apply_is_one_verb_over_groups_stages_commits_and_withdraws() {
     let item: serde_json::Value =
         serde_json::from_str(&run(&["review", "show", &base_id.to_string(), "--json"])).unwrap();
     assert_eq!(item["status"], "staged", "{item}");
+    // the item in full names every member, the one decided alone among them
+    let listed = item["member_stacks"].as_array().unwrap();
+    assert_eq!(listed.len() as i64, members, "{item}");
+    assert!(
+        listed
+            .iter()
+            .any(|m| m["stack_id"] == first_member && !m["decided_at"].is_null()),
+        "{item}"
+    );
     run(&["classify", "--pack-dir", packs.to_str().unwrap()]);
     {
         let mut store =
