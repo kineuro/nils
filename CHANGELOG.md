@@ -7,6 +7,7 @@ All notable changes to NILS v1 are recorded here. The format follows [Keep a Cha
 ### Fixed
 
 - A release no longer takes two images under one header for one acquisition written twice. Two stacks of a session made at one moment and the same in every field the registry holds were written once and the other recorded as absent (`written_twice`), which also left out a second image a scanner stores under the header of the first, a filtered image beside its magnitude image for one. The release now reads the pixel data of such stacks, and of no others, and skips one only where the pixel data are the same too; two that differ are each written under a numbered name, and a stack whose files cannot be read is never taken for a copy. On a release run again over an earlier version, the stack that was written is renamed with its number and the one left out is added.
+- `nils review show` names every member of a group. The text listed the first twenty stacks and `--json` only their count; both now give all of them, the JSON as `member_stacks` with each stack, its evidence and when it was decided, as the desk reads them.
 
 ## [pack-mri-v1.4.1] - 2026-11-25
 
