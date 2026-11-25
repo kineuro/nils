@@ -8087,7 +8087,32 @@ fn review_command(home: &Home, command: ReviewCommand) -> Result<(), Exit> {
                     .collect();
                 sealed::now(store, &stacks).map_err(|e| fail(e.to_string()))?
             };
+            // A group's members in full, in both forms: the stacks the item
+            // is about are what a person or a script came for, and a count or
+            // the first twenty of them answers neither.
+            let members = match s(&item["scope"]) == "group" {
+                true => {
+                    let mut members = nils_registry::review::members(store, id)
+                        .map_err(|e| fail(e.to_string()))?;
+                    members.retain(|m| !hidden.contains(&m.stack_id));
+                    Some(members)
+                }
+                false => None,
+            };
             if json {
+                let mut item = item;
+                if let Some(members) = &members {
+                    item["member_stacks"] = members
+                        .iter()
+                        .map(|m| {
+                            serde_json::json!({
+                                "stack_id": m.stack_id,
+                                "evidence": m.evidence,
+                                "decided_at": m.decided_at,
+                            })
+                        })
+                        .collect();
+                }
                 println!(
                     "{}",
                     serde_json::to_string_pretty(&item).unwrap_or_default()
@@ -8104,22 +8129,17 @@ fn review_command(home: &Home, command: ReviewCommand) -> Result<(), Exit> {
             println!("  created    {}", s(&item["created_at"]));
             println!("  ref        {}", item["ref"]);
             println!("  evidence   {}", item["evidence"]);
-            if s(&item["scope"]) == "group" {
-                let mut members =
-                    nils_registry::review::members(store, id).map_err(|e| fail(e.to_string()))?;
-                members.retain(|m| !hidden.contains(&m.stack_id));
+            if let Some(members) = &members {
                 let decided = members.iter().filter(|m| m.decided_at.is_some()).count();
                 println!(
-                    "  members    {} stack(s), {} decided: {}{}",
+                    "  members    {} stack(s), {} decided: {}",
                     members.len(),
                     decided,
                     members
                         .iter()
-                        .take(20)
                         .map(|m| m.stack_id.to_string())
                         .collect::<Vec<_>>()
                         .join(", "),
-                    if members.len() > 20 { ", ..." } else { "" }
                 );
             }
             if !item["decided_at"].is_null() {
