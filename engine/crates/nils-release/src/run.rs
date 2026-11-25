@@ -5030,6 +5030,51 @@ fn select_subject(
     rows_to_instances(store.query(&sql, &[])?)
 }
 
+/// A digest of one stack's pixel data, whatever order its files are in, or
+/// `None` where a file cannot be read or holds none: a stack nothing was read
+/// of is never found to be a copy of another.
+///
+/// The bytes as stored, so one image written under two transfer syntaxes is
+/// two digests, and both are written. A file split between stacks adds which
+/// frames are this stack's.
+fn pixels_of(store: &mut Store, stack: i64) -> Result<Option<String>, Error> {
+    use blake2::Digest;
+    use dicom_core::value::Value;
+    let mut files: Vec<[u8; 32]> = Vec::new();
+    for instance in instances_of(store, stack)? {
+        let Ok(object) = open(Path::new(&instance.path)) else {
+            return Ok(None);
+        };
+        let Ok(element) = object.element(dicom_dictionary_std::tags::PIXEL_DATA) else {
+            return Ok(None);
+        };
+        let mut h = blake2::Blake2s256::new();
+        match element.value() {
+            Value::Primitive(bytes) => h.update(bytes.to_bytes()),
+            Value::PixelSequence(sequence) => {
+                for fragment in sequence.fragments() {
+                    h.update((fragment.len() as u64).to_le_bytes());
+                    h.update(fragment);
+                }
+            }
+            Value::Sequence(_) => return Ok(None),
+        }
+        h.update(instance.frames.as_deref().unwrap_or("").as_bytes());
+        let mut digest = [0u8; 32];
+        digest.copy_from_slice(&h.finalize());
+        files.push(digest);
+    }
+    if files.is_empty() {
+        return Ok(None);
+    }
+    files.sort_unstable();
+    let mut h = blake2::Blake2s256::new();
+    for digest in &files {
+        h.update(digest);
+    }
+    Ok(Some(hex::encode(h.finalize())))
+}
+
 /// One stack's instances, read only when the stack is written.
 fn instances_of(store: &mut Store, stack: i64) -> Result<Vec<Instance>, Error> {
     let frames = frames_column(store);
@@ -6630,6 +6675,8 @@ fn places(
                 pe_direction: r.opt_text(10)?.map(str::to_string),
                 split_reason: r.opt_text(7)?.map(str::to_string),
                 stacks_in_series: r.opt_int(4)?,
+                // read below, for the stacks nothing else tells apart
+                pixels: None,
                 echo_time: r.opt_double(18)?,
                 repetition_time: r.opt_double(19)?,
                 inversion_time: r.opt_double(11)?,
@@ -6869,10 +6916,40 @@ fn places(
         shared.part_phase.insert(*stack);
     }
     // Wave 7b (agenda 3.4b): one acquisition written twice, both acquisition
-    // times recorded and equal and every fingerprint field the same, is one
-    // stack with several paths. In the bucket's order the first is the one
-    // written and the later ones are its copies, which take no name of their
-    // own and share none, so no question is asked about them.
+    // times recorded and equal, every fingerprint field the same and the
+    // pixel data the same, is one stack with several paths. In the bucket's
+    // order the first is the one written and the later ones are its copies,
+    // which take no name of their own and share none, so no question is
+    // asked about them.
+    //
+    // The fingerprint cannot say it alone: a magnitude image and a filtered
+    // image of it are written at one moment under one header. So the pixel
+    // data of the stacks the fingerprint cannot tell apart, and of no other
+    // stack, are read here, and two that differ are two images. A session
+    // the version takes nothing of is not read for: none of its stacks is
+    // written, and no name of the version depends on it.
+    let mut alike: std::collections::BTreeSet<i64> = std::collections::BTreeSet::new();
+    for bucket in bids_buckets.values() {
+        if !selected.is_none_or(|s| bucket.iter().any(|(_, stack, _)| s.contains(stack))) {
+            continue;
+        }
+        for (n, (_, one, _)) in bucket.iter().enumerate() {
+            for (_, other, _) in &bucket[n + 1..] {
+                if let (Some(a), Some(b)) = (acquisitions.get(one), acquisitions.get(other))
+                    && crate::bids::repeat::alike_but_for_the_image(a, b)
+                {
+                    alike.insert(*one);
+                    alike.insert(*other);
+                }
+            }
+        }
+    }
+    for stack in alike {
+        let pixels = pixels_of(store, stack)?;
+        if let Some(a) = acquisitions.get_mut(&stack) {
+            a.pixels = pixels;
+        }
+    }
     for bucket in bids_buckets.values_mut() {
         bucket.sort();
         let mut kept: Vec<i64> = Vec::new();

@@ -75,6 +75,9 @@ pub const SAME_COSINE: f64 = 0.01;
 /// field that differs, so it is said as what happened.
 pub const SAME_MOMENT: &str = "acquired at the same moment";
 
+/// The words for two stacks whose headers agree and whose images do not.
+pub const OTHER_IMAGE: &str = "the image itself";
+
 /// What the test reads of one stack.
 ///
 /// Everything here is a column of `stack_fingerprint` or a decided axis, so
@@ -137,15 +140,35 @@ pub struct Acquisition {
     pub temporal_positions: Option<i64>,
     pub split_reason: Option<String>,
     pub stacks_in_series: Option<i64>,
+    /// A digest of the stack's pixel data. The one thing here that is read
+    /// from the files and not the registry, so the caller fills it only for
+    /// the stacks [`alike_but_for_the_image`] names, and it is `None` for
+    /// every other stack and for one whose files could not be read.
+    pub pixels: Option<String>,
 }
 
 /// Whether two stacks are one acquisition written twice (Wave 7b, agenda
-/// 3.4b): both acquisition times recorded and equal, and nothing else the
-/// test reads differs, so they are one stack with several paths rather than
-/// a repeat or two acquisitions.
+/// 3.4b): both acquisition times recorded and equal, nothing else the test
+/// reads differs, and the pixel data of both were read and are the same, so
+/// they are one stack with several paths rather than a repeat or two
+/// acquisitions.
+///
+/// The headers alone do not say it. A scanner writes a magnitude image and a
+/// filtered image of it at one moment under one header, and those are two
+/// images: a stack whose pixel data were not read is never a copy.
 pub fn written_twice(a: &Acquisition, b: &Acquisition) -> bool {
-    let d = differences(a, b);
-    d.len() == 1 && d[0] == SAME_MOMENT
+    alike_but_for_the_image(a, b) && a.pixels.is_some() && a.pixels == b.pixels
+}
+
+/// Whether two stacks were made at one moment and agree in everything the
+/// registry holds, which leaves the image itself as the only thing that can
+/// tell a copy from a second image. The caller reads the pixel data of
+/// exactly these stacks.
+pub fn alike_but_for_the_image(a: &Acquisition, b: &Acquisition) -> bool {
+    same_moment(a, b)
+        && differences(a, b)
+            .iter()
+            .all(|d| d == SAME_MOMENT || d == OTHER_IMAGE)
 }
 
 /// What separates two stacks, in words a review item can carry. Empty means
@@ -157,6 +180,9 @@ pub fn differences(a: &Acquisition, b: &Acquisition) -> Vec<String> {
     }
     if same_moment(a, b) {
         out.push(SAME_MOMENT.to_string());
+    }
+    if matches!((&a.pixels, &b.pixels), (Some(x), Some(y)) if x != y) {
+        out.push(OTHER_IMAGE.to_string());
     }
     for axis in a.axes.keys().chain(b.axes.keys()) {
         if a.axes.get(axis) != b.axes.get(axis) {
@@ -526,6 +552,46 @@ mod tests {
             ..again()
         };
         assert_eq!(differences(&mprage(), &spelled), Vec::<String>::new());
+    }
+
+    #[test]
+    fn one_header_is_a_copy_only_where_the_image_is_the_same() {
+        let first = Acquisition {
+            acquired_date: Some("2022-01-15".to_string()),
+            acquired_time: Some("10:01:02.000000".to_string()),
+            ..mprage()
+        };
+        let other = Acquisition {
+            series: 2,
+            ..first.clone()
+        };
+        // Nothing was read of the images: the pair is the one to read, and
+        // not yet a copy.
+        assert!(alike_but_for_the_image(&first, &other));
+        assert!(!written_twice(&first, &other));
+        let read = |a: &Acquisition, pixels: &str| Acquisition {
+            pixels: Some(pixels.to_string()),
+            ..a.clone()
+        };
+        // One image under both: written twice.
+        assert!(written_twice(&read(&first, "aa"), &read(&other, "aa")));
+        // Two images under one header, a magnitude and a filtered image of
+        // it: two stacks, and the difference has a name.
+        let (magnitude, filtered) = (read(&first, "aa"), read(&other, "bb"));
+        assert!(!written_twice(&magnitude, &filtered));
+        assert!(alike_but_for_the_image(&magnitude, &filtered));
+        assert_eq!(
+            differences(&magnitude, &filtered),
+            [SAME_MOMENT, OTHER_IMAGE]
+        );
+        // One side unread says nothing, and is no copy.
+        assert!(!written_twice(&read(&first, "aa"), &other));
+        // A header that differs is never read for.
+        let echo = Acquisition {
+            echo_time: Some(9.0),
+            ..other.clone()
+        };
+        assert!(!alike_but_for_the_image(&first, &echo));
     }
 
     #[test]

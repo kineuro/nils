@@ -1821,6 +1821,9 @@ struct Twin<'a> {
     /// ImageType, whose third value says which part of the complex signal
     /// the image is (`M`, `P`).
     image_type: &'a str,
+    /// The byte every pixel holds, so two series can differ in nothing but
+    /// what the image shows.
+    fill: u8,
 }
 
 fn twin<'a>(description: &'a str, protocol: &'a str) -> Twin<'a> {
@@ -1833,6 +1836,7 @@ fn twin<'a>(description: &'a str, protocol: &'a str) -> Twin<'a> {
         thickness: "1.0",
         burned_in: "NO",
         image_type: "ORIGINAL\\PRIMARY\\M\\ND",
+        fill: 0x40,
     }
 }
 
@@ -1847,8 +1851,16 @@ fn twins(one: Twin, two: Twin) -> TempDir {
 fn scans(series: &[Twin]) -> TempDir {
     let dir = TempDir::new("bids-twins");
     for (i, t) in series.iter().enumerate() {
-        let n = (i + 1).to_string();
-        let n = n.as_str();
+        write_series(&dir, i + 1, t);
+    }
+    dir
+}
+
+/// The files of series `n` of that session, written or written over.
+fn write_series(dir: &TempDir, n: usize, t: &Twin) {
+    let n = n.to_string();
+    let n = n.as_str();
+    {
         for slice in 1..=4 {
             let at = t.first_slice + f64::from(slice - 1);
             let (orientation, position) = match t.sagittal_at {
@@ -1885,7 +1897,7 @@ fn scans(series: &[Twin]) -> TempDir {
                 synth::text(tags::IMAGE_POSITION_PATIENT, VR::DS, &position),
                 synth::text(tags::SLICE_LOCATION, VR::DS, &at.to_string()),
                 synth::text(tags::INSTANCE_NUMBER, VR::IS, &slice.to_string()),
-                synth::bytes(tags::PIXEL_DATA, VR::OW, vec![0x40u8; 16 * 16 * 2]),
+                synth::bytes(tags::PIXEL_DATA, VR::OW, vec![t.fill; 16 * 16 * 2]),
             ]);
             if let Some(time) = t.acquired {
                 e.push(synth::text(tags::ACQUISITION_TIME, VR::TM, time));
@@ -1896,7 +1908,6 @@ fn scans(series: &[Twin]) -> TempDir {
             );
         }
     }
-    dir
 }
 
 /// The names of the released anatomical images, sorted.
@@ -2830,4 +2841,92 @@ fn a_bids_tree_named_by_an_id_spells_the_name_everywhere_and_the_code_nowhere() 
             .all(|f| f.contains("sub-ST001")),
         "{written:?}"
     );
+}
+
+#[test]
+fn a_release_that_left_an_image_out_as_a_copy_adds_it_when_run_again() {
+    // What a release over an earlier version does once the two images are
+    // seen to differ: the one that was written is renamed with its number
+    // and not written again, and the one left out is added.
+    let one = Twin {
+        acquired: Some("102000"),
+        ..twin("t2star_3d_sag", "T2STAR 3D")
+    };
+    let source = twins(one, one);
+    let home_dir = TempDir::new("bids-home");
+    let out = TempDir::new("bids-out");
+    let (_home, mut reg) = registry(&home_dir, &source);
+    let policy = Policy::default();
+    let scheme = SessionScheme::default();
+    let mut s = settings(out.path(), &policy, &scheme, Options::default(), None);
+    s.layout = Layout::Descriptive;
+    let first = run::run(&mut reg, &s).unwrap();
+    assert_eq!(first.written_twice, 1, "{first:?}");
+    assert_eq!(first.added, 1, "{first:?}");
+
+    // the second series holds another image under the same header
+    write_series(&source, 2, &Twin { fill: 0x10, ..one });
+    let second = run::run(&mut reg, &s).unwrap();
+    assert_eq!(second.written_twice, 0, "{second:?}");
+    assert_eq!(second.moved, 1, "{second:?}");
+    assert_eq!(second.added, 1, "{second:?}");
+    assert_eq!(second.rewritten, 0, "{second:?}");
+    assert_eq!(second.removed, 0, "{second:?}");
+    let folders: std::collections::BTreeSet<String> = files_under(out.path())
+        .into_iter()
+        .filter(|f| f.ends_with(".dcm"))
+        .filter_map(|f| f.rsplit_once('/').map(|(folder, _)| folder.to_string()))
+        .collect();
+    assert_eq!(folders.len(), 2, "{folders:?}");
+    assert!(
+        folders
+            .iter()
+            .all(|f| f.ends_with("_1") || f.ends_with("_2")),
+        "{folders:?}"
+    );
+}
+
+#[test]
+fn two_images_with_one_header_are_both_written() {
+    // A site's report (2026-11): a magnitude series and a filtered image of
+    // it carry the same header, made at one moment, and differ only in what
+    // the image shows. They are two images and never one written twice.
+    let one = Twin {
+        acquired: Some("102000"),
+        ..twin("t2star_3d_sag", "T2STAR 3D")
+    };
+    let other = Twin { fill: 0x10, ..one };
+    for layout in [Layout::Descriptive, Layout::Bids] {
+        let converter = converter();
+        if layout == Layout::Bids && converter.is_none() {
+            continue;
+        }
+        let source = twins(one, other);
+        let home_dir = TempDir::new("bids-home");
+        let out = TempDir::new("bids-out");
+        let (_home, mut reg) = registry(&home_dir, &source);
+        let policy = Policy::default();
+        let scheme = SessionScheme::default();
+        let mut s = settings(
+            out.path(),
+            &policy,
+            &scheme,
+            Options::default(),
+            converter.as_ref(),
+        );
+        s.layout = layout;
+        let report = run::run(&mut reg, &s).unwrap();
+        assert_eq!(report.written_twice, 0, "{layout:?}: {report:?}");
+        assert_eq!(report.left_out, 0, "{layout:?}: {report:?}");
+        assert!(absent_rows(&mut reg, report.release_id, "written_twice").is_empty());
+        // each under a name of its own, and what told them apart is a
+        // difference the engine saw, so nobody is asked
+        assert!(shared_differs(&mut reg).is_empty(), "{layout:?}");
+        let folders: std::collections::BTreeSet<String> = files_under(out.path())
+            .into_iter()
+            .filter(|f| f.ends_with(".dcm"))
+            .filter_map(|f| f.rsplit_once('/').map(|(folder, _)| folder.to_string()))
+            .collect();
+        assert_eq!(folders.len(), 2, "{layout:?}: {folders:?}");
+    }
 }
