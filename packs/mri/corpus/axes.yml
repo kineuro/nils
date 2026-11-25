@@ -2575,3 +2575,27 @@ cases:
       directory_type: localizer
       body_part: brain
       body_region: head
+
+  # MRI pack 1.4.1: a spin-echo EPI reference with the phase encoding
+  # reversed has no base, and the reversed b=0 of a diffusion series keeps
+  # the base its own words give it.
+  - name: a spin-echo EPI field map reference has no base
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\ND'
+      scanning_sequence: 'EP\SE'
+      sequence_variant: SK
+      scan_options: FS
+      mr_acquisition_type: 2D
+      manufacturer: SIEMENS
+      text_sequence_name: 'epse2d1_128'
+      text_series_description: 'SE_EPI_fieldmap_PA'
+      repetition_time: 8000
+      echo_time: 66
+      n_instances: 3
+      n_slices: 60
+      stacks_in_series: 1
+    axes:
+      construct: 'FieldmapRef,ND'
+      technique: SE-EPI
+      directory_type: fmap
+      base: ''

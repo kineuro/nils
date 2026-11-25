@@ -98,6 +98,13 @@ target:
                 - {text: scanning_sequence, matches: 'gr'}
                 - {text: text_series_description, matches: '(^|[^a-z])cube'}
             - {axis: directory_type, is: excluded}
+            # MRI pack 1.4.1: an EPI field map reference the base rules
+            # leave without a base (`construct:fieldmap_ref`). One a rule
+            # gave a base is no target for a base, and still votes for a
+            # technique it lacks.
+            - all:
+                - {axis: construct, is: FieldmapRef}
+                - {axis: base, missing_or: Unknown}
             - all:
                 - any: [{axis: construct, is: Real}, {axis: construct, is: Imaginary}]
                 - {not: {axis: modifier, is: PSIR}}

@@ -9,6 +9,14 @@ All notable changes to NILS v1 are recorded here. The format follows [Keep a Cha
 - A release no longer takes two images under one header for one acquisition written twice. Two stacks of a session made at one moment and the same in every field the registry holds were written once and the other recorded as absent (`written_twice`), which also left out a second image a scanner stores under the header of the first, a filtered image beside its magnitude image for one. The release now reads the pixel data of such stacks, and of no others, and skips one only where the pixel data are the same too; two that differ are each written under a numbered name, and a stack whose files cannot be read is never taken for a copy. On a release run again over an earlier version, the stack that was written is renamed with its number and the one left out is added.
 - `nils review show` names every member of a group. The text listed the first twenty stacks and `--json` only their count; both now give all of them, the JSON as `member_stacks` with each stack, its evidence and when it was decided, as the desk reads them.
 
+## [pack-mri-v1.4.1] - 2026-11-25
+
+The MRI pack 1.4.1, a fix after a partner site's report on its weekly runs. It declares pack contract 11 as 1.4.0 did and relies on no engine fix, so it installs on every engine 1.4.0 installs on.
+
+### Changed
+
+- An EPI field map reference that no base rule names has no base contrast (`base.yml`, rule `construct:fieldmap_ref`, last in the set). A few volumes of EPI with the phase encoding reversed are acquired to measure distortion and not to be read, and BIDS files them as `fmap/_epi`. A site's spin-echo EPI references (technique SE-EPI, no diffusion word, no b value) ended the base rules with no base, so every run raised a `base = (missing)` question about them; the rule decides the base as nothing, as it is decided for an MP2RAGE inversion, and the question is not asked. The reversed b=0 of a diffusion series keeps the base its own words give it, and the physics vote does not fill a base the rule decided as nothing. On the archive replay only field map references that had no base move, from no base to no base by rule, and no value of any axis changes.
+
 ## [1.0.0-beta.21] - 2026-11-15
 
 The twenty-first engine beta: the ask measures the time between two dates in calendar months and years and warns of a difference written the wrong way round or a sequence read over the wrong rows, and installs take the assistant at 1.0.0-alpha.36.
