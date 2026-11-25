@@ -117,6 +117,7 @@ order:
   - 'physics:gre_pdw'
   - 'physics:gre_t1w'
   - 'physics:gre_t2starw'
+  - 'construct:fieldmap_ref'
 
 rules:
 
@@ -1066,3 +1067,18 @@ rules:
       - {when: {all: [has_gre, {not: has_se}, {not: has_epi}, {field: echo_time, gt: 15}]}, cite: 'a long echo time on a gradient echo', source: physics, tier: physics}
     set: {base: 'T2starw', base_basis: physics, contrast_mix: null}
     confidence: 0.7
+
+  # MRI pack 1.4.1: an EPI field map reference that no rule above gave a
+  # base has none. It is a few volumes of EPI with the phase encoding
+  # reversed, acquired to measure distortion and not to be read, and BIDS
+  # files it as `fmap/_epi`, a suffix and not a weighting [B1]. A site's
+  # spin-echo EPI references (technique SE-EPI, no diffusion word and no b
+  # value) reached the end of this set with no base, and each run asked a
+  # person for one. Last, so a reference a rule above names keeps its base:
+  # the reversed b=0 of a diffusion series is DWI by its own words.
+  'construct:fieldmap_ref':
+    clauses:
+      - {when: {axis: construct, is: FieldmapRef}, cite: 'an EPI field map reference', source: construct}
+    set: {base: null, base_basis: null, contrast_mix: null}
+    confidence: 0.85
+    why: 'an EPI field map reference that nothing gave a base has no base contrast'
