@@ -6550,7 +6550,7 @@ fn a_decision_holds_the_other_grain_and_status_counts_two_that_do_not_agree() {
         shown["notes"]["set_aside"][0],
         serde_json::json!({
             "axis": "body_part", "value": "spine", "tier": "keywords", "confidence": 0.65,
-            "by": {"axis": "body_region", "value": "chest"},
+            "by": {"axis": "body_region", "value": "chest", "who": "a-reader", "kind": "person"},
         }),
         "{shown}"
     );
@@ -6578,6 +6578,20 @@ fn a_decision_holds_the_other_grain_and_status_counts_two_that_do_not_agree() {
     assert!(
         region["decision"].is_null(),
         "no decision was made on it: {region}"
+    );
+    // and it says what it was folded from, and who decided that
+    assert_eq!(
+        region["folded_from"],
+        serde_json::json!({
+            "axis": "body_part", "kind": "person", "actor": "a-reader", "model": null,
+            "words": "brain was decided",
+        }),
+        "{region}"
+    );
+    let text = ok(&["explain", &stacks[1].to_string()]);
+    assert!(
+        text.contains("folded from body_part: brain was decided (a person, a-reader)"),
+        "{text}"
     );
     assert!(
         region["evidence"].as_array().unwrap().iter().any(|e| {

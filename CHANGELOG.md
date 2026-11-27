@@ -2,7 +2,11 @@
 
 All notable changes to NILS v1 are recorded here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html). The first release will be 1.0.0; until then pre-releases are tagged `v1.0.0-alpha.N`, then `v1.0.0-beta.N` from the first beta. The history of v0, the 0.x line, is in [kineuro/nils-legacy](https://github.com/kineuro/nils-legacy).
 
-## [Unreleased]
+## [1.0.0-beta.23] - 2026-11-27
+
+The twenty-third engine beta: a row holds one word of a value whoever wrote it, a subject others were merged into is in every question, a coarse axis and its fine axis are held to a decision on either, the ask says what a value means and warns of a filter narrower than the words, and the engine ships the MRI pack 1.5.0.
+
+After the update, `nils status` counts the rows written in an earlier word and the subjects without a session; `nils repair axis-values --apply` and `nils repair sessions` mend them, and a sort writes the rest. No migration.
 
 ### Added
 
@@ -18,7 +22,6 @@ All notable changes to NILS v1 are recorded here. The format follows [Keep a Cha
 
 ### Changed
 
-- The MRI pack's body part and body region say what a person means by them. `body_region` declares that it is the coarse form of `body_part`, and its `head` that it is what "a brain scan" or "a head scan" means in ordinary words; `body_part`'s `brain` and `brain-neck` say that they are the fine split of the head by how far down the stack reaches, and name the region. `head` is no longer a term of `body_part`'s `brain`, since the word names the region. Terms and descriptions are shown and never read by a rule, so no stack is decided differently.
 - A classification row holds one spelling of a value, the one the pack stores for it, whoever wrote it. A decision is written in the stored form at the one place decisions are written, so `nils review decide`, the review doors, the proposal grid, a model's staged answer, a campaign's close, an answer to several axes and the import of earlier labels all store the same word the rules store; and the sort writes a decision's value in the stored form as well, so a row never takes another spelling from a decision written before. A text that names no value of its axis is taken or refused where it was before.
 - One function reads a text as the value it names: by its identity, an identity it had before, its label, or the spelling rows keep (`Axis::value_named` in the pack crate, with `id_of`, `stored_of`, `stored_text` and `same` on it; `id_of_stored` is gone). Release names, the disposition and role rules, the picks and their check for a twin across contrast, the post-contrast labelling, a pipeline pack's facts and a cohort check's stratum, the desk's kinds and regions, the rule signals and a corpus case all read a row through it, so a registry sorted by an older version of a pack reads right before it is repaired.
 - A sort no longer asks about a person's decision again because the rules' answer they saw is spelled another way now.
@@ -39,10 +42,15 @@ All notable changes to NILS v1 are recorded here. The format follows [Keep a Cha
 - A brain role of the main-scan picks refuses a stack that has no body part but holds a region that does not cover a brain, where it admitted it as nobody having said anything. A stack with neither is admitted as before.
 - Importing labels again counts an earlier imported answer held in another spelling as already held.
 
-### MRI pack (unversioned here; the version is set at release)
+## [pack-mri-v1.5.0] - 2026-11-27
+
+The MRI pack 1.5.0: one plain word a value, everywhere. Some techniques are now named by one general word in the registry and in file names, where a vendor word or a second spelling was used (`SSTSE` where it said `HASTE`); files of those techniques carry the general word in releases made after the update, and old words still work in questions, selections and saved rules. No stack changes the value it holds: a replay of 1.4.1 and 1.5.0 over an archive gave the same value, tier and decided-as-nothing on every stack. It needs engine 1.0.0-beta.23 (`engine: ">=1.0.0-beta.23, <2.0.0"`), the first engine that reads every earlier word of a value, so an older engine stays on 1.4.1.
+
+### Changed
 
 - A row stores one plain word of letters and digits for a value, the word a release name can carry. `post_contrast` stores `given` and `not_given` where it stored `1` and `0`. `technique` stores each value's label where thirteen values stored a vendor's word (`SPGRE` for `FLASH`, `SSTSE` for `HASTE`, `IRTSE` for `TIRM`, `DETSE` for `RESTORE`, `combMEGRE` for `MEDIC`, `pcbSSFP` for `CISS`, `MSI` for `MAVRIC`, `bSSFP` for `FIESTA`, `SSFPecho` for `PSIF`, `VIGRE` for `VIBE`, `FSPGRE` for `TurboFLASH`, `SSFPFID` for `FISP`, `rsEPI` for `RESOLVE`), and seven values whose only word had a hyphen have a label without it (`DWITSE`, `DWIEPI`, `DWISTEAM`, `SEEPI`, `GREEPI`, `CEMRA`, `VFAGRE`). `base` stores `T2starw` and still shows `T2*w`. Every earlier word still names its value, in a question, a decision, an overlay and a corpus case, and `nils repair axis-values --apply` moves the rows of a registry an earlier version sorted. No rule changed and no stack changes its value. The physics vote's family table is keyed by the stored word and its keys moved with the words.
 - **BIDS file names change for eleven techniques.** The word of a technique in a BIDS name (`acq-`) is the word a row stores, for every technique, so files of these techniques are named by another word in every BIDS release made after the update: `rsEPI` where the name said `MSEPI`, `Perfusion` for `PerfusionEPI`, `DETSE` for `VFATSE`, `TOF` for `TOFMRA`, `PC` for `PCMRA`, `pcbSSFP` for `CISS`, `SSFPecho` for `SSFP`, `SSFPFID` for `SSGRE`; a BOLD series loses `BOLDEPI`, since its word is now `BOLD` and the `_bold` suffix says it; and the 3D turbo spin echo and the multispectral technique, which had no word in a name, carry `SPACE` and `MSI`. The first release of an existing tree after the pack is updated writes every stack of it again, because the pack's version is part of what a release records of a stack, and the files of the affected techniques are written under their new names while the files under the old names are removed; nothing is written twice and nothing is left under an old name. `nils pack validate` now refuses a name token that is not the stored word, in every group of the mapping that does not say its tokens are words of their own (`own_words`, a new optional key of an `acq` group that an earlier engine ignores).
+- The MRI pack's body part and body region say what a person means by them. `body_region` declares that it is the coarse form of `body_part`, and its `head` that it is what "a brain scan" or "a head scan" means in ordinary words; `body_part`'s `brain` and `brain-neck` say that they are the fine split of the head by how far down the stack reaches, and name the region. `head` is no longer a term of `body_part`'s `brain`, since the word names the region. Terms and descriptions are shown and never read by a rule, so no stack is decided differently.
 
 ## [1.0.0-beta.22] - 2026-11-25
 

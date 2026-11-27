@@ -149,9 +149,31 @@ pub(crate) fn document(
                 .collect();
             // Wave 4a §10.1: a value somebody decided says who, with what
             // standing, and why
+            // A value folded from a committed answer on the finer of two
+            // axes is no decision on this axis: who decided the finer value
+            // is said beside it, and `decision` stays null.
+            let folded_from = evidence
+                .iter()
+                .find(|e| {
+                    tier == nils_registry::coarse::FOLDED
+                        && e["axis"].as_str() == Some(axis.as_str())
+                        && e["tier"] == nils_registry::coarse::FOLDED
+                })
+                .map(|e| {
+                    json!({
+                        "axis": e["source"],
+                        "kind": e["author_kind"],
+                        "actor": e["author"],
+                        "model": e["model_id"]
+                            .as_i64()
+                            .and_then(|id| models.get(&id).cloned()),
+                        "words": e["matched"],
+                    })
+                });
             let decided = evidence.iter().find(|e| {
                 e["axis"].as_str() == Some(axis.as_str())
                     && e["author_kind"].is_string()
+                    && e["rule_set"] != nils_registry::coarse::RULE_SET
                     && value
                         .as_deref()
                         .is_none_or(|v| e["value"].as_str() == Some(v))
@@ -188,7 +210,7 @@ pub(crate) fn document(
                             .then(|| v.to_string())
                     })
             });
-            json!({
+            let mut doc = json!({
                 "axis": axis,
                 "value": value,
                 "label": label,
@@ -197,7 +219,11 @@ pub(crate) fn document(
                 "basis": nils_pack::basis_of(tier),
                 "evidence": mine,
                 "decision": decision,
-            })
+            });
+            if let Some(from) = folded_from {
+                doc["folded_from"] = from;
+            }
+            doc
         })
         .collect();
     Ok(Some(json!({
@@ -522,6 +548,17 @@ pub(crate) fn text(doc: &Value) -> String {
             a["tier"].as_str().unwrap_or_default(),
             a["basis"].as_str().unwrap_or_default()
         ));
+        // a value folded from a decided finer one says from what, and who
+        // decided that
+        if let Some(f) = a["folded_from"].as_object() {
+            out.push_str(&format!(
+                "      folded from {}: {} ({}, {})\n",
+                f["axis"].as_str().unwrap_or_default(),
+                f["words"].as_str().unwrap_or_default(),
+                nils_registry::a_or_an(f["kind"].as_str().unwrap_or("person")),
+                f["actor"].as_str().unwrap_or("unnamed"),
+            ));
+        }
         // §10.1. A value somebody decided says who, and with what standing,
         // in the same place a rule's answer says which rule.
         if let Some(d) = a["decision"].as_object() {
@@ -627,8 +664,14 @@ pub(crate) fn text(doc: &Value) -> String {
     // a rule's value a decided coarse value does not cover: the axis has
     // no row above to say it on
     for s in notes["set_aside"].as_array().into_iter().flatten() {
+        // a coarse value set aside with the finer value the rules folded
+        // it from is not one the decision "does not cover"
+        let why = match s["through"].as_str() {
+            Some(fine) => format!("set aside the {fine} it was folded from"),
+            None => "does not cover it".to_string(),
+        };
         out.push_str(&format!(
-            "  {} {} by {} set aside: {} {} was decided and does not cover it\n",
+            "  {} {} by {} set aside: {} {} was decided and {why}\n",
             s["axis"].as_str().unwrap_or_default(),
             s["value"].as_str().unwrap_or_default(),
             s["tier"].as_str().unwrap_or_default(),
