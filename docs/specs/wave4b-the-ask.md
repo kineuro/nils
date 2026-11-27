@@ -291,8 +291,50 @@ drift. The catalog serves it from both sides: the coarse axis carries
 carries `within`, the coarser value that covers it (`{axis, value}`), the
 wider choice where any of the values it covers will do. "A brain scan" in
 ordinary words is `body_region = head`; `body_part = brain` is the stacks
-that end above the neck and no others. A diagnosis warns where a draft wrote
-the fine value and left most rows with its sibling (`narrow_value`, §10).
+that end above the neck and no others. A diagnosis warns where a document
+wrote a fine value and left most rows with its sibling (`narrow_value`, §10).
+
+**A question authored as text is read in the pack's words, and told so.**
+Where a document arrives as text and is repaired (the draft door, and
+validation under `mode: repair`), two things are read from the vocabulary
+after the structural repair, the document is rewritten, and each reading is
+an entry of `repairs` with what was written and what it was read as. What
+is stored, hashed, described and run is the document read. Nothing is
+counted and nothing is guessed: a reading is a lookup in what the pack
+declares.
+
+- **word**: a clause of a stack set's `where` that holds an axis against a
+  value it writes out (`=`, `<>`, `has`, `in`, `not_in`, at any depth) and
+  names the value by its identity, an earlier name or a label that is not
+  the word a row stores is rewritten to that word (`FLASH` to `SPGRE`),
+  where the vocabulary names exactly one value by the text. A name two
+  values share is left as written and read as it always was. The clause
+  selects the same rows before and after.
+- **wider**: a pack may say, on a value of a coarse axis, which of the
+  values it covers a question means the coarse value by when it writes
+  that value alone: `read_for: [<values>]` beside `covers` (the MR pack's
+  `head` is read for `brain`, and for nothing else: a neck is not every
+  spine). The loader holds the list to `covers`: each value listed is one
+  the value covers, and it covers another beside it. A clause that keeps
+  exactly one such value (`=`, `has`, or `in` with the one value; itself a
+  `where` clause or a part of an `and` or an `or` of one) is rewritten to
+  the clause on the coarse axis, `["=", {}, ["axis", {}, "body_region"],
+  "head"]`. The fine value stays expressible, and is taken as written
+  where the clause carries the option `exact: true` (`["=", {exact: true},
+  ["axis", {}, "body_part"], "brain"]`, an option with no other effect),
+  where the set, or a set it is drawn `from`, already keeps the wider
+  value in a clause of its own (the heads, and of those the brains), under
+  a `not` and in `<>` and `not_in`, in an `or` beside another value of the
+  same axis, and in a list of several values. The catalog serves the
+  declaration from both sides: the fine value carries `read_as: {axis,
+  value}` and the coarse value `read_for`.
+
+A reading's entry carries `read` beside `path` and `what`: `{kind: word |
+wider, axis, wrote, as_axis, as_value}`, and for `wider` also `exact`, the
+clause that keeps the fine value alone, as a document writes it. A
+structural repair carries no `read`. A document that arrives structured
+(`POST /api/ask/documents`, a stored document, strict validation, a run) is
+taken as written: a filter a person clicked on one value means that value.
 
 **share** names its denominator. A denominator is an uncorrelated scalar count
 over a named set, legal only in a denominator position and only at count or
@@ -389,10 +431,12 @@ is a `min` over that event set.
     `ambiguous_parent`, `unknown_value`, `unknown_level`, `forbidden_field`,
     `federated_scope`, `scheme_mismatch`, `selection_outdated`,
     `binding_dropped`, `missing_order`, `not_releasable`, `truncated`,
-    `stale_options`, the warnings `sequence_before_where` and `sequence_inherited` (§5.4), and two
-    warnings only a diagnosis gives, `reversed_dates` and `narrow_value` (§10). Repair inserts a missing `{}`, wraps a lone clause and
+    `stale_options`, the warnings `sequence_before_where` and `sequence_inherited` (§5.4), and three
+    warnings only a diagnosis gives, `reversed_dates`, `narrow_value` and `emptied_by` (§10). Repair inserts a missing `{}`, wraps a lone clause and
     maps operator and unit aliases; it never rewrites a value and never guesses
-    among candidates.
+    among candidates. After it, where the text was authored, a value is read
+    from the pack's vocabulary and the reading said (§4.3, a question
+    authored as text): a lookup in what the pack declares, never a guess.
 15. Sensitivity is one policy evaluated in the catalog per (principal, role,
     purpose, scope) with no caller opt in. Identifying fields have no field
     record. Quasi-identifying fields (birth date, exact dates, subject code,
@@ -844,8 +888,12 @@ must not guess them (C20, D36):
   drawn from) above a positive
   bound, keeps no row, and keeps rows with the two dates the other way
   round, counted only for a stage that kept nothing, and `narrow_value`
-  (below); a one line zero-row explanation in
-  domain words; per clause and per null drop counts, for the `where` clauses
+  and `emptied_by` (below); a one line zero-row explanation in
+  domain words, which names the first stage that kept no row wherever the
+  last stage of the answer's set kept none, at `count` as at `record`
+  (until 2026-11-27 it read the stage whose name sorts last, which is
+  `source` for a set that only reads others through `has`, and a count of
+  nothing over such a set said nothing); per clause and per null drop counts, for the `where` clauses
   of the answer's set and of each set it reads its rows through (the set it
   is drawn `from` or is `of`, each set a `has` of it reads, and theirs in
   turn), each drop naming its `set`, the answer's own first; ties per pick; unresolved
@@ -895,6 +943,39 @@ must not guess them (C20, D36):
   purpose: `next` never names a clause the set already has. It is not
   counted once the time for the counts is spent, and the document is valid
   either way.
+  A clause is measured where it bites: in its own set, and in each stack
+  set on the answer's path that is drawn `from` it, in one step or
+  several, with that set's other conditions applied and the one clause
+  left out. A set several items share often holds the value clause, and
+  there the fine value may keep most rows while one item drawn from it
+  loses nearly all. The warning is raised once a clause, for the first set
+  the rule holds in, the sets with the fewest rows first; `path` stays the
+  clause's own, and the message names the set the rule held in: "swi:
+  with the set's other conditions, body_part = brain (written in base,
+  which swi is drawn from) keeps ...". The three statements are the bound
+  for a document, whichever sets they measure in. A clause that carries
+  `exact: true` is on purpose and is never measured.
+  `emptied_by` is a stack set that came to nothing because two of its
+  clauses hold together on no stack, one of them often written in a set it
+  is drawn from and not on the item (`disposition = acquisition` in a
+  shared set, and a base contrast only scanner-derived stacks hold in the
+  item). For each stack set on the answer's path that holds rows before
+  its own `where` and none after it, the clause it came to nothing at is
+  the first of its own whose stage kept no row; the set is then counted
+  with one other clause left out at a time (each clause that keeps values
+  of an axis it writes out, of the sets it is drawn from, nearest first,
+  then of its own), and where exactly one of them leaves the set with rows
+  that clause is warned of, at its own path: "swi keeps no stack: with the
+  set's other conditions, disposition = acquisition (written in base,
+  which swi is drawn from) and base = SWI hold together on no stack.
+  Without disposition = acquisition, swi holds 212 stacks." `next` says to
+  draft the set on its own without that clause where the question's words
+  did not put it on the item, and that the answer stands where they did.
+  Where no clause left out frees the set, or more than one does, nothing
+  is said. It costs one statement a clause left out, four of a document at
+  most, under the same time and the same rule for held counts as
+  `narrow_value` (a count held back is said as rows whose number is held),
+  and is not given where the request asks for keys.
 - **preview**: 10 rows or the count, by level.
 - **describe**: one deterministic sentence per set in deal breaker order
   (membership, then counts, then sameness), the conventions block (windows in
