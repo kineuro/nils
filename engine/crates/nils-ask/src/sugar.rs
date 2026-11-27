@@ -159,7 +159,7 @@ fn hidden(set: &str, what: &str) -> String {
 
 /// `pipeline: [stage, ...]` becomes sets `p1`, `p2`, ... (or the stage's own
 /// name), each `from` the one before.
-fn pipeline(ask: &mut Ask) -> Result<(), SugarError> {
+pub(crate) fn pipeline(ask: &mut Ask) -> Result<(), SugarError> {
     if ask.pipeline.is_empty() {
         return Ok(());
     }

@@ -4,6 +4,8 @@
 //! a clause is inserted, a lone clause where a list belongs is wrapped, and
 //! operator and unit aliases are mapped. It never rewrites a value and
 //! never guesses among candidates. Every repair is reported with its path.
+//! The values of authored text are read after it, by [`crate::reading`],
+//! from the pack's vocabulary and reported in the same list.
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -12,6 +14,10 @@ use serde_json::{Map, Value};
 pub struct Repair {
     pub path: String,
     pub what: String,
+    /// What a value was read as, where the repair is a reading of a value
+    /// ([`crate::reading`]); absent on a structural repair.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub read: Option<crate::reading::Read>,
 }
 
 const OP_ALIASES: &[(&str, &str)] = &[
@@ -85,6 +91,7 @@ fn repair_set(set: &mut Value, path: &str, out: &mut Vec<Repair>) {
                 out.push(Repair {
                     path: format!("{path}.{slot}"),
                     what: "wrapped a lone relation in a list".into(),
+                    read: None,
                 });
             }
             if let Some(items) = v.as_array_mut() {
@@ -128,6 +135,7 @@ fn repair_slots(m: &mut Map<String, Value>, path: &str, out: &mut Vec<Repair>, b
             out.push(Repair {
                 path: format!("{path}.{slot}"),
                 what: "wrapped a lone clause in a list".into(),
+                read: None,
             });
         }
         if let Some(items) = v.as_array_mut() {
@@ -141,6 +149,7 @@ fn repair_slots(m: &mut Map<String, Value>, path: &str, out: &mut Vec<Repair>, b
                         out.push(Repair {
                             path: p.clone(),
                             what: "an order term without a direction is ascending".into(),
+                            read: None,
                         });
                     }
                     if let Some(pair) = item.as_array_mut()
@@ -191,6 +200,7 @@ fn repair_clause(v: &mut Value, path: &str, out: &mut Vec<Repair>) {
         out.push(Repair {
             path: path.to_string(),
             what: format!("inserted the missing options map of {op}"),
+            read: None,
         });
     }
     // the op alias
@@ -199,6 +209,7 @@ fn repair_clause(v: &mut Value, path: &str, out: &mut Vec<Repair>) {
         out.push(Repair {
             path: path.to_string(),
             what: format!("{op} is written {canonical}"),
+            read: None,
         });
     }
     // units inside the options
@@ -225,6 +236,7 @@ fn repair_units(v: &mut Value, path: &str, out: &mut Vec<Repair>) {
         out.push(Repair {
             path: format!("{path}.unit"),
             what: format!("{alias} is written {canonical}"),
+            read: None,
         });
     }
 }

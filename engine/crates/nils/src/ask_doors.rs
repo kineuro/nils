@@ -17,7 +17,7 @@ use nils_ask::moves::{MOVE_KINDS_CAP, MoveCall};
 use nils_ask::run::{self, Request, RunError};
 use nils_ask::selection::{self, SelectionError};
 use nils_ask::validate::{Class, Scope};
-use nils_ask::{Error as AskError, diagnose, document, parse, parse_repaired, prepare, values};
+use nils_ask::{Error as AskError, diagnose, document, parse, parse_read, prepare, values};
 use nils_catalog::Catalog;
 use nils_pack::Pack;
 use nils_registry::Registry;
@@ -687,8 +687,11 @@ fn answer(
         ["api", "ask", "validate"] if post => {
             let repair = doc["mode"].as_str() == Some("repair");
             let (ask, repairs, stored) = if repair {
+                // repair is the authored treatment: the document's values
+                // are read from the vocabulary as the draft door reads them,
+                // so the hash answered is the one a draft of it would store
                 let text = doc["document"].to_string();
-                let (ask, repairs) = parse_repaired(&text).map_err(ask_err)?;
+                let (ask, repairs) = parse_read(&text, catalog).map_err(ask_err)?;
                 (ask, repairs, None)
             } else {
                 let (ask, stored) = document_of(registry, &doc)?;
@@ -723,7 +726,7 @@ fn answer(
                 "bound_hash": prepared.bound_hash,
                 "warnings": prepared.validated.warnings,
                 "pinned": prepared.pinned.iter().map(|(s, n, v)| json!({"set": s, "selection": n, "version": v})).collect::<Vec<_>>(),
-                "repairs": repairs.iter().map(|r| json!({"path": r.path, "what": r.what})).collect::<Vec<_>>(),
+                "repairs": repairs,
                 "order": prepared.validated.order,
             })))
         }

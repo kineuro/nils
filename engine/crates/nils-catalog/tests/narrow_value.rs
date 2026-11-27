@@ -952,3 +952,49 @@ fn the_clauses_measured_are_the_answer_s_own_sets_and_the_smallest_first() {
         }
     }
 }
+
+/// A clause that says its value is meant as written (`exact: true`) is a
+/// narrowing on purpose: it selects what the plain clause selects, and is
+/// warned of nowhere.
+#[test]
+fn a_value_written_exact_is_left_alone() {
+    for mut l in labs() {
+        let (counts, _) = plant(&mut l, false);
+        let exact = json!(["=", {"exact": true}, ["axis", {}, "body_part"], "brain"]);
+        let scans = |clause: Value| {
+            doc(
+                json!({"scans": {"grain": "stack", "where": [clause]}}),
+                "scans",
+            )
+        };
+        assert_eq!(
+            count(&mut l, &scans(exact.clone())),
+            counts[&("body_part", "brain")],
+            "{}",
+            l.name
+        );
+        // the plain clause warns: the control
+        for d in diagnosed(&mut l, &scans(is("body_part", "brain")), &quasi()) {
+            assert_eq!(narrow(&d).len(), 1, "{}", l.name);
+        }
+        for d in diagnosed(&mut l, &scans(exact.clone()), &quasi()) {
+            assert!(d.valid, "{}: {:?}", l.name, d.issues);
+            assert_eq!(narrow(&d), [], "{}", l.name);
+        }
+        // and in a set others draw from, measured in none of them
+        let drawn = doc(
+            json!({
+                "base": {"grain": "stack", "where": [exact]},
+                "kind": {"grain": "stack", "from": "base", "where": [is("directory_type", "anat")]}
+            }),
+            "kind",
+        );
+        for d in diagnosed(&mut l, &drawn, &quasi()) {
+            assert_eq!(narrow(&d), [], "{}", l.name);
+        }
+        // the option is a boolean
+        let wrong = scans(json!(["=", {"exact": "yes"}, ["axis", {}, "body_part"], "brain"]));
+        let e = nils_ask::prepare(parse(&wrong).unwrap(), &l.catalog, &quasi()).unwrap_err();
+        assert!(e.to_string().contains("exact"), "{}: {e}", l.name);
+    }
+}

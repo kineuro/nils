@@ -180,7 +180,8 @@ pub(crate) struct AskValidateArgs {
     #[command(flatten)]
     which: Which,
     /// Repair what is structural first (a missing {}, a lone clause, an
-    /// operator alias), then validate
+    /// operator alias) and read the values as a draft does (another name
+    /// of a value, a fine value read as its wider one), then validate
     #[arg(long)]
     repair: bool,
     #[command(flatten)]
@@ -587,7 +588,8 @@ fn validate(home: &Home, args: AskValidateArgs) -> Result<(), Exit> {
                 (Some(path), true) => {
                     let text = std::fs::read_to_string(path)
                         .map_err(|e| usage(format!("{}: {e}", path.display())))?;
-                    nils_ask::parse_repaired(&text)
+                    // as the door under mode repair: the values read too
+                    nils_ask::parse_read(&text, &l.catalog)
                         .map_err(|e| usage(format!("{}: {e}", path.display())))?
                 }
                 _ => (ask_of(&mut l, &args.which)?, Vec::new()),
@@ -609,7 +611,7 @@ fn validate(home: &Home, args: AskValidateArgs) -> Result<(), Exit> {
                 "bound_hash": prepared.bound_hash,
                 "warnings": prepared.validated.warnings,
                 "pinned": prepared.pinned.iter().map(|(s, n, v)| json!({"set": s, "selection": n, "version": v})).collect::<Vec<_>>(),
-                "repairs": repairs.iter().map(|r| json!({"path": r.path, "what": r.what})).collect::<Vec<_>>(),
+                "repairs": repairs,
                 "order": prepared.validated.order,
             })
         }
@@ -1777,6 +1779,15 @@ fn draft(home: &Home, args: AskDraftArgs) -> Result<(), Exit> {
         print_json(&doc);
         return Ok(());
     }
+    // what the draft read a value as is said, valid or not: the document
+    // stored is the one read
+    let readings = || {
+        for r in doc["repairs"].as_array().into_iter().flatten() {
+            if !r["read"].is_null() {
+                println!("read    {}: {}", text_of(&r["path"]), text_of(&r["what"]));
+            }
+        }
+    };
     match doc["document"].as_i64() {
         Some(id) => {
             println!(
@@ -1784,6 +1795,7 @@ fn draft(home: &Home, args: AskDraftArgs) -> Result<(), Exit> {
                 text_of(&doc["hash"]),
                 doc["repairs"].as_array().map_or(0, Vec::len)
             );
+            readings();
             // a valid document whose counts ran past the draft's time: what
             // was not counted, its cost class, and how it is run as a job
             let diagnosis = &doc["diagnosis"];
@@ -1798,11 +1810,14 @@ fn draft(home: &Home, args: AskDraftArgs) -> Result<(), Exit> {
                 );
             }
         }
-        None => println!(
-            "nils ask draft   not valid   {} repairs   {} issues",
-            doc["repairs"].as_array().map_or(0, Vec::len),
-            doc["diagnosis"]["issues"].as_array().map_or(0, Vec::len)
-        ),
+        None => {
+            println!(
+                "nils ask draft   not valid   {} repairs   {} issues",
+                doc["repairs"].as_array().map_or(0, Vec::len),
+                doc["diagnosis"]["issues"].as_array().map_or(0, Vec::len)
+            );
+            readings();
+        }
     }
     Ok(())
 }

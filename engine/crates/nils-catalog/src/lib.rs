@@ -169,6 +169,17 @@ pub struct AxisValueRecord {
     /// it covers will do.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub within: Vec<WiderValue>,
+    /// On a value the pack reads as its wider value where a question
+    /// writes it alone (`read_for` on the coarse axis's value): that wider
+    /// value. A question authored as text that keeps this value by itself
+    /// is rewritten to it and told so; `exact: true` on the clause keeps
+    /// the value as written.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub read_as: Option<WiderValue>,
+    /// On a value of a coarse axis: the values it covers that a question
+    /// is read as this one for, as the pack lists them (`read_for`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub read_for: Vec<String>,
 }
 
 /// A value of a coarser axis that covers a value of a finer one.
@@ -1792,6 +1803,20 @@ impl Catalog {
                                     })
                             })
                             .collect(),
+                        read_as: pack
+                            .axes
+                            .iter()
+                            .filter(|c| c.coarse_of.as_deref() == Some(a.name.as_str()))
+                            .find_map(|c| {
+                                c.values
+                                    .iter()
+                                    .find(|w| w.read_for.contains(&v.id))
+                                    .map(|w| WiderValue {
+                                        axis: c.name.clone(),
+                                        value: w.id.clone(),
+                                    })
+                            }),
+                        read_for: v.read_for.clone(),
                     })
                     .collect(),
             })
@@ -2203,6 +2228,12 @@ impl Names for Catalog {
                         .iter()
                         .filter(|v| !v.covers.is_empty())
                         .map(|v| (v.id.clone(), v.covers.clone()))
+                        .collect(),
+                    read_for: c
+                        .values
+                        .iter()
+                        .filter(|v| !v.read_for.is_empty())
+                        .map(|v| (v.id.clone(), v.read_for.clone()))
                         .collect(),
                 })
                 .collect(),

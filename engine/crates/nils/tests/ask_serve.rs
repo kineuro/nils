@@ -5699,3 +5699,219 @@ fn the_count_of_a_group_set_says_its_subjects_at_every_door() {
         }
     }
 }
+
+/// What a question authored as text names a value by is read at the doors
+/// that repair, and said: the draft door and validation under repair read
+/// another name of a value as the word the pack stores, and a fine value
+/// the pack reads as its wider one where it is written alone; each reading
+/// is an entry of `repairs` with `read`, the document stored is the one
+/// read, and the catalog says which value is read as which. A door that
+/// takes a document as it is written reads nothing.
+#[test]
+fn the_doors_that_repair_read_a_value_and_say_so_and_the_others_take_it_as_written() {
+    let home = synthetic();
+    let server = Server::start(&home, 1000, &[]);
+    let text = "\
+ast_version: 1
+name: brain scans
+sets:
+  eligible:
+    grain: stack
+    where:
+      - [\"=\", {}, [\"axis\", {}, \"technique\"], \"FLASH\"]
+      - [\"=\", {}, [\"axis\", {}, \"body_part\"], \"brain\"]
+out: {set: eligible, level: count}
+";
+    let exact = "[\"=\", {exact: true}, [\"axis\", {}, \"body_part\"], \"brain\"]";
+    let word = serde_json::json!({
+        "path": "sets.eligible.where[0]",
+        "what": "On technique, FLASH is another name of SPGRE, the word the pack stores: it was \
+                 read as SPGRE.",
+        "read": {
+            "kind": "word", "axis": "technique", "wrote": "FLASH",
+            "as_axis": "technique", "as_value": "SPGRE"
+        }
+    });
+    let wider = serde_json::json!({
+        "path": "sets.eligible.where[1]",
+        "what": format!(
+            "body_part = brain was read as body_region = head, which covers brain and \
+             brain-neck: the pack reads brain written alone as the wider head. To keep brain \
+             alone, write {exact}."
+        ),
+        "read": {
+            "kind": "wider", "axis": "body_part", "wrote": "brain",
+            "as_axis": "body_region", "as_value": "head", "exact": exact
+        }
+    });
+    let is = |axis: &str, value: &str| serde_json::json!(["=", {}, ["axis", {}, axis], value]);
+    let read = serde_json::json!([is("technique", "SPGRE"), is("body_region", "head")]);
+    let written = serde_json::json!([is("technique", "FLASH"), is("body_part", "brain")]);
+
+    // the draft door
+    let (status, drafted) = server.request(
+        "POST",
+        "/api/ask/draft",
+        Some(&body(serde_json::json!({"text": text}))),
+        None,
+    );
+    assert_eq!(status, 200, "{drafted}");
+    assert_eq!(
+        drafted["repairs"],
+        serde_json::json!([word, wider]),
+        "{drafted}"
+    );
+    assert_eq!(
+        drafted["diagnosis"]["repairs"], drafted["repairs"],
+        "{drafted}"
+    );
+    assert_eq!(drafted["diagnosis"]["valid"], true, "{drafted}");
+    let document = drafted["document"].as_i64().unwrap();
+    let (status, fetched) =
+        server.request("GET", &format!("/api/ask/documents/{document}"), None, None);
+    assert_eq!(status, 200, "{fetched}");
+    assert_eq!(
+        fetched["ask"]["sets"]["eligible"]["where"], read,
+        "{fetched}"
+    );
+
+    // validation under repair: the same readings, and the hash of the
+    // document a draft stores
+    let as_json = serde_json::json!({
+        "ast_version": 1, "name": "brain scans",
+        "sets": {"eligible": {"grain": "stack", "where": written}},
+        "out": {"set": "eligible", "level": "count"}
+    });
+    let (status, repaired) = server.request(
+        "POST",
+        "/api/ask/validate",
+        Some(&body(
+            serde_json::json!({"document": as_json, "mode": "repair"}),
+        )),
+        None,
+    );
+    assert_eq!(status, 200, "{repaired}");
+    assert_eq!(repaired["repairs"], drafted["repairs"], "{repaired}");
+    assert_eq!(repaired["hash"], drafted["hash"], "{repaired}");
+
+    // the doors that take a document as it is written: no reading, another
+    // hash, and the document stored as it was written
+    let (status, strict) = server.request(
+        "POST",
+        "/api/ask/validate",
+        Some(&body(serde_json::json!({"document": as_json}))),
+        None,
+    );
+    assert_eq!(status, 200, "{strict}");
+    assert_eq!(strict["repairs"], serde_json::json!([]), "{strict}");
+    assert_ne!(strict["hash"], drafted["hash"], "{strict}");
+    let (status, posted) = server.request(
+        "POST",
+        "/api/ask/documents",
+        Some(&body(serde_json::json!({"document": as_json}))),
+        None,
+    );
+    assert_eq!(status, 200, "{posted}");
+    let as_written = posted["document"].as_i64().unwrap();
+    assert_ne!(as_written, document);
+    let (status, fetched) = server.request(
+        "GET",
+        &format!("/api/ask/documents/{as_written}"),
+        None,
+        None,
+    );
+    assert_eq!(status, 200, "{fetched}");
+    assert_eq!(
+        fetched["ask"]["sets"]["eligible"]["where"], written,
+        "{fetched}"
+    );
+    let (status, diagnosed) = server.request(
+        "POST",
+        "/api/ask/diagnose",
+        Some(&body(serde_json::json!({"document_id": as_written}))),
+        None,
+    );
+    assert_eq!(status, 200, "{diagnosed}");
+    assert_eq!(diagnosed["repairs"], serde_json::json!([]), "{diagnosed}");
+
+    // the catalog says which value is read as which
+    let (status, catalog) = server.request("GET", "/api/ask/catalog", None, None);
+    assert_eq!(status, 200, "{catalog}");
+    let value = |axis: &str, id: &str| -> serde_json::Value {
+        catalog["axes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|a| a["name"] == axis)
+            .unwrap()["values"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|v| v["id"] == id)
+            .unwrap()
+            .clone()
+    };
+    assert_eq!(
+        value("body_part", "brain")["read_as"],
+        serde_json::json!({"axis": "body_region", "value": "head"}),
+        "{catalog}"
+    );
+    assert!(value("body_part", "brain-neck").get("read_as").is_none());
+    assert_eq!(
+        value("body_region", "head")["read_for"],
+        serde_json::json!(["brain"])
+    );
+
+    // the keyboard says each reading, through the door and in process
+    let url = format!("http://127.0.0.1:{}", server.port);
+    let file = home.path().join("brain.ask.yml");
+    std::fs::write(&file, text).unwrap();
+    let f = file.to_str().unwrap();
+    let printed = run(
+        &home,
+        &["ask", "draft", "--server", &url, "--file", f],
+        None,
+    );
+    assert!(printed.contains("nils ask draft   document "), "{printed}");
+    assert!(
+        printed.contains(
+            "read    sets.eligible.where[1]: body_part = brain was read as body_region = head"
+        ),
+        "{printed}"
+    );
+    assert!(
+        printed.contains(
+            "read    sets.eligible.where[0]: On technique, FLASH is another name of SPGRE"
+        ),
+        "{printed}"
+    );
+    drop(server);
+    let p = packs();
+    let p = p.to_str().unwrap();
+    let printed = run(
+        &home,
+        &["ask", "draft", "--file", f, "--pack-dir", p, "--json"],
+        None,
+    );
+    let in_process: serde_json::Value = serde_json::from_str(&printed).unwrap();
+    assert_eq!(in_process["repairs"], drafted["repairs"], "{printed}");
+    assert_eq!(in_process["hash"], drafted["hash"], "{printed}");
+    let printed = run(
+        &home,
+        &["ask", "validate", "--repair", "--file", f, "--pack-dir", p],
+        None,
+    );
+    assert!(
+        printed.contains("repaired sets.eligible.where[1]: body_part = brain was read as"),
+        "{printed}"
+    );
+    // and a file validated as it is written is read as nothing
+    let printed = run(
+        &home,
+        &["ask", "validate", "--file", f, "--pack-dir", p, "--json"],
+        None,
+    );
+    let strict_file: serde_json::Value = serde_json::from_str(&printed).unwrap();
+    assert_eq!(strict_file["repairs"], serde_json::json!([]), "{printed}");
+    assert_eq!(strict_file["hash"], strict["hash"], "{printed}");
+}

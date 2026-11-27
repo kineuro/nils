@@ -24,7 +24,7 @@ use crate::moves::{self, MoveCall, MoveError, Options};
 use crate::repair::Repair;
 use crate::run::{RunError, Runner};
 use crate::validate::{Class, Code, Issue, Names, Scope, validate};
-use crate::{Error as AskError, parse_repaired, prepare};
+use crate::{Error as AskError, parse_read, prepare};
 
 #[derive(Debug)]
 pub enum AffordanceError {
@@ -319,7 +319,7 @@ pub fn count_rows(
 }
 
 /// What `draft` returns: the repairs, the diagnosis, and the document's
-/// handle when it validated.
+/// handle when it validated. A repair that read a value carries `read`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Drafted {
     pub repairs: Vec<Repair>,
@@ -334,8 +334,8 @@ pub fn compile_issues(registry: &mut Registry, ask: &Ask, s: &Setting<'_>) -> Ve
     crate::run::not_compilable(registry, ask, s.names, s.scope, s.scheme)
 }
 
-/// Parse an authored text with add only repair, diagnose it, and store it
-/// when it validates.
+/// Parse an authored text with add only repair, read its values from the
+/// vocabulary, diagnose it, and store it when it validates.
 pub fn draft(
     registry: &mut Registry,
     text: &str,
@@ -373,7 +373,10 @@ pub fn draft_beside(
     budget_ms: Option<u64>,
     beside: &mut [Store],
 ) -> Result<Drafted, AffordanceError> {
-    let (ask, repairs) = parse_repaired(text)?;
+    // the text's values are read from the vocabulary after the structural
+    // repair (`crate::reading`): what is diagnosed and stored is what was
+    // read, and each reading is an entry of the repairs
+    let (ask, repairs) = parse_read(text, s.names)?;
     // the diagnosis refuses what the validator and the compiler refuse
     // before it counts anything, and stores nothing then
     let diagnosis = diagnose_beside(

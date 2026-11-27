@@ -2252,7 +2252,7 @@ pub const NARROW_NAMED: usize = 3;
 /// axis it writes out (`=`, `has`, or `in` with a list): the axis, its
 /// names, and the identities of the values kept. None for any other
 /// clause, and where a value is a parameter or no value of the axis.
-fn value_filter(
+pub(crate) fn value_filter(
     c: &Clause,
     names: &dyn Names,
 ) -> Option<(String, crate::validate::AxisNames, Vec<String>)> {
@@ -2290,7 +2290,7 @@ fn value_filter(
 /// Whether a set, or a set it is drawn from, holds a `where` clause that
 /// keeps values of a coarse axis which between them cover every one of
 /// `kept`, the values of the finer axis another clause keeps.
-fn narrowed_on_purpose(
+pub(crate) fn narrowed_on_purpose(
     ask: &Ask,
     name: &str,
     kin: &crate::validate::AxisKin,
@@ -2454,6 +2454,9 @@ fn rows_by_value(
 /// thing, a spine beside a brain; the coarse axis itself has nothing
 /// wider; an axis that holds several values a stack has no siblings.
 ///
+/// A clause that carries `exact: true` says its value is meant as
+/// written, and is never measured.
+///
 /// It costs one statement a clause, the set without the clause grouped by
 /// the axis, for [`NARROW_CLAUSES`] clauses of a document at most: those
 /// of the sets the answer reads its rows through first, and among them
@@ -2509,6 +2512,10 @@ fn narrow_values(
             continue;
         };
         for (i, c) in set.where_.iter().enumerate() {
+            // a value written as meant (`exact: true`) is on purpose
+            if crate::reading::is_exact(c) {
+                continue;
+            }
             let Some((axis, of, kept)) = value_filter(c, counter.names) else {
                 continue;
             };

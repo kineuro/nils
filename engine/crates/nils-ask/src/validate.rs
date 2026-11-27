@@ -121,6 +121,11 @@ pub struct AxisKin {
 pub struct WiderAxis {
     pub axis: String,
     pub values: Vec<(String, Vec<String>)>,
+    /// The pack's `read_for`: each value of this axis that a question is
+    /// read as where it writes, alone, one of the finer values listed with
+    /// it, by identity ([`crate::reading`]). Empty where the pack declares
+    /// none, and then nothing is read wider.
+    pub read_for: Vec<(String, Vec<String>)>,
 }
 
 /// A classification axis as a document names its values (Wave 7a). A
@@ -155,6 +160,30 @@ impl AxisNames {
                     .iter()
                     .find(|v| v.stored.as_deref() == Some(text))
             })
+    }
+
+    /// The one value a text names by another spelling than the word the
+    /// pack stores, with that word: what a question authored as text is
+    /// rewritten to ([`crate::reading`]). None where the text is the stored
+    /// word already or names no value, and none where the vocabulary does
+    /// not name exactly one value by it (a label of one value that is the
+    /// identity of another), or where the stored word read back would name
+    /// another value first: such a text is left as written and is read as
+    /// it always was ([`AxisNames::named`]).
+    pub fn other_spelling<'a>(&'a self, text: &str) -> Option<(&'a AxisValueNames, &'a str)> {
+        let mut named = self.values.iter().filter(|v| {
+            v.id == text
+                || v.label == text
+                || v.stored.as_deref() == Some(text)
+                || v.aliases.iter().any(|a| a == text)
+        });
+        let v = named.next()?;
+        if named.next().is_some() {
+            return None;
+        }
+        let stored = self.stored(v);
+        (stored != text && self.named(stored).is_some_and(|back| back.id == v.id))
+            .then_some((v, stored))
     }
 
     /// The name the pack stores for a value: the one form a group's key
@@ -763,8 +792,13 @@ const NAME_OPTIONS: &[&str] = &["of", "over", "set"];
 /// The clause options that are booleans. Under the YAML 1.2 booleans a
 /// `yes`, `no`, `on` or `off` is text, so each is checked here rather than
 /// read as its default where it is used (`adjacent: no` meant adjacent).
-/// An axis's `each` is checked with the axis's other options.
-const BOOL_OPTIONS: &[&str] = &["adjacent", "strict", "key"];
+/// An axis's `each` is checked with the axis's other options. `exact` on a
+/// clause that keeps a value of an axis says the value is meant as written
+/// (`["=", {exact: true}, ["axis", {}, "body_part"], "brain"]`): it changes
+/// nothing a clause selects, and tells a reading of authored text
+/// ([`crate::reading`]) and the `narrow_value` warning to leave the clause
+/// alone.
+const BOOL_OPTIONS: &[&str] = &["adjacent", "strict", "key", "exact"];
 
 /// A boolean option that holds something else.
 fn not_a_boolean(path: impl Into<String>, what: &str, key: &str, v: &Value) -> Issue {
