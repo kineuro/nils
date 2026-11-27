@@ -1431,7 +1431,7 @@
         {
           "code": "narrow_value",
           "path": "sets.necks.where[0]",
-          "message": "necks: body_part = neck kept 0 of 14,303 stacks; spine holds 843 of the rest. If any spine of body_region is meant, write body_region = spine, which covers spine and neck.",
+          "message": "necks: body_part = neck keeps 0 of 14,303 stacks; spine holds 843 of the rest. If any spine of body_region is meant, write body_region = spine, which covers spine and neck.",
           "next": "to keep them all, write [\"=\",{},[\"axis\",{},\"body_region\"],\"spine\"] at sets.necks.where[0]; where only neck is meant, change nothing"
         }
       ],
@@ -2912,7 +2912,7 @@
         {
           "code": "narrow_value",
           "path": "sets.necks.where[0]",
-          "message": "necks: body_part = neck kept 0 of 14,303 stacks; spine holds 843 of the rest. If any spine of body_region is meant, write body_region = spine, which covers spine and neck.",
+          "message": "necks: body_part = neck keeps 0 of 14,303 stacks; spine holds 843 of the rest. If any spine of body_region is meant, write body_region = spine, which covers spine and neck.",
           "next": "to keep them all, write [\"=\",{},[\"axis\",{},\"body_region\"],\"spine\"] at sets.necks.where[0]; where only neck is meant, change nothing"
         }
       ],

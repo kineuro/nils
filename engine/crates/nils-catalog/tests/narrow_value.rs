@@ -8,6 +8,11 @@
 //! siblings with their counts and, where the pack declares a coarse form
 //! of the axis, the wider choice.
 //!
+//! A clause is measured against its set: the rows the set holds with that
+//! one clause left out, by their value. So the warning is the same wherever
+//! in the list the clause stands, and a clause the set's other conditions
+//! already answer warns of nothing.
+//!
 //! The values are planted on each backend's synthetic registry, and every
 //! count the warning says is held against the rows as planted: the warning
 //! in a stack set a session set reads through `has`, on each of the three
@@ -307,7 +312,7 @@ fn a_fine_value_that_left_most_rows_with_its_sibling_is_warned_of_with_the_wider
             assert_eq!(
                 w[0].1,
                 format!(
-                    "scans: body_part = brain kept {} of {} stacks; brain-neck holds {} of the rest. \
+                    "scans: body_part = brain keeps {} of {} stacks; brain-neck holds {} of the rest. \
                      If any head of body_region is meant, write body_region = head, which covers \
                      brain and brain-neck.",
                     n(brain),
@@ -509,7 +514,7 @@ fn a_count_held_back_warns_of_nothing() {
             assert_eq!(w[0].0, "sets.scans.where[1]", "{}", l.name);
             assert!(
                 w[0].1
-                    .contains(&format!("kept {} of {} stacks", n(brain), n(stacks))),
+                    .contains(&format!("keeps {} of {} stacks", n(brain), n(stacks))),
                 "{}: {}",
                 l.name,
                 w[0].1
@@ -719,7 +724,7 @@ fn nothing_is_warned_of_where_the_keys_are_asked_for() {
         assert_eq!(w.len(), 1, "{}: {:?}", l.name, counted.warnings);
         assert!(
             w[0].1
-                .contains(&format!("kept {} of {} stacks", n(brain), n(stacks))),
+                .contains(&format!("keeps {} of {} stacks", n(brain), n(stacks))),
             "{}: {}",
             l.name,
             w[0].1
@@ -788,6 +793,162 @@ fn a_fine_value_beside_its_own_coarse_value_is_left_alone() {
         );
         for d in diagnosed(&mut l, &other, &quasi()) {
             assert_eq!(narrow(&d), [], "{}", l.name);
+        }
+    }
+}
+
+/// A clause is measured against its set, not against the rows before it
+/// in the list: the same set with the value clause first, in the middle
+/// and last gives the same warning with the same numbers, the rows the
+/// set holds without the clause and what the clause keeps of them, each
+/// held here against a count of its own.
+#[test]
+fn the_warning_is_the_same_wherever_the_clause_stands() {
+    for mut l in labs() {
+        plant(&mut l, false);
+        let anat = is("directory_type", "anat");
+        let day = json!([">=", {}, ["field", {}, "day"], "1900-01-01"]);
+        let brain = is("body_part", "brain");
+        let stack_count = |l: &mut Lab, clauses: Value| {
+            count(
+                l,
+                &doc(
+                    json!({"scans": {"grain": "stack", "where": clauses}}),
+                    "scans",
+                ),
+            )
+        };
+        let all = stack_count(&mut l, json!([anat, day]));
+        let kept = stack_count(&mut l, json!([anat, day, brain]));
+        let neck = stack_count(&mut l, json!([anat, day, is("body_part", "brain-neck")]));
+        assert!(kept > 0 && kept * 5 < all && neck >= 3 * kept, "{}", l.name);
+        let expected = format!(
+            "scans: with the set's other conditions, body_part = brain keeps {} of {} stacks; \
+             brain-neck holds {} of the rest. If any head of body_region is meant, write \
+             body_region = head, which covers brain and brain-neck.",
+            n(kept),
+            n(all),
+            n(neck)
+        );
+        for (at, clauses) in [
+            (0, json!([brain, anat, day])),
+            (1, json!([anat, brain, day])),
+            (2, json!([anat, day, brain])),
+        ] {
+            let text = visits_with(clauses);
+            for d in diagnosed(&mut l, &text, &quasi()) {
+                let w = narrow(&d);
+                assert_eq!(w.len(), 1, "{}: at {at}: {:?}", l.name, d.warnings);
+                assert_eq!(w[0].0, format!("sets.scans.where[{at}]"), "{}", l.name);
+                assert_eq!(w[0].1, expected, "{}: at {at}", l.name);
+                assert!(
+                    w[0].2.contains(&format!("at sets.scans.where[{at}]")),
+                    "{}: {}",
+                    l.name,
+                    w[0].2
+                );
+            }
+        }
+    }
+}
+
+/// A clause that keeps little of the rows before it, where the set's
+/// other conditions already narrow to the value it keeps: without the
+/// clause the set holds the same rows, so nothing was thrown away and
+/// nothing is warned of, whichever of the two is written first. And the
+/// other way round: a clause that keeps every row before it, in a set
+/// whose other conditions leave it nothing, is warned about.
+#[test]
+fn a_clause_the_other_conditions_already_answer_is_left_alone() {
+    for mut l in labs() {
+        let (counts, stacks) = plant(&mut l, false);
+        let brain = counts[&("body_part", "brain")];
+        // as planted, a contrast agent was given on the brains and on no
+        // other stack, and the contrast mix of a brain is one no other has
+        assert_eq!(counts[&("post_contrast", "1")], brain, "{}", l.name);
+        assert!(brain * 5 < stacks, "{}: few at its own place", l.name);
+        let given = is("post_contrast", "given");
+        let part = is("body_part", "brain");
+        for clauses in [json!([part, given]), json!([given, part])] {
+            let text = visits_with(clauses.clone());
+            for d in diagnosed(&mut l, &text, &quasi()) {
+                assert!(d.valid, "{}", l.name);
+                assert_eq!(narrow(&d), [], "{}: {clauses}", l.name);
+            }
+        }
+        // the brains hold one contrast mix and every other stack another:
+        // after the mix of the brains the clause keeps every row before it,
+        // and beside the mix of the others it keeps none of the many the
+        // set would hold, most of them a brain and neck
+        let others = is("contrast_mix", "PD_T2star");
+        let without = count(
+            &mut l,
+            &doc(
+                json!({"scans": {"grain": "stack", "where": [others]}}),
+                "scans",
+            ),
+        );
+        for (at, clauses) in [(0, json!([part, others])), (1, json!([others, part]))] {
+            let text = visits_with(clauses);
+            for d in diagnosed(&mut l, &text, &quasi()) {
+                let w = narrow(&d);
+                assert_eq!(w.len(), 1, "{}: {:?}", l.name, d.warnings);
+                assert_eq!(w[0].0, format!("sets.scans.where[{at}]"), "{}", l.name);
+                assert!(
+                    w[0].1.contains(&format!(
+                        "with the set's other conditions, body_part = brain keeps 0 of {} stacks",
+                        n(without)
+                    )),
+                    "{}: {}",
+                    l.name,
+                    w[0].1
+                );
+            }
+        }
+    }
+}
+
+/// The clauses measured are those of the sets the answer reads its rows
+/// through, before any other set's, and among them those of the sets that
+/// hold the fewest rows.
+#[test]
+fn the_clauses_measured_are_the_answer_s_own_sets_and_the_smallest_first() {
+    for mut l in labs() {
+        plant(&mut l, false);
+        let brain = is("body_part", "brain");
+        let of =
+            |kind: &str| json!({"grain": "stack", "where": [brain, is("directory_type", kind)]});
+        // four sets the answer reads, the first of them the largest, and
+        // one it does not read, declared before them all
+        let sets = json!({
+            "aside": of("misc"),
+            "every": {"grain": "stack", "where": [brain]},
+            "scans_a": of("anat"),
+            "scans_d": of("dwi"),
+            "scans_f": of("func"),
+            "visits": {"grain": "session", "has": [
+                {"set": "every", "min": 1},
+                {"set": "scans_a", "min": 1},
+                {"set": "scans_d", "min": 1},
+                {"set": "scans_f", "min": 1}
+            ]}
+        });
+        let text = doc(sets, "visits");
+        for d in diagnosed(&mut l, &text, &quasi()) {
+            assert!(d.valid, "{}", l.name);
+            let mut warned: Vec<String> = narrow(&d).into_iter().map(|w| w.0).collect();
+            warned.sort();
+            assert_eq!(
+                warned,
+                [
+                    "sets.scans_a.where[0]",
+                    "sets.scans_d.where[0]",
+                    "sets.scans_f.where[0]",
+                ],
+                "{}: {:?}",
+                l.name,
+                d.warnings
+            );
         }
     }
 }

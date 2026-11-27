@@ -2233,15 +2233,15 @@ fn reversed_dates(
     Ok(found)
 }
 
-/// A value filter is looked at where it kept less than one row in this
-/// many of the rows before it.
+/// A value filter is warned about where it keeps less than one row in
+/// this many of the rows its set holds without it.
 pub const NARROW_KEPT_ONE_IN: i64 = 5;
 
 /// How many times the rows a value filter kept its siblings must hold for
 /// the filter to be warned about.
 pub const NARROW_FACTOR: i64 = 3;
 
-/// The most value filters of one document whose siblings are counted: one
+/// The most value filters of one document that are measured: one
 /// statement each.
 pub const NARROW_CLAUSES: usize = 3;
 
@@ -2424,18 +2424,23 @@ fn rows_by_value(
 /// siblings hold. "All brain scans" written as `body_part = brain` keeps
 /// the stacks that end above the neck and drops the many a model labelled
 /// brain and neck, the answer is a small share of what was meant, and
-/// nothing in the counts says why. For a `where` clause of any stack set
-/// of the document that keeps the stacks holding a value of an axis it
-/// writes out ([`value_filter`]), the warning is raised where all of this
-/// holds:
+/// nothing in the counts says why. For a `where` clause of a stack set of
+/// the document that keeps the stacks holding a value of an axis it
+/// writes out ([`value_filter`]), the clause is measured against the set
+/// it stands in: the rows the set holds with that one clause left out and
+/// every other condition of the set applied, by their value of the axis.
+/// What the clause kept at its own place in the list says nothing of that
+/// (a clause written first is counted over everything, one written last
+/// over what the others left), so the measure does not depend on where
+/// the clause stands. The warning is raised where all of this holds:
 ///
 /// - the pack declares a coarse form of the axis (`coarse_of`), and a
 ///   value of it covers every value the clause keeps: the siblings the
 ///   kept value could be mistaken for are the other values that coarse
 ///   value covers, and no others;
-/// - the clause kept less than one in [`NARROW_KEPT_ONE_IN`] of the rows
-///   before it, as the funnel counted them;
-/// - other values of the axis hold more than half of the rows it dropped
+/// - of the rows the set holds without the clause, the clause keeps less
+///   than one in [`NARROW_KEPT_ONE_IN`];
+/// - other values of the axis hold more than half of the rows it drops
 ///   (the stacks with no value on the axis are no siblings);
 /// - the covered siblings together hold [`NARROW_FACTOR`] times the kept
 ///   rows or more.
@@ -2449,21 +2454,22 @@ fn rows_by_value(
 /// thing, a spine beside a brain; the coarse axis itself has nothing
 /// wider; an axis that holds several values a stack has no siblings.
 ///
-/// It costs one statement for each clause on such an axis that kept so
-/// little, the rows before the clause by their value, for
-/// [`NARROW_CLAUSES`] clauses of a document at most, and none for any
-/// other clause. The counts are those the funnel shows, and the statement
-/// is read under the caller's scope: a stage held back warns of nothing,
-/// and neither does a statement any of whose counts came back held. A
+/// It costs one statement a clause, the set without the clause grouped by
+/// the axis, for [`NARROW_CLAUSES`] clauses of a document at most: those
+/// of the sets the answer reads its rows through first, and among them
+/// the sets that hold the fewest rows first, since a set that came out
+/// small is the one a narrow value explains. The statement is read under
+/// the caller's scope: a set whose own count the funnel holds back warns
+/// of nothing, and neither does a statement any of whose counts came back
+/// held, so the message names no count the caller could not see. A
 /// clause on a value its own set already keeps the coarse value of is a
 /// narrowing written on purpose, and is left alone; and nothing is warned
 /// of where the caller asked for keys, since a stage's rows are then cut
-/// at the cap of a list. Nothing
-/// is counted once the time for the counts is spent or while the
-/// statements are listed to run ahead, and, as for [`reversed_dates`],
-/// the time these counts run past is not taken from the parts counted
-/// before them. A statement that does not answer warns of nothing: the
-/// document is valid either way.
+/// at the cap of a list. Nothing is counted once the time for the counts
+/// is spent or while the statements are listed to run ahead, and, as for
+/// [`reversed_dates`], the time these counts run past is not taken from
+/// the parts counted before them. A statement that does not answer warns
+/// of nothing: the document is valid either way.
 fn narrow_values(
     counter: &mut Counter<'_>,
     registry: &mut Registry,
@@ -2475,29 +2481,46 @@ fn narrow_values(
     if counter.spent() || matches!(counter.ahead, Ahead::Listed(_)) {
         return found;
     }
-    let mut counted = 0;
-    'sets: for name in order {
+    // The clauses to measure, each with the rows its set holds as the
+    // funnel counted them: the count of the set's last `where`, which is
+    // the count the clause's kept rows must be, and one the caller saw.
+    struct Candidate<'a> {
+        set: &'a str,
+        at: usize,
+        axis: String,
+        of: crate::validate::AxisNames,
+        kept: Vec<String>,
+        kin: crate::validate::AxisKin,
+        rows: i64,
+        on_path: bool,
+    }
+    let path = answer_path(ask);
+    let mut candidates: Vec<Candidate<'_>> = Vec::new();
+    for name in order {
         let Some(set) = ask.sets.get(name) else {
             continue;
         };
-        if name.contains("__") || set.grain != Grain::Stack {
+        if name.contains("__") || set.grain != Grain::Stack || set.where_.is_empty() {
             continue;
         }
-        let all = steps(set);
+        // held back, or not counted: nothing is said of the set
+        let last = format!("where {}", clause_text(&set.where_[set.where_.len() - 1]));
+        let Some(rows) = stage_counts.get(&(name.clone(), last)).and_then(|c| c.0) else {
+            continue;
+        };
         for (i, c) in set.where_.iter().enumerate() {
-            let Some((axis, of, kept_ids)) = value_filter(c, counter.names) else {
+            let Some((axis, of, kept)) = value_filter(c, counter.names) else {
                 continue;
             };
             let kin = counter.names.axis_kin(&axis);
             // a coarse value that covers every value kept, and some other
             // value beside them: without one there is no sibling to count
             let siblings_possible = kin.wider.iter().any(|w| {
-                kept_ids
-                    .iter()
+                kept.iter()
                     .all(|k| w.values.iter().any(|(_, covers)| covers.contains(k)))
                     && w.values.iter().any(|(_, covers)| {
-                        covers.iter().any(|k| kept_ids.contains(k))
-                            && covers.iter().any(|k| !kept_ids.contains(k))
+                        covers.iter().any(|k| kept.contains(k))
+                            && covers.iter().any(|k| !kept.contains(k))
                     })
             });
             if kin.multi || !siblings_possible {
@@ -2508,137 +2531,166 @@ fn narrow_values(
             // drawn from, narrows on purpose: "the heads, and of those the
             // brains" is what was written, and the wider clause to suggest
             // is one the set already has.
-            if narrowed_on_purpose(ask, name, &kin, &kept_ids, counter.names) {
+            if narrowed_on_purpose(ask, name, &kin, &kept, counter.names) {
                 continue;
             }
-            let Some(position) = all
-                .iter()
-                .position(|(s, _)| *s == Step::Where(i))
-                .filter(|p| *p > 0)
-            else {
-                continue;
-            };
-            let rows = |label: &str| {
-                stage_counts
-                    .get(&(name.clone(), label.to_string()))
-                    .and_then(|c| c.0)
-            };
-            let (Some(before), Some(kept)) = (rows(&all[position - 1].1), rows(&all[position].1))
-            else {
-                continue;
-            };
-            if kept * NARROW_KEPT_ONE_IN >= before {
-                continue;
-            }
-            if counted == NARROW_CLAUSES || counter.spent() {
-                break 'sets;
-            }
-            counted += 1;
-            let Some(by_value) = rows_by_value(
-                counter,
-                registry,
-                ask,
-                name,
-                &all[position - 1].0,
-                &axis,
-                &of,
-            ) else {
-                continue;
-            };
-            let dropped = before - kept;
-            let mut siblings: Vec<(String, i64)> = by_value
-                .into_iter()
-                .filter_map(|(k, n)| k.zip(n))
-                .filter(|(k, n)| !kept_ids.contains(k) && *n > 0)
-                .collect();
-            siblings.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
-            let held: i64 = siblings.iter().map(|s| s.1).sum();
-            if held * 2 <= dropped {
-                continue;
-            }
-            let floor = NARROW_FACTOR * kept.max(1);
-            // the wider choice: a coarse axis whose values cover every
-            // value kept, and the siblings those values cover as well
-            let wider = kin.wider.iter().find_map(|w| {
-                let mut coarse: Vec<&(String, Vec<String>)> = Vec::new();
-                for k in &kept_ids {
-                    let covering = w.values.iter().find(|(_, covers)| covers.contains(k))?;
-                    if !coarse.iter().any(|c| c.0 == covering.0) {
-                        coarse.push(covering);
-                    }
-                }
-                let covered: Vec<(String, i64)> = siblings
-                    .iter()
-                    .filter(|(k, _)| coarse.iter().any(|c| c.1.contains(k)))
-                    .cloned()
-                    .collect();
-                (covered.iter().map(|s| s.1).sum::<i64>() >= floor).then(|| {
-                    (
-                        w.axis.clone(),
-                        coarse.iter().map(|c| c.0.clone()).collect::<Vec<_>>(),
-                        coarse
-                            .iter()
-                            .flat_map(|c| c.1.iter().cloned())
-                            .collect::<Vec<_>>(),
-                        covered,
-                    )
-                })
-            });
-            let Some((coarse_axis, coarse, covers, covered)) = wider else {
-                continue;
-            };
-            let holds: Vec<String> = covered
-                .iter()
-                .take(NARROW_NAMED)
-                .enumerate()
-                .map(|(j, (k, n))| {
-                    let n = grouped_digits(*n);
-                    if j == 0 {
-                        format!("{k} holds {n}")
-                    } else {
-                        format!("{k} {n}")
-                    }
-                })
-                .collect();
-            let axis_ref = Arg::Clause(Clause::new("axis").arg(Arg::Text(coarse_axis.clone())));
-            let (words, clause) = match coarse.as_slice() {
-                [one] => (
-                    format!("{coarse_axis} = {one}"),
-                    Clause::new("=").arg(axis_ref).arg(Arg::Text(one.clone())),
-                ),
-                several => (
-                    format!("{coarse_axis} among [{}]", several.join(", ")),
-                    Clause::new("in")
-                        .arg(axis_ref)
-                        .arg(Arg::List(several.iter().cloned().map(Arg::Text).collect())),
-                ),
-            };
-            let message = format!(
-                "{name}: {} kept {} of {} {}s; {} of the rest. If any {} of {coarse_axis} is meant, write {words}, which covers {}.",
-                clause_text(c),
-                grouped_digits(kept),
-                grouped_digits(before),
-                set.grain.name(),
-                listed(&holds, "and"),
-                listed(&coarse, "or"),
-                listed(&covers, "and"),
-            );
-            let next = format!(
-                "to keep them all, write {} at sets.{name}.where[{i}]; where only {} is meant, change nothing",
-                serde_json::to_string(&clause).unwrap_or_default(),
-                listed(&kept_ids, "or"),
-            );
-            // never a clause the set already holds
-            if set.where_.contains(&clause) {
-                continue;
-            }
-            found.push(Issue {
-                code: Code::NarrowValue,
-                path: format!("sets.{name}.where[{i}]"),
-                message,
-                next,
+            candidates.push(Candidate {
+                set: name,
+                at: i,
+                axis,
+                of,
+                kept,
+                kin,
+                rows,
+                on_path: path.iter().any(|p| p == name),
             });
         }
+    }
+    // the sets the answer reads its rows through first, and among them the
+    // sets that hold the fewest rows; a stable sort, so the document's own
+    // order decides between equals
+    candidates.sort_by_key(|c| (!c.on_path, c.rows));
+    for c in candidates.iter().take(NARROW_CLAUSES) {
+        if counter.spent() {
+            break;
+        }
+        let (name, i) = (c.set, c.at);
+        let Some(set) = ask.sets.get(name) else {
+            continue;
+        };
+        let clause_here = &set.where_[i];
+        // the set with this one clause left out, every other condition
+        // applied, before any pick: by the value each row holds
+        let mut without = ask.clone();
+        let Some(lean) = without.sets.get_mut(name) else {
+            continue;
+        };
+        lean.where_.remove(i);
+        let Some(step) = steps(lean)
+            .into_iter()
+            .map(|(s, _)| s)
+            .rfind(|s| *s != Step::Pick)
+        else {
+            continue;
+        };
+        let other_conditions = step != Step::Source || lean.from.is_some();
+        let Some(by_value) =
+            rows_by_value(counter, registry, &without, name, &step, &c.axis, &c.of)
+        else {
+            continue;
+        };
+        let rows_of = |keep: &dyn Fn(Option<&String>) -> bool| -> i64 {
+            by_value
+                .iter()
+                .filter(|(k, _)| keep(k.as_ref()))
+                .filter_map(|(_, n)| *n)
+                .sum()
+        };
+        let all = rows_of(&|_| true);
+        let kept = rows_of(&|k| k.is_some_and(|k| c.kept.contains(k)));
+        // the kept rows are the set's own, which the funnel showed: a
+        // count that is not that one is not said
+        if kept != c.rows || kept * NARROW_KEPT_ONE_IN >= all {
+            continue;
+        }
+        let dropped = all - kept;
+        let mut siblings: Vec<(String, i64)> = by_value
+            .iter()
+            .filter_map(|(k, n)| k.clone().zip(*n))
+            .filter(|(k, n)| !c.kept.contains(k) && *n > 0)
+            .collect();
+        siblings.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        let held: i64 = siblings.iter().map(|s| s.1).sum();
+        if held * 2 <= dropped {
+            continue;
+        }
+        let floor = NARROW_FACTOR * kept.max(1);
+        // the wider choice: a coarse axis whose values cover every
+        // value kept, and the siblings those values cover as well
+        let wider = c.kin.wider.iter().find_map(|w| {
+            let mut coarse: Vec<&(String, Vec<String>)> = Vec::new();
+            for k in &c.kept {
+                let covering = w.values.iter().find(|(_, covers)| covers.contains(k))?;
+                if !coarse.iter().any(|c| c.0 == covering.0) {
+                    coarse.push(covering);
+                }
+            }
+            let covered: Vec<(String, i64)> = siblings
+                .iter()
+                .filter(|(k, _)| coarse.iter().any(|c| c.1.contains(k)))
+                .cloned()
+                .collect();
+            (covered.iter().map(|s| s.1).sum::<i64>() >= floor).then(|| {
+                (
+                    w.axis.clone(),
+                    coarse.iter().map(|c| c.0.clone()).collect::<Vec<_>>(),
+                    coarse
+                        .iter()
+                        .flat_map(|c| c.1.iter().cloned())
+                        .collect::<Vec<_>>(),
+                    covered,
+                )
+            })
+        });
+        let Some((coarse_axis, coarse, covers, covered)) = wider else {
+            continue;
+        };
+        let holds: Vec<String> = covered
+            .iter()
+            .take(NARROW_NAMED)
+            .enumerate()
+            .map(|(j, (k, n))| {
+                let n = grouped_digits(*n);
+                if j == 0 {
+                    format!("{k} holds {n}")
+                } else {
+                    format!("{k} {n}")
+                }
+            })
+            .collect();
+        let axis_ref = Arg::Clause(Clause::new("axis").arg(Arg::Text(coarse_axis.clone())));
+        let (words, clause) = match coarse.as_slice() {
+            [one] => (
+                format!("{coarse_axis} = {one}"),
+                Clause::new("=").arg(axis_ref).arg(Arg::Text(one.clone())),
+            ),
+            several => (
+                format!("{coarse_axis} among [{}]", several.join(", ")),
+                Clause::new("in")
+                    .arg(axis_ref)
+                    .arg(Arg::List(several.iter().cloned().map(Arg::Text).collect())),
+            ),
+        };
+        // never a clause the set already holds
+        if set.where_.contains(&clause) {
+            continue;
+        }
+        let message = format!(
+            "{name}: {}{} keeps {} of {} {}s; {} of the rest. If any {} of {coarse_axis} is meant, write {words}, which covers {}.",
+            if other_conditions {
+                "with the set's other conditions, "
+            } else {
+                ""
+            },
+            clause_text(clause_here),
+            grouped_digits(kept),
+            grouped_digits(all),
+            set.grain.name(),
+            listed(&holds, "and"),
+            listed(&coarse, "or"),
+            listed(&covers, "and"),
+        );
+        let next = format!(
+            "to keep them all, write {} at sets.{name}.where[{i}]; where only {} is meant, change nothing",
+            serde_json::to_string(&clause).unwrap_or_default(),
+            listed(&c.kept, "or"),
+        );
+        found.push(Issue {
+            code: Code::NarrowValue,
+            path: format!("sets.{name}.where[{i}]"),
+            message,
+            next,
+        });
     }
     // these counts are a hint: the time they ran past is not the counts'
     if let Some(b) = &mut counter.budget {

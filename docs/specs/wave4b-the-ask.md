@@ -857,26 +857,37 @@ must not guess them (C20, D36):
   the value's siblings hold. It is raised for a `where` clause of any stack
   set of the document that keeps the stacks holding a value it writes out
   (`=`, `has`, or `in` with a list), on an axis the pack declares a coarse
-  form of, where the clause kept less than one in five of the rows before
-  it, other values of the axis hold more than half of the rows it dropped,
-  and the values the kept value's coarse value also covers hold together
-  three times the kept rows or more (three rows or more where nothing was
-  kept). Those covered siblings need not hold most of what was dropped. The warning names the coarse axis and
-  value as the wider choice: "scans: body_part = brain kept 31 of 4,210
-  stacks; brain-neck holds 3,900 of the rest. If any head of body_region is
-  meant, write body_region = head, which covers brain and brain-neck."
+  form of. The clause is measured against its set, not against the rows
+  before it in the list: the rows the set holds with that one clause left
+  out and every other condition of the set applied, by their value of the
+  axis. Counted at its own place, a clause written before the conditions
+  that pick out a kind of scan keeps a large share of everything and says
+  nothing of that kind of scan, so the measure does not depend on where
+  the clause stands. It is raised where, of the rows the set holds without
+  the clause, the clause keeps less than one in five, other values of the
+  axis hold more than half of the rows it drops, and the values the kept
+  value's coarse value also covers hold together three times the kept rows
+  or more (three rows or more where nothing is kept). Those covered
+  siblings need not hold most of what is dropped, and a clause the set's
+  other conditions already answer is left alone. The warning names the
+  coarse axis and value as the wider choice: "flair: with the set's other
+  conditions, body_part = brain keeps 7 of 6,461 stacks; brain-neck holds
+  6,454 of the rest. If any head of body_region is meant, write
+  body_region = head, which covers brain and brain-neck." (the first words
+  are left out where the set has no other condition).
   `path` is the clause (`sets.<set>.where[i]`) and `next` holds the clause
   to write in its place. A sibling under another coarse value is another
   thing and is never warned about, and neither is the coarse axis itself,
   nor an axis the pack declares no coarse form of: a count alone cannot
   tell a value mistaken for its sibling from a value that is rare, and on
   an axis one value dominates every filter on another would be warned
-  about. It costs one statement, the rows before the clause by their
-  value, for each such clause that kept so little, three clauses of a
-  document at most, read under the caller's own scope: a stage whose count
-  is held back warns of nothing, and neither does a clause any of whose
-  sibling counts came back held, so the message never puts a shown count
-  beside a held one. It is not given where the request asks for keys,
+  about. It costs one statement a clause, the set without the clause by
+  the value of the axis, for three clauses of a document at most: those of
+  the sets the answer reads its rows through first, and among them the
+  sets that hold the fewest rows first. It is read under the caller's own
+  scope: a set whose own count is held back warns of nothing, and neither
+  does a clause any of whose counts by value came back held, so the
+  message never puts a shown count beside a held one. It is not given where the request asks for keys,
   since a stage's rows are then the keys listed, cut at the cap of a list;
   nor for a clause on a value where the same set, or a set it is drawn
   `from`, already keeps the coarse value that covers it (`body_region =

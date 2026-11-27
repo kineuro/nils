@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 # A filter on one value of an axis the pack declares a coarse form of. The
-# clause keeps no stack, so the diagnosis counts the stacks before it by
-# their value once more and warns (narrow_value): the spines are under the
-# same region as the neck, and the region is the wider choice. The cost of
-# that count is what is timed.
+# diagnosis counts the set without the clause by the value of the axis
+# and, since the clause keeps no stack of it, warns (narrow_value): the
+# spines are under the same region as the neck, and the region is the
+# wider choice. The cost of that count is what is timed.
 ast_version: 1
 name: scans of the neck
 sets:
