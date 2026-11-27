@@ -75,12 +75,13 @@ impl Tier {
 /// | vote | `neighbours` | a pass's vote among similar stacks already classified |
 /// | decision | `decision` | a decision document (a person's or a model's) overrode the rules |
 /// | session | `session` | record 53: the session pass, from the other stacks of the session |
+/// | folded, set_aside | `inferred` | a decision on the other of two axes the pack declares the coarse and the fine form of one thing (`coarse_of`): a coarse value folded from a decided finer one, and the note that a rule's value was set aside for a decided coarse one |
 /// | anything else | `other` | a tier this engine does not know |
 pub fn basis_of(tier: &str) -> &'static str {
     match tier {
         "exclusive" | "combination" | "alternative" | "physics" => "header",
         "keywords" => "name",
-        "stated" => "inferred",
+        "stated" | "folded" | "set_aside" => "inferred",
         "default" => "default",
         "answer" => "answer",
         "vote" => "neighbours",
@@ -283,6 +284,11 @@ pub struct Axis {
     /// identity for technique and the label for modifier, which is how one
     /// thing came to have two names; a pack says which, once, per axis.
     pub stores_label: bool,
+    /// The axis this one is the coarse form of, where the pack says so
+    /// (`coarse_of`): each value of this axis then names the values of
+    /// that axis it covers ([`AxisValue::covers`]), and the rules that
+    /// decide this axis fold them so, which the loader holds them to.
+    pub coarse_of: Option<String>,
 }
 
 /// When an axis is decided.
@@ -365,6 +371,12 @@ pub struct AxisValue {
     /// rename reads as the value it became (record 48: `ASL-EPI` became
     /// `ASL`). Never stored and never served as the identity.
     pub aliases: Vec<String>,
+    /// On an axis that is the coarse form of another ([`Axis::coarse_of`]):
+    /// the values of that axis this one covers, by identity. A stack that
+    /// holds one of them holds this value. Display and checking only: the
+    /// rules decide, and the loader refuses a pack whose rules fold
+    /// otherwise.
+    pub covers: Vec<String>,
 }
 
 /// How an axis value is reached other than by a word, kept in the words the
@@ -542,10 +554,21 @@ impl Axis {
         })
     }
 
-    /// The value a pack file names: by its identity, an identity it had
-    /// before a rename, its label, or the spelling rows store for it
-    /// (`stored`), so a rule written before a value's word changed still
-    /// names it.
+    /// The one resolver: the value a text names, whoever wrote the text.
+    ///
+    /// A value has an identity, the identities it had before a rename
+    /// (`aliases`), a label and, where the axis stores labels and a label
+    /// changed after rows were written, the spelling rows keep (`stored`).
+    /// A pack file, a question, a decision and a row written by an older
+    /// version of the pack may each use any of them, so a text is read in
+    /// this order: identity, alias, label, stored spelling. It is the order
+    /// a question's text is read in as well. The match is exact.
+    ///
+    /// Every reader of a row's text goes through this (or through
+    /// [`Axis::id_of`], [`Axis::stored_of`] and [`Axis::same`], which are
+    /// it), and every writer writes [`Axis::stored_of`]: a row holds one
+    /// spelling of a value, and a text that is another spelling still reads
+    /// as the value.
     pub fn value_named(&self, word: &str) -> Option<usize> {
         self.value_index(word)
             .or_else(|| self.values.iter().position(|v| v.label == word))
@@ -556,28 +579,89 @@ impl Axis {
             })
     }
 
-    /// The identity of the value a row stores.
+    /// The identity of the value a text names ([`Axis::value_named`]).
     ///
-    /// The inverse of [`Axis::stored`], and needed because an axis may store
-    /// the label: `base` stores `T2*w` and its identity is `T2starw`, which is
-    /// also the word BIDS uses. Anything keyed on the identity, a BIDS mapping
-    /// among them, reads a row through this.
-    pub fn id_of_stored(&self, stored: &str) -> Option<&str> {
-        let held = |v: &AxisValue| match self.stores_label {
-            true => v.stored.as_deref().unwrap_or(&v.label) == stored,
-            false => v.id == stored,
+    /// Anything keyed on the identity, a BIDS mapping among them, reads a
+    /// row through this: `base` stores `T2*w` and its identity is
+    /// `T2starw`, which is also the word BIDS uses.
+    pub fn id_of(&self, text: &str) -> Option<&str> {
+        self.value_named(text).map(|i| self.values[i].id.as_str())
+    }
+
+    /// What a row stores for the value a text names: the one spelling a
+    /// writer writes. None where the text names no value of the axis.
+    pub fn stored_of(&self, text: &str) -> Option<&str> {
+        self.value_named(text).map(|i| self.stored(i))
+    }
+
+    /// A row's or a decision's whole text in the stored form: each of its
+    /// comma-joined values by [`Axis::stored_of`], in the order given, a
+    /// value named twice kept once. A part that names no value of the axis
+    /// is kept as it was written: whether such a text is taken at all is
+    /// the door's rule, not the spelling's.
+    pub fn stored_text(&self, text: &str) -> String {
+        let mut out: Vec<&str> = Vec::new();
+        for part in text.split(',').map(str::trim).filter(|p| !p.is_empty()) {
+            let stored = self.stored_of(part).unwrap_or(part);
+            if !out.contains(&stored) {
+                out.push(stored);
+            }
+        }
+        out.join(",")
+    }
+
+    /// Whether two texts name the same values of the axis, whatever they
+    /// are spelled as and whatever order a multi-valued axis lists them in.
+    pub fn same(&self, a: &str, b: &str) -> bool {
+        let set = |text: &str| {
+            let mut words: Vec<String> = self
+                .stored_text(text)
+                .split(',')
+                .filter(|w| !w.is_empty())
+                .map(str::to_string)
+                .collect();
+            words.sort();
+            words
         };
-        // the spelling rows hold first; a label a value was given since is
-        // read as that value too, where no other value stores it
-        self.values
-            .iter()
-            .find(|v| held(v))
-            .or_else(|| {
-                self.stores_label
-                    .then(|| self.values.iter().find(|v| v.label == stored))
-                    .flatten()
-            })
-            .map(|v| v.id.as_str())
+        set(a) == set(b)
+    }
+
+    /// Every name of every value as the resolver reads it: (text, what a
+    /// row stores for the value it names, the value's identity). A name
+    /// two values share is listed once, for the value the resolver gives
+    /// it to.
+    pub fn names(&self) -> Vec<(String, String, String)> {
+        let mut out: Vec<(String, String, String)> = Vec::new();
+        for v in &self.values {
+            let names = std::iter::once(&v.id)
+                .chain(v.aliases.iter())
+                .chain(std::iter::once(&v.label))
+                .chain(v.stored.iter());
+            for name in names {
+                let Some(i) = self.value_named(name) else {
+                    continue;
+                };
+                if !out.iter().any(|(n, _, _)| n == name) {
+                    out.push((
+                        name.clone(),
+                        self.stored(i).to_string(),
+                        self.values[i].id.clone(),
+                    ));
+                }
+            }
+        }
+        out
+    }
+
+    /// Every text that names a value and is not what a row stores for it,
+    /// with what a row stores: the other spellings of the axis. What a
+    /// repair moves and a check counts.
+    pub fn spellings(&self) -> Vec<(String, String)> {
+        self.names()
+            .into_iter()
+            .filter(|(text, stored, _)| text != stored)
+            .map(|(text, stored, _)| (text, stored))
+            .collect()
     }
 
     /// What a row stores for this value.
@@ -597,21 +681,26 @@ impl Axis {
     /// value's label changed after rows were written (`stored`), or where the
     /// axis stores identities.
     pub fn label_of_stored<'a>(&'a self, stored: &'a str) -> &'a str {
-        self.id_of_stored(stored)
-            .and_then(|id| self.values.iter().find(|v| v.id == id))
-            .map_or(stored, |v| v.label.as_str())
+        self.value_named(stored)
+            .map_or(stored, |i| self.values[i].label.as_str())
     }
 
     /// What a person reads for a row's text of this axis: each of its
-    /// comma-joined values by [`Axis::label_of_stored`] where the axis
-    /// stores labels, the text as it is where it stores identities.
+    /// comma-joined values read as the value it names
+    /// ([`Axis::value_named`]) and shown by its label where the axis stores
+    /// labels, by its identity where it stores identities; a text that
+    /// names no value as it is.
     pub fn words_of_stored(&self, stored: &str) -> String {
-        if !self.stores_label {
-            return stored.to_string();
-        }
         stored
             .split(',')
-            .map(|v| self.label_of_stored(v.trim()))
+            .map(|v| {
+                let v = v.trim();
+                match self.value_named(v) {
+                    Some(i) if self.stores_label => self.values[i].label.as_str(),
+                    Some(i) => self.values[i].id.as_str(),
+                    None => v,
+                }
+            })
             .collect::<Vec<_>>()
             .join(",")
     }
@@ -710,6 +799,9 @@ mod tests {
         assert_eq!(basis_of("answer"), "answer");
         assert_eq!(basis_of("vote"), "neighbours");
         assert_eq!(basis_of("decision"), "decision");
+        // what a decision on the other of two grains wrote reads another axis
+        assert_eq!(basis_of("folded"), "inferred");
+        assert_eq!(basis_of("set_aside"), "inferred");
         assert_eq!(basis_of("something new"), "other");
         assert_eq!(basis_of(""), "other");
     }

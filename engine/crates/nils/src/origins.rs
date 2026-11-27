@@ -40,6 +40,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use nils_registry::Registry;
+use nils_registry::coarse;
 use nils_registry::home::Home;
 use nils_registry::store::{Error as StoreError, Store};
 use serde_json::{Value, json};
@@ -772,6 +773,13 @@ fn build(
                 names.insert(d.axis.clone());
             }
         }
+        // and every axis whose value a committed answer on the other grain
+        // set aside: it holds no row, and it is not an axis nobody answered
+        for (axis, rows) in read.evidence.get(&of.id).into_iter().flatten() {
+            if rows.iter().any(|e| e["tier"] == coarse::SET_ASIDE) {
+                names.insert(axis.clone());
+            }
+        }
         let no_rows = Vec::new();
         let mut rows: Vec<Value> = Vec::new();
         let mut unsorted = false;
@@ -791,9 +799,22 @@ fn build(
             let authored = evidence
                 .iter()
                 .find(|e| e["tier"] == "decision" && e["author_kind"].is_string());
+            // what a committed answer on the other grain did to this axis:
+            // the mark that its value was set aside, and the row that says
+            // what its value was folded from and who decided that
+            let aside = evidence
+                .iter()
+                .find(|e| held.is_empty() && e["tier"] == coarse::SET_ASIDE);
+            let folded = evidence
+                .iter()
+                .find(|e| tier == coarse::FOLDED && e["tier"] == coarse::FOLDED);
             let rules: Vec<Value> = evidence
                 .iter()
-                .filter(|e| e["author_kind"].is_null() && e["tier"] != "decision")
+                .filter(|e| {
+                    e["author_kind"].is_null()
+                        && e["rule_set"] != coarse::RULE_SET
+                        && !e["tier"].as_str().is_some_and(coarse::decided)
+                })
                 .filter(|e| {
                     held.is_empty()
                         || e["value"]
@@ -834,6 +855,31 @@ fn build(
                     ),
                     None => ("decision", json!({"kind": "decision"})),
                 }
+            } else if tier == coarse::FOLDED {
+                // a value folded from a committed answer on the finer axis is
+                // that answer's, a model's where a model gave it, and never
+                // the rules'
+                let from_axis = |e: &Value| json!({"axis": e["source"], "words": e["matched"]});
+                match folded {
+                    Some(e) if e["author_kind"] == "model" => (
+                        "model",
+                        json!({"kind": "model", "by": e["author"],
+                               "model": model_named(e["model_id"].as_i64()),
+                               "campaign": e["campaign_id"], "folded_from": from_axis(e)}),
+                    ),
+                    Some(e) => (
+                        "decision",
+                        json!({"kind": e["author_kind"], "by": e["author"],
+                               "campaign": e["campaign_id"], "folded_from": from_axis(e)}),
+                    ),
+                    None => ("decision", json!({"kind": "decision"})),
+                }
+            } else if let Some(e) = aside {
+                (
+                    "none",
+                    json!({"set_aside_by": {"axis": e["source"], "kind": e["author_kind"],
+                           "by": e["author"], "campaign": e["campaign_id"], "words": e["matched"]}}),
+                )
             } else if held.is_empty() && rules.is_empty() {
                 ("none", Value::Null)
             } else {
@@ -879,51 +925,118 @@ fn build(
                 }
                 (d, v)
             });
-            let (state, words, decided) = match decided {
-                Some((d, v)) => {
-                    let blind = d.campaign.is_some_and(|c| {
-                        let status = read
-                            .campaigns
-                            .get(&c)
-                            .map(|x| x.1.clone())
-                            .unwrap_or_default();
-                        !reads(c, &status)
-                    });
-                    if blind {
-                        let c = d.campaign.unwrap_or_default();
-                        (
-                            "withheld",
-                            format!(
-                                "a campaign not closed yet decided it; its answers are blind until it closes (campaign {c})"
-                            ),
-                            json!({"withheld": true, "campaign": {"id": c, "status": v["campaign"]["status"]}}),
-                        )
-                    } else {
-                        let want = values_of(d.value.as_deref());
-                        if want != held_sorted {
-                            unsorted = true;
-                            (
-                                "unsorted",
-                                format!("decided {}; sorted before the decision", said(&want)),
-                                v,
-                            )
-                        } else {
-                            ("current", String::new(), v)
-                        }
-                    }
-                }
-                None if tier == "decision" => {
+            // the answer on the other grain that folded this axis or set it
+            // aside: the axis it stands on, whether it is still in force,
+            // and whether a campaign not closed yet wrote it
+            let other = folded.or(aside).map(|e| {
+                let axis = e["source"].as_str().unwrap_or_default().to_string();
+                let stands = read.in_force(of, &axis).is_some();
+                let blind = e["campaign_id"].as_i64().filter(|c| {
+                    let status = read
+                        .campaigns
+                        .get(c)
+                        .map(|x| x.1.clone())
+                        .unwrap_or_default();
+                    !reads(*c, &status)
+                });
+                (
+                    axis,
+                    stands,
+                    blind,
+                    e["matched"].as_str().unwrap_or_default(),
+                )
+            });
+            let (state, words, decided) = match (other, decided) {
+                (Some((_, _, Some(c), _)), _) => (
+                    "withheld",
+                    format!(
+                        "a campaign not closed yet decided it; its answers are blind until it closes (campaign {c})"
+                    ),
+                    json!({"withheld": true, "campaign": {"id": c}}),
+                ),
+                (Some((other, false, _, _)), _) => {
                     unsorted = true;
                     (
                         "withdrawn",
                         format!(
-                            "{} was decided, and the decision is no longer in force; sorted before it was withdrawn",
-                            said(&held_sorted)
+                            "{}; that decision on {other} is no longer in force, and the stack was sorted before it was withdrawn",
+                            if aside.is_some() {
+                                format!("set aside by a decision on {other}")
+                            } else {
+                                format!(
+                                    "{} was folded from a decision on {other}",
+                                    said(&held_sorted)
+                                )
+                            }
                         ),
                         Value::Null,
                     )
                 }
-                None => ("current", String::new(), Value::Null),
+                (Some((other, true, _, cited)), decided) => (
+                    if aside.is_some() {
+                        "set_aside"
+                    } else {
+                        "current"
+                    },
+                    if aside.is_some() {
+                        format!("set aside by {other}: {cited}")
+                    } else {
+                        format!("folded from {other}: {cited}")
+                    },
+                    decided.map_or(Value::Null, |(_, v)| v),
+                ),
+                (None, decided) => match decided {
+                    Some((d, v)) => {
+                        let blind = d.campaign.is_some_and(|c| {
+                            let status = read
+                                .campaigns
+                                .get(&c)
+                                .map(|x| x.1.clone())
+                                .unwrap_or_default();
+                            !reads(c, &status)
+                        });
+                        if blind {
+                            let c = d.campaign.unwrap_or_default();
+                            (
+                                "withheld",
+                                format!(
+                                    "a campaign not closed yet decided it; its answers are blind until it closes (campaign {c})"
+                                ),
+                                json!({"withheld": true, "campaign": {"id": c, "status": v["campaign"]["status"]}}),
+                            )
+                        } else {
+                            let want = values_of(d.value.as_deref());
+                            if want != held_sorted {
+                                unsorted = true;
+                                (
+                                    "unsorted",
+                                    format!("decided {}; sorted before the decision", said(&want)),
+                                    v,
+                                )
+                            } else {
+                                ("current", String::new(), v)
+                            }
+                        }
+                    }
+                    None if tier == "decision" => {
+                        unsorted = true;
+                        (
+                            "withdrawn",
+                            format!(
+                                "{} was decided, and the decision is no longer in force; sorted before it was withdrawn",
+                                said(&held_sorted)
+                            ),
+                            Value::Null,
+                        )
+                    }
+                    None => ("current", String::new(), Value::Null),
+                },
+            };
+            // withheld: who decided on the other grain is not said either
+            let from = if state == "withheld" {
+                Value::Null
+            } else {
+                from
             };
             let line = match origin {
                 "rules" => {
@@ -947,7 +1060,17 @@ fn build(
                     from["model"]["label"].as_str().unwrap_or("unnamed")
                 ),
                 "decision" => format!("decided by {}", from["by"].as_str().unwrap_or("someone")),
+                _ if state == "set_aside" => format!(
+                    "set aside by {}",
+                    from["set_aside_by"]["axis"]
+                        .as_str()
+                        .unwrap_or("a decision")
+                ),
                 _ => "nothing answered it".to_string(),
+            };
+            let line = match from["folded_from"]["axis"].as_str() {
+                Some(fine) => format!("folded from {fine}, {line}"),
+                None => line,
             };
             let mut row = json!({
                 "axis": axis,

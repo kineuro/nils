@@ -73,7 +73,7 @@ fn identity(a: &Axis, value: &str) -> Option<String> {
         .iter()
         .find(|v| v.id == value || v.label == value)
         .map(|v| v.id.clone())
-        .or_else(|| a.id_of_stored(value).map(str::to_string))
+        .or_else(|| a.id_of(value).map(str::to_string))
         // an identity the value had before a rename (record 48)
         .or_else(|| a.value_index(value).map(|i| a.values[i].id.clone()))
 }

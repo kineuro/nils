@@ -255,12 +255,14 @@ pub fn preview(
     } else {
         validate(&ask, s.names, s.scope).map_err(AskError::Invalid)?
     };
+    let sessions_fresh = std::cell::Cell::new(false);
     let mut runner = Runner {
         names: s.names,
         scheme: s.scheme,
         bounds: s.bounds,
         reader,
         unsealed: s.scope.unsealed,
+        sessions_fresh: &sessions_fresh,
     };
     let limit = match ask.out.level {
         Level::Boolean | Level::Count => None,
@@ -300,12 +302,14 @@ pub fn count_rows(
     } else {
         validate(&ask, s.names, s.scope).map_err(AskError::Invalid)?
     };
+    let sessions_fresh = std::cell::Cell::new(false);
     let mut runner = Runner {
         names: s.names,
         scheme: s.scheme,
         bounds: s.bounds,
         reader,
         unsealed: s.scope.unsealed,
+        sessions_fresh: &sessions_fresh,
     };
     let (_, answer) = runner.answer(registry, &ask, &validated.counting_rows(), None, None)?;
     Ok(match answer.rows.first() {
@@ -572,12 +576,14 @@ pub fn values(
     prepared.validated = prepared.validated.counting_all();
     // how many values there are is how many groups: its rows alone
     counted.validated = counted.validated.counting_all().counting_rows();
+    let sessions_fresh = std::cell::Cell::new(false);
     let mut runner = Runner {
         names: s.names,
         scheme: s.scheme,
         bounds: s.bounds,
         reader,
         unsealed: s.scope.unsealed,
+        sessions_fresh: &sessions_fresh,
     };
     let (_, rows) = runner.answer(
         registry,

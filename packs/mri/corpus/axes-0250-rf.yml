@@ -101,7 +101,7 @@ cases:
     flags:
       ge_efgre3d_steady_state: true
     axes:
-      technique: FIESTA
+      technique: bSSFP
       base: T2w
 
   - name: guard, a GE efgre3d at flip 15 stays a plain gradient echo

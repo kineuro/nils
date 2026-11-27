@@ -182,12 +182,13 @@ entities:
 # construct. The engine joins the tokens with `+`, the one separator a BIDS
 # label admits (Nima: "+ is ok since that is our only option here"), and
 # leaves out a token that is the suffix itself (`MEGRE` on `_MEGRE`, `ASL`
-# on `_asl`); `TOFMRA` stays on `_angio`, which says nothing of the
+# on `_asl`); `TOF` stays on `_angio`, which says nothing of the
 # technique. The pack has no acceleration axis yet, so that slot is empty.
 # The quality flags have no slot in v0 and come last. Every axis is in the
 # sidecar's `NILS` object whatever a name spells.
 acq:
   - from: body_part
+    own_words: 'the prefixes of the earlier archive: the brain says nothing and the spine is SC'
     modes: [full]
     # Where in the body, which BIDS has no entity for and which a brain and a
     # spine acquisition of one session need to tell them apart. v0's prefix
@@ -247,27 +248,41 @@ acq:
       symri: SyMRI
       stage: STAGE
       mix: Mix
+  # The word of a technique in a name is the word a row stores for it, for
+  # every technique: one word for a value in the registry, in the descriptive
+  # name and here. `nils pack validate` refuses a token that is another word,
+  # in every group that reads an axis and does not say `own_words`. Until the
+  # version that made the stored word one plain word, nine tokens were words
+  # of their own (`MSEPI`, `BOLDEPI`, `PerfusionEPI`, `VFATSE`, `TOFMRA`,
+  # `PCMRA`, `CISS`, `SSFP`, `SSGRE`) and two techniques had none (the 3D
+  # turbo spin echo and the multispectral one). The pack's name and version
+  # are part of what a release's stack records, so the first release of an
+  # existing tree after the pack is updated writes every stack again under
+  # its new name and removes the files of the old one: nothing is written
+  # twice and nothing is left under an old name.
   - from: technique
     tokens:
-      'MS-EPI': MSEPI
+      'MS-EPI': rsEPI
       'DWI-TSE': DWITSE
       'DWI-EPI': DWIEPI
       'DWI-STEAM': DWISTEAM
       ZTE: ZTE
       MRS: MRS
-      'BOLD-EPI': BOLDEPI
+      'BOLD-EPI': BOLD
       ASL: ASL
       DCE: DCE
-      'Perfusion-EPI': PerfusionEPI
+      'Perfusion-EPI': Perfusion
       GRASE: GRASE
       'SE-EPI': SEEPI
       'GRE-EPI': GREEPI
       MRF: MRF
       MDME: MDME
+      MAVRIC: MSI
+      '3D-TSE': SPACE
       'SS-TSE': SSTSE
       'IR-TSE': IRTSE
       'ME-SE': MESE
-      'VFA-TSE': VFATSE
+      'VFA-TSE': DETSE
       TSE: TSE
       SE: SE
       QALAS: QALAS
@@ -275,19 +290,19 @@ acq:
       MEMPRAGE: MEMPRAGE
       MPRAGE: MPRAGE
       'CE-MRA': CEMRA
-      'TOF-MRA': TOFMRA
-      'PC-MRA': PCMRA
+      'TOF-MRA': TOF
+      'PC-MRA': PC
       'comb-ME-GRE': combMEGRE
       'ME-GRE': MEGRE
-      CISS: CISS
+      CISS: pcbSSFP
       bSSFP: bSSFP
       DESS: DESS
-      SSFP: SSFP
+      SSFP: SSFPecho
       'VFA-GRE': VFAGRE
       'VI-GRE': VIGRE
       'FSP-GRE': FSPGRE
       'SP-GRE': SPGRE
-      'SS-GRE': SSGRE
+      'SS-GRE': SSFPFID
       GRE: GRE
       EPI: EPI
   - from: construct
@@ -307,6 +322,7 @@ acq:
       MyelinMap: MyelinMap
       SWI: SWI
   - from: construct
+    own_words: 'short forms a name conflict spells, where the standard has an entity for the long one'
     modes: [separate]
     # The complex part, the reconstruction kinds, the Dixon images, the
     # projections and the derivative constructs, which the BIDS name carries
@@ -341,6 +357,7 @@ acq:
       Filtered: Filtered
       ORIG: ORIG
   - from: post_contrast
+    own_words: "the contrast entity's own word"
     modes: [separate]
     # `ce-` in the BIDS name; section 9.1 spells it `_CE`, and so does a
     # name conflict the contrast alone decides.
@@ -363,6 +380,7 @@ acq:
       BOLDRecon: BOLDRecon
       Calibration: Calibration
   - from: quality
+    own_words: 'a short word for a flag no name carries unless two stacks differ by it'
     modes: [full]
     # What the file says is wrong with its own image. It belongs in the name
     # because two stacks that agree on everything else and disagree here are

@@ -86,6 +86,11 @@ pub(crate) struct HostFacts {
     pub gpu: Option<bool>,
     pub gpu_memory_gb: Option<f64>,
     pub runtime: Option<String>,
+    /// Not a host fact: the names of the registry's axis values, by which a
+    /// stack's row is read as the identity of the value it names
+    /// (`nils_registry::spelling`). The facts are identities, whichever
+    /// spelling a row holds.
+    pub spellings: std::sync::Arc<nils_registry::spelling::Spellings>,
 }
 
 /// The host's facts as this engine reads them: the machine's cores and
@@ -102,6 +107,7 @@ pub(crate) fn host_facts(registry: &mut Registry) -> HostFacts {
         gpu: Some(card.is_some() && lane.card.is_some()),
         gpu_memory_gb: None,
         runtime: detected.runtime.as_ref().map(|r| r.kind.name().to_string()),
+        spellings: registry.spellings(),
     }
 }
 
@@ -141,7 +147,11 @@ struct StackRow {
     disposition: Option<String>,
 }
 
-fn stack_rows(store: &mut Store, stacks: &[i64]) -> BTreeMap<i64, StackRow> {
+fn stack_rows(
+    store: &mut Store,
+    spellings: &nils_registry::spelling::Spellings,
+    stacks: &[i64],
+) -> BTreeMap<i64, StackRow> {
     let mut out: BTreeMap<i64, StackRow> = BTreeMap::new();
     if stacks.is_empty() {
         return out;
@@ -180,6 +190,9 @@ fn stack_rows(store: &mut Store, stacks: &[i64]) -> BTreeMap<i64, StackRow> {
             continue;
         };
         let row = out.entry(id).or_default();
+        // a fact is the identity of the value the row names: a pack writes
+        // `post_contrast != 'given'` whichever spelling the row holds
+        let value = spellings.id(axis, value);
         match axis {
             "base" => row.base = Some(value.to_string()),
             "body_part" => row.body_part = Some(value.to_string()),
@@ -194,11 +207,11 @@ fn stack_rows(store: &mut Store, stacks: &[i64]) -> BTreeMap<i64, StackRow> {
 /// Whether these stacks were acquired alike (Wave 7b section 7, a family's
 /// `unit.same_protocol`): every one shares base, dimension, vendor and
 /// field strength. None where a stack lacks one of them, or there is none.
-pub(crate) fn same_protocol(store: &mut Store, stacks: &[i64]) -> Option<bool> {
+pub(crate) fn same_protocol(store: &mut Store, host: &HostFacts, stacks: &[i64]) -> Option<bool> {
     if stacks.is_empty() {
         return None;
     }
-    let rows = stack_rows(store, stacks);
+    let rows = stack_rows(store, &host.spellings, stacks);
     let mut seen: BTreeSet<(String, String, String, String)> = BTreeSet::new();
     for s in stacks {
         let r = rows.get(s)?;
@@ -357,7 +370,7 @@ pub(crate) fn facts_for(store: &mut Store, units: &[UnitOf], host: &HostFacts) -
         .collect();
     let mut rows: BTreeMap<i64, StackRow> = BTreeMap::new();
     for chunk in all.chunks(500) {
-        rows.extend(stack_rows(store, chunk));
+        rows.extend(stack_rows(store, &host.spellings, chunk));
     }
     // a registration step's aligned FLAIR on the T1w's grid says aligned
     // (Wave 7b section 7), read for every unit's session at once
@@ -804,7 +817,12 @@ pub(crate) fn flag_words(flags: &[Value]) -> String {
 /// The stratum of a unit for a cohort check: the registry (one site), the
 /// vendor, the field strength, the scanning sequence and the post-contrast
 /// state of its first stack, as the check's `stratum` names them.
-pub(crate) fn stratum_of(store: &mut Store, stack: Option<i64>, members: &[String]) -> String {
+pub(crate) fn stratum_of(
+    store: &mut Store,
+    spellings: &nils_registry::spelling::Spellings,
+    stack: Option<i64>,
+    members: &[String],
+) -> String {
     let mut parts: Vec<String> = Vec::new();
     let (mut vendor, mut field, mut sequence, mut post) = (
         "unknown".to_string(),
@@ -837,7 +855,8 @@ pub(crate) fn stratum_of(store: &mut Store, stack: Option<i64>, members: &[Strin
         if let Ok(Some(r)) = store.query_opt(&sql, &[Param::Int(s)])
             && let Ok(Some(v)) = r.opt_text(0)
         {
-            post = v.to_string();
+            // one stratum a value, whichever spelling the row holds
+            post = spellings.id("post_contrast", v).to_string();
         }
     }
     for m in members {
@@ -930,6 +949,7 @@ struct Seen {
 /// stratum_from, sessions, min_sessions}`.
 pub(crate) fn cohort_check(
     store: &mut Store,
+    spellings: &nils_registry::spelling::Spellings,
     pipeline: &str,
     check: &pack::Check,
     units: &[(i64, String)],
@@ -1022,7 +1042,7 @@ pub(crate) fn cohort_check(
     let mut stratum_for = |store: &mut Store, s: &Seen| -> String {
         stratum_cache
             .entry(s.stack)
-            .or_insert_with(|| stratum_of(store, s.stack, &check.stratum))
+            .or_insert_with(|| stratum_of(store, spellings, s.stack, &check.stratum))
             .clone()
     };
     let mut by_stratum: BTreeMap<(String, String), Vec<f64>> = BTreeMap::new();
@@ -1403,6 +1423,87 @@ mod tests {
             .unwrap();
     }
 
+    /// A fact is the identity of the value a row names: a row in the
+    /// spelling an older pack stored and one in today's give a pack's
+    /// `post_contrast != 'given'` and `base == 'T2starw'` one answer, and
+    /// two stacks of one base in two spellings are one protocol.
+    #[test]
+    fn a_fact_is_a_value_s_identity_whichever_spelling_the_row_holds() {
+        let dir = nils_dicom::synth::TempDir::new("pipeline-pack-spelling");
+        let home = nils_registry::Home::new(dir.path());
+        home.keys(None).add("k", b"a-test-key").unwrap();
+        let mut registry = home
+            .init(&nils_registry::home::InitOptions {
+                backend: nils_registry::Backend::Sqlite,
+                dsn: None,
+                schema: None,
+                scheme: nils_registry::Scheme::Blake2b32,
+                key: "k".to_string(),
+                display_length: 12,
+                session_scheme: None,
+            })
+            .unwrap();
+        let n = |axis: &str, text: &str, stored: &str, id: &str| {
+            (
+                axis.to_string(),
+                text.to_string(),
+                stored.to_string(),
+                id.to_string(),
+            )
+        };
+        let spellings = nils_registry::spelling::Spellings::new([
+            n("post_contrast", "1", "given", "given"),
+            n("post_contrast", "given", "given", "given"),
+            n("base", "T2*w", "T2starw", "T2starw"),
+            n("base", "T2starw", "T2starw", "T2starw"),
+        ]);
+        let store = registry.store();
+        let rows: Vec<Vec<Param>> = [
+            (1, "post_contrast", "1"),
+            (1, "base", "T2*w"),
+            (2, "post_contrast", "given"),
+            (2, "base", "T2starw"),
+        ]
+        .iter()
+        .map(|(stack, axis, value)| {
+            vec![
+                Param::Int(*stack),
+                Param::from(*axis),
+                Param::from(*value),
+                Param::Double(0.9),
+                Param::from("stated"),
+            ]
+        })
+        .collect();
+        store
+            .insert(
+                &nils_registry::Insert::new(
+                    nils_registry::schema::table("classification_axis"),
+                    &["stack_id", "axis", "value", "confidence", "tier"],
+                ),
+                &rows,
+            )
+            .unwrap();
+        let read = stack_rows(store, &spellings, &[1, 2]);
+        for stack in [1, 2] {
+            assert_eq!(read[&stack].post_contrast.as_deref(), Some("given"));
+            assert_eq!(read[&stack].base.as_deref(), Some("T2starw"));
+            let mut f = Facts::default();
+            stack_facts(&mut f, "t1w", read.get(&stack));
+            assert_eq!(f.get("t1w.post_contrast"), Val::Text("given".into()));
+            assert_eq!(f.get("t1w.base"), Val::Text("T2starw".into()));
+        }
+        // the stratum of a cohort check is one, too
+        let members = vec!["post_contrast".to_string()];
+        assert_eq!(
+            stratum_of(store, &spellings, Some(1), &members),
+            stratum_of(store, &spellings, Some(2), &members)
+        );
+        // read as text, as before, the two rows are two values
+        let raw = stack_rows(store, &Default::default(), &[1, 2]);
+        assert_ne!(raw[&1].post_contrast, raw[&2].post_contrast);
+    }
+
     #[test]
     fn a_raw_series_is_never_skull_stripped_and_a_derivative_is_not_told() {
         let mut f = Facts::default();
@@ -1657,7 +1758,13 @@ checks:
             );
             units.push((1, unit));
         }
-        let out = cohort_check(&mut store, "samseg-lesions", &check, &units);
+        let out = cohort_check(
+            &mut store,
+            &Default::default(),
+            "samseg-lesions",
+            &check,
+            &units,
+        );
         for (i, c) in out.iter().enumerate() {
             let field = if i < 5 { "1.5" } else { "3" };
             assert_eq!(c["stratum"], format!("site=here,field={field}"), "{c}");
@@ -1683,6 +1790,7 @@ checks:
         );
         let out = cohort_check(
             &mut store,
+            &Default::default(),
             "samseg-lesions",
             &check,
             &[(1, "sub-99_ses-a".into())],
@@ -1722,7 +1830,13 @@ checks:
                 units.push((run, unit));
             }
         }
-        let out = cohort_check(&mut store, "samseg-lesions", &check, &units);
+        let out = cohort_check(
+            &mut store,
+            &Default::default(),
+            "samseg-lesions",
+            &check,
+            &units,
+        );
         for c in &out {
             assert_eq!(c["status"], "not yet", "six values are two sessions: {c}");
             assert_eq!(c["words"], "not yet: 2 of 3 sessions", "{c}");
@@ -1746,7 +1860,13 @@ checks:
             "intracranial",
             11.0,
         );
-        let out = cohort_check(&mut store, "samseg-lesions", &check, &units);
+        let out = cohort_check(
+            &mut store,
+            &Default::default(),
+            "samseg-lesions",
+            &check,
+            &units,
+        );
         assert!(out.iter().all(|c| c["sessions"] == 3), "{out:?}");
         assert!(out.iter().all(|c| c["status"] == "within"), "{out:?}");
         // the same session under another key is a session of that key's own
@@ -1770,6 +1890,7 @@ checks:
         );
         let out = cohort_check(
             &mut store,
+            &Default::default(),
             "samseg-lesions",
             &check,
             &[(4, "sub-1_ses-a".into()), (3, "sub-3_ses-a".into())],
@@ -1821,7 +1942,13 @@ checks:
             );
             units.push((1, unit));
         }
-        let out = cohort_check(&mut store, "samseg-lesions", &check, &units);
+        let out = cohort_check(
+            &mut store,
+            &Default::default(),
+            "samseg-lesions",
+            &check,
+            &units,
+        );
         assert_eq!(out[9]["status"], "flagged", "{}", out[9]);
         assert!(
             out[9]["spread_by"]
@@ -2661,7 +2788,7 @@ checks:
                 );
                 units.push((1, unit));
             }
-            let out = cohort_check(&mut store, name, check, &units);
+            let out = cohort_check(&mut store, &Default::default(), name, check, &units);
             for c in &out {
                 assert_eq!(c["status"], "not yet", "{name}: {c}");
                 assert_eq!(c["words"], "not yet: 2 of 30 sessions", "{name}: {c}");

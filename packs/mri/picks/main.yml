@@ -97,23 +97,22 @@ components:
         MPRAGE: 1.00
         MP2RAGE: 1.00
         SPACE: 0.85
-        VIBE: 0.85
-        FLASH: 0.70
-        FSPGR: 0.70
-        TurboFLASH: 0.65
+        VIGRE: 0.85
+        SPGRE: 0.70
+        FSPGRE: 0.65
         GRE: 0.55
         SE: 0.50
-        TIRM: 0.45
+        IRTSE: 0.45
         TSE: 0.40
-        FIESTA: 0.40
+        bSSFP: 0.40
         CISS: 0.40
         Unknown: 0.30
       flair:
         SPACE: 1.00
         TSE: 0.90
-        TIRM: 0.75
+        IRTSE: 0.75
         GRASE: 0.65
-        RESOLVE: 0.50
+        rsEPI: 0.50
         Unknown: 0.40
       # Record 51 R8, and ours, not v0's (v0 had no T2w role). Drafted from
       # what the analyses that read a T2w take and from the development
@@ -129,14 +128,14 @@ components:
       t2w:
         SPACE: 1.00
         TSE: 0.90
-        RESTORE: 0.80
+        DETSE: 0.80
         GRASE: 0.65
         MESE: 0.55
         SE: 0.50
-        HASTE: 0.45
-        TIRM: 0.40
+        SSTSE: 0.45
+        IRTSE: 0.40
         CISS: 0.30
-        FIESTA: 0.30
+        bSSFP: 0.30
         Unknown: 0.30
     bonuses:
       - of: modifier

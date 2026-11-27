@@ -917,8 +917,13 @@ pub(crate) fn copy_of(originals: (Option<i64>, bool), copied: (Option<i64>, bool
 
 /// `(label, scans)` by value of an axis over the dataset's stacks, most
 /// first; for the kind axis a FLAIR is named as one whatever its base.
+///
+/// A row is counted under the value it names
+/// (`nils_registry::spelling`): rows that hold one value in two spellings
+/// are one bucket, named by the stored form.
 fn by_axis(
     store: &mut Store,
+    spellings: &nils_registry::spelling::Spellings,
     sources: &str,
     axis: &str,
     sealed: Option<&str>,
@@ -950,11 +955,13 @@ fn by_axis(
          WHERE a.axis = '{axis}' AND a.value IS NOT NULL AND a.value <> '' \
          AND {held}{hidden}) k GROUP BY k.label"
     );
-    let mut out: Vec<(String, i64)> = store
-        .query(&sql, &[])?
-        .iter()
-        .map(|r| Ok((r.text(0)?.to_string(), r.int(1)?)))
-        .collect::<Result<_, StoreError>>()?;
+    let mut by_value: std::collections::BTreeMap<String, i64> = Default::default();
+    for r in store.query(&sql, &[])? {
+        *by_value
+            .entry(spellings.stored_part(axis, r.text(0)?).to_string())
+            .or_default() += r.int(1)?;
+    }
+    let mut out: Vec<(String, i64)> = by_value.into_iter().collect();
     out.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
     Ok(out)
 }
@@ -1418,7 +1425,8 @@ fn counts(
         )
         .map_err(failed)
     };
-    let sorting = |store: &mut Store| sorted(store, &sources, hide, stacks);
+    let spellings = crate::spelling::of_home(&home);
+    let sorting = |store: &mut Store| sorted(store, &spellings, &sources, hide, stacks);
     std::thread::scope(|scope| -> Result<(), Reply> {
         let operations_apart = (!ids.is_empty()).then(|| scope.spawn(|| apart(&home, operations)));
         let sorted_apart = (!ids.is_empty()).then(|| scope.spawn(|| apart(&home, sorting)));
@@ -1582,7 +1590,13 @@ fn files_and_visits(
 
 /// What the sorts say of the stacks the sources (a comma list) hold,
 /// `stacks` of them.
-fn sorted(store: &mut Store, sources: &str, hide: bool, stacks: i64) -> Result<Sorted, Reply> {
+fn sorted(
+    store: &mut Store,
+    spellings: &nils_registry::spelling::Spellings,
+    sources: &str,
+    hide: bool,
+    stacks: i64,
+) -> Result<Sorted, Reply> {
     let in_tree = crate::operations::held_by(store, "x", sources);
     let classified = count(
         store,
@@ -1606,8 +1620,9 @@ fn sorted(store: &mut Store, sources: &str, hide: bool, stacks: i64) -> Result<S
         classified,
         certainty,
         passes,
-        kinds: by_axis(store, sources, KIND_AXIS, sealed.as_deref()).map_err(failed)?,
-        regions: by_axis(store, sources, REGION_AXIS, sealed.as_deref()).map_err(failed)?,
+        kinds: by_axis(store, spellings, sources, KIND_AXIS, sealed.as_deref()).map_err(failed)?,
+        regions: by_axis(store, spellings, sources, REGION_AXIS, sealed.as_deref())
+            .map_err(failed)?,
         sorts: sorts_of(store, sources).map_err(failed)?,
     })
 }

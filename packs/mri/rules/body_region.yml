@@ -11,7 +11,11 @@
 # read what it decided. An image model's coarse answer is not a rule: it
 # reaches a stack only as a proposal on this axis that a person commits,
 # and a committed decision outranks these rules in the classifier, as a
-# committed `chest` or `other` does on the body part.
+# committed `chest` or `other` does on the body part. A committed body part
+# decides the region as well, by what the axis file says each region
+# covers (`coarse_of`), since these rules have folded the rules' own body
+# part by then: the region of such a stack is written by the classifier at
+# a decision's confidence, and not from here.
 #
 # Because they read the body part alone, and at the stated tier, these
 # rules are what `nils pack derive` and a reader's derived line carry a

@@ -556,6 +556,184 @@ fn a_qc_decision_renames_a_bids_file_rather_than_writing_it_again() {
     }
 }
 
+/// A change of a name token under one pack version is a rename: where the
+/// pack's name token for a technique changes and the stacks do not, the
+/// next release of the same tree renames each file and
+/// its DICOM export in place (the release's `moved`), writes none again,
+/// and leaves nothing under the old name beside the new.
+#[test]
+fn a_pack_s_new_name_token_renames_a_bids_file_rather_than_writing_it_again() {
+    let Some(converter) = converter() else { return };
+    let source = tree();
+    let home_dir = TempDir::new("bids-home");
+    let out = TempDir::new("bids-out");
+    let (_home, mut reg) = registry(&home_dir, &source);
+    let policy = Policy::default();
+    let scheme = SessionScheme::default();
+    let s = settings(
+        out.path(),
+        &policy,
+        &scheme,
+        Options::default(),
+        Some(&converter),
+    );
+    run::run(&mut reg, &s).unwrap();
+    let before: Vec<String> = files_under(out.path())
+        .into_iter()
+        .filter(|f| f.ends_with(".nii.gz"))
+        .collect();
+    // the technique's token of every stack released, as the names spell it
+    let technique = pack()
+        .bids
+        .acq
+        .iter()
+        .find(|g| g.from == "technique")
+        .expect("the pack names a technique");
+    let spelled: Vec<&String> = technique
+        .tokens
+        .values()
+        .filter(|t| before.iter().any(|n| n.contains(&format!("+{t}"))))
+        .collect();
+    assert!(
+        !spelled.is_empty(),
+        "a name spells its technique: {before:?}"
+    );
+
+    // the same pack with another word for each technique's token, as a
+    // version whose stored words changed would have
+    let mut renamed = pack().clone();
+    for group in &mut renamed.bids.acq {
+        if group.from == "technique" {
+            for token in group.tokens.values_mut() {
+                token.push_str("new");
+            }
+        }
+    }
+    let s = run::Settings {
+        pack: &renamed,
+        private: &renamed.release,
+        ..settings(
+            out.path(),
+            &policy,
+            &scheme,
+            Options::default(),
+            Some(&converter),
+        )
+    };
+    let after = run::run(&mut reg, &s).unwrap();
+    assert!(after.moved > 0, "{after:?}");
+    assert_eq!(after.written, 0, "renamed, not rewritten");
+    let now: Vec<String> = files_under(out.path())
+        .into_iter()
+        .filter(|f| f.ends_with(".nii.gz"))
+        .collect();
+    assert_eq!(now.len(), before.len(), "no file twice: {now:?}");
+    for token in &spelled {
+        assert!(
+            now.iter().any(|n| n.contains(&format!("+{token}new"))),
+            "the new word is in the name: {now:?}"
+        );
+    }
+    // nothing stays under an old name: no image, no sidecar, no export
+    let all = files_under(out.path());
+    for n in &before {
+        if now.contains(n) {
+            continue;
+        }
+        let stem = n.trim_end_matches(".nii.gz");
+        assert!(
+            !all.iter().any(|f| f.starts_with(stem)),
+            "{stem} is gone: {all:?}"
+        );
+        let export = export_of(n);
+        assert!(
+            !all.iter().any(|f| f.starts_with(&format!("{export}/"))),
+            "{export} is gone: {all:?}"
+        );
+    }
+    // and a third release under the new words finds nothing to do
+    let again = run::run(&mut reg, &s).unwrap();
+    assert_eq!((again.moved, again.written), (0, 0), "{again:?}");
+}
+
+/// The pack's name and version are in a stack's content digest, so the same
+/// change of words in a pack of another version is a rewrite: the next
+/// release of an existing tree writes every stack again under the new names
+/// and removes the old ones, with no file twice and none left under an old
+/// name.
+#[test]
+fn a_new_pack_version_writes_a_bids_tree_again_under_the_new_names() {
+    let Some(converter) = converter() else { return };
+    let source = tree();
+    let home_dir = TempDir::new("bids-home");
+    let out = TempDir::new("bids-out");
+    let (_home, mut reg) = registry(&home_dir, &source);
+    let policy = Policy::default();
+    let scheme = SessionScheme::default();
+    let s = settings(
+        out.path(),
+        &policy,
+        &scheme,
+        Options::default(),
+        Some(&converter),
+    );
+    run::run(&mut reg, &s).unwrap();
+    let before: Vec<String> = files_under(out.path())
+        .into_iter()
+        .filter(|f| f.ends_with(".nii.gz"))
+        .collect();
+    assert!(!before.is_empty());
+    let mut renamed = pack().clone();
+    renamed.version.patch += 1;
+    for group in &mut renamed.bids.acq {
+        if group.from == "technique" {
+            for token in group.tokens.values_mut() {
+                token.push_str("new");
+            }
+        }
+    }
+    let s = run::Settings {
+        pack: &renamed,
+        private: &renamed.release,
+        ..settings(
+            out.path(),
+            &policy,
+            &scheme,
+            Options::default(),
+            Some(&converter),
+        )
+    };
+    let after = run::run(&mut reg, &s).unwrap();
+    assert!(after.written > 0, "{after:?}");
+    assert_eq!(after.moved, 0, "a new version is not a rename: {after:?}");
+    let now: Vec<String> = files_under(out.path())
+        .into_iter()
+        .filter(|f| f.ends_with(".nii.gz"))
+        .collect();
+    assert_eq!(now.len(), before.len(), "no file twice: {now:?}");
+    let all = files_under(out.path());
+    for n in &before {
+        // a name that does not spell a technique is the same name, written
+        // again
+        if now.contains(n) {
+            continue;
+        }
+        let stem = n.trim_end_matches(".nii.gz");
+        assert!(
+            !all.iter().any(|f| f.starts_with(stem)),
+            "{stem} is gone: {all:?}"
+        );
+        let export = export_of(n);
+        assert!(
+            !all.iter().any(|f| f.starts_with(&format!("{export}/"))),
+            "{export} is gone: {all:?}"
+        );
+    }
+    // and a third release under the same version finds nothing to do
+    let again = run::run(&mut reg, &s).unwrap();
+    assert_eq!((again.moved, again.written), (0, 0), "{again:?}");
+}
+
 /// A rename whose files are gone (somebody emptied the tree) is written
 /// again, and its sidecar carries its `NILS` card like any written stack's.
 #[test]

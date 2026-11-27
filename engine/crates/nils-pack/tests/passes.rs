@@ -94,7 +94,10 @@ fn a_stack_votes_among_the_stacks_whose_physics_is_its_own() {
         vec!["T2w", "TSE"],
         "the long TR votes with its own"
     );
-    assert_eq!(said(41), vec!["T1w", "FLASH"], "and the short one with its");
+    // the reference rows hold `FLASH`, the word a pack before this one
+    // stored: they are read as the value, and the answer is the word a
+    // row stores now
+    assert_eq!(said(41), vec!["T1w", "SPGRE"], "and the short one with its");
     for a in &answers {
         assert_eq!(a.outcome.method, "exact_bin");
         assert_eq!(a.outcome.matches, 20, "all twenty agreed");
@@ -223,7 +226,7 @@ fn a_zero_echo_time_is_not_a_short_one_to_the_vote_either() {
     assert_eq!(method, "exact_bin", "a measured one still votes");
     assert_eq!(
         writes,
-        vec!["T1w", "FLASH"],
+        vec!["T1w", "SPGRE"],
         "and is answered by its own bin, the technique it already has \
          being dropped where the pass writes it back"
     );

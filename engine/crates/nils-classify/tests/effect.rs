@@ -598,7 +598,7 @@ fn an_operation_scoped_to_a_scanner_moves_its_scanner_s_stacks_alone() {
         // the contrast word moves ACME's three stacks; the TSE word is
         // scoped to a maker the registry does not hold, and moves nothing
         assert_eq!(
-            moves.get(&("post_contrast".into(), String::new(), "1".into())),
+            moves.get(&("post_contrast".into(), String::new(), "given".into())),
             Some(&3),
             "{name}: {moves:?}"
         );
@@ -1185,5 +1185,110 @@ fn a_sort_with_scoped_changes_is_the_one_rehearsed_whatever_order_its_groups_run
             "{name}: a stack in the scope is labelled again"
         );
         assert_eq!(count(&mut reg, acme[0]), 1, "{name}: once");
+    }
+}
+
+/// A decision on one of two axes the pack declares the coarse and the fine
+/// form of one thing holds the other to it in the rehearsal as in the
+/// sort. Three stacks no rule reads a body part off; a region was decided
+/// on one and a body part on another. A change that makes the rules read a
+/// spine off all three moves the third alone: on the first the decided
+/// chest does not cover a spine, which is set aside, and on the second the
+/// region is the head of the decided brain whatever the rules fold.
+#[test]
+fn the_rehearsal_holds_a_coarse_form_to_a_decision_as_the_sort_does() {
+    let pack = nils_pack::load(&mri(), None).expect("the MRI pack loads");
+    let p = Patch::parse(
+        "ops",
+        "patch: 1\npack: mri\nreason: a check\nevidence: this test\noperations:\n  - {op: add_words, axis: body_part, value: spine, words: [zqzq]}\n",
+    )
+    .unwrap();
+    let patched = patch::apply(&mri(), &p, &|_| true).unwrap();
+    let out = TempDir::new("effect-coarse-pack");
+    let written = out.path().join("mri");
+    patched.docs.write(&written, Some("1.0.99")).unwrap();
+    let after_pack = nils_pack::load(&written, None).expect("the patched pack loads");
+    let settings = nils_classify::effect::Settings {
+        scope: None,
+        examples: 10,
+        workers: 2,
+        ..Default::default()
+    };
+    for lab in labs() {
+        let name = lab.name;
+        let dir = TempDir::new("effect-coarse");
+        for n in 1..=3 {
+            series(
+                &dir,
+                "1.2.9.8.1",
+                n,
+                "P8",
+                &spin_echo("SIEMENS", &format!("ax zqzq {n}")),
+                false,
+            );
+        }
+        let mut reg = prepare(&lab, &dir);
+        nils_classify::classify::classify(&mut reg, &pack, &Default::default(), &Cancel::new())
+            .unwrap();
+        let zqzq: Vec<i64> = (0..3)
+            .map(|i| stack_named(&mut reg, "SIEMENS", "zqzq", i))
+            .collect();
+        decide(&mut reg, zqzq[0], "body_region", "chest");
+        decide(&mut reg, zqzq[1], "body_part", "brain");
+        nils_classify::classify::classify(&mut reg, &pack, &Default::default(), &Cancel::new())
+            .unwrap();
+        let before = stored(&mut reg);
+        let body = |stored: &BTreeMap<i64, BTreeMap<String, String>>, stack: i64| {
+            let of = |axis: &str| stored[&stack].get(axis).cloned().unwrap_or_default();
+            (of("body_part"), of("body_region"))
+        };
+        assert_eq!(
+            body(&before, zqzq[0]),
+            (String::new(), "chest".into()),
+            "{name}"
+        );
+        assert_eq!(
+            body(&before, zqzq[1]),
+            ("brain".into(), "head".into()),
+            "{name}: the head of the decided brain, where the rules said nothing"
+        );
+        assert_eq!(
+            body(&before, zqzq[2]),
+            (String::new(), String::new()),
+            "{name}"
+        );
+
+        let doc = nils_classify::effect::run(reg.store(), &mri(), &pack, &p, &settings, &names)
+            .unwrap_or_else(|e| panic!("{name}: {e}"));
+        nils_classify::classify::classify(
+            &mut reg,
+            &after_pack,
+            &Default::default(),
+            &Cancel::new(),
+        )
+        .unwrap();
+        let after = stored(&mut reg);
+        assert_eq!(body(&after, zqzq[0]), body(&before, zqzq[0]), "{name}");
+        assert_eq!(body(&after, zqzq[1]), body(&before, zqzq[1]), "{name}");
+        assert_eq!(
+            body(&after, zqzq[2]),
+            ("spine".into(), "spine".into()),
+            "{name}"
+        );
+        let resort = diff(&before, &after, &BTreeSet::new());
+        let moved = |axis: &str| {
+            resort
+                .iter()
+                .filter(|((a, ..), _)| a == axis)
+                .map(|(_, n)| *n)
+                .sum::<i64>()
+        };
+        assert_eq!(moved("body_part"), 1, "{name}: {resort:?}");
+        assert_eq!(moved("body_region"), 1, "{name}: {resort:?}");
+        assert_eq!(
+            report_moves(&doc),
+            resort,
+            "{name}: the report's moves are the re-sort's"
+        );
     }
 }

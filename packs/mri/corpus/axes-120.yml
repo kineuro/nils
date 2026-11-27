@@ -23,9 +23,9 @@ cases:
       repetition_time: 700
       flip_angle: 20
     axes:
-      technique: MEDIC
+      technique: combMEGRE
       construct: Magnitude
-      base: 'T2*w'
+      base: T2starw
 
   - name: a MEDIC image marked ND keeps the ND beside its magnitude
     stack:
@@ -39,9 +39,9 @@ cases:
       repetition_time: 700
       flip_angle: 20
     axes:
-      technique: MEDIC
+      technique: combMEGRE
       construct: 'Magnitude,ND'
-      base: 'T2*w'
+      base: T2starw
 
   # --- Q2: QALAS
 
@@ -72,9 +72,9 @@ cases:
       text_sequence_name: '*epfid3d1_15'
       text_series_description: 'swi_epi3d'
     axes:
-      technique: GRE-EPI
+      technique: GREEPI
       construct: Magnitude
-      base: 'T2*w'
+      base: T2starw
 
   - name: the phase series of an SWI-type EPI is Phase and has no base
     stack:

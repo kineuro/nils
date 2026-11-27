@@ -100,6 +100,29 @@ pub struct AxisValueNames {
     pub stored: Option<String>,
 }
 
+/// What the pack says of an axis beside the names of its values: whether a
+/// stack may hold several of them, and the coarse forms declared around it
+/// (`coarse_of` and `covers` in the pack's axis files). A catalog that
+/// knows the values alone (a fixture) answers the default: one value a
+/// stack, no coarse form.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AxisKin {
+    /// Whether a stack may hold several values of the axis.
+    pub multi: bool,
+    /// The axis this one is the coarse form of, where it is one.
+    pub coarse_of: Option<String>,
+    /// The axes that are this one's coarse form.
+    pub wider: Vec<WiderAxis>,
+}
+
+/// An axis that is the coarse form of another: each of its values that
+/// covers values of the finer axis, with those values, by identity.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct WiderAxis {
+    pub axis: String,
+    pub values: Vec<(String, Vec<String>)>,
+}
+
 /// A classification axis as a document names its values (Wave 7a). A
 /// document may name a value by its identity, by an identity it had before
 /// a rename, or by its label, and a row may hold any of them: the rules
@@ -229,6 +252,13 @@ pub trait Names {
                 .collect(),
         })
     }
+    /// What the pack says of an axis beside its values' names: whether it
+    /// holds several values a stack, and its coarse forms. A catalog that
+    /// knows neither answers the default.
+    fn axis_kin(&self, axis: &str) -> AxisKin {
+        let _ = axis;
+        AxisKin::default()
+    }
     fn kind(&self, name: &str) -> Option<KindInfo>;
     fn level(&self, name: &str) -> bool;
     /// A library set shipped by the pack, and its grain.
@@ -344,6 +374,10 @@ pub enum Code {
     /// A set filters or orders by a count of rows in order that a set it
     /// is drawn from made, after a set between them kept only some rows.
     SequenceInherited,
+    /// A diagnosis's warning: a filter on one value of an axis kept a small
+    /// share of its rows, and sibling values of the axis hold most of the
+    /// rest.
+    NarrowValue,
 }
 
 impl Code {
@@ -372,6 +406,7 @@ impl Code {
             Code::ReversedDates => "reversed_dates",
             Code::SequenceBeforeWhere => "sequence_before_where",
             Code::SequenceInherited => "sequence_inherited",
+            Code::NarrowValue => "narrow_value",
         }
     }
 
@@ -385,6 +420,7 @@ impl Code {
                 | Code::ReversedDates
                 | Code::SequenceBeforeWhere
                 | Code::SequenceInherited
+                | Code::NarrowValue
         )
     }
 }

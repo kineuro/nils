@@ -567,7 +567,7 @@ pub(crate) fn own_folder<'p>(pack: Option<&'p nils_pack::Pack>, a: &Axes) -> Opt
         pack.axes
             .iter()
             .find(|x| x.name == axis)?
-            .id_of_stored(stored)
+            .id_of(stored)
             .map(str::to_string)
     };
     pack.bids

@@ -1275,6 +1275,44 @@ pub(crate) fn rules_seen(
         ),
         &[Param::Int(stack), Param::from(axis)],
     )?;
+    // A value folded from a decision on the finer of two axes is no rule's:
+    // the rules' value is the one a question names, and none where none
+    // does. And an axis whose value a decision on the other axis set aside
+    // holds no row, where the rules did say something: what they said, as
+    // the sort noted it, and never "the rules gave none".
+    if rows
+        .iter()
+        .any(|r| r.text(1).is_ok_and(|t| t == nils_registry::coarse::FOLDED))
+    {
+        return Ok(named.map(str::to_string));
+    }
+    if rows.is_empty()
+        && nils_registry::coarse::set_aside(store, &[stack])?
+            .get(&stack)
+            .is_some_and(|a| a.contains(axis))
+    {
+        if named.is_some() {
+            return Ok(named.map(str::to_string));
+        }
+        let notes = store.query_opt(
+            &format!(
+                "SELECT CAST(notes AS TEXT) FROM {} WHERE stack_id = {}",
+                store.qualified("classification"),
+                d.param(1, Type::Int)
+            ),
+            &[Param::Int(stack)],
+        )?;
+        let notes: Value = notes
+            .and_then(|r| r.opt_text(0).ok().flatten().map(str::to_string))
+            .and_then(|t| serde_json::from_str(&t).ok())
+            .unwrap_or(Value::Null);
+        return Ok(notes["set_aside"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .find(|n| n["axis"] == axis && n["decided_by"].is_null())
+            .and_then(|n| n["value"].as_str().map(str::to_string)));
+    }
     let mut values = Vec::new();
     for r in &rows {
         if r.text(1)? == "decision" {

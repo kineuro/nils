@@ -66,7 +66,16 @@ fn count_rows(
         .collect()
 }
 
-pub fn signals(store: &mut Store, scope: &Scope) -> Result<Value, Error> {
+///
+/// A row and a decision are each read as the value they name
+/// (`nils_registry::spelling`): rows that hold one value in two spellings
+/// are one value here, and a decision that spells the rules' answer another
+/// way is no disagreement.
+pub fn signals(
+    store: &mut Store,
+    spellings: &nils_registry::spelling::Spellings,
+    scope: &Scope,
+) -> Result<Value, Error> {
     let (stacks, scope_params) = scope.stacks_sql(store, 1);
     let mut axes: BTreeMap<String, Value> = BTreeMap::new();
     let axis = |axes: &mut BTreeMap<String, Value>, name: &str| -> Value {
@@ -133,11 +142,28 @@ pub fn signals(store: &mut Store, scope: &Scope) -> Result<Value, Error> {
     // The terms that carried the most decisions that disagreed with the
     // rules: a person's stack decision beside the rule's citation.
     let sql = format!(
-        "SELECT e.axis, e.matched, COUNT(*) FROM {} AS d JOIN {} AS e ON CAST(e.stack_id AS TEXT) = d.ref AND e.axis = d.axis WHERE d.scope = 'stack' AND d.withdrawn_at IS NULL AND e.source = 'text' AND (d.value IS NULL OR d.value <> e.value) AND e.stack_id IN {stacks} GROUP BY e.axis, e.matched ORDER BY COUNT(*) DESC, e.axis, e.matched LIMIT 200",
+        "SELECT e.axis, e.matched, d.value, e.value, COUNT(*) FROM {} AS d JOIN {} AS e ON CAST(e.stack_id AS TEXT) = d.ref AND e.axis = d.axis WHERE d.scope = 'stack' AND d.withdrawn_at IS NULL AND e.source = 'text' AND (d.value IS NULL OR d.value <> e.value) AND e.stack_id IN {stacks} GROUP BY e.axis, e.matched, d.value, e.value ORDER BY COUNT(*) DESC, e.axis, e.matched LIMIT 400",
         store.qualified("decision"),
         store.qualified("classification_evidence")
     );
-    for (a, term, n) in count_rows(store, &sql, &scope_params)? {
+    // by term, most first, a decision that names the rule's value in
+    // another spelling left out
+    let mut by_term: Vec<(String, String, i64)> = Vec::new();
+    for r in store.query(&sql, &scope_params)? {
+        let (a, term) = (r.text(0)?, r.opt_text(1)?.unwrap_or(""));
+        if let Some(decided) = r.opt_text(2)?
+            && spellings.same(a, decided, r.text(3)?)
+        {
+            continue;
+        }
+        let n = r.int(4)?;
+        match by_term.iter_mut().find(|(x, t, _)| x == a && t == term) {
+            Some(held) => held.2 += n,
+            None => by_term.push((a.to_string(), term.to_string(), n)),
+        }
+    }
+    by_term.sort_by(|x, y| y.2.cmp(&x.2).then_with(|| (&x.0, &x.1).cmp(&(&y.0, &y.1))));
+    for (a, term, n) in by_term {
         let mut doc = axis(&mut axes, &a);
         if doc["disagreeing_terms"]
             .as_array()
@@ -216,7 +242,7 @@ pub fn signals(store: &mut Store, scope: &Scope) -> Result<Value, Error> {
         }
     }
 
-    let by_value = by_value(store, &stacks, &scope_params, &shadowed)?;
+    let by_value = by_value(store, spellings, &stacks, &scope_params, &shadowed)?;
     let origins = origins(store, &stacks, &scope_params)?;
 
     Ok(json!({
@@ -520,6 +546,7 @@ struct ValueSignals {
 /// rule cited on stacks a person then decided otherwise.
 fn by_value(
     store: &mut Store,
+    spellings: &nils_registry::spelling::Spellings,
     stacks: &str,
     params: &[Param],
     shadowed: &[String],
@@ -548,7 +575,10 @@ fn by_value(
     );
     for r in store.query(&sql, params)? {
         let axis = r.text(0)?.to_string();
-        let value = r.opt_text(1)?.unwrap_or("").to_string();
+        // the value the row names, by the one spelling rows store
+        let value = spellings
+            .stored_part(&axis, r.opt_text(1)?.unwrap_or(""))
+            .to_string();
         let tier = r.text(2)?.to_string();
         let n = r.int(3)?;
         let Some(v) = slot(&mut out, &axis, &value) else {
@@ -573,27 +603,37 @@ fn by_value(
         store.qualified("review_item")
     );
     for (axis, value, n) in count_rows(store, &sql, params)? {
+        let value = spellings.stored_part(&axis, &value).to_string();
         if let Some(v) = slot(&mut out, &axis, &value) {
-            v.unsure = n;
+            v.unsure += n;
         }
     }
 
     // The words the rule cited on stacks a person then decided otherwise,
     // by the value the rule had decided.
     let sql = format!(
-        "SELECT e.axis, e.value, e.matched, COUNT(*) FROM {} AS d JOIN {} AS e ON CAST(e.stack_id AS TEXT) = d.ref AND e.axis = d.axis WHERE d.scope = 'stack' AND d.withdrawn_at IS NULL AND e.source = 'text' AND (d.value IS NULL OR d.value <> e.value) AND e.stack_id IN {stacks} GROUP BY e.axis, e.value, e.matched ORDER BY COUNT(*) DESC, e.axis, e.value, e.matched LIMIT 400",
+        "SELECT e.axis, e.value, e.matched, d.value, COUNT(*) FROM {} AS d JOIN {} AS e ON CAST(e.stack_id AS TEXT) = d.ref AND e.axis = d.axis WHERE d.scope = 'stack' AND d.withdrawn_at IS NULL AND e.source = 'text' AND (d.value IS NULL OR d.value <> e.value) AND e.stack_id IN {stacks} GROUP BY e.axis, e.value, e.matched, d.value ORDER BY COUNT(*) DESC, e.axis, e.value, e.matched LIMIT 800",
         store.qualified("decision"),
         store.qualified("classification_evidence")
     );
     for r in store.query(&sql, params)? {
         let axis = r.text(0)?.to_string();
-        let value = r.text(1)?.to_string();
-        let word = r.opt_text(2)?.unwrap_or("").to_string();
-        let n = r.int(3)?;
-        if let Some(v) = slot(&mut out, &axis, &value)
-            && v.overrode_with.len() < TOP
+        // a decision that names the rule's value in another spelling
+        // decided nothing otherwise
+        if let Some(decided) = r.opt_text(3)?
+            && spellings.same(&axis, decided, r.text(1)?)
         {
-            v.overrode_with.push((word, n));
+            continue;
+        }
+        let value = spellings.stored_part(&axis, r.text(1)?).to_string();
+        let word = r.opt_text(2)?.unwrap_or("").to_string();
+        let n = r.int(4)?;
+        if let Some(v) = slot(&mut out, &axis, &value) {
+            if let Some(at) = v.overrode_with.iter().position(|(w, _)| *w == word) {
+                v.overrode_with[at].1 += n;
+            } else if v.overrode_with.len() < TOP {
+                v.overrode_with.push((word, n));
+            }
         }
     }
 

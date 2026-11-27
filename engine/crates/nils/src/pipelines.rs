@@ -12131,11 +12131,17 @@ fn finalize(
                     .map(|(r, u)| (*r, u.unit.clone()))
                     .collect();
                 let mut results: Vec<Vec<Value>> = vec![Vec::new(); named.len()];
+                let spellings = registry.spellings();
                 for c in &cohort {
-                    for (i, v) in
-                        crate::pipeline_pack::cohort_check(registry.store(), &p.name, c, &named)
-                            .into_iter()
-                            .enumerate()
+                    for (i, v) in crate::pipeline_pack::cohort_check(
+                        registry.store(),
+                        &spellings,
+                        &p.name,
+                        c,
+                        &named,
+                    )
+                    .into_iter()
+                    .enumerate()
                     {
                         results[i].push(v);
                     }

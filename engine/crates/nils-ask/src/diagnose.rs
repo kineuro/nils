@@ -52,8 +52,11 @@ pub struct Stage {
     pub held_back: Option<String>,
 }
 
-/// A where clause of the answer's set, and what it dropped; a count held
-/// back is null (record 55 K7, small counts at plain).
+/// A where clause of the answer's set, or of a set the answer reads its
+/// rows through (the set it is drawn `from` or is `of`, and each set a
+/// `has` reads, and theirs in turn), and what it dropped there, in rows of
+/// `set`; the answer's own clauses come first. A count held back is null
+/// (record 55 K7, small counts at plain).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Drop {
     pub set: String,
@@ -371,6 +374,36 @@ fn variant(ask: &Ask, target: &str, step: &Step, level: Level) -> Ask {
         limit: None,
     };
     a
+}
+
+/// The sets the answer reads its rows through, the answer's set first:
+/// the set it is drawn `from`, the set it is `of`, and each set a `has` of
+/// it reads, and theirs in turn. A `where` clause of any of them cuts the
+/// answer as one of the answer's own does, so the drops count them all. A
+/// partner a `near` or an `attach` reads adds to a row and takes none
+/// away, and a group or an algebra is not followed.
+fn answer_path(ask: &Ask) -> Vec<String> {
+    let mut out = vec![ask.out.set.clone()];
+    let mut at = 0;
+    while at < out.len() {
+        if let Some(set) = ask.sets.get(&out[at]) {
+            let from = match &set.from {
+                Some(Src::Set(s)) => Some(s.clone()),
+                _ => None,
+            };
+            let read = from
+                .into_iter()
+                .chain(set.of.clone())
+                .chain(set.has.iter().map(|h| h.set.clone()));
+            for r in read {
+                if !out.contains(&r) && ask.sets.contains_key(&r) {
+                    out.push(r);
+                }
+            }
+        }
+        at += 1;
+    }
+    out
 }
 
 /// The step a set stands at before its first `where`: its last relation,
@@ -730,6 +763,27 @@ struct Count {
     quasi: bool,
 }
 
+thread_local! {
+    /// The statements a diagnosis under a time may still run on this
+    /// thread before its time counts as run out ([`time_ends_after`]).
+    static STATEMENTS_LEFT: std::cell::Cell<Option<u32>> = const { std::cell::Cell::new(None) };
+    /// The statements diagnoses under a time ran on this thread.
+    static STATEMENTS_RUN: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
+/// A clock a test can hold. A diagnosis under a time ([`diagnose_within`])
+/// run on this thread from now on finds its time run out when it comes to
+/// its statement number `statements` (counted from nought), whatever the
+/// wall clock says; `None` gives the wall clock back. Answers how many
+/// statements such diagnoses ran on this thread since the last call. What
+/// happens once the time is spent between two parts of a diagnosis cannot
+/// be tested by waiting for it, and this is how it is: no door calls it.
+#[doc(hidden)]
+pub fn time_ends_after(statements: Option<u32>) -> u32 {
+    STATEMENTS_LEFT.with(|c| c.set(statements));
+    STATEMENTS_RUN.with(|c| c.replace(0))
+}
+
 impl Counter<'_> {
     /// One statement of the diagnosis, under what is left of its time: none
     /// once the time is spent, and none where the statement ran past it,
@@ -743,10 +797,20 @@ impl Counter<'_> {
     ) -> Result<Option<(Compiled, Answer)>, RunError> {
         if let Some(b) = &mut self.budget {
             let left = b.ms.saturating_sub(b.started.elapsed().as_millis() as u64);
-            if b.spent_in.is_some() || left == 0 {
+            // a test's clock: the time ends at a statement it names
+            let ended = STATEMENTS_LEFT.with(|c| match c.get() {
+                Some(0) => true,
+                Some(n) => {
+                    c.set(Some(n - 1));
+                    false
+                }
+                None => false,
+            });
+            if b.spent_in.is_some() || left == 0 || ended {
                 b.spent_in.get_or_insert(b.part);
                 return Ok(None);
             }
+            STATEMENTS_RUN.with(|c| c.set(c.get() + 1));
             self.runner.bounds.timeout_ms = left.min(b.statement_ms);
         }
         let compiled = self.runner.compiled(registry, ask, validated, None, None)?;
@@ -877,6 +941,7 @@ impl Counter<'_> {
         let Some(set) = ask.sets.get(host).filter(|s| one_pass(s)) else {
             return Ok(None);
         };
+        let path = answer_path(ask);
         let subjects = set.grain != Grain::Cohort;
         let mut taken: BTreeSet<String> = set
             .bind
@@ -914,7 +979,7 @@ impl Counter<'_> {
             }
             let mut unknown: Vec<Unknown> = Vec::new();
             let mut asked: Vec<Option<usize>> = vec![None; clauses];
-            if *name == ask.out.set {
+            if path.contains(name) {
                 let all = steps(one);
                 for (w, c) in one.where_.iter().enumerate() {
                     let this = format!("where {}", clause_text(c));
@@ -1571,6 +1636,9 @@ fn diagnose_as(
     // what they answered ([`Ahead`]). A diagnosis that lists keys counts
     // one statement at a time, and so does the reference path.
     let started = Instant::now();
+    // the session cache is brought up to date once for the question, by
+    // whichever pass first compiles a statement that reads it
+    let sessions_fresh = std::cell::Cell::new(false);
     let mut ahead = Ahead::None;
     if in_one_pass && !with_keys && !beside.is_empty() {
         let mut listed = Ahead::Listed(Vec::new());
@@ -1591,6 +1659,7 @@ fn diagnose_as(
             None,
             in_one_pass,
             &mut listed,
+            &sessions_fresh,
         );
         if let Ahead::Listed(jobs) = listed {
             let own: &mut Store = match lend(&mut reader) {
@@ -1622,6 +1691,7 @@ fn diagnose_as(
         budget_ms.map(|ms| (started, ms)),
         in_one_pass,
         &mut ahead,
+        &sessions_fresh,
     )
 }
 
@@ -1650,6 +1720,7 @@ fn counted(
     budget: Option<(Instant, u64)>,
     in_one_pass: bool,
     ahead: &mut Ahead,
+    sessions_fresh: &std::cell::Cell<bool>,
 ) -> Result<Diagnosis, RunError> {
     let mut counter = Counter {
         runner: Runner {
@@ -1658,6 +1729,7 @@ fn counted(
             bounds,
             reader,
             unsealed: scope.unsealed,
+            sessions_fresh,
         },
         names,
         scope,
@@ -1677,9 +1749,10 @@ fn counted(
     // the sets whose last stage is held back: a set that narrows one, or
     // reads below it, starts from the same rows and holds its source too
     let mut last_held: BTreeSet<String> = BTreeSet::new();
-    // what a pass over the answer's set counted of the rows each of its
-    // clauses' fields is unknown on, by clause
-    let mut out_nulls: Vec<Option<Option<i64>>> = Vec::new();
+    // what a pass over a set the answer reads its rows through counted of
+    // the rows each of its clauses' fields is unknown on, by set and clause
+    let path = answer_path(ask);
+    let mut path_nulls: BTreeMap<String, Vec<Option<Option<i64>>>> = BTreeMap::new();
     // what a pass counted of each set, none where it counted nothing; and
     // whether sets of the same rows are still counted together
     let mut passed: BTreeMap<String, Option<Pass>> = BTreeMap::new();
@@ -1745,8 +1818,8 @@ fn counted(
                     shared + if counted.len() > 1 { counted.len() } else { 0 },
                 ));
                 for (of, pass) in counted {
-                    if of == ask.out.set {
-                        out_nulls.clone_from(&pass.nulls);
+                    if path.contains(&of) {
+                        path_nulls.insert(of.clone(), pass.nulls.clone());
                     }
                     passed.insert(of, Some(pass));
                 }
@@ -1798,14 +1871,21 @@ fn counted(
             last_held.insert(name.clone());
         }
     }
-    // the answer's where clauses: before, after and the nulls
+    // the where clauses of the answer's set, and of each set it reads its
+    // rows through: before, after and the nulls
     counter.enter("drops");
     let mut drops = Vec::new();
-    if let Some(out_set) = ask.sets.get(&ask.out.set)
-        && out_set.grain != Grain::Group
-    {
-        let all = steps(out_set);
-        for (w, c) in out_set.where_.iter().enumerate() {
+    for on in &path {
+        let Some(set) = ask.sets.get(on) else {
+            continue;
+        };
+        if on.contains("__") || set.grain == Grain::Group {
+            continue;
+        }
+        let no_nulls = Vec::new();
+        let nulls_of = path_nulls.get(on).unwrap_or(&no_nulls);
+        let all = steps(set);
+        for (w, c) in set.where_.iter().enumerate() {
             let this = format!("where {}", clause_text(c));
             let position = all.iter().position(|(_, l)| *l == this).unwrap_or(0);
             let before_label = position
@@ -1813,16 +1893,16 @@ fn counted(
                 .map(|p| all[p].1.clone())
                 .unwrap_or_else(|| "source".into());
             let before = stage_counts
-                .get(&(ask.out.set.clone(), before_label))
+                .get(&(on.clone(), before_label))
                 .map_or(Some(0), |c| c.0);
             let after = stage_counts
-                .get(&(ask.out.set.clone(), this.clone()))
+                .get(&(on.clone(), this.clone()))
                 .map_or(Some(0), |c| c.0);
             let mut paths = BTreeSet::new();
             paths_in(c, &mut paths);
             let nulls = match paths.iter().next() {
-                Some(_) if out_nulls.get(w).is_some_and(Option::is_some) => {
-                    out_nulls[w].unwrap_or(Some(0))
+                Some(_) if nulls_of.get(w).is_some_and(Option::is_some) => {
+                    nulls_of[w].unwrap_or(Some(0))
                 }
                 Some(p) => {
                     // the set as it stands before this clause, plus "the
@@ -1831,8 +1911,8 @@ fn counted(
                         .checked_sub(1)
                         .map(|q| all[q].0.clone())
                         .unwrap_or(Step::Source);
-                    let mut v = variant(ask, &ask.out.set, &previous, Level::Count);
-                    if let Some(s) = v.sets.get_mut(&ask.out.set) {
+                    let mut v = variant(ask, on, &previous, Level::Count);
+                    if let Some(s) = v.sets.get_mut(on) {
                         s.where_.push(
                             Clause::new("is_null").arg(crate::ast::Arg::Clause(Clause::field(p))),
                         );
@@ -1842,7 +1922,7 @@ fn counted(
                 None => Some(0),
             };
             drops.push(Drop {
-                set: ask.out.set.clone(),
+                set: on.clone(),
                 clause: this,
                 before,
                 after,
@@ -1906,6 +1986,19 @@ fn counted(
     // a filter on a date difference written the wrong way round
     let mut warnings = warnings;
     warnings.extend(reversed_dates(&mut counter, registry, ask, &stage_counts)?);
+    // a filter on one value of an axis that left most rows with its
+    // siblings. Not where the caller asked for keys: a stage's rows are
+    // then the keys listed, cut at the cap of a list, and the warning would
+    // hold a capped count against the whole count of each sibling.
+    if !with_keys {
+        warnings.extend(narrow_values(
+            &mut counter,
+            registry,
+            ask,
+            &validated.order,
+            &stage_counts,
+        ));
+    }
     // unresolved values
     let mut unresolved = Vec::new();
     for (name, decl) in &ask.values {
@@ -2138,6 +2231,472 @@ fn reversed_dates(
         b.spent_in = None;
     }
     Ok(found)
+}
+
+/// A value filter is warned about where it keeps less than one row in
+/// this many of the rows its set holds without it.
+pub const NARROW_KEPT_ONE_IN: i64 = 5;
+
+/// How many times the rows a value filter kept its siblings must hold for
+/// the filter to be warned about.
+pub const NARROW_FACTOR: i64 = 3;
+
+/// The most value filters of one document that are measured: one
+/// statement each.
+pub const NARROW_CLAUSES: usize = 3;
+
+/// The most sibling values a warning names, the largest first.
+pub const NARROW_NAMED: usize = 3;
+
+/// A `where` clause that keeps the stacks holding one of the values of an
+/// axis it writes out (`=`, `has`, or `in` with a list): the axis, its
+/// names, and the identities of the values kept. None for any other
+/// clause, and where a value is a parameter or no value of the axis.
+fn value_filter(
+    c: &Clause,
+    names: &dyn Names,
+) -> Option<(String, crate::validate::AxisNames, Vec<String>)> {
+    if !matches!(c.op.as_str(), "=" | "has" | "in") || c.args.len() != 2 {
+        return None;
+    }
+    let Some(Arg::Clause(l)) = c.args.first() else {
+        return None;
+    };
+    if l.op != "axis" || !l.opts.is_empty() {
+        return None;
+    }
+    let axis = l.ref_name()?;
+    let literal = |a: &Arg| match a {
+        Arg::Text(t) => Some(t.clone()),
+        Arg::Int(n) => Some(n.to_string()),
+        Arg::Number(n) => Some(n.to_string()),
+        _ => None,
+    };
+    let written: Vec<String> = match c.args.get(1)? {
+        Arg::List(items) => items.iter().map(literal).collect::<Option<_>>()?,
+        other => vec![literal(other)?],
+    };
+    let of = names.axis_names(axis)?;
+    let mut kept: Vec<String> = Vec::new();
+    for w in &written {
+        let id = of.named(w)?.id.clone();
+        if !kept.contains(&id) {
+            kept.push(id);
+        }
+    }
+    (!kept.is_empty()).then(|| (axis.to_string(), of, kept))
+}
+
+/// Whether a set, or a set it is drawn from, holds a `where` clause that
+/// keeps values of a coarse axis which between them cover every one of
+/// `kept`, the values of the finer axis another clause keeps.
+fn narrowed_on_purpose(
+    ask: &Ask,
+    name: &str,
+    kin: &crate::validate::AxisKin,
+    kept: &[String],
+    names: &dyn Names,
+) -> bool {
+    let mut seen: BTreeSet<&str> = BTreeSet::new();
+    let mut at = Some(name);
+    while let Some(n) = at {
+        if !seen.insert(n) {
+            break;
+        }
+        let Some(set) = ask.sets.get(n) else {
+            break;
+        };
+        for c in &set.where_ {
+            let Some((axis, _, coarse)) = value_filter(c, names) else {
+                continue;
+            };
+            let covered = kin.wider.iter().any(|w| {
+                w.axis == axis
+                    && kept.iter().all(|k| {
+                        w.values
+                            .iter()
+                            .any(|(v, covers)| coarse.contains(v) && covers.contains(k))
+                    })
+            });
+            if covered {
+                return true;
+            }
+        }
+        at = match &set.from {
+            Some(Src::Set(from)) => Some(from.as_str()),
+            _ => None,
+        };
+    }
+    false
+}
+
+/// A count as a person reads it: 4210 as 4,210.
+fn grouped_digits(n: i64) -> String {
+    let digits = n.unsigned_abs().to_string();
+    let mut out = String::new();
+    for (i, d) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(d);
+    }
+    if n < 0 { format!("-{out}") } else { out }
+}
+
+/// Words joined as a list is said: a, b and c.
+fn listed(words: &[String], last: &str) -> String {
+    match words {
+        [] => String::new(),
+        [one] => one.clone(),
+        [most @ .., end] => format!("{} {last} {end}", most.join(", ")),
+    }
+}
+
+/// The rows of a stack set as it stands after `step`, by the value each
+/// holds on `axis`: one statement, a group of the set keyed by the axis,
+/// read under the caller's own scope, so a count the engine holds back of
+/// a group's answer is held back here as well and comes as none. A key is
+/// the value's identity, the text a row holds where no value of the axis
+/// stores it, and none for the stacks with no value. None where the
+/// statement was not run or did not answer: the counts are a hint, and a
+/// hint that cannot be counted is not given.
+fn rows_by_value(
+    counter: &mut Counter<'_>,
+    registry: &mut Registry,
+    ask: &Ask,
+    set: &str,
+    step: &Step,
+    axis: &str,
+    of: &crate::validate::AxisNames,
+) -> Option<Vec<(Option<String>, Option<i64>)>> {
+    let mut v = variant(ask, set, step, Level::Count);
+    let by = format!("{set}__values");
+    if v.sets.contains_key(&by) {
+        return None;
+    }
+    let mut group = Set::at(Grain::Group);
+    group.group = Some(GroupSpec {
+        of: set.to_string(),
+        by: vec![Clause::new("axis").arg(Arg::Text(axis.to_string()))],
+    });
+    v.sets.insert(by.clone(), group);
+    v.out.set = by;
+    v.out.level = Level::Aggregate;
+    v.out.columns = vec![Clause::field(axis), Clause::field("_rows")];
+    let vv = validate(&v, counter.names, counter.scope).ok()?;
+    let (_, a) = counter.answer(registry, &v, &vv).ok()??;
+    if a.rows_held || a.truncated {
+        return None;
+    }
+    // the answer's own columns come after the ones every list carries
+    let value_at = a.columns.iter().position(|c| c == axis)?;
+    let rows_at = a.columns.iter().position(|c| c == "_rows")?;
+    let mut out: Vec<(Option<String>, Option<i64>)> = Vec::new();
+    for r in &a.rows {
+        let key = match r.0.get(value_at)? {
+            nils_registry::store::Cell::Null => None,
+            nils_registry::store::Cell::Text(t) => Some(t.clone()),
+            other => Some(crate::exec::render(other)),
+        };
+        let key = key.map(|k| {
+            of.values
+                .iter()
+                .find(|x| of.stored(x) == k)
+                .or_else(|| of.named(&k))
+                .map_or(k.clone(), |x| x.id.clone())
+        });
+        // A count held back in the group answer ends it: the kept value is
+        // small where this warning is raised, so it is often the group the
+        // answer holds, with the smallest group shown beside it, and a
+        // message that put the counts shown next to the funnel's would say
+        // by subtraction what the answer kept apart.
+        let rows = r.opt_int(rows_at).ok()??;
+        match out.iter_mut().find(|(k, _)| *k == key) {
+            // two spellings of one value
+            Some((_, n)) => *n = n.map(|a| a + rows),
+            None => out.push((key, Some(rows))),
+        }
+    }
+    Some(out)
+}
+
+/// A filter on a value of an axis that throws away what the value's
+/// siblings hold. "All brain scans" written as `body_part = brain` keeps
+/// the stacks that end above the neck and drops the many a model labelled
+/// brain and neck, the answer is a small share of what was meant, and
+/// nothing in the counts says why. For a `where` clause of a stack set of
+/// the document that keeps the stacks holding a value of an axis it
+/// writes out ([`value_filter`]), the clause is measured against the set
+/// it stands in: the rows the set holds with that one clause left out and
+/// every other condition of the set applied, by their value of the axis.
+/// What the clause kept at its own place in the list says nothing of that
+/// (a clause written first is counted over everything, one written last
+/// over what the others left), so the measure does not depend on where
+/// the clause stands. The warning is raised where all of this holds:
+///
+/// - the pack declares a coarse form of the axis (`coarse_of`), and a
+///   value of it covers every value the clause keeps: the siblings the
+///   kept value could be mistaken for are the other values that coarse
+///   value covers, and no others;
+/// - of the rows the set holds without the clause, the clause keeps less
+///   than one in [`NARROW_KEPT_ONE_IN`];
+/// - other values of the axis hold more than half of the rows it drops
+///   (the stacks with no value on the axis are no siblings);
+/// - the covered siblings together hold [`NARROW_FACTOR`] times the kept
+///   rows or more.
+///
+/// The warning names the coarse axis and value as the wider choice. An
+/// axis the pack declares no coarse form of is never warned about: a
+/// count alone cannot tell a value mistaken for its sibling from a value
+/// that is rare, and on an axis one value dominates every filter on
+/// another value would be warned about (a perfusion series beside the
+/// anatomical ones). A sibling under another coarse value is another
+/// thing, a spine beside a brain; the coarse axis itself has nothing
+/// wider; an axis that holds several values a stack has no siblings.
+///
+/// It costs one statement a clause, the set without the clause grouped by
+/// the axis, for [`NARROW_CLAUSES`] clauses of a document at most: those
+/// of the sets the answer reads its rows through first, and among them
+/// the sets that hold the fewest rows first, since a set that came out
+/// small is the one a narrow value explains. The statement is read under
+/// the caller's scope: a set whose own count the funnel holds back warns
+/// of nothing, and neither does a statement any of whose counts came back
+/// held, so the message names no count the caller could not see. A
+/// clause on a value its own set already keeps the coarse value of is a
+/// narrowing written on purpose, and is left alone; and nothing is warned
+/// of where the caller asked for keys, since a stage's rows are then cut
+/// at the cap of a list. Nothing is counted once the time for the counts
+/// is spent or while the statements are listed to run ahead, and, as for
+/// [`reversed_dates`], the time these counts run past is not taken from
+/// the parts counted before them. A statement that does not answer warns
+/// of nothing: the document is valid either way.
+fn narrow_values(
+    counter: &mut Counter<'_>,
+    registry: &mut Registry,
+    ask: &Ask,
+    order: &[String],
+    stage_counts: &StageCounts,
+) -> Vec<Issue> {
+    let mut found = Vec::new();
+    if counter.spent() || matches!(counter.ahead, Ahead::Listed(_)) {
+        return found;
+    }
+    // The clauses to measure, each with the rows its set holds as the
+    // funnel counted them: the count of the set's last `where`, which is
+    // the count the clause's kept rows must be, and one the caller saw.
+    struct Candidate<'a> {
+        set: &'a str,
+        at: usize,
+        axis: String,
+        of: crate::validate::AxisNames,
+        kept: Vec<String>,
+        kin: crate::validate::AxisKin,
+        rows: i64,
+        on_path: bool,
+    }
+    let path = answer_path(ask);
+    let mut candidates: Vec<Candidate<'_>> = Vec::new();
+    for name in order {
+        let Some(set) = ask.sets.get(name) else {
+            continue;
+        };
+        if name.contains("__") || set.grain != Grain::Stack || set.where_.is_empty() {
+            continue;
+        }
+        // held back, or not counted: nothing is said of the set
+        let last = format!("where {}", clause_text(&set.where_[set.where_.len() - 1]));
+        let Some(rows) = stage_counts.get(&(name.clone(), last)).and_then(|c| c.0) else {
+            continue;
+        };
+        for (i, c) in set.where_.iter().enumerate() {
+            let Some((axis, of, kept)) = value_filter(c, counter.names) else {
+                continue;
+            };
+            let kin = counter.names.axis_kin(&axis);
+            // a coarse value that covers every value kept, and some other
+            // value beside them: without one there is no sibling to count
+            let siblings_possible = kin.wider.iter().any(|w| {
+                kept.iter()
+                    .all(|k| w.values.iter().any(|(_, covers)| covers.contains(k)))
+                    && w.values.iter().any(|(_, covers)| {
+                        covers.iter().any(|k| kept.contains(k))
+                            && covers.iter().any(|k| !kept.contains(k))
+                    })
+            });
+            if kin.multi || !siblings_possible {
+                continue;
+            }
+            // A set that already keeps the coarse value that covers the
+            // values kept here, in a clause of its own or of a set it is
+            // drawn from, narrows on purpose: "the heads, and of those the
+            // brains" is what was written, and the wider clause to suggest
+            // is one the set already has.
+            if narrowed_on_purpose(ask, name, &kin, &kept, counter.names) {
+                continue;
+            }
+            candidates.push(Candidate {
+                set: name,
+                at: i,
+                axis,
+                of,
+                kept,
+                kin,
+                rows,
+                on_path: path.iter().any(|p| p == name),
+            });
+        }
+    }
+    // the sets the answer reads its rows through first, and among them the
+    // sets that hold the fewest rows; a stable sort, so the document's own
+    // order decides between equals
+    candidates.sort_by_key(|c| (!c.on_path, c.rows));
+    for c in candidates.iter().take(NARROW_CLAUSES) {
+        if counter.spent() {
+            break;
+        }
+        let (name, i) = (c.set, c.at);
+        let Some(set) = ask.sets.get(name) else {
+            continue;
+        };
+        let clause_here = &set.where_[i];
+        // the set with this one clause left out, every other condition
+        // applied, before any pick: by the value each row holds
+        let mut without = ask.clone();
+        let Some(lean) = without.sets.get_mut(name) else {
+            continue;
+        };
+        lean.where_.remove(i);
+        let Some(step) = steps(lean)
+            .into_iter()
+            .map(|(s, _)| s)
+            .rfind(|s| *s != Step::Pick)
+        else {
+            continue;
+        };
+        let other_conditions = step != Step::Source || lean.from.is_some();
+        let Some(by_value) =
+            rows_by_value(counter, registry, &without, name, &step, &c.axis, &c.of)
+        else {
+            continue;
+        };
+        let rows_of = |keep: &dyn Fn(Option<&String>) -> bool| -> i64 {
+            by_value
+                .iter()
+                .filter(|(k, _)| keep(k.as_ref()))
+                .filter_map(|(_, n)| *n)
+                .sum()
+        };
+        let all = rows_of(&|_| true);
+        let kept = rows_of(&|k| k.is_some_and(|k| c.kept.contains(k)));
+        // the kept rows are the set's own, which the funnel showed: a
+        // count that is not that one is not said
+        if kept != c.rows || kept * NARROW_KEPT_ONE_IN >= all {
+            continue;
+        }
+        let dropped = all - kept;
+        let mut siblings: Vec<(String, i64)> = by_value
+            .iter()
+            .filter_map(|(k, n)| k.clone().zip(*n))
+            .filter(|(k, n)| !c.kept.contains(k) && *n > 0)
+            .collect();
+        siblings.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        let held: i64 = siblings.iter().map(|s| s.1).sum();
+        if held * 2 <= dropped {
+            continue;
+        }
+        let floor = NARROW_FACTOR * kept.max(1);
+        // the wider choice: a coarse axis whose values cover every
+        // value kept, and the siblings those values cover as well
+        let wider = c.kin.wider.iter().find_map(|w| {
+            let mut coarse: Vec<&(String, Vec<String>)> = Vec::new();
+            for k in &c.kept {
+                let covering = w.values.iter().find(|(_, covers)| covers.contains(k))?;
+                if !coarse.iter().any(|c| c.0 == covering.0) {
+                    coarse.push(covering);
+                }
+            }
+            let covered: Vec<(String, i64)> = siblings
+                .iter()
+                .filter(|(k, _)| coarse.iter().any(|c| c.1.contains(k)))
+                .cloned()
+                .collect();
+            (covered.iter().map(|s| s.1).sum::<i64>() >= floor).then(|| {
+                (
+                    w.axis.clone(),
+                    coarse.iter().map(|c| c.0.clone()).collect::<Vec<_>>(),
+                    coarse
+                        .iter()
+                        .flat_map(|c| c.1.iter().cloned())
+                        .collect::<Vec<_>>(),
+                    covered,
+                )
+            })
+        });
+        let Some((coarse_axis, coarse, covers, covered)) = wider else {
+            continue;
+        };
+        let holds: Vec<String> = covered
+            .iter()
+            .take(NARROW_NAMED)
+            .enumerate()
+            .map(|(j, (k, n))| {
+                let n = grouped_digits(*n);
+                if j == 0 {
+                    format!("{k} holds {n}")
+                } else {
+                    format!("{k} {n}")
+                }
+            })
+            .collect();
+        let axis_ref = Arg::Clause(Clause::new("axis").arg(Arg::Text(coarse_axis.clone())));
+        let (words, clause) = match coarse.as_slice() {
+            [one] => (
+                format!("{coarse_axis} = {one}"),
+                Clause::new("=").arg(axis_ref).arg(Arg::Text(one.clone())),
+            ),
+            several => (
+                format!("{coarse_axis} among [{}]", several.join(", ")),
+                Clause::new("in")
+                    .arg(axis_ref)
+                    .arg(Arg::List(several.iter().cloned().map(Arg::Text).collect())),
+            ),
+        };
+        // never a clause the set already holds
+        if set.where_.contains(&clause) {
+            continue;
+        }
+        let message = format!(
+            "{name}: {}{} keeps {} of {} {}s; {} of the rest. If any {} of {coarse_axis} is meant, write {words}, which covers {}.",
+            if other_conditions {
+                "with the set's other conditions, "
+            } else {
+                ""
+            },
+            clause_text(clause_here),
+            grouped_digits(kept),
+            grouped_digits(all),
+            set.grain.name(),
+            listed(&holds, "and"),
+            listed(&coarse, "or"),
+            listed(&covers, "and"),
+        );
+        let next = format!(
+            "to keep them all, write {} at sets.{name}.where[{i}]; where only {} is meant, change nothing",
+            serde_json::to_string(&clause).unwrap_or_default(),
+            listed(&c.kept, "or"),
+        );
+        found.push(Issue {
+            code: Code::NarrowValue,
+            path: format!("sets.{name}.where[{i}]"),
+            message,
+            next,
+        });
+    }
+    // these counts are a hint: the time they ran past is not the counts'
+    if let Some(b) = &mut counter.budget {
+        b.spent_in = None;
+    }
+    found
 }
 
 /// The next call where the counts ran past their time: the job path, by the

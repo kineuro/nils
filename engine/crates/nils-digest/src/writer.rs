@@ -2282,32 +2282,83 @@ impl Writer<'_> {
     /// The date of every study the run touched, decided once, when every file
     /// of it has been seen (§4.2). A study whose `study_date` said something
     /// keeps it: the vote fills a gap and never writes over a measurement.
+    ///
+    /// One transaction, which moves the epoch where a study's date is now
+    /// another than it was (filled where there was none, or changed): a
+    /// study's day is what a session is made of, so a reader of the
+    /// sessions, and an answer kept from them, must see that the registry
+    /// moved. A vote that says again what the rows say moves nothing.
     pub fn settle_dates(&mut self) -> Result<u64, HomeError> {
         if self.ballots.is_empty() {
             return Ok(0);
         }
         let ballots = std::mem::take(&mut self.ballots);
-        let t = table("study");
         let store = self.registry.store();
-        let mut settled: u64 = 0;
-        for (uid, ballot) in ballots {
-            let Some(v) = ballot.verdict() else { continue };
+        store.begin()?;
+        let done = (|| -> Result<(u64, u64, Option<i64>), HomeError> {
+            let (settled, moved) = settle(store, ballots)?;
+            let epoch = match moved {
+                0 => None,
+                _ => Some(nils_registry::home::next_epoch_in(store)?),
+            };
+            Ok((settled, moved, epoch))
+        })();
+        let (settled, _, epoch) = match done {
+            Ok(d) => d,
+            Err(e) => {
+                store.rollback().ok();
+                return Err(e);
+            }
+        };
+        store.commit()?;
+        if let Some(epoch) = epoch {
+            self.registry.refresh_meta()?;
+            self.written.epoch = epoch;
+        }
+        Ok(settled)
+    }
+}
+
+/// The votes written: how many studies took one, and how many of them hold
+/// another date for it than before.
+fn settle(
+    store: &mut Store,
+    ballots: HashMap<String, date::Ballot>,
+) -> Result<(u64, u64), HomeError> {
+    let t = table("study");
+    let (mut settled, mut moved): (u64, u64) = (0, 0);
+    for (uid, ballot) in ballots {
+        let Some(v) = ballot.verdict() else { continue };
+        // The same write twice over: first the rows whose date the vote
+        // changes, then, where there was none, the row that holds the
+        // vote's date already and takes its weights. So the count of the
+        // first is the count of dates that moved.
+        for changes in [true, false] {
             let sql = format!(
                 // A measured value that is a placeholder is no measurement:
                 // `19000101` is a real day, so the reader keeps it and the
                 // column still says what the file said, but the vote is
                 // allowed to answer over it (§4.2).
-                "UPDATE {} SET date_filled = {}, date_source = {}, date_weight = {}, \
+                "UPDATE {} SET date_filled = {date}, date_source = {}, date_weight = {}, \
                  date_runner_up = {} WHERE study_instance_uid = {} \
-                 AND (study_date IS NULL OR study_date IN ('1900-01-01', '1901-01-01'))",
+                 AND (study_date IS NULL OR study_date IN ('1900-01-01', '1901-01-01')) \
+                 AND {}",
                 store.qualified(t.name),
-                store.dialect().param(1, Type::Date),
                 store.dialect().param(2, Type::Text),
                 store.dialect().param(3, Type::Int),
                 store.dialect().param(4, Type::Int),
                 store.dialect().param(5, Type::Text),
+                if changes {
+                    format!(
+                        "(date_filled IS NULL OR date_filled <> {})",
+                        store.dialect().param(6, Type::Date)
+                    )
+                } else {
+                    format!("date_filled = {}", store.dialect().param(6, Type::Date))
+                },
+                date = store.dialect().param(1, Type::Date),
             );
-            settled += store.execute(
+            let n = store.execute(
                 &sql,
                 &[
                     Param::from(v.date.as_str()),
@@ -2315,11 +2366,19 @@ impl Writer<'_> {
                     Param::Int(v.weight as i64),
                     Param::Int(v.runner_up as i64),
                     Param::from(uid.as_str()),
+                    Param::from(v.date.as_str()),
                 ],
             )?;
+            settled += n;
+            if changes {
+                moved += n;
+            }
+            if n > 0 {
+                break;
+            }
         }
-        Ok(settled)
     }
+    Ok((settled, moved))
 }
 
 impl Writer<'_> {

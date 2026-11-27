@@ -66,6 +66,8 @@ fn the_mri_pack_s_axes_that_matter_and_where_a_missing_one_is_asked() {
     for axis in [
         "base",
         "body_part",
+        // read by the main-scan picks where a stack holds no body part
+        "body_region",
         "construct",
         "directory_type",
         "disposition",
@@ -78,7 +80,7 @@ fn the_mri_pack_s_axes_that_matter_and_where_a_missing_one_is_asked() {
         assert!(names.contains(&axis), "{axis} matters: {names:?}");
     }
     // described, never read by a name, a pick or a release
-    for axis in ["contrast_mix", "base_basis", "body_region", "convertible"] {
+    for axis in ["contrast_mix", "base_basis", "convertible"] {
         assert!(!names.contains(&axis), "{axis} does not matter: {names:?}");
     }
     // a missing answer is asked only on an axis that holds one value, has

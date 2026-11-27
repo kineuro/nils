@@ -101,6 +101,8 @@ pub(crate) fn door(
         None => None,
     };
     let layer = crate::main_scans::layer_named(query.get("layer").map(String::as_str))?;
+    // a member whose sessions the cache lacks would be listed with none
+    crate::main_scans::sessions_fresh(registry)?;
     let store = registry.store();
     let cohort = nils_registry::cohort::by_name(store, name)
         .map_err(failed)?

@@ -15,7 +15,8 @@ use nils_registry::schema::{Type, table};
 use nils_registry::session::{self, Anchor, Naming, Scheme};
 use nils_registry::{Backend, Insert, Param, Registry, Row, Store, Subkeys, lock, merge};
 use nils_session::{
-    Anchors, MOVED_KIND, Rebuilt, ensure, ensure_for, labels_by_study, sessions_of,
+    Anchors, MOVED_KIND, Rebuilt, ensure, ensure_for, labels_by_study, refresh, refresh_for,
+    sessions_of, stale, without_sessions,
 };
 
 static POSTGRES: Mutex<()> = Mutex::new(());
@@ -1160,10 +1161,13 @@ fn a_changed_label_is_updated_in_place_and_nothing_else_is_written() {
             .filter(|(a, b)| a != b)
             .map(|(a, _)| a.0)
             .collect();
+        // and the epoch, once: an answer kept under the labels as they
+        // were is not the one a run gives now
+        assert!(done.epoch.is_some(), "{name}");
         match changes(&mut l.registry) {
             Some(now) => assert_eq!(
                 now - counted.unwrap(),
-                ids.len() as u64,
+                ids.len() as u64 + 1,
                 "{name}: rows written"
             ),
             None => assert_eq!(rewritten, rows_of_theirs, "{name}"),
@@ -1279,4 +1283,227 @@ fn a_merge_waits_for_a_build_and_leaves_no_label_of_a_dropped_session() {
     assert_eq!(studies(&cached, canonical), both);
     assert_eq!(studies(&cached, alias), 0);
     assert_eq!(orphan_labels(&mut l.registry), 0);
+}
+
+/// The cache rows of one subject taken away, as a merge takes them.
+fn drop_sessions(registry: &mut Registry, subject: i64) {
+    let store = registry.store();
+    let ids = format!(
+        "SELECT id FROM {} WHERE subject_id = {subject}",
+        store.qualified("session_cache")
+    );
+    for t in ["session_label", "session_cache_study"] {
+        let sql = format!(
+            "DELETE FROM {} WHERE session_id IN ({ids})",
+            store.qualified(t)
+        );
+        store.execute(&sql, &[]).unwrap();
+    }
+    let sql = format!(
+        "DELETE FROM {} WHERE subject_id = {subject}",
+        store.qualified("session_cache")
+    );
+    store.execute(&sql, &[]).unwrap();
+}
+
+/// A reader that has only the scheme brings the cache up to date before it
+/// reads (2026-11-27: a question read the cache as it stood, and the
+/// subject a merge left had no session in any answer). A cold cache is
+/// built whole; a merge's subject is found and built alone, every study of
+/// both on its sessions; a label row that went is written again; and a
+/// cache that is up to date is read and never written.
+#[test]
+fn a_refresh_builds_what_a_merge_dropped_and_writes_nothing_after() {
+    for mut l in labs() {
+        let name = l.name;
+        let scheme = months_scheme();
+        let anchors = Anchors::resolve(&mut l.registry, &scheme, BTreeMap::new()).unwrap();
+
+        // cold: every timeline is stale, and none of its subjects has a session
+        let cold = stale(l.registry.store(), &scheme, Some(&anchors)).unwrap();
+        assert!(cold.timelines > 2, "{name}");
+        assert_eq!(cold.subjects.len(), cold.timelines, "{name}");
+        assert_eq!(
+            without_sessions(l.registry.store(), &scheme).unwrap().len(),
+            cold.timelines,
+            "{name}"
+        );
+        let first = refresh(&mut l.registry, &scheme).unwrap();
+        assert_eq!(first.rebuilt, cold.timelines, "{name}");
+        // it left what a whole build leaves
+        let whole = ensure(&mut l.registry, &scheme, &anchors, None, false).unwrap();
+        assert_eq!((whole.rebuilt, whole.relabelled), (0, 0), "{name}");
+        assert_eq!(whole.sessions, first.sessions, "{name}");
+        assert!(
+            without_sessions(l.registry.store(), &scheme)
+                .unwrap()
+                .is_empty(),
+            "{name}"
+        );
+
+        // a merge drops the sessions of both its subjects
+        let cached = sessions_of(l.registry.store(), &scheme, None).unwrap();
+        let studies = |cached: &[nils_session::Cached], s: i64| -> usize {
+            cached
+                .iter()
+                .filter(|c| c.subject_id == s)
+                .map(|c| c.studies.len())
+                .sum()
+        };
+        let mut with: Vec<i64> = cached.iter().map(|c| c.subject_id).collect();
+        with.dedup();
+        let (canonical, alias) = (with[0], with[1]);
+        let both = studies(&cached, canonical) + studies(&cached, alias);
+        let mut linkage = l.registry.open_linkage().unwrap();
+        let keys = Subkeys::derive(&l.registry.pseudonym_key().unwrap());
+        merge::merge(
+            l.registry.store(),
+            &mut linkage,
+            &keys,
+            &merge::Ask {
+                canonical,
+                alias,
+                why: "one person",
+                actor: "test",
+                job_id: None,
+                place_id: None,
+            },
+        )
+        .unwrap();
+        drop(linkage);
+        l.registry.refresh_meta().unwrap();
+        let cached = sessions_of(l.registry.store(), &scheme, None).unwrap();
+        assert_eq!(studies(&cached, canonical), 0, "{name}");
+        let without = without_sessions(l.registry.store(), &scheme).unwrap();
+        assert_eq!(without.len(), 1, "{name}: {without:?}");
+        assert_eq!(without[0].subject_id, canonical, "{name}");
+        assert_eq!(without[0].studies as usize, both, "{name}");
+        let found = stale(l.registry.store(), &scheme, Some(&anchors)).unwrap();
+        assert_eq!(found.subjects, BTreeSet::from([canonical]), "{name}");
+
+        // the refresh builds that subject alone
+        let done = refresh(&mut l.registry, &scheme).unwrap();
+        assert_eq!(done.rebuilt, 1, "{name}");
+        assert_eq!(done.subjects, cold.timelines - 1, "{name}");
+        let cached = sessions_of(l.registry.store(), &scheme, None).unwrap();
+        assert_eq!(studies(&cached, canonical), both, "{name}");
+        assert_eq!(studies(&cached, alias), 0, "{name}");
+        assert!(
+            without_sessions(l.registry.store(), &scheme)
+                .unwrap()
+                .is_empty(),
+            "{name}"
+        );
+        assert_eq!(orphan_labels(&mut l.registry), 0, "{name}");
+
+        // up to date: read, and nothing written
+        let before = written(&mut l.registry);
+        let counted = changes(&mut l.registry);
+        let again = refresh(&mut l.registry, &scheme).unwrap();
+        assert_eq!((again.rebuilt, again.relabelled), (0, 0), "{name}");
+        assert_eq!(again.unchanged, cold.timelines - 1, "{name}");
+        assert_eq!(again.sessions, done.sessions, "{name}");
+        assert_eq!(written(&mut l.registry), before, "{name}");
+        assert_eq!(changes(&mut l.registry), counted, "{name}: rows written");
+
+        // a label row that went is found, and written again alone
+        let labelled = *label_rows(&mut l.registry, &scheme).keys().next().unwrap();
+        let sql = format!(
+            "DELETE FROM {} WHERE session_id = {labelled}",
+            l.registry.store().qualified("session_label")
+        );
+        l.registry.store().execute(&sql, &[]).unwrap();
+        let found = stale(l.registry.store(), &scheme, Some(&anchors)).unwrap();
+        assert_eq!(found.subjects.len(), 1, "{name}");
+        // a label is a name: nothing that makes or unmakes a session moved,
+        // so the refresh reads the cache as it is, until the registry moves
+        let done = refresh(&mut l.registry, &scheme).unwrap();
+        assert_eq!((done.rebuilt, done.relabelled), (0, 0), "{name}");
+        l.registry.next_epoch().unwrap();
+        let done = refresh(&mut l.registry, &scheme).unwrap();
+        assert_eq!((done.rebuilt, done.relabelled), (0, 1), "{name}");
+
+        // a subject whose rows went under one scheme is built under it by
+        // the writer that dropped them, and under no other
+        drop_sessions(&mut l.registry, canonical);
+        let done = refresh_for(&mut l.registry, &scheme, &BTreeSet::from([canonical])).unwrap();
+        assert_eq!((done.subjects, done.rebuilt), (1, 1), "{name}");
+        assert!(
+            stale(l.registry.store(), &scheme, Some(&anchors))
+                .unwrap()
+                .subjects
+                .is_empty(),
+            "{name}"
+        );
+    }
+}
+
+/// A scheme whose month zero is a file's (an explicit anchor) is labelled
+/// by the build that is handed the file. A reader that has only the scheme
+/// brings its sessions up to date and leaves those labels as they are: it
+/// writes none from no anchor over them, and a subject it has to build
+/// again gets its sessions and waits for the build that knows its anchor.
+#[test]
+fn a_refresh_leaves_the_labels_an_explicit_anchor_gave() {
+    for mut l in labs() {
+        let name = l.name;
+        let scheme = Scheme {
+            anchor: Anchor::Explicit,
+            ..months_scheme()
+        };
+        let explicit: BTreeMap<String, Day> = timelines(&mut l.registry)
+            .into_iter()
+            .map(|(code, studies)| (code, studies.iter().map(|s| s.day).min().unwrap()))
+            .collect();
+        let anchors = Anchors::resolve(&mut l.registry, &scheme, explicit).unwrap();
+        let built = ensure(&mut l.registry, &scheme, &anchors, None, false).unwrap();
+        assert!(built.relabelled > 0, "{name}");
+        let labels = versions(&mut l.registry, "session_label");
+        let before = written(&mut l.registry);
+
+        // the first refresh finds nothing to build and keeps its mark; the
+        // next reads two counts and writes nothing at all
+        let first = refresh(&mut l.registry, &scheme).unwrap();
+        assert_eq!((first.rebuilt, first.relabelled), (0, 0), "{name}");
+        let counted = changes(&mut l.registry);
+        let again = refresh(&mut l.registry, &scheme).unwrap();
+        assert_eq!((again.rebuilt, again.relabelled), (0, 0), "{name}");
+        assert_eq!(again.sessions, first.sessions, "{name}");
+        assert_eq!(written(&mut l.registry), before, "{name}");
+        assert_eq!(changes(&mut l.registry), counted, "{name}: rows written");
+
+        // one subject's rows gone: its sessions come back, and every other
+        // subject's label stands as the build wrote it
+        let subject = sessions_of(l.registry.store(), &scheme, None).unwrap()[0].subject_id;
+        let of_subject: BTreeSet<i64> = sessions_of(l.registry.store(), &scheme, None)
+            .unwrap()
+            .iter()
+            .filter(|c| c.subject_id == subject)
+            .map(|c| c.id)
+            .collect();
+        let kept: Vec<(i64, String)> = {
+            let rows = label_rows(&mut l.registry, &scheme);
+            let ids: BTreeSet<i64> = rows
+                .iter()
+                .filter(|(session, _)| !of_subject.contains(session))
+                .map(|(_, r)| r.int(1).unwrap())
+                .collect();
+            labels
+                .iter()
+                .filter(|(id, _)| ids.contains(id))
+                .cloned()
+                .collect()
+        };
+        drop_sessions(&mut l.registry, subject);
+        let done = refresh(&mut l.registry, &scheme).unwrap();
+        assert_eq!((done.rebuilt, done.relabelled), (1, 0), "{name}");
+        assert!(
+            sessions_of(l.registry.store(), &scheme, None)
+                .unwrap()
+                .iter()
+                .any(|c| c.subject_id == subject),
+            "{name}"
+        );
+        assert_eq!(versions(&mut l.registry, "session_label"), kept, "{name}");
+    }
 }

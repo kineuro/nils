@@ -24,7 +24,7 @@ cases:
     flags:
       siemens_tfl_unprepared: true
     axes:
-      technique: TurboFLASH
+      technique: FSPGRE
 
   - name: a Philips SWIp mini-mip is a minimum projection
     stack:
@@ -138,7 +138,7 @@ cases:
     flags:
       siemens_echoes_combined_named: true
     axes:
-      technique: MEDIC
+      technique: combMEGRE
 
   - name: guard, one echo of a Siemens three-echo FLASH stays ME-GRE
     stack:
@@ -176,7 +176,7 @@ cases:
     flags:
       siemens_fieldmap_phase_difference: true
     axes:
-      technique: MEDIC
+      technique: combMEGRE
 
   - name: a Siemens fast 3D FLASH subtraction given contrast is a CE-MRA
     stack:
@@ -196,7 +196,7 @@ cases:
     flags:
       siemens_fast_fl3d_ce: true
     axes:
-      technique: CE-MRA
+      technique: CEMRA
 
   - name: guard, a post-contrast VIBE is no CE-MRA
     stack:
@@ -320,7 +320,7 @@ cases:
       echo_time: 6.9
       flip_angle: 25
     axes:
-      base: 'T2*w'
+      base: T2starw
 
   - name: GE multi-echo QSM's SWI output is SWI, not QSM
     stack:

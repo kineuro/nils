@@ -459,8 +459,16 @@ pub(crate) fn export_doc(registry: &mut Registry, draw: Option<i64>) -> Result<V
     }
     let (reads, settle) = audit_draw::settled_reads(registry.store(), &d).map_err(fail)?;
     let closed = settle["closed"] == true;
-    let g =
-        audit_draw::grade_of(registry.store(), &d, &reads, closed, settle.clone()).map_err(e)?;
+    let spellings = registry.spellings();
+    let g = audit_draw::grade_of(
+        registry.store(),
+        &d,
+        &reads,
+        closed,
+        settle.clone(),
+        &spellings,
+    )
+    .map_err(e)?;
     let drawn = audit_draw::stacks(registry.store(), d.id).map_err(e)?;
     let axes: Vec<String> = drawn
         .first()
@@ -470,7 +478,7 @@ pub(crate) fn export_doc(registry: &mut Registry, draw: Option<i64>) -> Result<V
     let mut campaigns: Vec<i64> = Vec::new();
     campaigns.extend(d.campaign_id);
     campaigns.extend(d.settle_campaign_id);
-    let disagree = disagreements(registry.store(), &campaigns, &axes)?;
+    let disagree = disagreements(registry.store(), &campaigns, &axes, &spellings)?;
     Ok(assemble(&d, &g, &settle, &drawn, &axes, &disagree))
 }
 
@@ -489,7 +497,12 @@ struct Disagreed {
 /// The readers' answers of the draw's campaigns (each reader's latest, a
 /// rater's, never an adjudicator's), compared within each campaign on the
 /// audited axes.
-fn disagreements(store: &mut Store, campaigns: &[i64], axes: &[String]) -> Result<Disagreed, Exit> {
+fn disagreements(
+    store: &mut Store,
+    campaigns: &[i64],
+    axes: &[String],
+    spellings: &nils_registry::spelling::Spellings,
+) -> Result<Disagreed, Exit> {
     let mut out = Disagreed::default();
     for &c in campaigns {
         let campaign = nils_registry::campaign::get(store, c)
@@ -535,7 +548,13 @@ fn disagreements(store: &mut Store, campaigns: &[i64], axes: &[String]) -> Resul
             for axis in axes {
                 let seen: BTreeSet<Option<String>> = reads
                     .iter()
-                    .map(|r| audit_draw::comparable(r.get(axis).unwrap_or(&Value::Null)))
+                    .map(|r| {
+                        audit_draw::comparable_in(
+                            spellings,
+                            axis,
+                            r.get(axis).unwrap_or(&Value::Null),
+                        )
+                    })
                     .collect();
                 if seen.len() > 1 {
                     out.stacks.insert(stack);

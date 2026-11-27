@@ -277,8 +277,8 @@ fn every_image_type_identity_record_37_named_reaches_an_axis() {
         // dead `is_mavric`. The composite it also writes is the sum over the
         // spectral bins of one acquisition, and since MRI pack 0.18.0 no
         // construct (the 2026-09-30 deep research, case 3).
-        ("ORIGINAL\\PRIMARY\\M\\MAVRIC", "technique", "MAVRIC"),
-        ("DERIVED\\PRIMARY\\MAVRIC_COMPOSITE", "technique", "MAVRIC"),
+        ("ORIGINAL\\PRIMARY\\M\\MAVRIC", "technique", "MSI"),
+        ("DERIVED\\PRIMARY\\MAVRIC_COMPOSITE", "technique", "MSI"),
         ("DERIVED\\PRIMARY\\MAVRIC_COMPOSITE", "construct", ""),
         // And what the file says is wrong with its own image.
         (
@@ -471,4 +471,151 @@ fn an_echo_stage_acquired_enters_its_route_and_stays_raw() {
 
     let other = classify(&stack("ORIGINAL\\PRIMARY\\M\\ND", "gre_me_pd", "*fl3d6"));
     assert!(!other.entered.iter().any(|r| r == "stage"));
+}
+
+/// One spelling of a value in a row, and the one a release name can carry:
+/// what the MRI pack stores for a technique, a base and a post-contrast
+/// value is a plain word of letters and digits (an underscore in
+/// `not_given`, which no name reads), and every word a row held under an
+/// earlier version of the pack still names its value.
+#[test]
+fn the_mri_pack_stores_one_plain_word_a_value_and_reads_the_earlier_ones() {
+    let pack = nils_pack::load(&common::shipped_mri(), None).expect("the MRI pack loads");
+    for axis in ["technique", "base"] {
+        let a = pack.axis(axis).unwrap();
+        for i in 0..a.values.len() {
+            let stored = a.stored(i);
+            assert!(
+                stored.chars().all(|c| c.is_ascii_alphanumeric()),
+                "{axis}: {} stores {stored}",
+                a.values[i].id
+            );
+        }
+    }
+    let contrast = pack.axis("post_contrast").unwrap();
+    assert_eq!(contrast.stored_of("given"), Some("given"));
+    assert_eq!(contrast.stored_of("not_given"), Some("not_given"));
+    // (axis, a word rows held before, the value's identity, what a row stores)
+    for (axis, earlier, id, stored) in [
+        ("post_contrast", "1", "given", "given"),
+        ("post_contrast", "0", "not_given", "not_given"),
+        ("base", "T2*w", "T2starw", "T2starw"),
+        ("technique", "RESOLVE", "MS-EPI", "rsEPI"),
+        ("technique", "MAVRIC", "MAVRIC", "MSI"),
+        ("technique", "HASTE", "SS-TSE", "SSTSE"),
+        ("technique", "TIRM", "IR-TSE", "IRTSE"),
+        ("technique", "RESTORE", "VFA-TSE", "DETSE"),
+        ("technique", "MEDIC", "comb-ME-GRE", "combMEGRE"),
+        ("technique", "CISS", "CISS", "pcbSSFP"),
+        ("technique", "FIESTA", "bSSFP", "bSSFP"),
+        ("technique", "PSIF", "SSFP", "SSFPecho"),
+        ("technique", "VIBE", "VI-GRE", "VIGRE"),
+        ("technique", "TurboFLASH", "FSP-GRE", "FSPGRE"),
+        ("technique", "FLASH", "SP-GRE", "SPGRE"),
+        ("technique", "FISP", "SS-GRE", "SSFPFID"),
+        ("technique", "DWI-TSE", "DWI-TSE", "DWITSE"),
+        ("technique", "DWI-EPI", "DWI-EPI", "DWIEPI"),
+        ("technique", "DWI-STEAM", "DWI-STEAM", "DWISTEAM"),
+        ("technique", "SE-EPI", "SE-EPI", "SEEPI"),
+        ("technique", "GRE-EPI", "GRE-EPI", "GREEPI"),
+        ("technique", "CE-MRA", "CE-MRA", "CEMRA"),
+        ("technique", "VFA-GRE", "VFA-GRE", "VFAGRE"),
+    ] {
+        let a = pack.axis(axis).unwrap();
+        assert_eq!(a.id_of(earlier), Some(id), "{axis} {earlier}");
+        assert_eq!(a.stored_of(earlier), Some(stored), "{axis} {earlier}");
+        assert_eq!(a.stored_of(id), Some(stored), "{axis} {id}");
+    }
+    // a person still reads the star
+    assert_eq!(
+        pack.axis("base").unwrap().words_of_stored("T2starw"),
+        "T2*w"
+    );
+    // no name is shared by two values of an axis, so the order a text is
+    // read in decides nothing
+    for a in &pack.axes {
+        let mut seen: std::collections::BTreeMap<String, &str> = Default::default();
+        for v in &a.values {
+            let names = std::iter::once(&v.id)
+                .chain(v.aliases.iter())
+                .chain(std::iter::once(&v.label))
+                .chain(v.stored.iter());
+            for name in names {
+                let held = seen.entry(name.clone()).or_insert(v.id.as_str());
+                assert_eq!(*held, v.id, "{}: {name} names two values", a.name);
+            }
+        }
+    }
+    // the pick model reads a row by the same names
+    let picks = &pack.picks[0];
+    assert_eq!(picks.stored("post_contrast", "1"), "given");
+    assert_eq!(picks.stored("technique", "FLASH"), "SPGRE");
+    assert_eq!(picks.stored("slice_thickness", "1"), "1");
+}
+
+/// One word for a value, in the registry and in a file's name: every name
+/// token of the BIDS mapping is the word a row stores for its value, unless
+/// its group says its tokens are words of their own; every technique has a
+/// token; and a token that drifts from the stored word is found.
+#[test]
+fn a_name_token_is_the_word_a_row_stores() {
+    let pack = nils_pack::load(&common::shipped_mri(), None).expect("the MRI pack loads");
+    assert_eq!(pack.token_drift(), [], "nils pack validate refuses these");
+    let technique = pack.axis("technique").unwrap();
+    let tokens = pack
+        .bids
+        .acq
+        .iter()
+        .find(|g| g.from == "technique")
+        .expect("the mapping names a technique");
+    assert!(
+        tokens.own_words.is_none(),
+        "a technique's word is the stored one"
+    );
+    for (i, v) in technique.values.iter().enumerate() {
+        assert_eq!(
+            tokens.tokens.get(&v.id).map(String::as_str),
+            Some(technique.stored(i)),
+            "{}",
+            v.id
+        );
+    }
+    // the groups that keep words of their own say why
+    for group in &pack.bids.acq {
+        let Some(axis) = pack.axis(&group.from) else {
+            continue;
+        };
+        let differs = group
+            .tokens
+            .iter()
+            .any(|(value, token)| axis.stored_of(value) != Some(token.as_str()));
+        assert_eq!(
+            differs,
+            group.own_words.is_some(),
+            "{} {:?}: own_words is said where a token differs, and only there",
+            group.from,
+            group.modes
+        );
+    }
+    // a token that is another word is found, with the word it should be
+    let mut drifted = pack.clone();
+    for group in &mut drifted.bids.acq {
+        if group.from == "technique" {
+            group.tokens.insert("SP-GRE".into(), "FLASH".into());
+        }
+    }
+    let quad = |a: &str, b: &str, c: &str, d: &str| {
+        (a.to_string(), b.to_string(), c.to_string(), d.to_string())
+    };
+    assert_eq!(
+        drifted.token_drift(),
+        [quad("technique", "SP-GRE", "FLASH", "SPGRE")]
+    );
+    // and excused where the group says its words are its own
+    for group in &mut drifted.bids.acq {
+        if group.from == "technique" {
+            group.own_words = Some("a test's reason".into());
+        }
+    }
+    assert_eq!(drifted.token_drift(), []);
 }

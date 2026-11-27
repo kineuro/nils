@@ -451,3 +451,117 @@ fn picked_is_refused_a_role_the_served_pack_does_not_pick() {
         }
     }
 }
+
+/// What the pack says its values mean reaches the catalog: each value's
+/// description and terms, and the coarse form an axis declares, from both
+/// sides. A reader written before these fields reads the catalog as it did.
+#[test]
+fn the_catalog_serves_what_the_pack_says_its_values_mean() {
+    let (mut registry, _dir) = registry();
+    let catalog = Catalog::build(&mut registry, &pack()).unwrap();
+    let doc = catalog.document(&Scope::default());
+    let axis = |name: &str| {
+        doc["axes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|a| a["name"] == name)
+            .unwrap_or_else(|| panic!("no axis {name}"))
+            .clone()
+    };
+    let value = |a: &serde_json::Value, id: &str| {
+        a["values"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|v| v["id"] == id)
+            .unwrap_or_else(|| panic!("no value {id}"))
+            .clone()
+    };
+    // the coarse axis says what it is the coarse form of, and each value
+    // which fine values it covers
+    let region = axis("body_region");
+    assert_eq!(region["coarse_of"], "body_part");
+    let head = value(&region, "head");
+    assert_eq!(head["covers"], serde_json::json!(["brain", "brain-neck"]));
+    assert_eq!(
+        head["terms"],
+        serde_json::json!(["head", "brain", "skull", "neuro"])
+    );
+    let said = head["description"].as_str().unwrap();
+    assert!(
+        said.contains("\"a brain scan\" or \"a head scan\""),
+        "{said}"
+    );
+    assert!(head.get("within").is_none(), "{head}");
+    assert_eq!(
+        value(&region, "spine")["covers"],
+        serde_json::json!(["spine", "neck"])
+    );
+    // the fine axis says, on each value, the wider choice that covers it
+    let part = axis("body_part");
+    assert!(part.get("coarse_of").is_none(), "{part}");
+    for (id, wider) in [
+        ("brain", "head"),
+        ("brain-neck", "head"),
+        ("neck", "spine"),
+        ("spine", "spine"),
+        ("chest", "chest"),
+        ("other", "other"),
+    ] {
+        let v = value(&part, id);
+        assert_eq!(
+            v["within"],
+            serde_json::json!([{"axis": "body_region", "value": wider}]),
+            "{id}"
+        );
+        assert!(v.get("covers").is_none(), "{v}");
+    }
+    let brain = value(&part, "brain");
+    assert_eq!(brain["terms"], serde_json::json!(["brain", "neuro"]));
+    let said = brain["description"].as_str().unwrap();
+    assert!(said.contains("body_region head"), "{said}");
+    assert!(
+        value(&part, "brain-neck")["description"]
+            .as_str()
+            .unwrap()
+            .contains("body_region head")
+    );
+    // an axis with no coarse form, and a value the pack says nothing more
+    // of, carry none of the new fields
+    let technique = axis("technique");
+    assert!(technique.get("coarse_of").is_none());
+    assert!(
+        technique["values"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|v| v.get("covers").is_none() && v.get("within").is_none())
+    );
+    // the ask reads the same relation by name
+    let kin = catalog.axis_kin("body_part");
+    assert!(!kin.multi && kin.coarse_of.is_none());
+    assert_eq!(kin.wider.len(), 1);
+    assert_eq!(kin.wider[0].axis, "body_region");
+    assert_eq!(
+        kin.wider[0].values[0],
+        (
+            "head".to_string(),
+            vec!["brain".to_string(), "brain-neck".to_string()]
+        )
+    );
+    assert_eq!(
+        catalog.axis_kin("body_region").coarse_of.as_deref(),
+        Some("body_part")
+    );
+    assert!(catalog.axis_kin("modifier").multi);
+    // additive: a catalog written before the fields is read as it was
+    let before: nils_catalog::AxisRecord = serde_json::from_value(serde_json::json!({
+        "name": "body_part", "multi": false, "stores": "id",
+        "values": [{"id": "brain", "label": "brain"}]
+    }))
+    .unwrap();
+    assert_eq!(before.coarse_of, None);
+    assert!(before.values[0].terms.is_empty() && before.values[0].within.is_empty());
+    assert_eq!(before.values[0].description, None);
+}

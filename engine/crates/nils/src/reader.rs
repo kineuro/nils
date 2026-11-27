@@ -471,6 +471,19 @@ pub(crate) fn why(
                 if quasi {
                     v["why"] = json!(held.and_then(|(_, _, why, ..)| why.clone()));
                 }
+                // a value folded from a committed answer on the finer axis:
+                // who decided that, and which axis it was decided on; no
+                // decision stands on this axis itself
+                if tier.as_str() == nils_registry::coarse::FOLDED
+                    && e["tier"] == nils_registry::coarse::FOLDED
+                {
+                    v["folded_from"] = json!({"axis": e["source"], "words": e["matched"]});
+                    v["decision"] = Value::Null;
+                    v["committed_by"] = Value::Null;
+                    if quasi {
+                        v["why"] = Value::Null;
+                    }
+                }
                 v
             }
             None => json!({"kind": "rule"}),

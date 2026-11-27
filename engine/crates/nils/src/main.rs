@@ -118,6 +118,7 @@ mod setup;
 mod slice_cache;
 mod software;
 mod sources;
+mod spelling;
 mod starter;
 mod summary;
 mod supervise;
@@ -1952,6 +1953,49 @@ enum RepairCommand {
         /// Say how the two stand, and write nothing
         #[arg(long)]
         dry_run: bool,
+        /// Machine-readable output
+        #[arg(long)]
+        json: bool,
+    },
+    /// Name the subjects that hold a dated study with series and have no
+    /// session under the default scheme, which no question about sessions
+    /// finds, and build their sessions, under the default scheme and every
+    /// kept one. The sessions are a cache a reader builds, so a subject
+    /// digested since the last read is among them through no fault; one
+    /// that stays is what an engine before this left after a merge. A
+    /// repair that built some is audited and moves the epoch, so answers
+    /// kept before it are not read again
+    Sessions {
+        /// Name them, and write nothing
+        #[arg(long)]
+        dry_run: bool,
+        /// Machine-readable output
+        #[arg(long)]
+        json: bool,
+    },
+    /// Find every row of an axis, every decision and every staged answer
+    /// that holds a value in another spelling than the one the pack stores
+    /// (its identity, an identity or a spelling it had before, or its label
+    /// where the pack stores another word), and say how many by axis. With
+    /// --apply, write each in the stored form and make the stacks' rows of
+    /// `stack_axis` again. No stack changes the value it holds: only the
+    /// spelling moves. A row of a stack of a sample sealed now and a
+    /// decision that reaches one are left and counted apart, and a label
+    /// set's file keeps the spelling it was written with. Saved main-scan
+    /// rules that name a kind by a technique's other spelling are written
+    /// with the stored word and counted apart. The repair is audited, and
+    /// answers kept before it are not read again: a staged answer is
+    /// refused at its commit without --anyway. On a large registry it
+    /// rewrites the read model, so run it in a maintenance window
+    AxisValues {
+        /// Write the stored form; without it nothing is written
+        #[arg(long)]
+        apply: bool,
+        /// The pack whose stored forms are meant, looked up in the pack directory
+        #[arg(long, default_value = "mri")]
+        pack: String,
+        #[arg(long, value_name = "DIR")]
+        pack_dir: Option<PathBuf>,
         /// Machine-readable output
         #[arg(long)]
         json: bool,
@@ -5211,6 +5255,25 @@ fn pack_command(home: &Home, command: PackCommand) -> Result<(), Exit> {
                         shape.unreachable(),
                         shape.implications.len()
                     );
+                    // one word for a value, in the registry and in a file's
+                    // name: a name token that is not the stored word, in a
+                    // group that does not say its tokens are its own
+                    let drift = pack.token_drift();
+                    if !drift.is_empty() {
+                        let lines: Vec<String> = drift
+                            .iter()
+                            .map(|(axis, value, token, stored)| {
+                                format!(
+                                    "  {axis} {value}: the name token is {token}, a row stores {stored}"
+                                )
+                            })
+                            .collect();
+                        return Err(fail(format!(
+                            "{} name token(s) of the BIDS mapping are not the word a row stores (bids.yml, acq). Spell each as the stored word, or give the group own_words with the reason its tokens are words of their own:\n{}",
+                            drift.len(),
+                            lines.join("\n")
+                        )));
+                    }
                     Ok(())
                 }
                 Err(e) => Err(fail(e.to_string())),
@@ -6632,7 +6695,7 @@ fn open(home: &Home) -> Result<Registry, Exit> {
             home.dir().display()
         )));
     }
-    Ok(home.open()?)
+    Ok(spelling::attached(home.open()?))
 }
 
 /// A column as text on either backend, for the timestamps and the JSON.
@@ -6649,7 +6712,46 @@ fn status(home: &Home, args: StatusArgs) -> Result<(), Exit> {
     if let Some(id) = args.batch {
         return batch_report(&mut registry, id, args.json);
     }
-    let doc = status_doc(home, &mut registry)?;
+    let mut doc = status_doc(home, &mut registry)?;
+    // one spelling of a value in a row: the rows that hold another, by
+    // axis. A probe per name of the served pack, at the keyboard only: the
+    // status door is asked too often to count rows.
+    let pack = spelling::pack(home);
+    let astray = match &pack {
+        Some(pack) => Some((
+            pack.id(),
+            nils_registry::spelling::count_rows(registry.store(), &spelling::of(pack))?,
+        )),
+        None => None,
+    };
+    // two grains of one answer: the stacks whose decision on a coarse axis
+    // does not cover the decision on the axis it is the coarse form of,
+    // which the sort leaves as they were decided and asks nothing about.
+    // One statement for each form the served pack declares.
+    let forms = pack
+        .as_deref()
+        .map(spelling::coarse_forms)
+        .unwrap_or_default();
+    let apart = nils_registry::coarse::count_apart(registry.store(), &forms)?;
+    if let Some((pack, by_axis)) = &astray {
+        let decided_apart: serde_json::Map<String, serde_json::Value> = forms
+            .iter()
+            .map(|f| {
+                (
+                    f.coarse.clone(),
+                    serde_json::json!({
+                        "coarse_of": f.fine,
+                        "stacks": apart.get(&f.coarse).copied().unwrap_or(0),
+                    }),
+                )
+            })
+            .collect();
+        doc["axis_values"] = serde_json::json!({
+            "pack": pack,
+            "rows_in_another_spelling": by_axis,
+            "decided_apart": decided_apart,
+        });
+    }
     if args.json {
         println!("{}", serde_json::to_string_pretty(&doc).unwrap_or_default());
         return Ok(());
@@ -6669,7 +6771,30 @@ fn status(home: &Home, args: StatusArgs) -> Result<(), Exit> {
         &others,
         &batches,
         doc["registry"]["schema"].as_str(),
-    )
+    )?;
+    println!("axis values");
+    match &astray {
+        None => println!("  no pack is installed, so no row was held against its stored form"),
+        Some((pack, by_axis)) if by_axis.is_empty() => {
+            println!("  every row holds the spelling {pack} stores")
+        }
+        Some((pack, by_axis)) => {
+            for (axis, n) in by_axis {
+                println!("  {axis:<16} {n} row(s) in another spelling than {pack} stores");
+            }
+            println!("  nils repair axis-values says which, and with --apply moves them");
+        }
+    }
+    for f in &forms {
+        let (coarse, fine) = (&f.coarse, &f.fine);
+        match apart.get(coarse).copied().unwrap_or(0) {
+            0 => println!("  every decided {coarse} covers the {fine} decided beside it"),
+            n => println!(
+                "  {coarse:<16} {n} stack(s) whose decided {fine} the decided {coarse} does not cover"
+            ),
+        }
+    }
+    Ok(())
 }
 
 /// The status document (`nils status --json`, `GET /api/status`).
@@ -7214,10 +7339,24 @@ fn merge_subjects(
             return Err(fail(e.to_string()));
         }
     };
+    // the merge is committed: a metadata read that fails here must not
+    // leave its job running with no result, and the build below reads the
+    // epoch again where it writes
+    if let Err(e) = registry.refresh_meta() {
+        eprintln!("nils: the registry's metadata was not read again after the merge: {e}");
+    }
+    // The merge dropped the sessions of both subjects; the one that is left
+    // has them again before the job ends, whatever reads next. A build that
+    // fails here does not undo a merge that is committed: it is said, and
+    // the next question or page builds what is missing.
+    if let Err(e) =
+        session_schemes::rebuild_for(registry, &std::collections::BTreeSet::from([canonical]))
+    {
+        eprintln!("nils: the merged subject's sessions were not built again: {e}");
+    }
     job::set_result(registry.store(), job_id, &merged.as_json())
         .map_err(|e| fail(e.to_string()))?;
     job::finish(registry.store(), job_id, State::Done, None).map_err(|e| fail(e.to_string()))?;
-    registry.refresh_meta()?;
     Ok(merged)
 }
 
@@ -7428,6 +7567,274 @@ fn repair_stack_axis(home: &Home, dry_run: bool, json: bool) -> Result<(), Exit>
     Ok(())
 }
 
+/// How many subjects `nils repair sessions` names on a terminal; `--json`
+/// names every one.
+const SESSIONLESS_SHOWN: usize = 20;
+
+/// `nils repair sessions`: the subjects that hold a study a session is made
+/// of and have no session under the default scheme, named, and their
+/// sessions built. A dry run writes nothing.
+fn repair_sessions(home: &Home, dry_run: bool, json: bool) -> Result<(), Exit> {
+    let mut registry = open(home)?;
+    let principal = actor();
+    let scheme = session::Scheme::default();
+    let found = nils_session::without_sessions(registry.store(), &scheme)
+        .map_err(|e| fail(e.to_string()))?;
+    let mut built = None;
+    let mut failed = None;
+    if !dry_run && !found.is_empty() {
+        let subjects = found.iter().map(|s| s.subject_id).collect();
+        // A build under one scheme is committed before the next begins. A
+        // kept scheme that cannot be built must not leave the default
+        // scheme's sessions built with no account of them: what was built
+        // is audited and said, and the failure ends the run after it.
+        let done = session_schemes::rebuild_each(&mut registry, &subjects).map_err(fail)?;
+        let sessions = done.sessions;
+        failed = done.failed;
+        let store = registry.store();
+        store.begin()?;
+        let moved = done.wrote;
+        let failure = failed.clone();
+        let done = (|| -> Result<(), nils_registry::store::Error> {
+            // an answer kept while these subjects had no session is not
+            // this one: the builds moved the epoch with their rows, and
+            // where none wrote it moves here
+            if !moved {
+                nils_registry::home::next_epoch_in(store)?;
+            }
+            nils_registry::audit::record_in(
+                store,
+                &nils_registry::audit::Entry {
+                    principal: &principal,
+                    action: nils_registry::audit::Action::RegistryRepair,
+                    scope: serde_json::json!({"repair": "sessions"}),
+                    policy: None,
+                    job_id: None,
+                    details: Some(match &failure {
+                        None => serde_json::json!({
+                            "subjects": found.len(),
+                            "sessions": sessions,
+                        }),
+                        Some(why) => serde_json::json!({
+                            "subjects": found.len(),
+                            "sessions": sessions,
+                            "failed": why,
+                        }),
+                    }),
+                },
+            )?;
+            Ok(())
+        })();
+        match done {
+            Ok(()) => store.commit()?,
+            Err(e) => {
+                store.rollback().ok();
+                return Err(fail(e.to_string()));
+            }
+        }
+        registry.refresh_meta()?;
+        built = Some(sessions);
+    }
+    // said after what was built: the sessions of the schemes that did build
+    // are there and audited, and the run still ends as a failure
+    let ended = |failed: Option<String>| match failed {
+        Some(why) => Err(fail(format!(
+            "the sessions were built under the default scheme and not under every kept one: {why}"
+        ))),
+        None => Ok(()),
+    };
+    if json {
+        let mut doc = serde_json::json!({
+            "dry_run": dry_run,
+            "scheme_digest": scheme.digest(),
+            "window_days": scheme.window_days,
+            "without_sessions": found.len(),
+            "subjects": found
+                .iter()
+                .map(|s| serde_json::json!({"code": s.code, "studies": s.studies}))
+                .collect::<Vec<_>>(),
+            "built": built.is_some(),
+            "sessions": built,
+        });
+        if let Some(why) = &failed {
+            doc["failed"] = serde_json::json!(why);
+        }
+        println!("{}", serde_json::to_string_pretty(&doc).unwrap_or_default());
+        return ended(failed);
+    }
+    if found.is_empty() {
+        println!("every subject that holds a dated study with series has its sessions");
+        return Ok(());
+    }
+    println!(
+        "{} {} a dated study with series and no session under the default scheme; {}",
+        found.len(),
+        if found.len() == 1 {
+            "subject holds"
+        } else {
+            "subjects hold"
+        },
+        match built {
+            Some(n) => format!("{n} {} built", counted("sessions", n as u64)),
+            None => "nothing was written".to_string(),
+        }
+    );
+    for s in found.iter().take(SESSIONLESS_SHOWN) {
+        println!(
+            "  {}  {} {}",
+            s.code,
+            s.studies,
+            counted("studies", s.studies as u64)
+        );
+    }
+    if found.len() > SESSIONLESS_SHOWN {
+        println!(
+            "  and {} more; --json names every one",
+            found.len() - SESSIONLESS_SHOWN
+        );
+    }
+    ended(failed)
+}
+
+/// `nils repair axis-values`: every row, decision and staged answer that
+/// holds a value in another spelling than the one the pack stores, counted
+/// by axis, and with `--apply` written in the stored form
+/// (`nils_registry::spelling`).
+fn repair_axis_values(
+    home: &Home,
+    apply: bool,
+    pack: &str,
+    given_dir: Option<PathBuf>,
+    json: bool,
+) -> Result<(), Exit> {
+    let mut registry = open(home)?;
+    let dir = pack_dir(home, given_dir)?;
+    let pack = ask_cli::load_pack(&dir, pack)?;
+    let spellings = spelling::of(&pack);
+    let principal = actor();
+    let store = registry.store();
+    let (found, done) = if apply {
+        store.begin()?;
+        let done = (|| -> Result<_, nils_registry::store::Error> {
+            let (found, done) = nils_registry::spelling::repair(store, &spellings)?;
+            if done != nils_registry::spelling::Repaired::default() {
+                // an answer kept under the rows as they were is not this one
+                nils_registry::home::next_epoch_in(store)?;
+                nils_registry::audit::record_in(
+                    store,
+                    &nils_registry::audit::Entry {
+                        principal: &principal,
+                        action: nils_registry::audit::Action::RegistryRepair,
+                        scope: serde_json::json!({"repair": "axis-values", "pack": pack.id()}),
+                        policy: None,
+                        job_id: None,
+                        details: Some(serde_json::json!({
+                            "found": found.as_json(),
+                            "written": done.as_json(),
+                        })),
+                    },
+                )?;
+            }
+            Ok((found, done))
+        })();
+        match done {
+            Ok((found, done)) => {
+                store.commit()?;
+                (found, Some(done))
+            }
+            Err(e) => {
+                store.rollback().ok();
+                return Err(fail(e.to_string()));
+            }
+        }
+    } else {
+        (nils_registry::spelling::find(store, &spellings)?, None)
+    };
+    if json {
+        let mut doc = found.as_json();
+        doc["pack"] = pack.id().into();
+        doc["applied"] = apply.into();
+        if let Some(done) = &done {
+            doc["written"] = done.as_json();
+        }
+        println!("{}", serde_json::to_string_pretty(&doc).unwrap_or_default());
+        return Ok(());
+    }
+    if found.clean() {
+        println!(
+            "nils repair axis-values   every row and decision holds the spelling {} stores",
+            pack.id()
+        );
+        return Ok(());
+    }
+    println!(
+        "nils repair axis-values   held in another spelling than {} stores:",
+        pack.id()
+    );
+    let line = |what: &str, s: &nils_registry::spelling::Stray| {
+        println!(
+            "  {:<13} {:<16} {:<22} -> {:<22} {:>9}{}",
+            what,
+            s.axis,
+            s.text,
+            s.stored,
+            s.open,
+            if s.sealed > 0 {
+                format!("   and {} sealed, left as they are", s.sealed)
+            } else {
+                String::new()
+            }
+        );
+    };
+    for s in &found.rows {
+        line("rows", s);
+    }
+    for s in &found.decisions {
+        line("decisions", s);
+    }
+    for s in &found.in_view {
+        line("rules in view", s);
+    }
+    if found.staged > 0 {
+        println!(
+            "  {} of the decisions are staged answers not yet committed",
+            found.staged
+        );
+    }
+    if found.label_sets > 0 {
+        println!(
+            "  {} label set(s) of these axes are files under a digest and keep the spelling they were written with",
+            found.label_sets
+        );
+    }
+    if found.pick_rules > 0 {
+        println!(
+            "  {} saved version(s) of main-scan rules name a kind by a technique's other spelling",
+            found.pick_rules
+        );
+    }
+    match done {
+        Some(done) => println!(
+            "  wrote the stored form in {} row(s) ({} more removed, their stack holding it already), {} decision(s), {} rules-in-view and {} saved version(s) of main-scan rules; {}",
+            done.rows,
+            done.rows_merged,
+            done.decisions,
+            done.in_view,
+            done.pick_rules,
+            if done.rebuilt {
+                "every stack's row of stack_axis was made again".to_string()
+            } else {
+                format!(
+                    "{} stack(s)' rows of stack_axis were made again",
+                    done.stacks
+                )
+            }
+        ),
+        None => println!("  nothing was written; --apply writes the stored form"),
+    }
+    Ok(())
+}
+
 /// `nils quarantine list`: the paths a digest refused, with the class and
 /// the detail, joined to the root of their source.
 fn repair_command(home: &Home, command: RepairCommand) -> Result<(), Exit> {
@@ -7438,6 +7845,17 @@ fn repair_command(home: &Home, command: RepairCommand) -> Result<(), Exit> {
         }
         RepairCommand::StackAxis { dry_run, json } => {
             return repair_stack_axis(home, dry_run, json);
+        }
+        RepairCommand::Sessions { dry_run, json } => {
+            return repair_sessions(home, dry_run, json);
+        }
+        RepairCommand::AxisValues {
+            apply,
+            pack,
+            pack_dir,
+            json,
+        } => {
+            return repair_axis_values(home, apply, &pack, pack_dir, json);
         }
     };
     let mut registry = open(home)?;
@@ -8888,7 +9306,7 @@ fn custody_doc(home: &Home, registry: &mut Registry) -> Result<serde_json::Value
             "kept": "until the next run of that job replaces it; a decision until withdrawn, and a withdrawn one for good",
             "commands": {
                 "read": ["nils explain <stack>", "nils review list", "nils pack show <name>"],
-                "change": ["nils fingerprint", "nils classify", "nils classify --no-votes", "nils review decide <id> --value <v>"],
+                "change": ["nils fingerprint", "nils classify", "nils classify --no-votes", "nils review decide <id> --value <v>", "nils repair axis-values [--apply]"],
                 "export": ["nils explain <stack> --json", "nils classify votes [--out <file>] [--axis <axis>]"],
                 "delete": "with the registry",
             },
@@ -9035,7 +9453,7 @@ fn custody_doc(home: &Home, registry: &mut Registry) -> Result<serde_json::Value
             "kept": "no retention: rebuildable, and dropped on rebuild (Wave 4b section 14.1)",
             "commands": {
                 "read": ["nils session list"],
-                "change": [],
+                "change": ["nils session rebuild", "nils repair sessions"],
                 "export": [],
                 "delete": "with the registry, or by the next rebuild",
             },
@@ -9734,6 +10152,14 @@ fn import_map(registry: &mut Registry, store: &mut Store, args: &ImportArgs) -> 
         }
     };
     registry.refresh_meta()?;
+    // a map that merged subjects dropped their sessions: built again here,
+    // as after `nils linkage merge`
+    if report.written()
+        && !report.merges.is_empty()
+        && let Err(e) = session_schemes::rebuild_after_merges(registry, &report.merges)
+    {
+        eprintln!("nils: the merged subjects' sessions were not built again: {e}");
+    }
     if let Some(job) = job_id {
         job::set_result(registry.store(), job, &report.as_json())
             .map_err(|e| fail(e.to_string()))?;

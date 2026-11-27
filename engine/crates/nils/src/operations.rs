@@ -262,9 +262,21 @@ fn without_condition(store: &Store, step: &str) -> String {
                AND t.told = 0) AND NOT {answered}"
         )
     } else {
+        // A stack whose body part a decided region set aside holds none. It
+        // is its model's to answer once more only where the model has not
+        // answered it: a model's answer in force on the stack is one, also
+        // where it gave way to the region a person decided and so left no
+        // row, and it is not asked again for what it said.
+        let overruled = format!(
+            "({} AND EXISTS (SELECT 1 FROM {} d WHERE d.scope = 'stack' AND d.ref = CAST(x.id AS TEXT) \
+             AND d.axis = 'body_part' AND d.author_kind = 'model' AND d.withdrawn_at IS NULL \
+             AND (d.staged_at IS NULL OR d.committed_at IS NOT NULL)))",
+            nils_registry::coarse::set_aside_sql(store, "x.id", "body_part"),
+            store.qualified("decision"),
+        );
         format!(
             "NOT EXISTS (SELECT 1 FROM {axis} a WHERE a.stack_id = x.id AND a.axis = 'body_part' \
-             AND a.value IS NOT NULL AND a.value <> '') AND NOT {answered}"
+             AND a.value IS NOT NULL AND a.value <> '') AND NOT {answered} AND NOT {overruled}"
         )
     }
 }

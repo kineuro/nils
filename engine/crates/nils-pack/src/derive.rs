@@ -301,7 +301,7 @@ pub fn derive(
             .unwrap_or_default()
             .into_iter()
             .filter(|v| !v.is_empty())
-            .map(|v| axis.id_of_stored(&v).map(str::to_string).unwrap_or(v))
+            .map(|v| axis.id_of(&v).map(str::to_string).unwrap_or(v))
             .collect();
         values.sort();
         values.dedup();

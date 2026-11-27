@@ -377,7 +377,7 @@ cases:
       echo_time: 63
       echo_train_length: 4
     axes:
-      technique: RESOLVE
+      technique: rsEPI
 
   - name: a GE pCASL CBF map is ASL's, with no FLAIR from its labelling inversion
     stack:

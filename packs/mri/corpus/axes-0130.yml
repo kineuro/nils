@@ -120,7 +120,7 @@ cases:
       echo_train_length: 17
     axes:
       modifier: STIR
-      technique: TIRM
+      technique: IRTSE
 
   - name: an MDME's short saturation delay is still no STIR
     stack:
@@ -304,7 +304,7 @@ cases:
       inversion_time: 2200
       echo_train_length: 8
     axes:
-      technique: TIRM
+      technique: IRTSE
       modifier: FLAIR
 
   - name: MP-RAGE with its hyphen is an MPRAGE
@@ -392,7 +392,7 @@ cases:
       echo_train_length: 49
     axes:
       provenance: RawRecon
-      technique: DWI-EPI
+      technique: DWIEPI
       # MRI pack 0.15.0, Nima's ruling N4 (2026-09-30): and it is the
       # isotropic (trace) image, which Philips writes as a projection.
       construct: Trace
@@ -424,7 +424,7 @@ cases:
       echo_train_length: 59
     axes:
       construct: Trace
-      technique: DWI-EPI
+      technique: DWIEPI
       base: DWI
 
   - name: GE's Isotropic Image is the trace image of a diffusion EPI though its b value is 0
@@ -438,7 +438,7 @@ cases:
       diffusion_b_value: '0'
     axes:
       construct: Trace
-      technique: DWI-EPI
+      technique: DWIEPI
       base: DWI
 
   - name: a Philips b=0 image named sb0 is diffusion
@@ -455,7 +455,7 @@ cases:
       echo_time: 74
       echo_train_length: 61
     axes:
-      technique: DWI-EPI
+      technique: DWIEPI
       base: DWI
 
   - name: a B0 field map is no diffusion
@@ -581,7 +581,7 @@ cases:
       text_series_description: 'SWAN'
       echo_train_length: 8
     axes:
-      technique: MEDIC
+      technique: combMEGRE
 
   - name: a GE 3D EPI SWI's train is its EPI factor, and it stays EPI
     stack:
@@ -681,7 +681,7 @@ cases:
       text_protocol_name: 'rs-fMRI_ep2d_bold'
     axes:
       technique: BOLD
-      base: 'T2*w'
+      base: T2starw
 
   - name: a SyMRI tissue map is a quantitative map with no base
     stack:
@@ -710,7 +710,7 @@ cases:
       image_role: derived
     axes:
       provenance: EPIMix
-      technique: DWI-EPI
+      technique: DWIEPI
       construct: Trace
       disposition: scanner_derived
 
@@ -727,7 +727,7 @@ cases:
       text_series_description: 'SWI_Images'
       echo_train_length: 1
     axes:
-      technique: FLASH
+      technique: SPGRE
       construct: 'ND,SWI'
 
   - name: a single-echo SWI whose SequenceVariant does not say SP is a GRE
@@ -763,7 +763,7 @@ cases:
     # (record 48, conventions round 3, case 7).
     axes:
       provenance: Calibration
-      technique: FISP
+      technique: SSFPFID
       base: ''
       disposition: working_scan
       role: ''
@@ -782,7 +782,7 @@ cases:
     # MRI pack 0.21.0: provenance Calibration (case 7).
     axes:
       provenance: Calibration
-      technique: TurboFLASH
+      technique: FSPGRE
 
   # MRI pack 0.21.0: a calibration of any vendor is Calibration (record 48,
   # conventions round 3, case 7), no longer a localizer by the word.
@@ -808,4 +808,4 @@ cases:
       echo_train_length: 55
     axes:
       construct: Trace
-      technique: DWI-EPI
+      technique: DWIEPI

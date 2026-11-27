@@ -1161,3 +1161,94 @@ fn a_file_with_an_impossible_length_is_read_and_counted() {
         );
     }
 }
+
+/// The day a study is given when a run ends is what its sessions are made
+/// of, so the vote moves the epoch where it changed a study's date, once,
+/// and a vote that says again what the rows say moves nothing. Held as a
+/// difference: a study whose files state its date takes no vote, and a
+/// digest of it moves the epoch by its batches alone.
+#[test]
+fn the_date_vote_moves_the_epoch_where_it_changed_a_date_and_only_then() {
+    let stated = |day: &str| synth::text(tags::STUDY_DATE, VR::DA, day);
+    let series_day = |day: &str| synth::text(tags::SERIES_DATE, VR::DA, day);
+    for lab in labs() {
+        let name = lab.name;
+        let mut reg = lab.home.open().unwrap();
+        let moved = |reg: &mut Registry, source: &str, file: Vec<u8>| -> i64 {
+            let dir = TempDir::new("vote");
+            dir.file("a/1", &file);
+            let mut s = settings(&dir);
+            s.name = source.to_string();
+            reg.refresh_meta().unwrap();
+            let before = reg.meta().epoch;
+            digest(&s, reg).unwrap();
+            reg.refresh_meta().unwrap();
+            reg.meta().epoch - before
+        };
+        // a study that states its date, and one that does not, whose series
+        // says the day: the same one batch each, and the vote's move more
+        let with_date = moved(
+            &mut reg,
+            "stated",
+            mr(
+                "1.2.3.1",
+                "1.2.3.1.1",
+                "1.2.3.1.1.1",
+                "P1",
+                &[stated("20200102")],
+            ),
+        );
+        let voted = moved(
+            &mut reg,
+            "voted",
+            mr(
+                "1.2.3.2",
+                "1.2.3.2.1",
+                "1.2.3.2.1.1",
+                "P2",
+                &[series_day("20200102")],
+            ),
+        );
+        assert_eq!(
+            texts(
+                &mut reg,
+                "SELECT CAST(date_filled AS TEXT) FROM {study} WHERE study_instance_uid = '1.2.3.2'"
+            ),
+            ["2020-01-02"],
+            "{name}: the vote filled the date"
+        );
+        assert_eq!(
+            voted,
+            with_date + 1,
+            "{name}: the vote moved the epoch once"
+        );
+        // the same files seen again from another place: the vote says what
+        // the row says, and moves nothing more than a study that takes none
+        let with_date_again = moved(
+            &mut reg,
+            "stated again",
+            mr(
+                "1.2.3.1",
+                "1.2.3.1.1",
+                "1.2.3.1.1.1",
+                "P1",
+                &[stated("20200102")],
+            ),
+        );
+        let voted_again = moved(
+            &mut reg,
+            "voted again",
+            mr(
+                "1.2.3.2",
+                "1.2.3.2.1",
+                "1.2.3.2.1.1",
+                "P2",
+                &[series_day("20200102")],
+            ),
+        );
+        assert_eq!(
+            voted_again, with_date_again,
+            "{name}: a vote that changed nothing moved the epoch"
+        );
+    }
+}

@@ -600,10 +600,66 @@ fn the_funnel_holds_a_stage_an_age_chose_of_few_or_that_dropped_few() {
         assert!(
             d.drops
                 .iter()
+                .filter(|x| x.set == "older")
                 .all(|x| x.before.is_none() && x.after.is_none()),
             "{:?}",
             d.drops
         );
+        // and a drop of the set the answer is drawn from says of a stage
+        // what the funnel says of it, held where the stage is: the 4
+        // subjects without an age are in no count of it
+        let known = d
+            .drops
+            .iter()
+            .find(|x| x.set == "firsts" && x.clause == "where age is known")
+            .unwrap_or_else(|| panic!("{}: {:?}", l.name, d.drops));
+        assert_eq!((known.after, known.nulls), (None, None), "{}", l.name);
+        // Every such drop, held against the counts read with nothing held
+        // (detail quasi), which is another diagnosis: where the stage is
+        // shown the drop says the count itself, and where the stage is
+        // held the drop says none.
+        let truth = |x: &diagnose::Drop| {
+            raw.drops
+                .iter()
+                .find(|r| r.set == x.set && r.clause == x.clause)
+                .cloned()
+                .unwrap_or_else(|| panic!("{}: no drop {x:?} at detail quasi", l.name))
+        };
+        let (mut shown, mut held) = (0, 0);
+        for x in d.drops.iter().filter(|x| x.set != "older") {
+            let stage = d
+                .funnel
+                .iter()
+                .find(|s| s.set == x.set && s.stage == x.clause)
+                .unwrap_or_else(|| panic!("{}: {x:?}", l.name));
+            let t = truth(x);
+            assert!(t.before.is_some() && t.after.is_some(), "{}: {t:?}", l.name);
+            match stage.held_back {
+                None => {
+                    assert_eq!(x.after, t.after, "{}: {x:?}", l.name);
+                    shown += 1;
+                }
+                Some(_) => {
+                    assert_eq!(x.after, None, "{}: {x:?}", l.name);
+                    held += 1;
+                }
+            }
+            // the rows before are a stage's too: said as they are, or not
+            assert!(
+                x.before.is_none() || x.before == t.before,
+                "{}: {x:?} against {t:?}",
+                l.name
+            );
+        }
+        assert!(
+            shown > 0 && held > 0,
+            "{}: {shown} shown, {held} held",
+            l.name
+        );
+        // the rows before the clause that dropped the 4: the first visits,
+        // a stage that is shown, so its count is
+        assert_eq!(known.before, truth(known).before, "{}", l.name);
+        assert_eq!(known.before, firsts[1].rows, "{}", l.name);
         // with the keys: none for a held stage
         let keyed = diagnosed(&mut l, &plain(), true);
         let older = stages(&keyed, "older");

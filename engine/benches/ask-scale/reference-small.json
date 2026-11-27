@@ -49,7 +49,7 @@
     "08-stack-list": {
       "rows": 118,
       "subjects": null,
-      "hash": "490ddd3b1f22cd9c9adef8f515499406d0c3e185ad4ecf1db845d30de9afbb17",
+      "hash": "d0a21528d03402a0e2c1c12c8a7c1a79fc7e41bcdad8b9476d84e1ee62eda898",
       "held": false
     },
     "09-group-by-axes": {
@@ -99,6 +99,12 @@
       "subjects": 45,
       "hash": "11778065a36a385666b1cc8e2eb271268106d931dca677df8320745caa205f2c",
       "held": false
+    },
+    "17-narrow-value": {
+      "rows": 0,
+      "subjects": 0,
+      "hash": "675cfcd56e5a65f0db0bdcec4ddb3fd30c39397f651637d3e68c986f4208ea9d",
+      "held": false
     }
   },
   "sqlite": {
@@ -147,7 +153,7 @@
     "08-stack-list": {
       "rows": 118,
       "subjects": null,
-      "hash": "c311de419c055a97592455843cefd012fe17d08620395261984eb69cffb55497",
+      "hash": "860e2925cf7081bfb989d981d4231ccab40e98b51089b7fef9e2db1b16162342",
       "held": false
     },
     "09-group-by-axes": {
@@ -196,6 +202,12 @@
       "rows": 54,
       "subjects": 46,
       "hash": "826471ff9ba4af57b833184e04ac9f9d1a837758cd0d2d01287be4a5e6538e4c",
+      "held": false
+    },
+    "17-narrow-value": {
+      "rows": 0,
+      "subjects": 0,
+      "hash": "675cfcd56e5a65f0db0bdcec4ddb3fd30c39397f651637d3e68c986f4208ea9d",
       "held": false
     }
   }

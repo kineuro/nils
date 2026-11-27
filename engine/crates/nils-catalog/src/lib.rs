@@ -22,8 +22,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use nils_ask::ast::Grain;
 use nils_ask::hash::Locale;
 use nils_ask::validate::{
-    AxisNames, AxisValueNames, Class, ColumnRef, DATASET_TABLE, Dataset, DerivedInfo, FieldInfo,
-    KindInfo, LevelSpec, Names, Scope,
+    AxisKin, AxisNames, AxisValueNames, Class, ColumnRef, DATASET_TABLE, Dataset, DerivedInfo,
+    FieldInfo, KindInfo, LevelSpec, Names, Scope, WiderAxis,
 };
 use nils_dicom::catalogue::{self, Level as CatalogueLevel, Sensitivity};
 use nils_pack::pack::{Pack, Visibility};
@@ -129,6 +129,11 @@ pub struct AxisRecord {
     /// answer. A document may name a value by either, or by an alias.
     #[serde(default = "stores_id")]
     pub stores: String,
+    /// The axis this one is the coarse form of, where the pack declares one
+    /// (`coarse_of`): each of its values then lists the values of that axis
+    /// it covers (`covers`). Absent on every other axis.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub coarse_of: Option<String>,
     pub values: Vec<AxisValueRecord>,
 }
 
@@ -147,6 +152,30 @@ pub struct AxisValueRecord {
     /// after rows were written (record 55, ruling 23).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stored: Option<String>,
+    /// What the value means, in a line, where the pack says.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// Other words a person knows the value by, as the pack lists them.
+    /// They explain the value and are no names of it: a document names a
+    /// value by its `id`, its `label` or an alias.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub terms: Vec<String>,
+    /// On an axis that is the coarse form of another (`coarse_of`): the
+    /// values of that axis this value covers, by identity.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub covers: Vec<String>,
+    /// On an axis another is the coarse form of: the value of each coarser
+    /// axis that covers this one, the wider choice where any of the values
+    /// it covers will do.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub within: Vec<WiderValue>,
+}
+
+/// A value of a coarser axis that covers a value of a finer one.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct WiderValue {
+    pub axis: String,
+    pub value: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1739,6 +1768,7 @@ impl Catalog {
                 name: a.name.clone(),
                 multi: a.multi,
                 stores: if a.stores_label { "label" } else { "id" }.to_string(),
+                coarse_of: a.coarse_of.clone(),
                 values: a
                     .values
                     .iter()
@@ -1747,6 +1777,21 @@ impl Catalog {
                         label: v.label.clone(),
                         aliases: v.aliases.clone(),
                         stored: v.stored.clone(),
+                        description: v.description.clone(),
+                        terms: v.terms.clone(),
+                        covers: v.covers.clone(),
+                        within: nils_pack::coarse::of(&pack.axes, &a.name)
+                            .into_iter()
+                            .flat_map(|(axis, values)| {
+                                values
+                                    .into_iter()
+                                    .filter(|(_, covers)| covers.contains(&v.id))
+                                    .map(move |(value, _)| WiderValue {
+                                        axis: axis.to_string(),
+                                        value: value.to_string(),
+                                    })
+                            })
+                            .collect(),
                     })
                     .collect(),
             })
@@ -2138,6 +2183,30 @@ impl Names for Catalog {
                     })
                     .collect(),
             })
+    }
+
+    fn axis_kin(&self, axis: &str) -> AxisKin {
+        let Some(a) = self.axes.iter().find(|a| a.name == axis) else {
+            return AxisKin::default();
+        };
+        AxisKin {
+            multi: a.multi,
+            coarse_of: a.coarse_of.clone(),
+            wider: self
+                .axes
+                .iter()
+                .filter(|c| c.coarse_of.as_deref() == Some(axis))
+                .map(|c| WiderAxis {
+                    axis: c.name.clone(),
+                    values: c
+                        .values
+                        .iter()
+                        .filter(|v| !v.covers.is_empty())
+                        .map(|v| (v.id.clone(), v.covers.clone()))
+                        .collect(),
+                })
+                .collect(),
+        }
     }
 
     fn kind(&self, name: &str) -> Option<KindInfo> {

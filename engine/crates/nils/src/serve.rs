@@ -1166,6 +1166,9 @@ pub fn serve(home: &Home, args: ServeArgs) -> Result<(), Exit> {
     let pack_dir = crate::pack_dir(home, args.pack_dir.clone()).ok();
     // the Data page's speed (2026-10-15): every pack is loaded, its corpus
     // run, before the doors open, so that no request pays for it
+    // one spelling of a value in a row: the pack this engine serves is the
+    // one every registry it opens writes and reads by
+    crate::spelling::serve_from(pack_dir.clone(), &args.ask_pack);
     if let Some(d) = &pack_dir {
         warm_packs(d, &args.ask_pack);
     }
@@ -1387,7 +1390,7 @@ pub fn serve(home: &Home, args: ServeArgs) -> Result<(), Exit> {
                     }
                     used = Instant::now();
                     if registry.is_none() {
-                        registry = doors.home.open().ok();
+                        registry = doors.home.open().ok().map(crate::spelling::attached);
                     }
                     let Some(reg) = registry.as_mut() else {
                         let _ = respond(
@@ -1873,7 +1876,7 @@ fn queue_worker(
 ) {
     let stopped = || stop.load(Ordering::SeqCst);
     while !stopped() {
-        let outcome = match home.open() {
+        let outcome = match home.open().map(crate::spelling::attached) {
             Ok(mut registry) => {
                 let store = registry.store();
                 match crate::worker::claim(store, false, lane) {
@@ -2896,7 +2899,8 @@ fn routed(
             })?;
             let scope =
                 nils_classify::scope::Scope::parse(scope).map_err(|e| Reply::error(400, e))?;
-            let mut doc = nils_classify::signals::signals(registry.store(), &scope)?;
+            let spellings = registry.spellings();
+            let mut doc = nils_classify::signals::signals(registry.store(), &spellings, &scope)?;
             // kineuro/nils#94: the text each axis was matched against, under
             // the pack the engine serves, over one bounded sample: per axis
             // for the stacks it left unresolved, and per axis and value for

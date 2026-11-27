@@ -27,7 +27,7 @@ cases:
       flip_angle: 80
       echo_train_length: 1
     axes:
-      technique: FISP
+      technique: SSFPFID
 
   - name: a Philips FFE of the private technique T1FFE is SP-GRE with OSP in place of SP
     stack:
@@ -42,7 +42,7 @@ cases:
       echo_time: 4.6
       flip_angle: 80
     axes:
-      technique: FLASH
+      technique: SPGRE
 
   - name: a Philips FFE of the private technique FFE is SS-GRE with OSP in place of SS
     stack:
@@ -57,7 +57,7 @@ cases:
       echo_time: 16
       flip_angle: 18
     axes:
-      technique: FISP
+      technique: SSFPFID
 
   - name: a Philips T1W_FFE with only OSP and no private technique is a plain gradient echo
     stack:
@@ -85,7 +85,7 @@ cases:
       echo_time: 4.6
       flip_angle: 30
     axes:
-      technique: FLASH
+      technique: SPGRE
 
   - name: an enhanced Philips FFE whose Spoiling says RF is SP-GRE whatever SequenceVariant says
     stack:
@@ -101,7 +101,7 @@ cases:
       echo_time: 4.6
       flip_angle: 30
     axes:
-      technique: FLASH
+      technique: SPGRE
 
   - name: an enhanced Philips FFE whose Spoiling says NONE is SS-GRE
     stack:
@@ -116,7 +116,7 @@ cases:
       echo_time: 9
       flip_angle: 20
     axes:
-      technique: FISP
+      technique: SSFPFID
 
   - name: a Siemens FLASH stays SP-GRE (case 1 is Philips')
     stack:
@@ -131,7 +131,7 @@ cases:
       echo_time: 2.5
       flip_angle: 70
     axes:
-      technique: FLASH
+      technique: SPGRE
 
   # --- the per-echo Philips multi-echo FFE (record 48, "The nine, after our
   # counts"): each echo written on its own is ME-GRE; only the combined
@@ -189,7 +189,7 @@ cases:
       n_instances: 26
       n_slices: 26
     axes:
-      technique: MEDIC
+      technique: combMEGRE
 
   - name: a single-echo Philips FFE named mFFE is no combined image
     stack:
@@ -205,7 +205,7 @@ cases:
       echo_train_length: 1
       echo_numbers: '1'
     axes:
-      technique: FISP
+      technique: SSFPFID
 
   # --- case 2: a Philips SWIp output of a multi-echo acquisition, one image
   # per slice, combines its echoes
@@ -227,7 +227,7 @@ cases:
       n_instances: 150
       n_slices: 150
     axes:
-      technique: MEDIC
+      technique: combMEGRE
       provenance: SWIRecon
 
   - name: the SWIp phase of a 4-echo acquisition is comb-ME-GRE, RawRecon and Phase
@@ -247,7 +247,7 @@ cases:
       n_instances: 150
       n_slices: 150
     axes:
-      technique: MEDIC
+      technique: combMEGRE
       provenance: RawRecon
       construct: Phase
 
@@ -449,7 +449,7 @@ cases:
       echo_train_length: 4
     axes:
       provenance: RawRecon
-      technique: MEDIC
+      technique: combMEGRE
       construct: 'EchoCombined,Phase'
 
   - name: a Siemens MEAN output named for its phase with no P token is RawRecon too
@@ -465,7 +465,7 @@ cases:
       echo_train_length: 4
     axes:
       provenance: RawRecon
-      technique: MEDIC
+      technique: combMEGRE
 
   - name: the MEAN magnitude of a Siemens 8-echo 2D gradient echo is comb-ME-GRE and RawRecon
     stack:
@@ -482,7 +482,7 @@ cases:
       echo_train_length: 8
     axes:
       provenance: RawRecon
-      technique: MEDIC
+      technique: combMEGRE
 
   - name: one echo of a Siemens 8-echo 2D gradient echo stays ME-GRE
     stack:
@@ -914,8 +914,8 @@ cases:
       echo_time: 12
       flip_angle: 7
     axes:
-      technique: FISP
-      base: T2*w
+      technique: SSFPFID
+      base: T2starw
 
   - name: a GE research-mode 2D gradient echo named T2 at TE 18 is T2*w
     stack:
@@ -931,7 +931,7 @@ cases:
       flip_angle: 0
     axes:
       technique: GRE
-      base: T2*w
+      base: T2starw
 
   - name: a GE gradient echo in an exam whose protocol says optT2 is not T2*w by it
     stack:
@@ -979,7 +979,7 @@ cases:
       echo_time: 6
       flip_angle: 35
     axes:
-      technique: FLASH
+      technique: SPGRE
       base: T1w
 
   - name: a GE research-mode gradient echo named GRE with a train is no spin echo
@@ -1014,7 +1014,7 @@ cases:
       diffusion_b_value: 0
       dwi_directions: 14
     axes:
-      technique: DWI-EPI
+      technique: DWIEPI
       base: DWI
       directory_type: dwi
 
@@ -1034,7 +1034,7 @@ cases:
       echo_time: 3.12
       flip_angle: 12
     axes:
-      technique: FLASH
+      technique: SPGRE
 
   # --- A9: Siemens' minIP named in mixed case
 

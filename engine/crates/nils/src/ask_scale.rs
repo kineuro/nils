@@ -7,7 +7,10 @@
 //! times each, and prints how long the statement took and what it
 //! answered: the rows, the subjects, and the content hash of the answer,
 //! and how long the funnel a draft counts took under a draft's time, in
-//! one pass per set and by a statement per stage.
+//! one pass per set and by a statement per stage. Before the documents it
+//! times what every question that reads a session pays first: the session
+//! cache found up to date (`sessions_refresh`), with nothing to build, and
+//! what the first question after the registry moved pays once.
 //!
 //! The answers are the reference a change to the compiler is held to: the
 //! generator is code and a seed, so a registry built again holds the same
@@ -164,6 +167,46 @@ fn time(home: &Home, args: TimeArgs) -> Result<(), Exit> {
         })
         .collect();
     files.sort();
+    // What a question that reads a session pays before its first statement
+    // (`nils_session::refresh`, from the ask's runner): on a cache that is
+    // up to date, the reads that find it so. The first call builds whatever
+    // is not, so that the timed ones find nothing to do.
+    let brought = nils_session::refresh(&mut registry, &scheme).map_err(|e| fail(e.to_string()))?;
+    let mut refresh_us: Vec<u128> = Vec::new();
+    let mut refreshed = brought.clone();
+    for _ in 0..args.runs.max(1) {
+        let started = Instant::now();
+        refreshed =
+            nils_session::refresh(&mut registry, &scheme).map_err(|e| fail(e.to_string()))?;
+        refresh_us.push(started.elapsed().as_micros());
+    }
+    refresh_us.sort_unstable();
+    // and what it pays once after the registry has moved: every timeline
+    // and the whole cache read, and nothing found to build
+    let anchors = nils_session::Anchors::resolve(&mut registry, &scheme, BTreeMap::new())
+        .map_err(|e| fail(e.to_string()))?;
+    let mut whole_us: Vec<u128> = Vec::new();
+    for _ in 0..args.runs.max(1) {
+        let started = Instant::now();
+        nils_session::stale(registry.store(), &scheme, Some(&anchors))
+            .map_err(|e| fail(e.to_string()))?;
+        whole_us.push(started.elapsed().as_micros());
+    }
+    whole_us.sort_unstable();
+    let ms = |us: u128| (us as f64 / 100.0).round() / 10.0;
+    let sessions_refresh = json!({
+        "runs": refresh_us.len(),
+        "min_ms": refresh_us.first().copied().map(ms),
+        "p50_ms": ms(percentile(&refresh_us, 50.0)),
+        "max_ms": refresh_us.last().copied().map(ms),
+        "after_a_move_min_ms": whole_us.first().copied().map(ms),
+        "after_a_move_p50_ms": ms(percentile(&whole_us, 50.0)),
+        "subjects": refreshed.subjects,
+        "sessions": refreshed.sessions,
+        "built_first": brought.rebuilt,
+        "built": refreshed.rebuilt,
+        "relabelled": refreshed.relabelled,
+    });
     let mut shapes = Vec::new();
     let mut answers = serde_json::Map::new();
     let mut differ: Vec<String> = Vec::new();
@@ -462,6 +505,7 @@ fn time(home: &Home, args: TimeArgs) -> Result<(), Exit> {
         "backend": backend,
         "runs": args.runs,
         "timeout_ms": args.timeout_ms,
+        "sessions_refresh": sessions_refresh,
         "shapes": shapes,
     });
     println!("{}", serde_json::to_string_pretty(&doc).unwrap_or_default());

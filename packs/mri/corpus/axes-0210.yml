@@ -477,7 +477,7 @@ cases:
       flip_angle: 1
     axes:
       provenance: Calibration
-      technique: TurboFLASH
+      technique: FSPGRE
       base: ''
       disposition: working_scan
       convertible: 'no'
@@ -498,7 +498,7 @@ cases:
       flip_angle: 70
     axes:
       provenance: Calibration
-      technique: FISP
+      technique: SSFPFID
       base: ''
 
   # --- the gradient-echo family (cases 8 and 9)
@@ -518,7 +518,7 @@ cases:
       echo_time: 4
       flip_angle: 30
     axes:
-      technique: FISP
+      technique: SSFPFID
 
   - name: a GE fgre with SP is FSP-GRE
     stack:
@@ -533,7 +533,7 @@ cases:
       echo_time: 2
       flip_angle: 70
     axes:
-      technique: TurboFLASH
+      technique: FSPGRE
 
   - name: a GE efgre3d without SP states no spoiling and is GRE, FAST_GEMS notwithstanding
     stack:
@@ -564,7 +564,7 @@ cases:
       echo_time: 2.5
       flip_angle: 12
     axes:
-      technique: TurboFLASH
+      technique: FSPGRE
 
   - name: a GE fspgr pulse sequence is FSP-GRE
     stack:
@@ -579,7 +579,7 @@ cases:
       echo_time: 2.5
       flip_angle: 12
     axes:
-      technique: TurboFLASH
+      technique: FSPGRE
 
   - name: a Siemens fl3d with SequenceVariant SK alone is SP-GRE
     stack:
@@ -594,7 +594,7 @@ cases:
       echo_time: 4.8
       flip_angle: 15
     axes:
-      technique: FLASH
+      technique: SPGRE
 
   # --- Dixon (case 10)
 
@@ -692,7 +692,7 @@ cases:
       echo_time: 2.4
       flip_angle: 10
     axes:
-      technique: FLASH
+      technique: SPGRE
       construct: 'InPhase,MPR'
       modifier: Dixon
 
@@ -708,7 +708,7 @@ cases:
       echo_time: 2.4
       flip_angle: 10
     axes:
-      technique: VIBE
+      technique: VIGRE
       construct: Water
 
   - name: a Philips enhanced mDixon stack whose frames name the water part is Water and Dixon
@@ -811,7 +811,7 @@ cases:
       flip_angle: 18
       echo_train_length: 1
     axes:
-      technique: FISP
+      technique: SSFPFID
 
   # --- Philips 3D T1 TFE (case 17)
 
@@ -991,7 +991,7 @@ cases:
       flip_angle: 7
       echo_train_length: 1
     axes:
-      base: 'T2*w'
+      base: T2starw
 
   - name: a Philips T2-FFE the scanner states (the time-reversed steady state) is no T2*w by its name
     stack:
@@ -1039,7 +1039,7 @@ cases:
       repetition_time: 5000
       echo_time: 60
     axes:
-      technique: RESOLVE
+      technique: rsEPI
 
   - name: Philips IRIS by its name is multi-shot EPI
     stack:
@@ -1054,7 +1054,7 @@ cases:
       echo_time: 70
       echo_train_length: 20
     axes:
-      technique: RESOLVE
+      technique: rsEPI
 
   - name: the ADC of a Siemens diffusion named with 32 directions is DTIRecon
     stack:
@@ -1120,7 +1120,7 @@ cases:
       echo_time: 90
       inversion_time: 2500
     axes:
-      technique: SE-EPI
+      technique: SEEPI
       modifier: FLAIR
       base: T2w
 
@@ -1158,7 +1158,7 @@ cases:
       echo_time: 100
       echo_train_length: 16
     axes:
-      technique: RESTORE
+      technique: DETSE
 
   - name: a GE frfseopt without FR_GEMS is a plain TSE
     stack:
@@ -1193,7 +1193,7 @@ cases:
     flags:
       ge_fast_recovery: false
     axes:
-      technique: TIRM
+      technique: IRTSE
       modifier: STIR
 
   - name: a GE PROPELLER with FR_GEMS is the flip-back TSE, Radial
@@ -1210,7 +1210,7 @@ cases:
       echo_time: 100
       echo_train_length: 32
     axes:
-      technique: RESTORE
+      technique: DETSE
       modifier: Radial
 
   # --- dev-6's rule bugs (grade.md part 2, A1 to A10)
@@ -1234,7 +1234,7 @@ cases:
     axes:
       provenance: RawRecon
       construct: ''
-      base: 'T2*w'
+      base: T2starw
 
   - name: A1, a Siemens SWI magnitude written M keeps Magnitude
     stack:

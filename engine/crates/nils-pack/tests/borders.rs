@@ -41,7 +41,7 @@ fn row(changes: &[(&str, &str)]) -> BTreeMap<String, String> {
         ("fov_x", "240"),
         ("image_orientation_patient", "0\\1\\0\\0\\0\\-1"),
         ("provenance", "RawRecon"),
-        ("post_contrast", "0"),
+        ("post_contrast", "not_given"),
         ("orientation", "Sagittal"),
         ("directory_type", "anat"),
     ]
@@ -156,7 +156,7 @@ fn v0_s_dixon_sisters_are_no_retake_and_two_in_phase_are() {
     let m = main_pick();
     let dixon = |c: &str| {
         row(&[
-            ("technique", "VIBE"),
+            ("technique", "VIGRE"),
             ("modifier", "Dixon"),
             ("construct", c),
         ])
@@ -164,7 +164,7 @@ fn v0_s_dixon_sisters_are_no_retake_and_two_in_phase_are() {
     let mut rows = many(
         10,
         &[
-            ("technique", "VIBE"),
+            ("technique", "VIGRE"),
             ("modifier", "Dixon"),
             ("construct", "InPhase"),
         ],
@@ -172,7 +172,7 @@ fn v0_s_dixon_sisters_are_no_retake_and_two_in_phase_are() {
     rows.extend(many(
         10,
         &[
-            ("technique", "VIBE"),
+            ("technique", "VIGRE"),
             ("modifier", "Dixon"),
             ("construct", "Water"),
         ],
@@ -284,11 +284,11 @@ fn v0_s_pre_and_post_twin_is_a_border_and_not_a_second_main() {
     // otherwise the same. v0 tagged both main; here one is the pick and the
     // other is named in the border, for a person to choose.
     let m = main_pick();
-    let mut rows = many(10, &[("post_contrast", "0")]);
-    rows.extend(many(5, &[("post_contrast", "1")]));
+    let mut rows = many(10, &[("post_contrast", "not_given")]);
+    rows.extend(many(5, &[("post_contrast", "given")]));
     let r = cohort(&m, &rows);
-    let pre = cand(&[(1, row(&[("post_contrast", "0")]))], None);
-    let post = cand(&[(2, row(&[("post_contrast", "1")]))], None);
+    let pre = cand(&[(1, row(&[("post_contrast", "not_given")]))], None);
+    let post = cand(&[(2, row(&[("post_contrast", "given")]))], None);
     let p = pick::pick(&m, "t1w", &[pre, post], &r);
     assert!(p.borders.contains(&Border::PrePostTwin), "{:?}", p.borders);
     assert_eq!(
@@ -328,11 +328,11 @@ fn v0_s_dixon_against_plain() {
     // MPRAGE within 10%, expect border". Here the family's in-phase image
     // and a plain VIBE of the same session, the plain one scored close.
     let m = main_pick();
-    let mut rows = many(10, &[("technique", "VIBE")]);
+    let mut rows = many(10, &[("technique", "VIGRE")]);
     rows.extend(many(
         10,
         &[
-            ("technique", "VIBE"),
+            ("technique", "VIGRE"),
             ("modifier", "Dixon"),
             ("construct", "InPhase"),
         ],
@@ -342,14 +342,14 @@ fn v0_s_dixon_against_plain() {
         &[(
             2,
             row(&[
-                ("technique", "VIBE"),
+                ("technique", "VIGRE"),
                 ("modifier", "Dixon"),
                 ("construct", "InPhase"),
             ]),
         )],
         Some("dixon"),
     );
-    let plain = cand(&[(1, row(&[("technique", "VIBE")]))], None);
+    let plain = cand(&[(1, row(&[("technique", "VIGRE")]))], None);
     let p = pick::pick(&m, "t1w", &[dixon, plain], &r);
     assert_eq!(
         p.winner.as_ref().unwrap().stacks,
@@ -365,7 +365,7 @@ fn v0_s_dixon_against_plain() {
         &[(
             2,
             row(&[
-                ("technique", "VIBE"),
+                ("technique", "VIGRE"),
                 ("modifier", "Dixon"),
                 ("construct", "InPhase"),
             ]),
@@ -373,7 +373,7 @@ fn v0_s_dixon_against_plain() {
         Some("dixon"),
     );
     let we = cand(
-        &[(1, row(&[("technique", "VIBE"), ("modifier", "WaterExc")]))],
+        &[(1, row(&[("technique", "VIGRE"), ("modifier", "WaterExc")]))],
         None,
     );
     let p = pick::pick(&m, "t1w", &[dixon, we], &r);
@@ -397,9 +397,9 @@ fn v0_s_three_that_v1_already_had_still_hold() {
     );
     assert!(p.borders.contains(&Border::TooClose), "{:?}", p.borders);
     let mut rows = many(99, &[]);
-    rows.push(row(&[("technique", "FIESTA")]));
+    rows.push(row(&[("technique", "bSSFP")]));
     let r = cohort(&m, &rows);
-    let odd = cand(&[(1, row(&[("technique", "FIESTA")]))], None);
+    let odd = cand(&[(1, row(&[("technique", "bSSFP")]))], None);
     assert!(
         pick::pick(&m, "t1w", &[odd], &r)
             .borders
@@ -437,7 +437,9 @@ fn the_mri_pack_scores_t2w_on_its_own_tables_and_declares_all_nine() {
     let names: Vec<&str> = m.families.iter().map(|f| f.name.as_str()).collect();
     assert_eq!(names, ["dixon", "mp2rage"]);
     let mp2rage = &m.families[1];
-    assert_eq!(mp2rage.canonical, ["UniformDenoised", "Uniform"]);
+    // the pick file names the denoised uniform image by its identity; the
+    // model holds the word a row stores for it
+    assert_eq!(mp2rage.canonical, ["Denoised", "Uniform"]);
     assert!(mp2rage.apart_without_canonical);
     assert_eq!(mp2rage.retake_above, 2);
     // A 3D turbo spin echo is the T2w a volume analysis wants, over the 2D
@@ -637,7 +639,7 @@ fn a_pack_without_the_new_keys_raises_only_the_three_it_declares() {
     let m = pack.picks.into_iter().next().unwrap();
     assert_eq!(m.families.len(), 1);
     assert!(m.borders.retake.is_none() && m.borders.dixon_vs_plain.is_none());
-    let mut rows = many(10, &[("post_contrast", "0")]);
+    let mut rows = many(10, &[("post_contrast", "not_given")]);
     rows.push(row(&[
         ("technique", "GRE"),
         ("mr_acquisition_type", ""),
@@ -656,7 +658,10 @@ fn a_pack_without_the_new_keys_raises_only_the_three_it_declares() {
     };
     let planted = cand(&[(1, odd()), (2, odd())], None);
     let twin = cand(
-        &[(3, row(&[("post_contrast", "1"), ("provenance", "EPIMix")]))],
+        &[(
+            3,
+            row(&[("post_contrast", "given"), ("provenance", "EPIMix")]),
+        )],
         None,
     );
     let p = pick::pick(&m, "t1w", &[planted, twin], &r);
@@ -815,10 +820,11 @@ fn which_stacks_compete_and_how_a_near_tie_is_decided_are_contract_9_s() {
     );
     assert_eq!(m.candidates["t2w"].when.len(), 1);
     assert_eq!(m.near_tie.len(), 5);
-    // A value of an axis that stores labels is read as it is stored.
+    // A value is read as its axis stores it: the word, where a pack before
+    // this one stored the digit.
     assert_eq!(
         m.near_tie[2].rank,
-        pick::Rank::Avoid(vec!["1".into()]),
+        pick::Rank::Avoid(vec!["given".into()]),
         "{:?}",
         m.near_tie[2]
     );
@@ -878,4 +884,152 @@ fn a_candidacy_or_a_near_tie_order_the_engine_cannot_read_is_refused() {
         assert!(e.contains(want), "{text}: {e}");
         let _ = std::fs::remove_dir_all(&dir);
     }
+}
+
+/// A stack's values as a row stores them: each word of a name through the
+/// model's one reading of it, which is how the registry side builds a
+/// candidate.
+fn read_as_stored(m: &Model, changes: &[(&str, &str)]) -> BTreeMap<String, String> {
+    row(changes)
+        .into_iter()
+        .map(|(k, v)| {
+            let s = m.stored(&k, &v).to_string();
+            (k, s)
+        })
+        .collect()
+}
+
+#[test]
+fn the_technique_tiers_are_read_by_the_form_a_row_stores() {
+    let m = main_pick();
+    let r = cohort(&m, &[row(&[])]);
+    let tech = |words: &[(&str, &str)], role: &str| -> f64 {
+        let c = cand(&[(1, read_as_stored(&m, words))], None);
+        let s = pick::score(&m, role, &c, &r);
+        s.parts
+            .iter()
+            .find(|p| p.name == "tech")
+            .expect("the tech part")
+            .score
+    };
+    // A planted word of an older pack reads as the value's stored word, so
+    // the 3D VIBE ranks where it ranked before, above a spoiled gradient
+    // echo and well above an unknown technique.
+    let vibe = tech(&[("technique", "VIBE")], "t1w");
+    assert_eq!(vibe, tech(&[("technique", "VIGRE")], "t1w"));
+    assert!(vibe > tech(&[("technique", "FLASH")], "t1w"));
+    assert!(vibe > tech(&[("technique", "Unknown")], "t1w"));
+    assert_eq!(
+        tech(&[("technique", "FLASH")], "t1w"),
+        tech(&[("technique", "SPGRE")], "t1w")
+    );
+    assert_eq!(
+        tech(&[("technique", "TIRM")], "flair"),
+        tech(&[("technique", "IRTSE")], "flair")
+    );
+    assert!(tech(&[("technique", "TIRM")], "flair") > tech(&[("technique", "Unknown")], "flair"));
+    assert!(
+        tech(&[("technique", "HASTE")], "t2w") > tech(&[("technique", "CISS")], "t2w"),
+        "a table key written in a word the row no longer holds still ranks"
+    );
+}
+
+#[test]
+fn a_table_that_names_one_value_twice_is_refused() {
+    let dir = edited(9, |main| {
+        main.replace(
+            "        VIGRE: 0.85\n",
+            "        VIGRE: 0.85\n        VIBE: 0.80\n",
+        )
+    });
+    let e = refused(&dir, "name the value VIGRE");
+    assert!(e.contains("name the value VIGRE"), "{e}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn saved_rules_name_a_kind_by_any_spelling_of_its_technique() {
+    use nils_pack::pick_rules::{Chooser, Rules};
+    let m = main_pick();
+    let kind_of = |t: &str| -> Candidate {
+        cand(
+            &[(
+                1,
+                read_as_stored(&m, &[("technique", t), ("mr_acquisition_type", "2D")]),
+            )],
+            None,
+        )
+    };
+    let tirm = kind_of("TIRM");
+    let tse = kind_of("TSE");
+    assert_eq!(nils_pack::pick_rules::kind_of(&tirm), "2D IRTSE");
+
+    // Rules saved when a row stored `TIRM`: the kind is written with it.
+    let mut rules = Rules::defaults(&m);
+    let t1 = &mut rules.roles.iter_mut().find(|(r, _)| r == "t1w").unwrap().1;
+    t1.not_used = vec!["2D TIRM".to_string()];
+    let chooser = Chooser::new(&rules, &m);
+    let got = chooser.choose("t1w", &[vec![tirm.clone(), tse.clone()]], None);
+    assert_eq!(got[0].allowed, vec!["2D TSE".to_string()], "{:?}", got[0]);
+    assert_eq!(got[0].held.len(), 2);
+
+    // The same rules written with the stored word, or with the label's
+    // own spelling, do the same.
+    for word in ["2D IRTSE", "2D IR-TSE"] {
+        let mut rules = Rules::defaults(&m);
+        let t1 = &mut rules.roles.iter_mut().find(|(r, _)| r == "t1w").unwrap().1;
+        t1.not_used = vec![word.to_string()];
+        let got = Chooser::new(&rules, &m).choose("t1w", &[vec![tirm.clone(), tse.clone()]], None);
+        assert_eq!(got[0].allowed, vec!["2D TSE".to_string()], "{word}");
+    }
+
+    // A saved order names the kinds the same way.
+    let mut rules = Rules::defaults(&m);
+    let t1 = &mut rules.roles.iter_mut().find(|(r, _)| r == "t1w").unwrap().1;
+    t1.kinds_in_order = vec!["2D TIRM".to_string(), "2D TSE".to_string()];
+    let order = Chooser::new(&rules, &m).order("t1w").unwrap();
+    assert!(order.rank("2D IRTSE") < order.rank("2D TSE"));
+    assert!(!order.is_new("2D IRTSE"));
+}
+
+#[test]
+fn a_stack_whose_body_part_was_set_aside_is_judged_by_its_decided_region() {
+    use nils_pack::pick_rules::{BodyPart, Chooser, Rules};
+    let m = main_pick();
+    assert!(m.reads().contains(&"body_region".to_string()));
+    let with = |part: &str, region: &str| -> Candidate {
+        cand(
+            &[(
+                1,
+                read_as_stored(
+                    &m,
+                    &[
+                        ("technique", "MPRAGE"),
+                        ("body_part", part),
+                        ("body_region", region),
+                    ],
+                ),
+            )],
+            None,
+        )
+    };
+    let mut rules = Rules::defaults(&m);
+    for (role, r) in &mut rules.roles {
+        if role == "t1w" {
+            r.body_part = BodyPart::Brain;
+        }
+    }
+    let chooser = Chooser::new(&rules, &m);
+    let taken = |c: Candidate| chooser.choose("t1w", &[vec![c]], None)[0].kind.is_some();
+    // no body part, and a decided region that is not the head: refused
+    assert!(!taken(with("", "spine")));
+    assert!(!taken(with("", "chest")));
+    // a region that covers a brain admits it
+    assert!(taken(with("", "head")));
+    // nobody said anything on either: admitted, as before
+    assert!(taken(with("", "")));
+    // a body part that is a brain is admitted whatever the region says, and
+    // one that is not is refused, as before
+    assert!(taken(with("brain", "")));
+    assert!(!taken(with("spine", "")));
 }

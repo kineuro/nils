@@ -132,6 +132,109 @@ pub(crate) fn list(registry: &mut Registry) -> Result<Vec<Value>, Exit> {
         .collect())
 }
 
+/// What [`rebuild_each`] did: a build under one scheme is committed before
+/// the next begins, so a failure under a later scheme leaves the earlier
+/// ones built.
+pub(crate) struct Built {
+    /// The sessions the subjects have under the default scheme.
+    pub sessions: usize,
+    /// Whether any build wrote a session or a label (and so moved the
+    /// epoch).
+    pub wrote: bool,
+    /// The first kept scheme that could not be built, and why.
+    pub failed: Option<String>,
+}
+
+/// The sessions of some subjects built again once a write has dropped
+/// them: a merge takes away the cache rows of both its subjects, and the
+/// subject that is left had no session, in any question or on any page that
+/// reads the cache as it stands, until some reader built them. Built under
+/// the default scheme and under every kept one, since the merge dropped the
+/// rows of every window. Answers the sessions the subjects have under the
+/// default scheme. The default scheme's failure is the error; a kept
+/// scheme's is too, once every scheme was tried.
+pub(crate) fn rebuild_for(
+    registry: &mut Registry,
+    subjects: &std::collections::BTreeSet<i64>,
+) -> Result<usize, String> {
+    let built = rebuild_each(registry, subjects)?;
+    match built.failed {
+        Some(e) => Err(e),
+        None => Ok(built.sessions),
+    }
+}
+
+/// [`rebuild_for`] for a caller that must account for what was built when a
+/// kept scheme fails: the default scheme's failure is the error, with
+/// nothing written; a kept scheme's is told beside what the others built.
+pub(crate) fn rebuild_each(
+    registry: &mut Registry,
+    subjects: &std::collections::BTreeSet<i64>,
+) -> Result<Built, String> {
+    let mut out = Built {
+        sessions: 0,
+        wrote: false,
+        failed: None,
+    };
+    if subjects.is_empty() {
+        return Ok(out);
+    }
+    let default = Scheme::default();
+    let built =
+        nils_session::refresh_for(registry, &default, subjects).map_err(|e| e.to_string())?;
+    out.sessions = built.sessions;
+    out.wrote = built.epoch.is_some();
+    let store = registry.store();
+    let rows = store
+        .query(
+            &format!(
+                "SELECT name, definition FROM {} ORDER BY name",
+                store.qualified("session_scheme")
+            ),
+            &[],
+        )
+        .map_err(|e| e.to_string())?;
+    let mut done = vec![default.digest()];
+    for r in &rows {
+        let name = r.text(0).unwrap_or_default();
+        let Ok(scheme) = Scheme::from_json(r.text(1).unwrap_or_default()) else {
+            continue;
+        };
+        if done.contains(&scheme.digest()) {
+            continue;
+        }
+        done.push(scheme.digest());
+        match nils_session::refresh_for(registry, &scheme, subjects) {
+            Ok(built) => out.wrote |= built.epoch.is_some(),
+            Err(e) => {
+                out.failed
+                    .get_or_insert(format!("under the scheme {name}: {e}"));
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// [`rebuild_for`] for the subjects an identifier map merged others into,
+/// by their codes.
+pub(crate) fn rebuild_after_merges(
+    registry: &mut Registry,
+    merges: &[nils_registry::identity_map::Merge],
+) -> Result<usize, String> {
+    let codes: Vec<String> = merges
+        .iter()
+        .map(|m| m.canonical.clone())
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    let subjects = nils_registry::linkage::subjects_by_code(registry.store(), &codes)
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .map(|s| s.merged_into.unwrap_or(s.id))
+        .collect();
+    rebuild_for(registry, &subjects)
+}
+
 /// A scheme's name: what a release, a pick and a question name it by.
 fn name_ok(name: &str) -> bool {
     !name.is_empty()

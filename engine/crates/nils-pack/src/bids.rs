@@ -68,6 +68,13 @@ pub struct Tokens {
     /// name says it at all (record 37 S7).
     pub modes: Vec<String>,
     pub tokens: BTreeMap<String, String>,
+    /// Why this group's tokens are words of their own and not the words a
+    /// row stores (`own_words:` in the pack): the body part's are v0's
+    /// prefixes, the contrast's is the entity's. None for a group whose
+    /// tokens are the stored words, which `nils pack validate` then holds
+    /// them to ([`crate::Pack::token_drift`]), so the word in the registry
+    /// and the word in a file's name cannot drift apart again.
+    pub own_words: Option<String>,
 }
 
 impl Tokens {
@@ -403,12 +410,14 @@ mod tests {
             from: "orientation".into(),
             modes: Vec::new(),
             tokens: BTreeMap::new(),
+            own_words: None,
         };
         assert!(both.in_mode("bids") && both.in_mode("informative"));
         let only = Tokens {
             from: "provenance".into(),
             modes: vec!["informative".into()],
             tokens: BTreeMap::new(),
+            own_words: None,
         };
         assert!(!only.in_mode("bids") && only.in_mode("informative"));
     }

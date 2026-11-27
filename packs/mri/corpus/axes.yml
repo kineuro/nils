@@ -26,7 +26,7 @@ cases:
       text_series_description: 'ax dwi b1000'
       diffusion_b_value: '1000'
     axes:
-      technique: DWI-EPI
+      technique: DWIEPI
       # Not DTIRecon: that provenance needs a diffusion-derived output, and
       # this is the acquisition itself.
       provenance: RawRecon
@@ -41,7 +41,7 @@ cases:
       inversion_time: 2500
     axes:
       # The axis stores the display name: v0 calls IR-TSE a TIRM in a row.
-      technique: TIRM
+      technique: IRTSE
       modifier: FLAIR
 
   - name: an ADC map is a construct, and the map is what it is of
@@ -92,8 +92,8 @@ cases:
       repetition_time: 700
       flip_angle: 20
     axes:
-      technique: MEDIC
-      base: 'T2*w'
+      technique: combMEGRE
+      base: T2starw
 
   - name: a stack marked ND carries the ND construct
     stack:
@@ -425,7 +425,7 @@ cases:
       image_type: 'DERIVED\PRIMARY\MAVRIC_COMPOSITE'
       text_series_description: 'cor hip'
     axes:
-      technique: MAVRIC
+      technique: MSI
       construct: ''
 
   - name: a derived image made without one of its inputs says so
@@ -476,7 +476,7 @@ cases:
       text_protocol_name: 'ep2d_diff_2mm_hcp_32_b1000_AP'
       diffusion_b_value: '1000'
     axes:
-      technique: DWI-EPI
+      technique: DWIEPI
 
   - name: and neither is the trace image computed from it
     stack:
@@ -486,7 +486,7 @@ cases:
       text_sequence_name: '*ep_b1000t'
       text_series_description: 'ep2d_diff_2mm_hcp_32_b1000_AP_TRACEW'
     axes:
-      technique: DWI-EPI
+      technique: DWIEPI
 
   - name: a readout-segmented diffusion EPI is RESOLVE by its sequence name
     stack:
@@ -496,7 +496,7 @@ cases:
       text_sequence_name: '*re_b1000t'
       text_series_description: 'ax dwi b1000'
     axes:
-      technique: RESOLVE
+      technique: rsEPI
 
   # Canon's FASE is a single-shot fast spin echo, the vendor's HASTE, and
   # nothing like RESOLVE; the word stood on both values and RESOLVE came first.
@@ -550,7 +550,7 @@ cases:
       text_sequence_name: 'epfid2d1_64'
       text_series_description: 'ax ep2d'
     axes:
-      technique: GRE-EPI
+      technique: GREEPI
 
   - name: a 3D GRASE arterial spin labelling series is ASL
     stack:
@@ -950,7 +950,7 @@ cases:
     axes:
       technique: DCE
       base: PWI
-      post_contrast: '1'
+      post_contrast: given
 
   - name: a DSC series had contrast whatever its name says of the bolus
     stack:
@@ -961,7 +961,7 @@ cases:
     axes:
       technique: Perfusion
       base: PWI
-      post_contrast: '1'
+      post_contrast: given
 
   - name: an ASL series is stored as ASL, as before the identity lost its EPI
     stack:
@@ -995,7 +995,7 @@ cases:
       split_reason: multi_echo
     axes:
       technique: MEGRE
-      base: T2*w
+      base: T2starw
 
   - name: a water-only image is a Dixon image
     stack:
@@ -1018,35 +1018,35 @@ cases:
       image_type: 'ORIGINAL\PRIMARY\M\ND'
       text_series_description: 'T1 SE tra med K'
     axes:
-      post_contrast: '1'
+      post_contrast: given
 
   - name: a Swedish efter K says contrast was given
     stack:
       image_type: 'ORIGINAL\PRIMARY\M\ND'
       text_series_description: 'T1 SE tra efter K'
     axes:
-      post_contrast: '1'
+      post_contrast: given
 
   - name: kontrast alone says given, and före kontrast says not
     stack:
       image_type: 'ORIGINAL\PRIMARY\M\ND'
       text_series_description: 'T1 före kontrast'
     axes:
-      post_contrast: '0'
+      post_contrast: not_given
 
   - name: a German post KM and a hyphenated post-contrast say given
     stack:
       image_type: 'ORIGINAL\PRIMARY\M\ND'
       text_series_description: 't1_mprage post-contrast'
     axes:
-      post_contrast: '1'
+      post_contrast: given
 
   - name: a hyphenated non-contrast says not given
     stack:
       image_type: 'ORIGINAL\PRIMARY\M\ND'
       text_series_description: 'T1 non-contrast'
     axes:
-      post_contrast: '0'
+      post_contrast: not_given
 
   - name: GE's plain Inhance Inflow is a time of flight
     stack:
@@ -1060,7 +1060,7 @@ cases:
       image_type: 'ORIGINAL\PRIMARY\M\ND'
       text_series_description: 'T1 tra kontrast'
     axes:
-      post_contrast: '1'
+      post_contrast: given
 
   # --- pack 0.9.0: Nima's rulings of 2026-09-27 and 28
   # (`studies/2026-09-27-read-r1-notes/` and `studies/2026-09-27-header-judge/`
@@ -1216,7 +1216,7 @@ cases:
       split_reason: multi_echo
       stacks_in_series: 2
     axes:
-      technique: HASTE
+      technique: SSTSE
 
   # The acquisition's own images are RawRecon, and what the scanner computes
   # from them takes the product (Nima's ruling, 2026-09-28). An SWI: its
@@ -1233,7 +1233,7 @@ cases:
     axes:
       provenance: RawRecon
       construct: 'Magnitude,ND'
-      base: T2*w
+      base: T2starw
 
   - name: the phase of a Siemens SWI is acquired and has no base contrast
     stack:
@@ -1292,9 +1292,9 @@ cases:
       echo_time: 20
     axes:
       provenance: RawRecon
-      technique: MEDIC
+      technique: combMEGRE
       construct: EchoCombined,Magnitude
-      base: T2*w
+      base: T2starw
 
   # A BOLD run as acquired is RawRecon and still a functional series; the map
   # the scanner computes from it is BOLDRecon.
@@ -1413,7 +1413,7 @@ cases:
       n_slices: 1
     axes:
       technique: Perfusion
-      post_contrast: '1'
+      post_contrast: given
 
   - name: a Philips FE-EPI of 40 dynamics named for gadolinium is DSC
     stack:
@@ -1469,7 +1469,7 @@ cases:
       text_sequence_name: '*fldyn3d2'
       text_series_description: 't1_vibe_dixon_tra_dyn_TTP'
     axes:
-      technique: VIBE
+      technique: VIGRE
 
   - name: a GE reverse-phase field map in an fMRI exam is not BOLD
     stack:
@@ -1532,7 +1532,7 @@ cases:
       n_instances: 120
       n_slices: 30
     axes:
-      technique: GRE-EPI
+      technique: GREEPI
 
   - name: a series named for BOLD whose header states nothing is still BOLD
     stack:
@@ -1567,7 +1567,7 @@ cases:
       n_instances: 1
       n_slices: 1
     axes:
-      technique: GRE-EPI
+      technique: GREEPI
 
   - name: a gradient-echo EPI written SE\EP is a GRE-EPI by its name
     stack:
@@ -1578,7 +1578,7 @@ cases:
       n_instances: 30
       n_slices: 30
     axes:
-      technique: GRE-EPI
+      technique: GREEPI
 
   - name: a spin-echo EPI written GR\EP is a SE-EPI by its name
     stack:
@@ -1589,7 +1589,7 @@ cases:
       n_instances: 60
       n_slices: 60
     axes:
-      technique: SE-EPI
+      technique: SEEPI
 
   # Whole words.
   - name: a baseline misspelt in the comments is not ASL
@@ -1628,9 +1628,9 @@ cases:
     axes:
       # MRI pack 0.13.0, Nima's ruling (2026-09-29): a single-echo SWI whose
       # SequenceVariant says SP is a spoiled GRE.
-      technique: FLASH
+      technique: SPGRE
       provenance: RawRecon
-      base: T2*w
+      base: T2starw
 
   # DCE from the header, and what it is not.
   - name: a 3D FLASH of 40 time points through a bolus is DCE
@@ -1645,7 +1645,7 @@ cases:
     axes:
       technique: DCE
       base: PWI
-      post_contrast: '1'
+      post_contrast: given
 
   - name: a TWIST angiography run of 50 time points is not DCE
     stack:
@@ -1658,7 +1658,7 @@ cases:
       temporal_positions: 50
     # MRI pack 0.18.0: CE-MRA, the value the vocabulary lacked.
     axes:
-      technique: CE-MRA
+      technique: CEMRA
 
   - name: a liver VIBE of four phases is a VIBE and not DCE
     stack:
@@ -1670,7 +1670,7 @@ cases:
       text_series_description: 't1_vibe_fs_tra_dyn'
       temporal_positions: 4
     axes:
-      technique: VIBE
+      technique: VIGRE
 
   - name: Philips' PRESTO of 40 dynamics is not DCE
     stack:
@@ -1681,7 +1681,7 @@ cases:
       text_series_description: 'presto_hr'
       temporal_positions: 40
     axes:
-      technique: FLASH
+      technique: SPGRE
 
   # The gradient-echo family.
   - name: a 3D FLASH nobody named VIBE is a spoiled GRE
@@ -1693,7 +1693,7 @@ cases:
       text_sequence_name: '*fl3d1'
       text_series_description: 't1_3d_tra'
     axes:
-      technique: FLASH
+      technique: SPGRE
 
   - name: a GE 3D SPGR nobody named LAVA is a spoiled GRE
     stack:
@@ -1704,7 +1704,7 @@ cases:
       manufacturer: GE MEDICAL SYSTEMS
       text_series_description: 'Ax 3D T1'
     axes:
-      technique: FLASH
+      technique: SPGRE
 
   - name: a GE FSPGR is the fast spoiled GRE
     stack:
@@ -1715,7 +1715,7 @@ cases:
       manufacturer: GE MEDICAL SYSTEMS
       text_series_description: 'Sag 3D T1 FSPGR'
     axes:
-      technique: TurboFLASH
+      technique: FSPGRE
 
   - name: a Siemens CISS written with ScanningSequence SE is a CISS
     stack:
@@ -1726,7 +1726,7 @@ cases:
       text_sequence_name: '*ci3d1'
       text_series_description: 't2_ci3d_tra'
     axes:
-      technique: CISS
+      technique: pcbSSFP
 
   - name: a Siemens TrueFISP written with ScanningSequence SE is a bSSFP
     stack:
@@ -1736,7 +1736,7 @@ cases:
       text_sequence_name: '*tfi2d1_110'
       text_series_description: 'trufi_cor'
     axes:
-      technique: FIESTA
+      technique: bSSFP
 
   - name: a Siemens FISP is the steady-state GRE by its name
     stack:
@@ -1746,7 +1746,7 @@ cases:
       mr_acquisition_type: 3D
       text_sequence_name: '*fi3d1'
     axes:
-      technique: FISP
+      technique: SSFPFID
 
   - name: a Siemens DESS is a DESS by its name
     stack:
@@ -1765,7 +1765,7 @@ cases:
       sequence_variant: TRSS
       text_sequence_name: '*ps2d1'
     axes:
-      technique: PSIF
+      technique: SSFPecho
 
   - name: a Siemens TOF is a TOF before anything its FLASH readout says
     stack:
@@ -1788,7 +1788,7 @@ cases:
       philips_scanning_technique: T1FFE
       text_series_description: 'T1W_3D'
     axes:
-      technique: FLASH
+      technique: SPGRE
 
   - name: a Philips 2D TFE is the turbo field echo
     stack:
@@ -1800,7 +1800,7 @@ cases:
       philips_scanning_technique: T1TFE
       text_series_description: 'T1W_TFE'
     axes:
-      technique: TurboFLASH
+      technique: FSPGRE
 
   - name: a Philips balanced FFE is a bSSFP
     stack:
@@ -1811,7 +1811,7 @@ cases:
       philips_scanning_technique: B-FFE
       text_series_description: 'bffe_cor'
     axes:
-      technique: FIESTA
+      technique: bSSFP
 
   # Provenance: value 1 decides a motion-corrected copy and no map.
   # MRI pack 0.20.0: RawRecon with MoCo, the acquisition registered, whatever
@@ -1998,7 +1998,7 @@ cases:
       n_instances: 3
       n_slices: 1
     axes:
-      technique: SE-EPI
+      technique: SEEPI
       construct: FieldmapRef
 
   - name: a dual-echo gradient-echo field map is still a B0 map
@@ -2056,7 +2056,7 @@ cases:
       text_series_description: 'DTI-MC-epi'
       diffusion_b_value: '1000'
     axes:
-      technique: DWI-EPI
+      technique: DWIEPI
       provenance: RawRecon
 
   - name: an FA map is still DTIRecon
@@ -2155,7 +2155,7 @@ cases:
       inversion_time: 2658
       echo_train_length: 21
     axes:
-      technique: TIRM
+      technique: IRTSE
 
   - name: an old Siemens tir with ScanningSequence IR alone is a turbo inversion recovery
     stack:
@@ -2169,7 +2169,7 @@ cases:
       inversion_time: 2500
       echo_train_length: 27
     axes:
-      technique: TIRM
+      technique: IRTSE
 
   - name: a GE CUBE FLAIR reformat keeps its 3D turbo spin echo
     stack:
@@ -2205,7 +2205,7 @@ cases:
       philips_scanning_technique: FFE
       text_series_description: 'T1W_FFE'
     axes:
-      technique: FISP
+      technique: SSFPFID
 
   - name: a FLASH named T2 is T2*-weighted
     stack:
@@ -2219,8 +2219,8 @@ cases:
       repetition_time: 800
       echo_time: 26
     axes:
-      technique: FLASH
-      base: T2*w
+      technique: SPGRE
+      base: T2starw
 
   - name: a classic Siemens dynamic VIBE phase with a time to contrast is DCE
     stack:
@@ -2236,7 +2236,7 @@ cases:
     axes:
       technique: DCE
       base: PWI
-      post_contrast: '1'
+      post_contrast: given
 
   - name: a GE TOF with MT_GEMS carries MT, and its vascular projection is a MIP
     stack:
@@ -2274,7 +2274,7 @@ cases:
       text_sequence_name: '*epfid3d1_15'
       text_series_description: 'swi_epi3d_mag'
     axes:
-      technique: GRE-EPI
+      technique: GREEPI
 
   # MDME keeps ND; post-contrast is not read off GE's exam name.
   - name: a Siemens SyMRI acquisition image keeps ND from its image type
@@ -2319,7 +2319,7 @@ cases:
       text_series_description: 't1_se_tra'
       text_protocol_name: 't1_se_tra +gd'
     axes:
-      post_contrast: '1'
+      post_contrast: given
 
   # --- MRI pack 0.12.0: the dev-1 development reference's rule errors
   # (`studies/2026-09-28-dev-reference/` in the design repository). Every
@@ -2422,7 +2422,7 @@ cases:
       text_series_description: 't2_tse_tra'
       echo_train_length: 16
     axes:
-      technique: RESTORE
+      technique: DETSE
 
   - name: the letters after a Siemens TSE's echo train are not RESTORE
     stack:
@@ -2467,7 +2467,7 @@ cases:
     axes:
       provenance: RawRecon
       construct: 'Magnitude,ND'
-      base: 'T2*w'
+      base: T2starw
       technique: MEGRE
 
   # A multi-parameter mapping protocol's MT-weighted multi-echo gradient
@@ -2596,6 +2596,6 @@ cases:
       stacks_in_series: 1
     axes:
       construct: 'FieldmapRef,ND'
-      technique: SE-EPI
+      technique: SEEPI
       directory_type: fmap
       base: ''

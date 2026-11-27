@@ -86,7 +86,7 @@ cases:
     flags:
       philips_tfe_cant_tell: false
     axes:
-      technique: VIBE
+      technique: VIGRE
 
   - name: guard, a Philips SmartBrain survey is a localizer whatever its prepulse
     stack:
@@ -270,7 +270,7 @@ cases:
     flags:
       siemens_two_echo_fl_swi_output: true
     axes:
-      technique: MEDIC
+      technique: combMEGRE
       base: SWI
 
   - name: its minIP combines them too
@@ -291,7 +291,7 @@ cases:
     flags:
       siemens_two_echo_fl_swi_output: true
     axes:
-      technique: MEDIC
+      technique: combMEGRE
       base: SWI
 
   # --- GE's multi-echo QSM outputs (item 9)

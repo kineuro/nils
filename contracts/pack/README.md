@@ -53,6 +53,15 @@ detail, and `nils pack show --json` no longer names it. MRI pack 0.20.2
 drops the marks. Only 1.0.0-alpha.66 and 1.0.0-alpha.67 read the key. The
 manifest is unchanged.
 
+Added in place to version 11, additively, as an axis file grew two keys an
+older engine does not read and an older pack never writes: `coarse_of` on an
+axis, the axis declared before it that this one is the coarse form of, and
+`covers` on each of its values, the values of that axis the value covers.
+They decide nothing: the loader holds them to the rules that fold the fine
+answer into the coarse one and refuses a pack whose rules fold otherwise, and
+the ask's catalog serves them. An engine that does not know the keys loads the
+pack as it did. The manifest is unchanged.
+
 The engine's own copy of the version is `nils_pack::CONTRACT`; a test keeps
 the two the same and keeps every manifest key the loader reads on the schema.
 

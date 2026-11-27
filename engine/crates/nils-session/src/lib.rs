@@ -30,7 +30,7 @@ use nils_registry::schema::{Type, table};
 use nils_registry::session::{self, Anchor, Scheme, Session, Study};
 use nils_registry::store::Error as StoreError;
 use nils_registry::time::now_iso;
-use nils_registry::{Insert, Param, Registry, Store};
+use nils_registry::{Insert, Param, Registry, Row, Store};
 use serde::{Deserialize, Serialize};
 
 pub use nils_registry::session::{Collision, Naming, Reason, Said, Unmatched};
@@ -235,6 +235,11 @@ pub struct Rebuilt {
     /// Subjects that own series and no study, so they are on no timeline.
     #[serde(default)]
     pub without_a_study: usize,
+    /// The epoch the build moved the registry to, where it wrote a session
+    /// or a label: an answer kept before it was made from other sessions
+    /// and is not this epoch's answer. None where it wrote neither.
+    #[serde(skip)]
+    pub epoch: Option<i64>,
 }
 
 struct Point {
@@ -450,7 +455,7 @@ pub fn ensure(
         Some(code) => Whose::Code(code),
         None => Whose::All,
     };
-    ensure_of(registry, scheme, anchors, whose, force)
+    ensure_of(registry, scheme, Some(anchors), whose, force)
 }
 
 /// [`ensure`] for some subjects by id: the cache brought up to date for
@@ -467,13 +472,362 @@ pub fn ensure_for(
     subjects: &BTreeSet<i64>,
 ) -> Result<Rebuilt, Error> {
     let ids: Vec<i64> = subjects.iter().copied().collect();
-    ensure_of(registry, scheme, anchors, Whose::Ids(&ids), false)
+    ensure_of(registry, scheme, Some(anchors), Whose::Ids(&ids), false)
 }
 
+/// What [`stale`] found: the subjects whose cache does not say what their
+/// timeline says, among how many timelines, and the sessions of the rest.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Stale {
+    pub subjects: BTreeSet<i64>,
+    pub timelines: usize,
+    pub sessions: usize,
+}
+
+/// Every stored session of a window, by subject, with its studies in the
+/// order [`stored`] reads them: two statements for the whole registry.
+fn stored_all(store: &mut Store, window: i64) -> Result<HashMap<i64, Vec<Stored>>, Error> {
+    let d = store.dialect();
+    let t = table("session_cache");
+    let first = d.text_of_qualified(Some("c"), t.column("first").expect("first"));
+    let sql = format!(
+        "SELECT c.id, c.subject_id, {first}, c.timeline_digest FROM {} c \
+         WHERE c.window_days = {} ORDER BY c.id",
+        store.qualified("session_cache"),
+        d.param(1, Type::Int)
+    );
+    let mut out: HashMap<i64, Vec<Stored>> = HashMap::new();
+    // where a session sits, to hand it its studies
+    let mut at: HashMap<i64, (i64, usize)> = HashMap::new();
+    for r in store.query(&sql, &[Param::Int(window)])? {
+        let (id, subject) = (r.int(0)?, r.int(1)?);
+        let of = out.entry(subject).or_default();
+        at.insert(id, (subject, of.len()));
+        of.push(Stored {
+            id,
+            first: Day::parse(r.text(2)?).ok_or_else(|| Error::Message("a cached day".into()))?,
+            digest: r.text(3)?.to_string(),
+            studies: Vec::new(),
+        });
+    }
+    if out.is_empty() {
+        return Ok(out);
+    }
+    let members = format!(
+        "SELECT cs.session_id, cs.study_id FROM {} cs WHERE cs.window_days = {} \
+         ORDER BY cs.study_id",
+        store.qualified("session_cache_study"),
+        d.param(1, Type::Int)
+    );
+    for r in store.query(&members, &[Param::Int(window)])? {
+        if let Some((subject, i)) = at.get(&r.int(0)?)
+            && let Some(s) = out.get_mut(subject).and_then(|of| of.get_mut(*i))
+        {
+            s.studies.push(r.int(1)?);
+        }
+    }
+    Ok(out)
+}
+
+/// Every label row under a scheme of a window's sessions, by session: one
+/// statement for the whole registry, where [`labels_of`] reads a subject's.
+fn labels_all(
+    store: &mut Store,
+    window: i64,
+    scheme_digest: &str,
+) -> Result<HashMap<i64, Label>, Error> {
+    let d = store.dialect();
+    let sql = format!(
+        "SELECT l.session_id, l.label, l.months, l.nominal, l.offset_months, l.flagged, l.reason \
+         FROM {label} l JOIN {cache} c ON c.id = l.session_id \
+         WHERE c.window_days = {} AND l.scheme_digest = {}",
+        d.param(1, Type::Int),
+        d.param(2, Type::Text),
+        label = store.qualified("session_label"),
+        cache = store.qualified("session_cache"),
+    );
+    let mut out = HashMap::new();
+    for r in store.query(&sql, &[Param::Int(window), Param::from(scheme_digest)])? {
+        out.insert(r.int(0)?, Label::read(&r)?);
+    }
+    Ok(out)
+}
+
+/// The subjects a build under this scheme would write something for, found
+/// by reading alone: no transaction, no lock, no write. A subject is stale
+/// when it has a timeline and no session, when a session of its was built
+/// from another timeline (a study came, went, moved to or from another
+/// subject, or changed its day), and, with anchors, when a label row under
+/// the scheme is missing or says something else than the resolver.
+///
+/// It reads what [`ensure`] reads and decides as it decides, in a handful
+/// of statements for the whole registry where a build asks three of every
+/// subject, so a reader can afford it on every request and call a build
+/// only for what it names. Without anchors the labels are not looked at.
+pub fn stale(
+    store: &mut Store,
+    scheme: &Scheme,
+    anchors: Option<&Anchors>,
+) -> Result<Stale, Error> {
+    let window = scheme.window_days;
+    let digest = scheme.digest();
+    let mut by_subject: BTreeMap<i64, (String, Vec<Study>)> = BTreeMap::new();
+    for p in points(store, scheme, Whose::All)? {
+        let e = by_subject
+            .entry(p.subject_id)
+            .or_insert_with(|| (p.code.clone(), Vec::new()));
+        e.1.push(p.study);
+    }
+    let mut cached = stored_all(store, window)?;
+    let mut labels = match anchors {
+        Some(_) => labels_all(store, window, &digest)?,
+        None => HashMap::new(),
+    };
+    let mut out = Stale {
+        timelines: by_subject.len(),
+        ..Stale::default()
+    };
+    for (subject, (code, studies)) in &by_subject {
+        let old = cached.remove(subject).unwrap_or_default();
+        let timeline = timeline_digest(studies);
+        if old.is_empty() || old.iter().any(|s| s.digest != timeline) {
+            out.subjects.insert(*subject);
+            continue;
+        }
+        if let Some(anchors) = anchors {
+            let resolved = session::sessions(studies, anchors.of(scheme, code, studies), scheme);
+            let ids: Vec<i64> = old.iter().map(|s| s.id).collect();
+            let mut held: HashMap<i64, Label> = ids
+                .iter()
+                .filter_map(|id| labels.remove(id).map(|l| (*id, l)))
+                .collect();
+            let (rows, gone) = label_changes(&ids, &old, &resolved, &mut held, &digest);
+            if !rows.is_empty() || !gone.is_empty() {
+                out.subjects.insert(*subject);
+                continue;
+            }
+        }
+        out.sessions += old.len();
+    }
+    Ok(out)
+}
+
+/// The `registry_meta` row a [`refresh`] keeps per scheme: what the
+/// registry looked like when the cache was last found up to date.
+fn fresh_key(scheme: &Scheme) -> String {
+    format!("sessions_fresh.{}.{}", scheme.window_days, scheme.digest())
+}
+
+/// What moves when a timeline may have: the epoch, which every digest
+/// batch, merge and repair moves with its rows, and the studies themselves
+/// (how many, how many dated, the newest, whose they are), since a date the
+/// vote fills when a run ends puts a study on a timeline and moves no
+/// epoch. One read of a key and one pass over the studies.
+fn timelines_mark(store: &mut Store) -> Result<(i64, String), Error> {
+    let epoch = nils_registry::home::get_meta(store, "epoch")?
+        .and_then(|e| e.parse::<i64>().ok())
+        .unwrap_or(0);
+    let sql = format!(
+        "SELECT COUNT(*), COUNT(COALESCE(st.date_filled, st.study_date)), COALESCE(MAX(st.id), 0), \
+         CAST(COALESCE(SUM(st.subject_id), 0) AS BIGINT) FROM {} st",
+        store.qualified("study")
+    );
+    let rows = store.query(&sql, &[])?;
+    let r = rows
+        .first()
+        .ok_or_else(|| Error::Message("no count of the studies".into()))?;
+    Ok((
+        epoch,
+        format!("{}.{}.{}.{}", r.int(0)?, r.int(1)?, r.int(2)?, r.int(3)?),
+    ))
+}
+
+/// What moves when a window's sessions do: how many there are and the
+/// newest. A merge takes rows away and a build makes new ones.
+fn cache_mark(store: &mut Store, window: i64) -> Result<String, Error> {
+    let sql = format!(
+        "SELECT COUNT(*), COALESCE(MAX(c.id), 0) FROM {} c WHERE c.window_days = {}",
+        store.qualified("session_cache"),
+        store.dialect().param(1, Type::Int)
+    );
+    let rows = store.query(&sql, &[Param::Int(window)])?;
+    let r = rows
+        .first()
+        .ok_or_else(|| Error::Message("no count of the sessions".into()))?;
+    Ok(format!("{}.{}", r.int(0)?, r.int(1)?))
+}
+
+/// The cache brought up to date for a reader that reads it on every
+/// request and has only the scheme (2026-11-27: a question read the cache
+/// as it stood, and a subject whose rows a merge had dropped had no session
+/// in any answer until some other reader built them).
+///
+/// Two steps, the first one cheap enough for every request. It holds the
+/// registry as it is (the epoch, a count of the studies, a count of the
+/// window's sessions: [`timelines_mark`], [`cache_mark`]) against what it
+/// was when the cache was last found up to date under this scheme, kept in
+/// `registry_meta`. Where the two are the same nothing that makes or
+/// unmakes a session has happened, and the cache is read as it is. Where
+/// they differ, or nothing is kept, [`stale`] reads every timeline and the
+/// whole cache and finds the subjects a build would write for, a build is
+/// run for them alone, and the mark is kept again.
+///
+/// What the first step does not see is a change that moves neither the
+/// epoch nor those counts: a study's date changed to another date, or a
+/// label row taken away, by something that is not the engine. Both are
+/// found by the second step the next time the registry moves, and by a
+/// rebuild (`ensure`) at once. A subject with studies and no session is
+/// always seen, since its sessions are missing from the count.
+///
+/// The anchors are the ones the registry gives. A scheme whose month zero
+/// comes from outside it (an explicit anchor, whose file only a rebuild is
+/// handed) or cannot be resolved has its identity brought up to date and
+/// its labels left as the build that knew the anchors wrote them.
+pub fn refresh(registry: &mut Registry, scheme: &Scheme) -> Result<Rebuilt, Error> {
+    let key = fresh_key(scheme);
+    // read before the timelines are, so that a write that lands while they
+    // are read leaves a mark that differs from the one kept here
+    let (epoch, studies) = timelines_mark(registry.store())?;
+    let kept = nils_registry::home::get_meta(registry.store(), &key)?;
+    if let Some(kept) = &kept {
+        let now = format!(
+            "{epoch}.{studies}.{}",
+            cache_mark(registry.store(), scheme.window_days)?
+        );
+        let mut parts = kept.split(' ');
+        if parts.next() == Some(now.as_str()) {
+            let mut count = || parts.next().and_then(|n| n.parse::<usize>().ok());
+            let (subjects, sessions) = (count().unwrap_or(0), count().unwrap_or(0));
+            return Ok(Rebuilt {
+                subjects,
+                unchanged: subjects,
+                sessions,
+                ..Rebuilt::default()
+            });
+        }
+    }
+    let anchors = anchors_known(registry, scheme)?;
+    let found = stale(registry.store(), scheme, anchors.as_ref())?;
+    let fresh = found.timelines - found.subjects.len();
+    let done = if found.subjects.is_empty() {
+        Rebuilt {
+            subjects: fresh,
+            unchanged: fresh,
+            sessions: found.sessions,
+            ..Rebuilt::default()
+        }
+    } else {
+        // the epoch a build writes on its rows is the registry's, not the
+        // one this connection read when it opened
+        registry
+            .refresh_meta()
+            .map_err(|e| Error::Message(e.to_string()))?;
+        let ids: Vec<i64> = found.subjects.iter().copied().collect();
+        let mut done = ensure_of(registry, scheme, anchors.as_ref(), Whose::Ids(&ids), false)?;
+        done.subjects += fresh;
+        done.unchanged += fresh;
+        done.sessions += found.sessions;
+        done
+    };
+    // A build that wrote moved the epoch itself. Where the epoch it wrote
+    // is the next after the one read above, nothing else moved it, and the
+    // mark is kept under it; where another writer came between, the mark
+    // keeps the epoch read above, differs at the next read, and the whole
+    // pass runs once more.
+    let epoch = match done.epoch {
+        Some(moved) if moved == epoch + 1 => moved,
+        _ => epoch,
+    };
+    let mark = format!(
+        "{epoch}.{studies}.{} {} {}",
+        cache_mark(registry.store(), scheme.window_days)?,
+        done.subjects,
+        done.sessions
+    );
+    if kept.as_deref() != Some(mark.as_str()) {
+        // a mark that cannot be kept costs the next reader the second step
+        // again, and nothing else
+        let _ = nils_registry::home::set_meta(registry.store(), &key, &mark);
+    }
+    Ok(done)
+}
+
+/// The anchors a caller that has only the scheme can know: the registry's
+/// own, and none for an explicit anchor or one that does not resolve.
+fn anchors_known(registry: &mut Registry, scheme: &Scheme) -> Result<Option<Anchors>, Error> {
+    if scheme.anchor == Anchor::Explicit {
+        return Ok(None);
+    }
+    match Anchors::resolve(registry, scheme, BTreeMap::new()) {
+        Ok(a) => Ok(Some(a)),
+        Err(Error::Message(_)) => Ok(None),
+        Err(e) => Err(e),
+    }
+}
+
+/// The cache built for some subjects by id, by a writer that has only the
+/// scheme: what a merge's caller runs once the merge has committed, since
+/// the merge drops both subjects' sessions and the subject that is left
+/// has none until they are built. Anchors as [`refresh`] knows them.
+pub fn refresh_for(
+    registry: &mut Registry,
+    scheme: &Scheme,
+    subjects: &BTreeSet<i64>,
+) -> Result<Rebuilt, Error> {
+    let anchors = anchors_known(registry, scheme)?;
+    let ids: Vec<i64> = subjects.iter().copied().collect();
+    ensure_of(registry, scheme, anchors.as_ref(), Whose::Ids(&ids), false)
+}
+
+/// A subject with a timeline and no session in a window.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Sessionless {
+    pub subject_id: i64,
+    pub code: String,
+    /// The dated studies that hold series: what a build makes sessions of.
+    pub studies: i64,
+}
+
+/// The subjects that hold a study a session is made of and have no session
+/// in a scheme's window: no question at session grain finds them. A cache
+/// is in that state between a write to the timelines and the next build,
+/// so some are no fault; ones that stay are.
+pub fn without_sessions(store: &mut Store, scheme: &Scheme) -> Result<Vec<Sessionless>, Error> {
+    let d = store.dialect();
+    let st = table("study");
+    let filled = d.text_of_qualified(Some("st"), st.column("date_filled").expect("date_filled"));
+    let dated = d.text_of_qualified(Some("st"), st.column("study_date").expect("study_date"));
+    let sql = format!(
+        "SELECT su.id, su.code, COUNT(*) FROM {study} st JOIN {subject} su ON su.id = st.subject_id \
+         WHERE COALESCE({filled}, {dated}) IS NOT NULL \
+         AND EXISTS (SELECT 1 FROM {series} se WHERE se.study_id = st.id) \
+         AND NOT EXISTS (SELECT 1 FROM {cache} c WHERE c.subject_id = su.id AND c.window_days = {}) \
+         GROUP BY su.id, su.code ORDER BY su.code",
+        d.param(1, Type::Int),
+        study = store.qualified("study"),
+        subject = store.qualified("subject"),
+        series = store.qualified("series"),
+        cache = store.qualified("session_cache"),
+    );
+    let mut out = Vec::new();
+    for r in store.query(&sql, &[Param::Int(scheme.window_days)])? {
+        out.push(Sessionless {
+            subject_id: r.int(0)?,
+            code: r.text(1)?.to_string(),
+            studies: r.int(2)?,
+        });
+    }
+    Ok(out)
+}
+
+/// The build itself. Without anchors (`None`) it brings identity up to date
+/// and leaves every label row as it is: what a reader that cannot know a
+/// scheme's month zero does, since labels written from no anchor would take
+/// away the ones a build that knew it wrote.
 fn ensure_of(
     registry: &mut Registry,
     scheme: &Scheme,
-    anchors: &Anchors,
+    anchors: Option<&Anchors>,
     whose: Whose<'_>,
     force: bool,
 ) -> Result<Rebuilt, Error> {
@@ -506,15 +860,18 @@ fn ensure_of(
             let timeline = timeline_digest(studies);
             let old = stored(store, *subject, window)?;
             let unchanged = !force && !old.is_empty() && old.iter().all(|s| s.digest == timeline);
-            let anchor = anchors.of(scheme, code, studies);
+            let anchor = anchors.and_then(|a| a.of(scheme, code, studies));
             let resolved = session::sessions(studies, anchor, scheme);
             if unchanged {
                 out.unchanged += 1;
                 out.sessions += old.len();
                 // the labels under this scheme may still be missing, or say
                 // what another month zero made of them
-                let ids: Vec<i64> = old.iter().map(|s| s.id).collect();
-                out.relabelled += relabel(store, *subject, window, &ids, &old, &resolved, &digest)?;
+                if anchors.is_some() {
+                    let ids: Vec<i64> = old.iter().map(|s| s.id).collect();
+                    out.relabelled +=
+                        relabel(store, *subject, window, &ids, &old, &resolved, &digest)?;
+                }
                 continue;
             }
             out.rebuilt += 1;
@@ -523,8 +880,11 @@ fn ensure_of(
                 &mut out,
             )?;
             out.sessions += ids.len();
-            let fresh = stored(store, *subject, window)?;
-            out.relabelled += relabel(store, *subject, window, &ids, &fresh, &resolved, &digest)?;
+            if anchors.is_some() {
+                let fresh = stored(store, *subject, window)?;
+                out.relabelled +=
+                    relabel(store, *subject, window, &ids, &fresh, &resolved, &digest)?;
+            }
         }
         // What the timeline could not take, said rather than dropped. Over
         // the whole registry, whichever subject was asked for: an empty row
@@ -535,11 +895,24 @@ fn ensure_of(
         out.empty_studies = empty;
         out.without_a_study = orphans;
         out.items += empty + orphans;
+        // An answer kept at this epoch was made from the sessions as they
+        // stood. Where the build made, moved or took away a session, or
+        // wrote a label, that answer is no longer the one a run would
+        // give, so the epoch moves with the rows, in their transaction; a
+        // build that found everything as it should be moves nothing.
+        if out.rebuilt > 0 || out.relabelled > 0 {
+            out.epoch = Some(nils_registry::home::next_epoch_in(store)?);
+        }
         Ok(())
     })();
     match result {
         Ok(()) => {
             store.commit()?;
+            if out.epoch.is_some() {
+                registry
+                    .refresh_meta()
+                    .map_err(|e| Error::Message(e.to_string()))?;
+            }
             Ok(out)
         }
         Err(e) => {
@@ -817,6 +1190,19 @@ impl Label {
         }
     }
 
+    /// A label row as [`labels_of`] and [`labels_all`] select it: the
+    /// session first, then the six columns.
+    fn read(r: &Row) -> Result<Label, Error> {
+        Ok(Label {
+            label: r.opt_text(1)?.map(str::to_string),
+            months: r.opt_int(2)?,
+            nominal: r.opt_int(3)?,
+            offset_months: r.opt_double(4)?,
+            flagged: r.int(5)?,
+            reason: r.opt_text(6)?.map(str::to_string),
+        })
+    }
+
     /// Whether a stored row says this already. A double reads back as it
     /// was written on either backend; zero and minus zero are one value.
     fn said_by(&self, row: &Label) -> bool {
@@ -874,19 +1260,43 @@ fn labels_of(
         Param::from(scheme_digest),
     ];
     for r in store.query(&sql, &params)? {
-        out.insert(
-            r.int(0)?,
-            Label {
-                label: r.opt_text(1)?.map(str::to_string),
-                months: r.opt_int(2)?,
-                nominal: r.opt_int(3)?,
-                offset_months: r.opt_double(4)?,
-                flagged: r.int(5)?,
-                reason: r.opt_text(6)?.map(str::to_string),
-            },
-        );
+        out.insert(r.int(0)?, Label::read(&r)?);
     }
     Ok(out)
+}
+
+/// What the label rows of a subject's sessions named have to become to say
+/// what the resolver says: the rows to write, and the sessions whose row is
+/// to go. `held` is the rows as they stand, by session. Both empty where
+/// the labels stand, which is how a reader finds them up to date without
+/// writing ([`stale`]) and how [`relabel`] writes only what changed.
+fn label_changes(
+    ids: &[i64],
+    cached: &[Stored],
+    resolved: &[Session],
+    held: &mut HashMap<i64, Label>,
+    scheme_digest: &str,
+) -> (Vec<Vec<Param>>, Vec<i64>) {
+    // the resolver's session for each cached one, by its first study
+    let mut rows: Vec<Vec<Param>> = Vec::new();
+    for c in cached.iter().filter(|c| ids.contains(&c.id)) {
+        let Some(s) = resolved
+            .iter()
+            .find(|s| c.studies.first().is_some_and(|f| s.studies.contains(f)))
+        else {
+            continue;
+        };
+        let label = Label::of(s);
+        if held.remove(&c.id).is_some_and(|row| label.said_by(&row)) {
+            continue;
+        }
+        rows.push(label.row(c.id, scheme_digest));
+    }
+    // a row still held is of a session named that the resolver gives no
+    // label
+    let mut gone: Vec<i64> = held.keys().copied().filter(|id| ids.contains(id)).collect();
+    gone.sort_unstable();
+    (rows, gone)
 }
 
 /// The labels under one scheme of a subject's sessions named, brought to
@@ -909,25 +1319,7 @@ fn relabel(
         return Ok(0);
     }
     let mut held = labels_of(store, subject, window, scheme_digest)?;
-    // the resolver's session for each cached one, by its first study
-    let mut rows: Vec<Vec<Param>> = Vec::new();
-    for c in cached.iter().filter(|c| ids.contains(&c.id)) {
-        let Some(s) = resolved
-            .iter()
-            .find(|s| c.studies.first().is_some_and(|f| s.studies.contains(f)))
-        else {
-            continue;
-        };
-        let label = Label::of(s);
-        if held.remove(&c.id).is_some_and(|row| label.said_by(&row)) {
-            continue;
-        }
-        rows.push(label.row(c.id, scheme_digest));
-    }
-    // a row still held is of a session named that the resolver gives no
-    // label
-    let mut stale: Vec<i64> = held.into_keys().filter(|id| ids.contains(id)).collect();
-    stale.sort_unstable();
+    let (rows, stale) = label_changes(ids, cached, resolved, &mut held, scheme_digest);
     let d = store.dialect();
     for id in &stale {
         store.execute(

@@ -97,7 +97,15 @@
       "repairs": [],
       "warnings": [],
       "zero_rows": null,
-      "drops": [],
+      "drops": [
+        {
+          "set": "scope",
+          "clause": "where name = alpha",
+          "before": 591,
+          "after": 1,
+          "nulls": 0
+        }
+      ],
       "ties": [],
       "unresolved": [],
       "coarse": [],
@@ -514,7 +522,15 @@
       "repairs": [],
       "warnings": [],
       "zero_rows": null,
-      "drops": [],
+      "drops": [
+        {
+          "set": "wanted",
+          "clause": "where modifier has FLAIR and post_contrast = given and acquisition_type = 3D or modifier has DIR",
+          "before": 516612,
+          "after": 5287,
+          "nulls": 0
+        }
+      ],
       "ties": [],
       "unresolved": [],
       "coarse": [],
@@ -689,6 +705,13 @@
           "before": 344,
           "after": 101,
           "nulls": 0
+        },
+        {
+          "set": "people",
+          "clause": "where code among [SC000010, SC000200, SC001500, SC003000, SC005000]",
+          "before": 5900,
+          "after": 5,
+          "nulls": 0
         }
       ],
       "ties": [],
@@ -750,6 +773,13 @@
           "clause": "where dataset among [site-c, site-d]",
           "before": 28647,
           "after": 613,
+          "nulls": 0
+        },
+        {
+          "set": "people",
+          "clause": "where dataset = site-a",
+          "before": 5900,
+          "after": 4571,
           "nulls": 0
         }
       ],
@@ -984,6 +1014,20 @@
           "clause": "where alike.largest >= 2",
           "before": 3818,
           "after": 1573,
+          "nulls": 0
+        },
+        {
+          "set": "good",
+          "clause": "where t1.station_name = flair.station_name",
+          "before": 14754,
+          "after": 14754,
+          "nulls": 0
+        },
+        {
+          "set": "scope",
+          "clause": "where name = alpha",
+          "before": 591,
+          "after": 1,
           "nulls": 0
         }
       ],
@@ -1378,6 +1422,62 @@
       "next": [
         "read the warnings; a selection_outdated warning carries an update move"
       ]
+    },
+    "17-narrow-value": {
+      "valid": true,
+      "issues": [],
+      "repairs": [],
+      "warnings": [
+        {
+          "code": "narrow_value",
+          "path": "sets.necks.where[0]",
+          "message": "necks: body_part = neck keeps 0 of 516,612 stacks; spine holds 31,877 of the rest. If any spine of body_region is meant, write body_region = spine, which covers spine and neck.",
+          "next": "to keep them all, write [\"=\",{},[\"axis\",{},\"body_region\"],\"spine\"] at sets.necks.where[0]; where only neck is meant, change nothing"
+        }
+      ],
+      "zero_rows": "no stack of necks survives where body_part = neck; everything after it is empty",
+      "drops": [
+        {
+          "set": "necks",
+          "clause": "where body_part = neck",
+          "before": 516612,
+          "after": 0,
+          "nulls": 0
+        }
+      ],
+      "ties": [],
+      "unresolved": [],
+      "coarse": [],
+      "cost": {
+        "sets": 1,
+        "near": 0,
+        "groups": 0,
+        "algebra": 0,
+        "class": "small"
+      },
+      "funnel": [
+        {
+          "set": "necks",
+          "grain": "stack",
+          "stage": "source",
+          "rows": 516612,
+          "subjects": 5900,
+          "on_path": false
+        },
+        {
+          "set": "necks",
+          "grain": "stack",
+          "stage": "where body_part = neck",
+          "rows": 0,
+          "subjects": 0,
+          "on_path": false
+        }
+      ],
+      "by": "set",
+      "next": [
+        "POST /api/ask/options on the set named, for a move that widens it",
+        "read the warnings; a selection_outdated warning carries an update move"
+      ]
     }
   },
   "postgres": {
@@ -1478,7 +1578,15 @@
       "repairs": [],
       "warnings": [],
       "zero_rows": null,
-      "drops": [],
+      "drops": [
+        {
+          "set": "scope",
+          "clause": "where name = alpha",
+          "before": 591,
+          "after": 1,
+          "nulls": 0
+        }
+      ],
       "ties": [],
       "unresolved": [],
       "coarse": [],
@@ -1895,7 +2003,15 @@
       "repairs": [],
       "warnings": [],
       "zero_rows": null,
-      "drops": [],
+      "drops": [
+        {
+          "set": "wanted",
+          "clause": "where modifier has FLAIR and post_contrast = given and acquisition_type = 3D or modifier has DIR",
+          "before": 516612,
+          "after": 5287,
+          "nulls": 0
+        }
+      ],
       "ties": [],
       "unresolved": [],
       "coarse": [],
@@ -2070,6 +2186,13 @@
           "before": 344,
           "after": 101,
           "nulls": 0
+        },
+        {
+          "set": "people",
+          "clause": "where code among [SC000010, SC000200, SC001500, SC003000, SC005000]",
+          "before": 5900,
+          "after": 5,
+          "nulls": 0
         }
       ],
       "ties": [],
@@ -2131,6 +2254,13 @@
           "clause": "where dataset among [site-c, site-d]",
           "before": 28647,
           "after": 613,
+          "nulls": 0
+        },
+        {
+          "set": "people",
+          "clause": "where dataset = site-a",
+          "before": 5900,
+          "after": 4571,
           "nulls": 0
         }
       ],
@@ -2365,6 +2495,20 @@
           "clause": "where alike.largest >= 2",
           "before": 3837,
           "after": 1550,
+          "nulls": 0
+        },
+        {
+          "set": "good",
+          "clause": "where t1.station_name = flair.station_name",
+          "before": 14901,
+          "after": 14901,
+          "nulls": 0
+        },
+        {
+          "set": "scope",
+          "clause": "where name = alpha",
+          "before": 591,
+          "after": 1,
           "nulls": 0
         }
       ],
@@ -2757,6 +2901,62 @@
       ],
       "by": "set",
       "next": [
+        "read the warnings; a selection_outdated warning carries an update move"
+      ]
+    },
+    "17-narrow-value": {
+      "valid": true,
+      "issues": [],
+      "repairs": [],
+      "warnings": [
+        {
+          "code": "narrow_value",
+          "path": "sets.necks.where[0]",
+          "message": "necks: body_part = neck keeps 0 of 516,612 stacks; spine holds 31,877 of the rest. If any spine of body_region is meant, write body_region = spine, which covers spine and neck.",
+          "next": "to keep them all, write [\"=\",{},[\"axis\",{},\"body_region\"],\"spine\"] at sets.necks.where[0]; where only neck is meant, change nothing"
+        }
+      ],
+      "zero_rows": "no stack of necks survives where body_part = neck; everything after it is empty",
+      "drops": [
+        {
+          "set": "necks",
+          "clause": "where body_part = neck",
+          "before": 516612,
+          "after": 0,
+          "nulls": 0
+        }
+      ],
+      "ties": [],
+      "unresolved": [],
+      "coarse": [],
+      "cost": {
+        "sets": 1,
+        "near": 0,
+        "groups": 0,
+        "algebra": 0,
+        "class": "small"
+      },
+      "funnel": [
+        {
+          "set": "necks",
+          "grain": "stack",
+          "stage": "source",
+          "rows": 516612,
+          "subjects": 5900,
+          "on_path": false
+        },
+        {
+          "set": "necks",
+          "grain": "stack",
+          "stage": "where body_part = neck",
+          "rows": 0,
+          "subjects": 0,
+          "on_path": false
+        }
+      ],
+      "by": "set",
+      "next": [
+        "POST /api/ask/options on the set named, for a move that widens it",
         "read the warnings; a selection_outdated warning carries an update move"
       ]
     }

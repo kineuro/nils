@@ -134,7 +134,7 @@ cases:
       flip_angle: 110
       echo_train_length: 14
     axes:
-      technique: RESTORE
+      technique: DETSE
       modifier: Radial
 
   - name: a BLADE written tseBN without the R stays a TSE
@@ -170,4 +170,4 @@ cases:
       inversion_time: 2700
       echo_train_length: 31
     axes:
-      technique: TIRM
+      technique: IRTSE

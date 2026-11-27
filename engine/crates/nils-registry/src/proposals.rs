@@ -213,10 +213,16 @@ struct Decided {
 impl Decided {
     /// Whether the decision holds `value`, one of a multi-valued axis's
     /// values included.
-    fn holds(&self, value: &str) -> bool {
-        self.value
-            .as_deref()
-            .is_some_and(|v| v.split(',').any(|x| x.trim() == value))
+    ///
+    /// The model's class word and the decision's text are each read as the
+    /// value they name (`crate::spelling`), so a decision written in one
+    /// spelling and a class in another are one value.
+    fn holds(&self, spellings: &crate::spelling::Spellings, axis: &str, value: &str) -> bool {
+        let named = spellings.stored_part(axis, value);
+        self.value.as_deref().is_some_and(|v| {
+            v.split(',')
+                .any(|x| spellings.stored_part(axis, x.trim()) == named)
+        })
     }
 }
 
@@ -646,6 +652,7 @@ pub fn ingest(
     let mut groups: BTreeMap<(String, i64, String, String), Gathered> = BTreeMap::new();
     let mut models: BTreeMap<i64, Model> = BTreeMap::new();
     let mut against: Vec<Against> = Vec::new();
+    let spellings = registry.spellings();
     for (i, m) in resolved {
         let p = &proposals[i];
         if sealed.contains(&p.stack_id) {
@@ -658,7 +665,8 @@ pub fn ingest(
             // at or above its threshold is asked about, never applied
             let confidence = p.confidence();
             let at = thresholds[&m.id].unwrap_or(f64::INFINITY);
-            let disagrees = dec.person && confidence >= at && !dec.holds(&p.value);
+            let disagrees =
+                dec.person && confidence >= at && !dec.holds(&spellings, &p.axis, &p.value);
             let evidence = disagrees.then(|| {
                 json!({
                     "axis": p.axis,

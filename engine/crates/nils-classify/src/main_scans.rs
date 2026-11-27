@@ -142,7 +142,7 @@ pub fn read(registry: &mut Registry, ask: &Ask<'_>) -> Result<Read, Error> {
     names.extend(COLUMNS.iter().map(|n| n.to_string()));
     names.sort();
     names.dedup();
-    let mut rows = picking::read_named(store, &names, None, Some(ask.subjects))?;
+    let mut rows = picking::read_named(store, ask.model, &names, None, Some(ask.subjects))?;
     rows.retain(|r| {
         !ask.withheld.contains(&r.stack) && ask.held.is_none_or(|h| h.contains(&r.stack))
     });
@@ -319,7 +319,7 @@ pub fn reference(
     {
         return Ok(reference.clone());
     }
-    let rows = picking::read_named(store, &model.reads(), None, None)?;
+    let rows = picking::read_named(store, model, &model.reads(), None, None)?;
     let mine = picking::of_role(model, role, &rows);
     let reference = picking::build_reference(model, "registry", &mine);
     if let Ok(mut held) = cache.0.lock() {
@@ -730,6 +730,9 @@ fn kinds(read: &Read, cmp: &Compare, model: &Model, role: &str) -> (Vec<String>,
         return (Vec::new(), json!([]));
     };
     let order = pick_rules::KindOrder::new(model, role, r);
+    // Saved keys name a technique as the pack stored it then; the kinds
+    // below carry it as a row stores it now.
+    let r = &r.stored(model);
     let mut with: BTreeMap<String, i64> = BTreeMap::new();
     let mut taken: BTreeMap<String, i64> = BTreeMap::new();
     for (s, t) in read.subjects.iter().zip(&shown.taken) {

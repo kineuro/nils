@@ -119,7 +119,14 @@ fn hearing_every_rule_changes_no_verdict_and_holds_every_decider() {
                 Some(a) => a.stored(),
                 None => heard.stored(axis),
             };
-            assert_eq!(&got, want, "{}: {axis}", case.name);
+            // as the corpus check holds them: as values, whichever of a
+            // value's names the case writes
+            let axis_of = pack.axis(axis).expect("an axis of the pack");
+            assert!(
+                axis_of.same(&got, want),
+                "{}: {axis} is {got:?}, the case says {want:?}",
+                case.name
+            );
         }
     }
     assert!(decided > 100, "{decided} axes decided by a rule");

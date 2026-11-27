@@ -228,13 +228,19 @@ impl Vocabulary {
         let mut gradient_echo = BTreeSet::new();
         for a in &pack.axes {
             for v in &a.values {
-                identity.insert((a.name.clone(), v.label.clone()), v.id.clone());
-                // record 55, ruling 23: the spelling rows keep where the
-                // label changed since (`FLASH` for SP-GRE, labelled SPGRE)
-                if let Some(stored) = &v.stored {
-                    identity.insert((a.name.clone(), stored.clone()), v.id.clone());
+                // every name of the value, read as the pack's resolver
+                // reads it (`Axis::id_of`): its identity, an identity it
+                // had before, its label, and the spelling rows keep where
+                // the label changed since (record 55, ruling 23)
+                let names = std::iter::once(&v.id)
+                    .chain(v.aliases.iter())
+                    .chain(std::iter::once(&v.label))
+                    .chain(v.stored.iter());
+                for name in names {
+                    if let Some(id) = a.id_of(name) {
+                        identity.insert((a.name.clone(), name.clone()), id.to_string());
+                    }
                 }
-                identity.insert((a.name.clone(), v.id.clone()), v.id.clone());
                 if a.name == "technique" && v.family.as_deref() == Some("GRE") {
                     gradient_echo.insert(v.id.clone());
                 }
@@ -277,6 +283,8 @@ struct Raw {
     earliest_time: Option<String>,
     agent: bool,
     axes: BTreeMap<String, Vec<String>>,
+    /// Whether a decided body region set the stack's body part aside.
+    part_set_aside: bool,
     images: Vec<Images>,
     sealed: bool,
     answer: Option<(u8, i64, Answer)>,
@@ -404,7 +412,7 @@ fn read(
         // the axes in force
         let sql = format!(
             "SELECT stack_id, axis, value FROM {} WHERE stack_id IN ({list}) AND axis IN \
-             ('base', 'modifier', 'technique', 'body_part', 'directory_type', 'disposition') AND value IS NOT NULL",
+             ('base', 'modifier', 'technique', 'body_part', 'body_region', 'directory_type', 'disposition') AND value IS NOT NULL",
             store.qualified("classification_axis"),
         );
         for r in store.query(&sql, &[])? {
@@ -412,6 +420,12 @@ fn read(
                 let axis = r.text(1)?.to_string();
                 let value = vocab.id(&axis, r.text(2)?);
                 raw.axes.entry(axis).or_default().push(value);
+            }
+        }
+        // the stacks whose body part a decided region set aside
+        for (stack, axes) in nils_registry::coarse::set_aside(store, chunk)? {
+            if let Some(raw) = raws.get_mut(&stack) {
+                raw.part_set_aside = axes.contains("body_part");
             }
         }
         // the images' times, per stack and acquisition date
@@ -503,7 +517,10 @@ fn read(
                 // an agent's call is neither a read nor the image model
                 _ => continue,
             };
-            let post = match r.opt_text(1)? {
+            // the decision's text read as the value it names: a decision
+            // written in another spelling of the value is the same answer
+            let answered = r.opt_text(1)?.map(|t| vocab.id("post_contrast", t));
+            let post = match answered.as_deref() {
                 Some("given") => true,
                 Some("not_given") => false,
                 _ => continue,
@@ -617,7 +634,10 @@ fn scan_of(cfg: &Config, vocab: &Vocabulary, raw: Raw, study_day: Option<i64>) -
         series_number: raw.series_number,
         kind,
         outside,
-        region: Region::of_body_part(one("body_part")),
+        region: Region::of_body(
+            one("body_part"),
+            one("body_region").filter(|_| raw.part_set_aside),
+        ),
         time,
         first,
         last,
@@ -733,6 +753,25 @@ fn write(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A row and a decision are read as the value they name, whichever of
+    /// its names they hold: every name of every value of the shipped pack
+    /// gives the value's identity, so a person's `given` and a row's older
+    /// spelling of it are one read.
+    #[test]
+    fn every_spelling_of_a_value_reads_as_its_identity() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../packs/mri");
+        let pack = nils_pack::load(&dir, None).expect("the MRI pack loads");
+        let vocab = Vocabulary::of(&pack);
+        for (axis, text, _, id) in pack.names() {
+            assert_eq!(vocab.id(&axis, &text), id, "{axis} {text}");
+        }
+        assert_eq!(vocab.id("post_contrast", "given"), "given");
+        assert_eq!(vocab.id("post_contrast", "1"), "given");
+        assert_eq!(vocab.id("post_contrast", "0"), "not_given");
+        // a text that names no value stays what it is
+        assert_eq!(vocab.id("post_contrast", "perhaps"), "perhaps");
+    }
 
     #[test]
     fn dates_and_times_read_as_the_registry_writes_them() {

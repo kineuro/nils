@@ -114,7 +114,7 @@ cases:
     flags:
       philips_isotropic_private: false
     axes:
-      technique: DWI-EPI
+      technique: DWIEPI
       construct: ''
       disposition: acquisition
 
@@ -190,7 +190,7 @@ cases:
     flags:
       typed_localizer_gre: false
     axes:
-      technique: DWI-EPI
+      technique: DWIEPI
 
   - name: a diffusion named DWI and not typed LOCALIZER is DWI-EPI as before
     stack:
@@ -208,7 +208,7 @@ cases:
     flags:
       typed_localizer_gre: false
     axes:
-      technique: DWI-EPI
+      technique: DWIEPI
 
   # --- Philips SmartExam's planning reformat counts with SmartBrain
 
@@ -341,7 +341,7 @@ cases:
       echo_train_length: 4
     axes:
       provenance: SWIRecon
-      technique: MEDIC
+      technique: combMEGRE
       construct: 'EchoCombined,SWI'
       base: SWI
 
@@ -361,7 +361,7 @@ cases:
       echo_train_length: 4
     axes:
       provenance: ProjectionDerived
-      technique: MEDIC
+      technique: combMEGRE
       construct: 'EchoCombined,MinIP'
       base: SWI
 
@@ -381,7 +381,7 @@ cases:
       echo_train_length: 4
     axes:
       provenance: RawRecon
-      technique: MEDIC
+      technique: combMEGRE
       construct: 'EchoCombined,Magnitude'
 
   - name: one echo's minIP of a Siemens 4-echo SWI, written without MEAN, stays ME-GRE

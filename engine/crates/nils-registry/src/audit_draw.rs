@@ -37,6 +37,7 @@ use std::collections::BTreeMap;
 use serde_json::{Value, json};
 
 use crate::schema::{Type, table};
+use crate::spelling::Spellings;
 use crate::store::{Error as StoreError, Insert, Param, Row, Store};
 use crate::time::now_iso;
 use crate::verify::sha256_hex;
@@ -538,11 +539,15 @@ impl ToSettle {
 
 /// Whether an answer agrees with what was accepted on every axis the draw
 /// keeps an accepted answer for (a cannot tell, or an axis left out, is a
-/// difference).
-pub fn agrees(accepted: &Value, answer: &Answered) -> bool {
+/// difference). The two are compared by value: a draw made before a pack
+/// changed what a row stores holds the words of its day, a rater answers in
+/// the words served now, and the same value is no difference.
+pub fn agrees(spellings: &Spellings, accepted: &Value, answer: &Answered) -> bool {
     accepted.as_object().is_none_or(|m| {
-        m.iter()
-            .all(|(axis, v)| comparable(answer.get(axis).unwrap_or(&Value::Null)) == comparable(v))
+        m.iter().all(|(axis, v)| {
+            comparable_in(spellings, axis, answer.get(axis).unwrap_or(&Value::Null))
+                == comparable_in(spellings, axis, v)
+        })
     })
 }
 
@@ -556,6 +561,7 @@ pub fn to_settle(
     drawn: &[Framed],
     answers: &BTreeMap<i64, Vec<Answered>>,
     raters: usize,
+    spellings: &Spellings,
 ) -> ToSettle {
     let mut out = ToSettle::default();
     let mut agreeing: Vec<Framed> = Vec::new();
@@ -563,7 +569,7 @@ pub fn to_settle(
         let list = answers.get(&f.stack_id).map(Vec::as_slice).unwrap_or(&[]);
         if list.len() < raters.max(1) {
             out.waiting.push(f.stack_id);
-        } else if list.iter().all(|a| agrees(&f.accepted, a)) {
+        } else if list.iter().all(|a| agrees(spellings, &f.accepted, a)) {
             agreeing.push(f.clone());
         } else {
             out.differ.push(f.stack_id);
@@ -798,6 +804,17 @@ pub fn clopper_pearson_upper(k: u64, n: u64, confidence: f64) -> f64 {
 /// A value as answers and the rules' answers are compared: its words in
 /// order, a list or a comma list alike; none for no value.
 pub fn comparable(v: &Value) -> Option<String> {
+    comparable_by(v, |w| w.to_string())
+}
+
+/// [`comparable`] of an axis's value with each word read as the form a row
+/// stores for the value it names, so two spellings of a value compare
+/// equal.
+pub fn comparable_in(spellings: &Spellings, axis: &str, v: &Value) -> Option<String> {
+    comparable_by(v, |w| spellings.stored_part(axis, w).to_string())
+}
+
+fn comparable_by(v: &Value, word: impl Fn(&str) -> String) -> Option<String> {
     let words: Vec<String> = match v {
         Value::Null => Vec::new(),
         Value::Array(list) => list
@@ -810,7 +827,11 @@ pub fn comparable(v: &Value) -> Option<String> {
         Value::String(s) => s.split(',').map(|w| w.trim().to_string()).collect(),
         other => vec![other.to_string()],
     };
-    let mut words: Vec<String> = words.into_iter().filter(|w| !w.is_empty()).collect();
+    let mut words: Vec<String> = words
+        .iter()
+        .filter(|w| !w.is_empty())
+        .map(|w| word(w))
+        .collect();
     words.sort();
     words.dedup();
     (!words.is_empty()).then(|| words.join(","))
@@ -870,8 +891,9 @@ pub fn grade(
     campaign_closed: bool,
     settle: Value,
     who: &str,
+    spellings: &Spellings,
 ) -> Result<Value, StoreError> {
-    let doc = grade_of(store, draw, reads, campaign_closed, settle)?;
+    let doc = grade_of(store, draw, reads, campaign_closed, settle, spellings)?;
     store.update_by_id(
         table("audit_draw"),
         &[
@@ -893,6 +915,7 @@ pub fn grade_of(
     reads: &[Read],
     campaign_closed: bool,
     settle: Value,
+    spellings: &Spellings,
 ) -> Result<Value, StoreError> {
     let drawn = stacks(store, draw.id)?;
     let by_stack: BTreeMap<i64, &Read> = reads.iter().map(|r| (r.stack_id, r)).collect();
@@ -926,7 +949,9 @@ pub fn grade_of(
         count_in(&mut years, &year, "read", 1);
         let mut axes: Vec<&str> = Vec::new();
         for (axis, v) in &read.settled {
-            if comparable(v) != comparable(&f.accepted[axis]) {
+            if comparable_in(spellings, axis, v)
+                != comparable_in(spellings, axis, &f.accepted[axis])
+            {
                 axes.push(axis);
                 *wrong_axes.entry(axis.clone()).or_default() += 1;
             }
@@ -1111,6 +1136,41 @@ mod tests {
     }
 
     #[test]
+    fn a_draw_and_an_answer_in_two_spellings_of_a_value_agree() {
+        let n = |axis: &str, text: &str, stored: &str| {
+            (
+                axis.to_string(),
+                text.to_string(),
+                stored.to_string(),
+                stored.to_string(),
+            )
+        };
+        let s = Spellings::new([
+            n("post_contrast", "1", "given"),
+            n("post_contrast", "given", "given"),
+            n("technique", "FLASH", "SPGRE"),
+            n("technique", "SPGRE", "SPGRE"),
+        ]);
+        let accepted = json!({"technique": "FLASH", "post_contrast": "1"});
+        let answer: Answered = [
+            ("technique".to_string(), json!("SPGRE")),
+            ("post_contrast".to_string(), json!("given")),
+        ]
+        .into_iter()
+        .collect();
+        assert!(agrees(&s, &accepted, &answer));
+        // as text they differ, and so they do without the spellings
+        assert!(!agrees(&Spellings::default(), &accepted, &answer));
+        let other: Answered = [
+            ("technique".to_string(), json!("MPRAGE")),
+            ("post_contrast".to_string(), json!("given")),
+        ]
+        .into_iter()
+        .collect();
+        assert!(!agrees(&s, &accepted, &other));
+    }
+
+    #[test]
     fn the_settle_holds_every_difference_and_a_seeded_share_of_the_agreements() {
         let frame: Vec<Framed> = (1..=150).map(framed).collect();
         let mut answers: BTreeMap<i64, Vec<Answered>> = BTreeMap::new();
@@ -1126,7 +1186,14 @@ mod tests {
         }
         // a cannot tell is a difference too
         answers.insert(40, vec![answer("cant_tell"), answer("T1w")]);
-        let s = to_settle("seed-x", SETTLE_SHARE, &frame, &answers, 2);
+        let s = to_settle(
+            "seed-x",
+            SETTLE_SHARE,
+            &frame,
+            &answers,
+            2,
+            &Spellings::default(),
+        );
         assert_eq!(s.differ, vec![3, 9, 27, 40]);
         assert_eq!(s.agree, 146);
         assert_eq!(s.agreements_drawn.len(), 15, "10 % of 146, rounded up");
@@ -1134,17 +1201,38 @@ mod tests {
         assert!(s.waiting.is_empty());
         assert_eq!(s.stacks(&frame).len(), 19);
         // the same seed settles the same agreements; another seed others
-        let again = to_settle("seed-x", SETTLE_SHARE, &frame, &answers, 2);
+        let again = to_settle(
+            "seed-x",
+            SETTLE_SHARE,
+            &frame,
+            &answers,
+            2,
+            &Spellings::default(),
+        );
         assert_eq!(again, s);
-        let other = to_settle("seed-y", SETTLE_SHARE, &frame, &answers, 2);
+        let other = to_settle(
+            "seed-y",
+            SETTLE_SHARE,
+            &frame,
+            &answers,
+            2,
+            &Spellings::default(),
+        );
         assert_ne!(other.agreements_drawn, s.agreements_drawn);
         // a stack one rater has not read waits
         answers.get_mut(&5).unwrap().pop();
-        let w = to_settle("seed-x", SETTLE_SHARE, &frame, &answers, 2);
+        let w = to_settle(
+            "seed-x",
+            SETTLE_SHARE,
+            &frame,
+            &answers,
+            2,
+            &Spellings::default(),
+        );
         assert_eq!(w.waiting, vec![5]);
         // a share of none settles the differences alone
         assert!(
-            to_settle("seed-x", 0.0, &frame, &answers, 2)
+            to_settle("seed-x", 0.0, &frame, &answers, 2, &Spellings::default())
                 .agreements_drawn
                 .is_empty()
         );

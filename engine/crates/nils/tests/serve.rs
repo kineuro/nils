@@ -1782,7 +1782,7 @@ fn the_knob_engine_rehearses_proposes_adopts_and_probes() {
     assert!(
         moves
             .iter()
-            .any(|m| m["axis"] == "post_contrast" && m["to"] == "1"),
+            .any(|m| m["axis"] == "post_contrast" && m["to"] == "given"),
         "the site's agent moves post_contrast: {tried}"
     );
     assert!(
@@ -1981,7 +1981,7 @@ fn the_knob_engine_rehearses_proposes_adopts_and_probes() {
         "{signals}"
     );
     assert_eq!(
-        resolved["axes"]["post_contrast"]["values"]["1"]["stacks"], 1,
+        resolved["axes"]["post_contrast"]["values"]["given"]["stacks"], 1,
         "{signals}"
     );
     assert_eq!(resolved["axes"]["post_contrast"]["stacks"], 1, "{signals}");
@@ -9936,7 +9936,7 @@ fn a_rule_change_is_rehearsed_over_the_registry_and_nothing_is_written() {
         .find(|a| a["axis"] == "post_contrast")
         .unwrap_or_else(|| panic!("{doc}"));
     assert_eq!(pc["transitions"][0]["from"], "", "{doc}");
-    assert_eq!(pc["transitions"][0]["to"], "1", "{doc}");
+    assert_eq!(pc["transitions"][0]["to"], "given", "{doc}");
     assert_eq!(pc["transitions"][0]["stacks"], 2, "{doc}");
     // the registry's stacks name no maker and no dataset, and say so
     assert_eq!(pc["transitions"][0]["makes"]["(none)"], 2, "{doc}");
@@ -9964,7 +9964,7 @@ fn a_rule_change_is_rehearsed_over_the_registry_and_nothing_is_written() {
             .as_array()
             .unwrap()
             .iter()
-            .all(|a| a["axis"] != "post_contrast" || a["value"] != "1"),
+            .all(|a| a["axis"] != "post_contrast" || a["value"] != "given"),
         "{explain}"
     );
     // an operation that cannot apply says why, and a patch of another pack

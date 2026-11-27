@@ -73,7 +73,7 @@ fn add_words_reaches_the_bucket_a_value_reads_and_moves_the_stack() {
         p.applied[0].changes
     );
     assert!(p.pack.buckets["contrast_positive"].contains(&"mdc".to_string()));
-    assert_eq!(stored(&p.pack, &s, "post_contrast"), "1");
+    assert_eq!(stored(&p.pack, &s, "post_contrast"), "given");
     // the pack itself is untouched
     let again = nils_pack::load(&mri(), None).unwrap();
     assert!(!again.buckets["contrast_positive"].contains(&"mdc".to_string()));
@@ -186,7 +186,7 @@ fn a_silenced_axis_is_answered_as_nothing_and_asked_nothing() {
     assert_eq!(v.stored("post_contrast"), "");
     assert!(!v.unresolved.contains(&"post_contrast".to_string()));
     let bare = nils_pack::load(&mri(), None).unwrap();
-    assert_eq!(stored(&bare, &s, "post_contrast"), "1");
+    assert_eq!(stored(&bare, &s, "post_contrast"), "given");
 }
 
 #[test]
@@ -418,8 +418,8 @@ fn the_pick_file_is_reached_by_four_operations() {
         }]
     );
     assert_eq!(m.near_tie.len(), 4);
-    // A value named by its label is the stored value: post-contrast's 1.
-    assert_eq!(m.near_tie[2].rank, Rank::Avoid(vec!["1".into()]));
+    // A value is read as its axis stores it: post-contrast's word.
+    assert_eq!(m.near_tie[2].rank, Rank::Avoid(vec!["given".into()]));
     assert_eq!(m.near_tie[3].rank, Rank::Lowest);
     // The keys are contract 9's, which the shipped pack declares since
     // 1.0.2 (10 since 1.1.0), so nothing had to raise it.
@@ -659,4 +659,188 @@ fn an_operation_that_writes_a_later_contract_s_key_raises_the_pack_s_contract() 
         "{changes}"
     );
     let _ = std::fs::remove_dir_all(&at_8);
+}
+
+// ---------------------------------------------------------------------------
+// A value added under a coarse form, on a made-up pack of two axes: a kind
+// read off the image type, and its size, which the pack declares the coarse
+// form of the kind.
+
+fn two_grains() -> common::Dir {
+    let d = common::Dir::new("patch-coarse");
+    d.file(
+        "pack.yml",
+        "\
+pack: t
+version: 1.0.0
+contract: 1
+modality: MR
+parsers: [parsers.yml]
+flags: [flags.yml]
+axes: [axes/kind.yml, axes/size.yml]
+rules: [rules/kind.yml, rules/size.yml]
+order: [kind, size]
+",
+    )
+    .file(
+        "parsers.yml",
+        "\
+parsers:
+  image_type:
+    field: image_type
+    case: upper
+    tokenize: {split: '[\\\\/\\s]+'}
+    predicates:
+      is_original: {token: ORIGINAL}
+",
+    )
+    .file(
+        "flags.yml",
+        "flags:\n  is_original: image_type.is_original\n",
+    )
+    .file(
+        "corpus/cases.yml",
+        "\
+cases:
+  - name: an original image is original
+    stack: {image_type: 'ORIGINAL\\PRIMARY'}
+    flags: {is_original: true}
+",
+    )
+    .file(
+        "axes/kind.yml",
+        "axis: kind\nkind: single\nvalues: {a: {}, c: {}}\n",
+    )
+    .file(
+        "axes/size.yml",
+        "\
+axis: size
+kind: single
+coarse_of: kind
+values:
+  small: {covers: [a]}
+  large: {covers: [c]}
+  huge: {}
+",
+    )
+    .file(
+        "rules/kind.yml",
+        "\
+rule_set: kind
+decides: [kind]
+tiers: {stated: 0.9}
+order: [original]
+rules:
+  original:
+    clauses: [{flag: is_original, tier: stated}]
+    set: {kind: a}
+",
+    )
+    .file(
+        "rules/size.yml",
+        "\
+rule_set: size
+decides: [size]
+tiers: {stated: 0.9}
+order: [small, large]
+rules:
+  small:
+    clauses: [{when: {axis: kind, is: a}, cite: small, source: kind}]
+    set: {size: small}
+  large:
+    clauses: [{when: {axis: kind, is: c}, cite: large, source: kind}]
+    set: {size: large}
+",
+    );
+    d
+}
+
+fn on_two_grains(ops: &str) -> Result<patch::Patched, String> {
+    let d = two_grains();
+    let p = Patch::parse(
+        "test",
+        &format!("patch: 1\npack: t\nreason: a test\nevidence: this test\noperations:\n{ops}"),
+    )
+    .map_err(|e| e.to_string())?;
+    patch::apply(d.path(), &p, &|_| true).map_err(|e| e.to_string())
+}
+
+/// A patch that adds a value of the finer axis and a rule that folds it
+/// into a coarse value loads where the value is given its place under that
+/// coarse value, and the pack that results says the coarse value covers it.
+/// Without the place the loader refuses it, since `covers` and the rules
+/// then say two things; and a place that is none is refused with why.
+#[test]
+fn a_value_added_with_its_place_under_a_coarse_value_loads() {
+    let fold = "  - {op: add_rule, axis: size, value: large, set: size, rule: e_is_large, position: last, when: {axis: kind, is: e}}\n";
+    let done = on_two_grains(&format!(
+        "  - {{op: add_value, axis: kind, value: e, within: {{axis: size, value: large}}}}\n{fold}"
+    ))
+    .unwrap_or_else(|e| panic!("{e}"));
+    let forms = nils_pack::coarse::forms(&done.pack);
+    assert_eq!(forms.len(), 1);
+    assert_eq!(forms[0].fold("e"), Some(Some("large")));
+    assert_eq!(forms[0].covers("large", "e"), Some(true));
+    assert_eq!(forms[0].covers("small", "e"), Some(false));
+    let said: Vec<String> = done
+        .applied
+        .iter()
+        .flat_map(|a| a.changes.clone())
+        .collect();
+    assert!(said.iter().any(|c| c == "size=large covers e"), "{said:?}");
+
+    // a coarse value that covered nothing before takes its first value
+    let done = on_two_grains(
+        "  - {op: add_value, axis: kind, value: e, within: {axis: size, value: huge}}\n  \
+         - {op: add_rule, axis: size, value: huge, set: size, rule: e_is_huge, position: last, when: {axis: kind, is: e}}\n",
+    )
+    .unwrap_or_else(|e| panic!("{e}"));
+    assert_eq!(
+        nils_pack::coarse::forms(&done.pack)[0].fold("e"),
+        Some(Some("huge"))
+    );
+
+    // the value alone, with no rule that folds it, loads as before
+    on_two_grains("  - {op: add_value, axis: kind, value: e}\n").unwrap_or_else(|e| panic!("{e}"));
+
+    // the rule without the place: covers and the rules say two things
+    let e = on_two_grains(&format!(
+        "  - {{op: add_value, axis: kind, value: e}}\n{fold}"
+    ))
+    .err()
+    .expect("refused");
+    assert!(
+        e.contains("covers says a kind of e is nothing of size, and the rules decide large"),
+        "{e}"
+    );
+    // the place without the rule: the same check, the other way round
+    let e = on_two_grains(
+        "  - {op: add_value, axis: kind, value: e, within: {axis: size, value: large}}\n",
+    )
+    .err()
+    .expect("refused");
+    assert!(
+        e.contains("covers says a kind of e is large of size, and the rules decide nothing"),
+        "{e}"
+    );
+    for (within, why) in [
+        (
+            "{axis: kind, value: a}",
+            "kind is not declared the coarse form of kind",
+        ),
+        (
+            "{axis: shade, value: dark}",
+            "the pack has no axis named shade",
+        ),
+        ("{axis: size, value: vast}", "vast is no value of size"),
+        ("{axis: size}", "within is {axis, value}"),
+        ("large", "within is {axis, value}"),
+    ] {
+        let e = on_two_grains(&format!(
+            "  - {{op: add_value, axis: kind, value: e, within: {within}}}\n{fold}"
+        ))
+        .err()
+        .expect("refused");
+        assert!(e.contains(why), "{within}: {e}");
+    }
 }

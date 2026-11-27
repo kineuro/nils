@@ -12,6 +12,16 @@ axis: technique
 kind: single
 # v0's pipeline stores the display name and not the identity, which is how
 # `3D-TSE` came to be written `SPACE` and `SP-GRE` written `FLASH`.
+#
+# A row stores the value's label, one plain word of letters and digits, the
+# word a release name carries: the word in the registry and the word in a
+# file name are the same word. The vendor words rows held until this
+# version (`FLASH`, `HASTE`, `TIRM`, `RESTORE`, `MEDIC`, `FIESTA`, `PSIF`,
+# `VIBE`, `TurboFLASH`, `FISP`, `RESOLVE`, and `CISS` and `MAVRIC`, which
+# are identities still) stay names of their values (`aliases`), as the
+# hyphenated identities do: a registry an older version sorted, a question,
+# a decision and a corpus case written with them read as the value, and
+# `nils repair axis-values` moves the rows to the label.
 stores: label
 # The pipeline stores the display name, and v0 spells the fallback `Unknown`.
 default: Unknown
@@ -119,7 +129,7 @@ values:
     terms: ['RESOLVE', 'readout-segmented EPI', 'readout segmented', 'IRIS', 'MUSE', 'rs-EPI', 'segmented EPI DWI']
     # Ruling 23: a generic word, not a vendor's (PROVENANCE.md); rows keep the old one.
     label: rsEPI
-    stored: RESOLVE
+    aliases: [RESOLVE]
     family: EPI
     keywords:
       - resolve
@@ -146,6 +156,7 @@ values:
   # diffusion flag would take it, and read from that flag with a stated
   # spin echo, a train and a readout named as no EPI (flags.yml, `dwi_tse`).
   DWI-TSE:
+    label: DWITSE
     terms: ['TSE diffusion', 'turbo spin echo diffusion', 'DWI TSE', 'PROPELLER DWI', 'BLADE diffusion', 'MultiVane DWI', 'HASTE diffusion', 'non-EPI DWI']
     description: 'diffusion-weighted imaging read out by a turbo spin echo (PROPELLER, BLADE, MultiVane, HASTE, Philips DWI-TSE), not an EPI'
     family: SE
@@ -153,6 +164,7 @@ values:
     detection:
       combination: [dwi_tse]
   DWI-EPI:
+    label: DWIEPI
     terms: ['ep2d_diff', 'diffusion weighted EPI', 'SS-EPI DWI']
     family: MIXED
     # MRI pack 0.22.0: never an image the scanner typed LOCALIZER or SCOUT
@@ -171,6 +183,7 @@ values:
     detection:
       exclusive: is_dwi
   DWI-STEAM:
+    label: DWISTEAM
     family: MIXED
     requires: {not: gre_scout_readout}
     keywords:
@@ -318,6 +331,7 @@ values:
     detection:
       exclusive: mech_grase
   SE-EPI:
+    label: SEEPI
     family: MIXED
     keywords:
       - se-epi
@@ -327,6 +341,7 @@ values:
     detection:
       combination: [is_se_epi]
   GRE-EPI:
+    label: GREEPI
     family: MIXED
     keywords:
       - gre-epi
@@ -362,7 +377,6 @@ values:
     terms: ['MAVRIC', 'multispectral imaging', 'MSI']
     # Ruling 23: a generic word, not a vendor's (PROVENANCE.md); rows keep the old one.
     label: MSI
-    stored: MAVRIC
     family: SE
     keywords:
       - mavric
@@ -402,7 +416,7 @@ values:
     terms: ['HASTE', 'SSFSE', 'SSh TSE', 'single shot TSE', 'FASE', 'single-shot FSE']
     # Ruling 23: a generic word, not a vendor's (PROVENANCE.md); rows keep the old one.
     label: SSTSE
-    stored: HASTE
+    aliases: [HASTE]
     family: SE
     requires: {all: [{not: readout_not_spin_echo}, {not: siemens_plain_se_named_turbo}]}
     keywords:
@@ -420,7 +434,7 @@ values:
     terms: ['TIRM', 'FSE-IR', 'IR TSE', 'TSE-IR', 'turbo inversion recovery', 'TIR', 'FastIR', 'Fast IR', 'FIR']
     # Ruling 23: a generic word, not a vendor's (PROVENANCE.md); rows keep the old one.
     label: IRTSE
-    stored: TIRM
+    aliases: [TIRM]
     family: SE
     # MRI pack 0.16.0: never a dual-echo spin echo that only its name calls
     # FLAIR (flags.yml, dev-4 H3), where `flair tse2` holds `ir tse`.
@@ -476,7 +490,7 @@ values:
     terms: ['RESTORE', 'FRFSE', 'DRIVE', 'T2 Plus', 'driven equilibrium', 'fast recovery FSE', 'DE-FSE', 'DE-FIR', 'Driven Equilibrium FSE']
     # Ruling 23: a generic word, not a vendor's (PROVENANCE.md); rows keep the old one.
     label: DETSE
-    stored: RESTORE
+    aliases: [RESTORE]
     description: '90-degree flip-back (driven equilibrium) turbo spin echo'
     family: SE
     # MRI pack 0.21.0: on GE only with `FR_GEMS`; its FRFSE pulse sequence or
@@ -595,8 +609,8 @@ values:
   # `VASCTOF_GEMS` had no value of their own. A TOF given contrast stays TOF
   # by its words.
   CE-MRA:
+    label: CEMRA
     terms: ['contrast-enhanced MRA', 'CE-MRA', 'CEMRA', 'time-resolved MRA', 'TRICKS', 'TWIST', '4D-TRAK', 'bolus chase', 'Fluoro Triggered MRA']
-    label: CE-MRA
     description: 'contrast-enhanced MR angiography: a T1-weighted 3D spoiled gradient echo timed to the arterial bolus, single phase or time resolved'
     family: GRE
     keywords:
@@ -647,7 +661,7 @@ values:
     terms: ['MEDIC', 'MERGE', 'mFFE', 'M-FFE', 'combined multi-echo GRE', 'mEcho', 'ADAGE']  # [MQ9, V2, V1]
     # Ruling 23: a generic word, not a vendor's (PROVENANCE.md); rows keep the old one.
     label: combMEGRE
-    stored: MEDIC
+    aliases: [MEDIC]
     family: GRE
     keywords:
       - medic
@@ -701,7 +715,6 @@ values:
     terms: ['CISS', 'FIESTA-C', 'PBSG', 'Phase Balanced SARGE']
     # Ruling 23: a generic word, not a vendor's (PROVENANCE.md); rows keep the old one.
     label: pcbSSFP
-    stored: CISS
     family: GRE
     requires: {not: philips_balanced}
     keywords:
@@ -713,7 +726,7 @@ values:
     terms: ['TrueFISP', 'FIESTA', 'balanced FFE', 'bFFE', 'True SSFP', 'balanced SSFP', 'trufi', 'BASG']  # BASG: Hitachi [V1, V2]
     # Ruling 23: a generic word, not a vendor's (PROVENANCE.md); rows keep the old one.
     label: bSSFP
-    stored: FIESTA
+    aliases: [FIESTA]
     family: GRE
     keywords:
       - bssfp
@@ -742,7 +755,7 @@ values:
     terms: ['PSIF', 'T2-FFE', 'CE-FAST', 'reversed FISP', 'TRSG']  # TRSG: Hitachi [V1, V2]
     # Ruling 23: a generic word, not a vendor's (PROVENANCE.md); rows keep the old one.
     label: SSFPecho
-    stored: PSIF
+    aliases: [PSIF]
     family: GRE
     keywords:
       - ssfp
@@ -754,6 +767,7 @@ values:
     detection:
       exclusive: is_psif
   VFA-GRE:
+    label: VFAGRE
     terms: ['DESPOT', 'variable flip angle GRE']
     family: GRE
     keywords:
@@ -766,7 +780,7 @@ values:
     terms: ['VIBE', 'LAVA', 'THRIVE', 'Quick 3D', 'TIGRE', 'volumetric interpolated']
     # Ruling 23: a generic word, not a vendor's (PROVENANCE.md); rows keep the old one.
     label: VIGRE
-    stored: VIBE
+    aliases: [VIBE]
     family: GRE
     keywords:
       - vibe
@@ -781,7 +795,7 @@ values:
     terms: ['TurboFLASH', 'FSPGR', 'TFE', 'turbo field echo', 'fast SPGR', 'TFL', 'Fast FE', 'FastFE', 'RGE']  # Fast FE: Canon, RGE: Hitachi [V1, M1, IM4]
     # Ruling 23: a generic word, not a vendor's (PROVENANCE.md); rows keep the old one.
     label: FSPGRE
-    stored: TurboFLASH
+    aliases: [TurboFLASH]
     family: GRE
     keywords:
       - turboflash
@@ -800,10 +814,10 @@ values:
     # Record 55, ruling 23 (Nima, 2026-10-14: "yes we should use generic name
     # not FLASH"): shown and named by a generic word, spelled as the pack
     # spells its technique tokens (`SPGRE`, as ME-GRE is `MEGRE`), not by
-    # Siemens' name. Rows keep the spelling v0 stored, so nothing is sorted
-    # again.
+    # Siemens' name. A row stores that word too; `FLASH`, which rows held
+    # before, still names the value.
     label: SPGRE
-    stored: FLASH
+    aliases: [FLASH]
     description: 'a spoiled gradient echo'
     family: GRE
     keywords:
@@ -827,7 +841,7 @@ values:
     terms: ['FISP', 'GRASS', 'FFE', 'steady state GRE', 'SARGE', 'Rephased SARGE']  # Hitachi [V1, V2, M1]
     # Ruling 23: a generic word, not a vendor's (PROVENANCE.md); rows keep the old one.
     label: SSFPFID
-    stored: FISP
+    aliases: [FISP]
     family: GRE
     keywords:
       - fisp

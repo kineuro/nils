@@ -49,7 +49,7 @@ cases:
     flags:
       twist_vibe_dynamic: false
     axes:
-      technique: CE-MRA
+      technique: CEMRA
 
   # --- case 2: a GE SWAN output combines its echoes
 
@@ -70,7 +70,7 @@ cases:
     flags:
       ge_swan_combined: true
     axes:
-      technique: MEDIC
+      technique: combMEGRE
 
   - name: guard, a GE SWAN exported split by echo keeps its echoes apart
     stack:
@@ -110,7 +110,7 @@ cases:
       ge_swan_combined: true
     axes:
       construct: MinIP
-      technique: MEDIC
+      technique: combMEGRE
 
   - name: guard, a Siemens Dixon in-phase image keeps InPhase
     stack:

@@ -1784,6 +1784,56 @@ fn pack_validate_says_what_is_wrong_and_where() {
     assert!(e.contains("do not hold"), "{e}");
 }
 
+/// `nils pack validate` holds a name token to the word a row stores: the
+/// shipped pack passes, and a copy whose BIDS mapping spells one technique
+/// by another word is refused with the token and the stored word named.
+#[test]
+fn pack_validate_refuses_a_name_token_that_is_not_the_stored_word() {
+    fn copy(from: &std::path::Path, to: &std::path::Path) {
+        std::fs::create_dir_all(to).unwrap();
+        for entry in std::fs::read_dir(from).unwrap() {
+            let entry = entry.unwrap();
+            let target = to.join(entry.file_name());
+            if entry.file_type().unwrap().is_dir() {
+                copy(&entry.path(), &target);
+            } else {
+                std::fs::copy(entry.path(), &target).unwrap();
+            }
+        }
+    }
+    let shipped = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../packs/mri");
+    let out = nils()
+        .args(["pack", "validate"])
+        .arg(&shipped)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", stderr(&out));
+
+    let scratch = home();
+    let drifted = scratch.path().join("mri");
+    copy(&shipped, &drifted);
+    let bids = std::fs::read_to_string(drifted.join("bids.yml")).unwrap();
+    let line = "      'SP-GRE': SPGRE\n";
+    assert!(bids.contains(line), "the test edits the SP-GRE token");
+    std::fs::write(
+        drifted.join("bids.yml"),
+        bids.replacen(line, "      'SP-GRE': FLASH\n", 1),
+    )
+    .unwrap();
+    let out = nils()
+        .args(["pack", "validate"])
+        .arg(&drifted)
+        .output()
+        .unwrap();
+    assert!(!out.status.success(), "a drifted token is refused");
+    let said = stderr(&out);
+    assert!(
+        said.contains("technique SP-GRE: the name token is FLASH, a row stores SPGRE"),
+        "{said}"
+    );
+    assert!(said.contains("own_words"), "{said}");
+}
+
 #[test]
 fn pack_list_and_show_read_the_pack_directory() {
     let packs = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../packs");
@@ -6225,6 +6275,370 @@ fn repair_removes_the_empty_stacks_and_keeps_what_a_person_named() {
     // nothing is left to do
     let again = run(&[]);
     assert_eq!(again["stacks_removed"], 0, "{again}");
+}
+
+/// `nils repair axis-values`: rows an older version of the pack wrote in
+/// another spelling and a decision written as its author spelled it are
+/// counted by axis and nothing is written; with `--apply` each is written
+/// in the stored form, the read model follows and one audit row says so; a
+/// sealed stack's row is left and counted apart; a second run finds only
+/// that; and `nils status` counts the rows astray.
+#[test]
+fn repair_moves_axis_values_to_the_stored_form_and_audits_it() {
+    let home = home();
+    let dir = tree();
+    let packs = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../packs");
+    let registry = ["--registry", home.path().to_str().unwrap()];
+    let out = nils()
+        .args(registry)
+        .args(["digest", "--workers", "2", "--name", "first"])
+        .arg(dir.path())
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", stderr(&out));
+    let db = home.path().join("registry.db");
+    let count = |store: &mut nils_registry::Store, sql: &str| -> i64 {
+        store.query(sql, &[]).unwrap()[0].int(0).unwrap()
+    };
+    let (stack, sealed) = {
+        let mut store = nils_registry::Store::open_sqlite(&db).unwrap();
+        let stack = count(&mut store, "SELECT MIN(id) FROM stack");
+        let sealed = count(&mut store, "SELECT MAX(id) FROM stack");
+        assert_ne!(stack, sealed, "the tree holds two stacks");
+        // what a sort by an older version of the pack and a decision by
+        // identity left
+        for (s, axis, value) in [
+            (stack, "post_contrast", "1"),
+            (stack, "technique", "FLASH"),
+            (stack, "base", "T1w"),
+            (sealed, "post_contrast", "0"),
+        ] {
+            store
+                .execute(
+                    &format!(
+                        "INSERT INTO classification_axis (stack_id, axis, value, confidence, tier) \
+                         VALUES ({s}, '{axis}', '{value}', 0.9, 'stated')"
+                    ),
+                    &[],
+                )
+                .unwrap();
+        }
+        store
+            .execute(
+                &format!(
+                    "INSERT INTO decision (scope, ref, axis, value, actor, author_kind, decided_at, committed_at) \
+                     VALUES ('stack', '{stack}', 'technique', 'SP-GRE', 'a-reader', 'person', \
+                     '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')"
+                ),
+                &[],
+            )
+            .unwrap();
+        store
+            .execute(
+                &format!(
+                    "INSERT INTO sealed_stack (sample, stack_id, subject_id, sealed_by, sealed_at) \
+                     VALUES ('s@1', {sealed}, 0, 'an-operator', '2026-01-01T00:00:00Z')"
+                ),
+                &[],
+            )
+            .unwrap();
+        (stack, sealed)
+    };
+    let run = |extra: &[&str]| -> serde_json::Value {
+        let out = nils()
+            .args(registry)
+            .args(["repair", "axis-values", "--json", "--pack-dir"])
+            .arg(&packs)
+            .args(extra)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{}", stderr(&out));
+        serde_json::from_slice(&out.stdout).unwrap()
+    };
+    let value = |axis: &str, of: i64| -> String {
+        let mut store = nils_registry::Store::open_sqlite(&db).unwrap();
+        store
+            .query(
+                &format!(
+                    "SELECT value FROM classification_axis WHERE stack_id = {of} AND axis = '{axis}'"
+                ),
+                &[],
+            )
+            .unwrap()[0]
+            .text(0)
+            .unwrap()
+            .to_string()
+    };
+
+    // without --apply it says what it found and writes nothing
+    let found = run(&[]);
+    assert_eq!(found["clean"], false, "{found}");
+    assert_eq!(found["applied"], false, "{found}");
+    assert_eq!(found["by_axis"]["post_contrast"]["rows"], 2, "{found}");
+    assert_eq!(found["by_axis"]["technique"]["rows"], 1, "{found}");
+    assert_eq!(found["by_axis"]["technique"]["decisions"], 1, "{found}");
+    assert!(found["by_axis"]["base"].is_null(), "{found}");
+    assert_eq!(value("post_contrast", stack), "1");
+
+    // the status says how many rows, by axis
+    let out = nils()
+        .args(registry)
+        .args(["status", "--json"])
+        .env("NILS_PACK_DIR", &packs)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", stderr(&out));
+    let status: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let astray = &status["axis_values"]["rows_in_another_spelling"];
+    assert_eq!(astray["post_contrast"], 2, "{status}");
+    assert_eq!(astray["technique"], 1, "{status}");
+
+    let done = run(&["--apply"]);
+    assert_eq!(done["written"]["rows"], 2, "{done}");
+    assert_eq!(done["written"]["decisions"], 1, "{done}");
+    assert_eq!(done["written"]["stacks"], 1, "{done}");
+    assert_eq!(value("post_contrast", stack), "given");
+    assert_eq!(value("technique", stack), "SPGRE");
+    assert_eq!(value("base", stack), "T1w");
+    // the sealed stack's row is left as it is
+    assert_eq!(value("post_contrast", sealed), "0");
+    let mut store = nils_registry::Store::open_sqlite(&db).unwrap();
+    assert_eq!(
+        count(
+            &mut store,
+            "SELECT COUNT(*) FROM decision WHERE axis = 'technique' AND value = 'SPGRE'"
+        ),
+        1
+    );
+    assert_eq!(
+        count(
+            &mut store,
+            &format!(
+                "SELECT COUNT(*) FROM stack_axis WHERE stack_id = {stack} AND axes LIKE '%\"given\"%' AND axes LIKE '%\"SPGRE\"%'"
+            )
+        ),
+        1,
+        "the read model holds the stored forms"
+    );
+    assert_eq!(
+        count(
+            &mut store,
+            "SELECT COUNT(*) FROM audit WHERE action = 'registry.repair' AND scope LIKE '%axis-values%'"
+        ),
+        1
+    );
+    drop(store);
+
+    // what is left is what is sealed, and a second run writes nothing
+    let again = run(&["--apply"]);
+    assert_eq!(again["by_axis"]["post_contrast"]["rows"], 1, "{again}");
+    assert_eq!(again["rows"][0]["sealed"], 1, "{again}");
+    assert_eq!(again["written"]["rows"], 0, "{again}");
+    let mut store = nils_registry::Store::open_sqlite(&db).unwrap();
+    assert_eq!(
+        count(
+            &mut store,
+            "SELECT COUNT(*) FROM audit WHERE action = 'registry.repair'"
+        ),
+        1,
+        "a run that writes nothing writes no audit row"
+    );
+}
+
+/// Two axes the pack declares the coarse and the fine form of one thing,
+/// at the keyboard: a body part the rules read off a word is set aside
+/// where a decided region does not cover it, and `nils explain` says so;
+/// a decided body part decides the region; and where both were decided and
+/// do not agree they are left, the sort's report counts them and so does
+/// `nils status`, in words and in `--json`.
+#[test]
+fn a_decision_holds_the_other_grain_and_status_counts_two_that_do_not_agree() {
+    let home = home();
+    let dir = TempDir::new("cli-coarse");
+    for n in 1..=3 {
+        let (series, sop) = (format!("1.2.3.A.{n}"), format!("1.2.3.A.{n}.1"));
+        let mut e = synth::minimal_mr("1.2.3.A", &series, &sop);
+        e.push(synth::text(
+            dicom_dictionary_std::tags::SERIES_DESCRIPTION,
+            dicom_core::VR::LO,
+            &format!("sag t1 spine {n}"),
+        ));
+        dir.file(
+            &format!("a/IM_{n}"),
+            &synth::part10(&MetaFields::mr(&sop), &e, true),
+        );
+    }
+    let packs = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../packs");
+    let registry = ["--registry", home.path().to_str().unwrap()];
+    let ok = |args: &[&str]| -> String {
+        let out = nils()
+            .args(registry)
+            .args(args)
+            .env("NILS_PACK_DIR", &packs)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{}: {}", args.join(" "), stderr(&out));
+        stdout(&out)
+    };
+    ok(&[
+        "digest",
+        "--workers",
+        "2",
+        "--name",
+        "first",
+        dir.path().to_str().unwrap(),
+    ]);
+    ok(&["fingerprint", "--name", "f"]);
+    let sort = || -> serde_json::Value {
+        serde_json::from_str(&ok(&[
+            "classify",
+            "--json",
+            "--pack-dir",
+            packs.to_str().unwrap(),
+        ]))
+        .unwrap()
+    };
+    let first = sort();
+    assert_eq!(first["written"], 3, "{first}");
+    assert!(first["coarse"].is_null(), "nothing was decided: {first}");
+    let db = home.path().join("registry.db");
+    let stacks: Vec<i64> = {
+        let mut store = nils_registry::Store::open_sqlite(&db).unwrap();
+        let stacks: Vec<i64> = store
+            .query(
+                "SELECT stack_id FROM classification_axis WHERE axis = 'body_part' \
+                 AND value = 'spine' AND tier = 'keywords' ORDER BY stack_id",
+                &[],
+            )
+            .unwrap()
+            .iter()
+            .map(|r| r.int(0).unwrap())
+            .collect();
+        assert_eq!(stacks.len(), 3, "the rules read a spine off each name");
+        // a region decided on the first, a body part on the second, and
+        // both on the third, which do not agree
+        for (stack, axis, value) in [
+            (stacks[0], "body_region", "chest"),
+            (stacks[1], "body_part", "brain"),
+            (stacks[2], "body_part", "brain"),
+            (stacks[2], "body_region", "chest"),
+        ] {
+            store
+                .execute(
+                    &format!(
+                        "INSERT INTO decision (scope, ref, axis, value, actor, author_kind, decided_at, committed_at) \
+                         VALUES ('stack', '{stack}', '{axis}', '{value}', 'a-reader', 'person', \
+                         '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')"
+                    ),
+                    &[],
+                )
+                .unwrap();
+        }
+        stacks
+    };
+    let second = sort();
+    assert_eq!(second["coarse"]["body_part:set_aside"], 1, "{second}");
+    assert_eq!(second["coarse"]["body_region:folded"], 1, "{second}");
+    assert_eq!(second["coarse"]["body_region:apart"], 1, "{second}");
+
+    // the stack whose spine was set aside: no body part, and why
+    let shown: serde_json::Value =
+        serde_json::from_str(&ok(&["explain", &stacks[0].to_string(), "--json"])).unwrap();
+    let axes = shown["axes"].as_array().unwrap();
+    assert!(axes.iter().all(|a| a["axis"] != "body_part"), "{shown}");
+    assert_eq!(
+        shown["notes"]["set_aside"][0],
+        serde_json::json!({
+            "axis": "body_part", "value": "spine", "tier": "keywords", "confidence": 0.65,
+            "by": {"axis": "body_region", "value": "chest", "who": "a-reader", "kind": "person"},
+        }),
+        "{shown}"
+    );
+    let text = ok(&["explain", &stacks[0].to_string()]);
+    assert!(
+        text.contains(
+            "body_part spine by keywords set aside: body_region chest was decided and does not cover it"
+        ),
+        "{text}"
+    );
+    // the stack whose body part was decided: the region is its head
+    let shown: serde_json::Value =
+        serde_json::from_str(&ok(&["explain", &stacks[1].to_string(), "--json"])).unwrap();
+    let region = shown["axes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|a| a["axis"] == "body_region")
+        .unwrap()
+        .clone();
+    assert_eq!(region["value"], "head", "{region}");
+    assert_eq!(region["tier"], "folded", "{region}");
+    assert_eq!(region["basis"], "inferred", "{region}");
+    assert_eq!(region["confidence"], 1.0, "{region}");
+    assert!(
+        region["decision"].is_null(),
+        "no decision was made on it: {region}"
+    );
+    // and it says what it was folded from, and who decided that
+    assert_eq!(
+        region["folded_from"],
+        serde_json::json!({
+            "axis": "body_part", "kind": "person", "actor": "a-reader", "model": null,
+            "words": "brain was decided",
+        }),
+        "{region}"
+    );
+    let text = ok(&["explain", &stacks[1].to_string()]);
+    assert!(
+        text.contains("folded from body_part: brain was decided (a person, a-reader)"),
+        "{text}"
+    );
+    assert!(
+        region["evidence"].as_array().unwrap().iter().any(|e| {
+            e["rule_set"] == "coarse_of" && e["rule"] == "body_part" && e["value"] == "head"
+        }),
+        "{region}"
+    );
+
+    // the two decisions that do not agree are counted, and left
+    let status: serde_json::Value = serde_json::from_str(&ok(&["status", "--json"])).unwrap();
+    assert_eq!(
+        status["axis_values"]["decided_apart"],
+        serde_json::json!({"body_region": {"coarse_of": "body_part", "stacks": 1}}),
+        "{status}"
+    );
+    let text = ok(&["status"]);
+    assert!(
+        text.contains(
+            "body_region      1 stack(s) whose decided body_part the decided body_region does not cover"
+        ),
+        "{text}"
+    );
+    // once the two agree the line says so
+    {
+        let mut store = nils_registry::Store::open_sqlite(&db).unwrap();
+        store
+            .execute(
+                &format!(
+                    "UPDATE decision SET value = 'head' WHERE axis = 'body_region' AND ref = '{}'",
+                    stacks[2]
+                ),
+                &[],
+            )
+            .unwrap();
+    }
+    let third = sort();
+    assert!(third["coarse"]["body_region:apart"].is_null(), "{third}");
+    let status: serde_json::Value = serde_json::from_str(&ok(&["status", "--json"])).unwrap();
+    assert_eq!(
+        status["axis_values"]["decided_apart"]["body_region"]["stacks"], 0,
+        "{status}"
+    );
+    let text = ok(&["status"]);
+    assert!(
+        text.contains("every decided body_region covers the body_part decided beside it"),
+        "{text}"
+    );
 }
 
 /// `nils repair sealed-review`: the open review items an older engine raised

@@ -584,7 +584,7 @@ fn round(pg: Option<(String, String)>) {
         vocabulary.iter().any(|v| v["value"] == "T2w")
             && vocabulary
                 .iter()
-                .any(|v| v["value"] == "T2*w" && v["name"] == "T2starw"),
+                .any(|v| v["value"] == "T2starw" && v["name"] == "T2starw" && v["label"] == "T2*w"),
         "the stored form, its name and its label: {vocabulary:?}"
     );
     assert_eq!(list["elsewhere"], json!([]), "{list}");
@@ -963,7 +963,7 @@ fn round(pg: Option<(String, String)>) {
     );
     assert_eq!(status, 200, "{done}");
     assert_eq!(done["blind"], 1, "one scan, counted once: {done}");
-    assert_eq!(done["decisions"][0]["value"], "T2*w", "{done}");
+    assert_eq!(done["decisions"][0]["value"], "T2starw", "{done}");
     assert_eq!(
         done["decisions"][0]["items"].as_array().map(Vec::len),
         Some(2),
@@ -978,7 +978,7 @@ fn round(pg: Option<(String, String)>) {
     for m in &marked {
         assert_eq!(m[0], 1, "{marked:?}");
         assert_eq!(m[1], "blind_first", "{marked:?}");
-        assert_eq!(m[2], "T2*w", "{marked:?}");
+        assert_eq!(m[2], "T2starw", "{marked:?}");
         assert!(m[3].is_null(), "the rules' answer was hidden: {marked:?}");
     }
 
@@ -1057,25 +1057,25 @@ fn round(pg: Option<(String, String)>) {
         .iter()
         .map(|q| q["key"].as_str().unwrap())
         .collect();
-    assert!(keys.contains(&"base:PDw|T2*w"), "{asked}");
+    assert!(keys.contains(&"base:PDw|T2starw"), "{asked}");
     assert!(keys.contains(&"base:PDw|T2w"), "{asked}");
     // a question whose words name the rules' answer is never read blind,
     // whatever its mode
     let pair = format!(
         "/api/review/questions/{}/scans?dataset=other",
-        key("base:PDw|T2*w")
+        key("base:PDw|T2starw")
     );
     let page = server.get(&pair, OPS);
     let tile = &page["scans"][0];
     assert_eq!(tile["stack"], d, "{page}");
     assert_eq!(tile["mode"], "blind_first", "{tile}");
     assert_eq!(tile["blind"], false, "{tile}");
-    assert_eq!(tile["nils"], "T2*w", "{tile}");
+    assert_eq!(tile["nils"], "T2starw", "{tile}");
     assert_eq!(tile["other"], "PDw", "{tile}");
     // the person keeps their answer with the rules' PDw on screen
     let (status, done) = server.call(
         "POST",
-        &format!("/api/review/questions/{}/answer", key("base:PDw|T2*w")),
+        &format!("/api/review/questions/{}/answer", key("base:PDw|T2starw")),
         Some(json!({"dataset": "other", "value": "T2*w"})),
         OPS,
     );
@@ -1102,12 +1102,12 @@ fn round(pg: Option<(String, String)>) {
             .as_array()
             .unwrap()
             .iter()
-            .all(|q| q["key"] != "base:PDw|T2*w"),
+            .all(|q| q["key"] != "base:PDw|T2starw"),
         "{left}"
     );
     assert_eq!(
         base_of(&home, d).unwrap(),
-        ("T2*w".to_string(), "decision".to_string())
+        ("T2starw".to_string(), "decision".to_string())
     );
 
     // --- UX round 5 (2026-11-08): a model's disagreement with a person's
@@ -1122,9 +1122,9 @@ fn round(pg: Option<(String, String)>) {
              \"model_id\": 99, \"value\": \"{value}\", \"confidence\": 0.97}}', 'open', '2026-11-08T10:00:00Z')"
         ));
     };
-    // d: a decision T2*w a model disputes with PDw; e: a decision T2w the
+    // d: a decision T2starw a model disputes with PDw; e: a decision T2w the
     // rules dispute already, and now a model too
-    model_item(d, "T2*w", "PDw");
+    model_item(d, "T2starw", "PDw");
     model_item(e, "T2w", "PDw");
     home.exec(&format!(
         "INSERT INTO {{review_item}} (kind, scope, ref, evidence, status, created_at) \
@@ -1142,15 +1142,15 @@ fn round(pg: Option<(String, String)>) {
             .unwrap_or_else(|| panic!("no {key} in {doc}"))
     };
     let asked = server.get("/api/review/questions?dataset=other", OPS);
-    let q = find(&asked, "base:PDw|T2*w");
+    let q = find(&asked, "base:PDw|T2starw");
     assert_eq!(
         q["values"],
-        json!(["T2*w", "PDw"]),
+        json!(["T2starw", "PDw"]),
         "the decision kept is key 1: {q}"
     );
-    assert_eq!(q["words"], "T2*w or PDw?", "{q}");
+    assert_eq!(q["words"], "T2starw or PDw?", "{q}");
     assert_eq!(
-        q["reason"], "A model says PDw; a person decided T2*w.",
+        q["reason"], "A model says PDw; a person decided T2starw.",
         "{q}"
     );
     assert_eq!(q["scans"], 1, "{q}");
@@ -1193,12 +1193,12 @@ fn round(pg: Option<(String, String)>) {
     let page = server.get(
         &format!(
             "/api/review/questions/{}/scans?dataset=other",
-            key("base:PDw|T2*w")
+            key("base:PDw|T2starw")
         ),
         OPS,
     );
     assert_eq!(page["scans"][0]["stack"], d, "{page}");
-    assert_eq!(page["scans"][0]["nils"], "T2*w", "{page}");
+    assert_eq!(page["scans"][0]["nils"], "T2starw", "{page}");
     assert_eq!(page["scans"][0]["other"], "PDw", "{page}");
     // key 1 keeps the decision: a decision too, so the item closes and the
     // scan is re-sorted; the question is gone
@@ -1212,7 +1212,7 @@ fn round(pg: Option<(String, String)>) {
     let before = open_items();
     let (status, done) = server.call(
         "POST",
-        &format!("/api/review/questions/{}/answer", key("base:PDw|T2*w")),
+        &format!("/api/review/questions/{}/answer", key("base:PDw|T2starw")),
         Some(json!({"dataset": "other", "value": "T2*w"})),
         OPS,
     );
@@ -1229,7 +1229,7 @@ fn round(pg: Option<(String, String)>) {
     assert_eq!(open_items(), before - 1, "the model's item closed");
     assert_eq!(
         base_of(&home, d).unwrap(),
-        ("T2*w".to_string(), "decision".to_string())
+        ("T2starw".to_string(), "decision".to_string())
     );
     let left = server.get("/api/review/questions?dataset=other", OPS);
     assert!(
@@ -1237,7 +1237,7 @@ fn round(pg: Option<(String, String)>) {
             .as_array()
             .unwrap()
             .iter()
-            .all(|q| q["key"] != "base:PDw|T2*w"),
+            .all(|q| q["key"] != "base:PDw|T2starw"),
         "{left}"
     );
     // key 2 takes the model's value: both items on e close with it

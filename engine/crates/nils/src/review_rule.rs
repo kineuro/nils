@@ -835,7 +835,7 @@ impl round::Words for PackWords {
             Some(v) => {
                 a.default.as_deref() == Some(v)
                     && a.value_index(v).is_none()
-                    && a.id_of_stored(v).is_none()
+                    && a.id_of(v).is_none()
             }
         }
     }
@@ -850,7 +850,7 @@ impl round::Words for PackWords {
             // T2starw); the axis may store the label (SPACE, T2*w)
             let i = a
                 .value_index(w)
-                .or_else(|| a.id_of_stored(w).and_then(|id| a.value_index(id)))
+                .or_else(|| a.id_of(w).and_then(|id| a.value_index(id)))
                 .ok_or_else(|| {
                     format!(
                         "{w} is none of the {axis} values of the pack {}",
@@ -1122,7 +1122,7 @@ pub(crate) fn named_by_pack(pack: &nils_pack::Pack, axis: &str, stored: &Value) 
             continue;
         }
         let known = a
-            .id_of_stored(&w)
+            .id_of(&w)
             .map(str::to_string)
             .or_else(|| a.value_named(&w).map(|i| a.values[i].id.clone()));
         let id = match known {
@@ -1759,7 +1759,7 @@ fn settled_again(registry: &mut Registry, d: &audit_draw::Draw) -> Result<Reply,
         }
         None => (BTreeMap::new(), 1),
     };
-    let ts = audit_draw::to_settle(&seed, share, &drawn, &reads, raters);
+    let ts = audit_draw::to_settle(&seed, share, &drawn, &reads, raters, &registry.spellings());
     let campaign = match d.settle_campaign_id {
         Some(c) => {
             let made = nils_registry::campaign::get(registry.store(), c)
@@ -1862,7 +1862,7 @@ pub(crate) fn settle_draw(
         .map(|(s, l)| (*s, l.iter().map(|(_, _, a)| a.clone()).collect()))
         .collect();
     let raters = c.raters_per_item.max(1) as usize;
-    let ts = audit_draw::to_settle(&seed, share, &drawn, &reads, raters);
+    let ts = audit_draw::to_settle(&seed, share, &drawn, &reads, raters, &registry.spellings());
     if !ts.waiting.is_empty() {
         return Err(Reply::error(
             409,
@@ -2028,6 +2028,7 @@ fn verify_over(
     // a difference but never an alternative: on a joint answer the axis
     // keeps the accepted value, and an answer that then equals the accepted
     // answer offers nothing. A missing value on a single axis offers nothing.
+    let spellings = registry.spellings();
     let alternative_of = |accepted: &Value, read: &audit_draw::Answered| -> Option<String> {
         let cant = |v: &Value| {
             audit_draw::comparable(v).is_some_and(|w| audit_draw::CANT_TELL.contains(&w.as_str()))
@@ -2048,7 +2049,7 @@ fn verify_over(
                         kept.insert(axis.clone(), accepted[axis.as_str()].clone());
                     }
                 }
-                if audit_draw::agrees(accepted, &kept) {
+                if audit_draw::agrees(&spellings, accepted, &kept) {
                     return None;
                 }
                 Some(Value::Object(kept.into_iter().collect()).to_string())
@@ -2071,7 +2072,7 @@ fn verify_over(
         }
         let mut seen: Vec<audit_draw::Answered> = Vec::new();
         for (_, _, read) in answers.get(stack).into_iter().flatten() {
-            if audit_draw::agrees(a, read) || seen.contains(read) || seen.len() >= 2 {
+            if audit_draw::agrees(&spellings, a, read) || seen.contains(read) || seen.len() >= 2 {
                 continue;
             }
             seen.push(read.clone());
@@ -2279,6 +2280,7 @@ fn grade_door(
             .collect();
         (reads, c.status == "closed", Value::Null)
     };
+    let spellings = registry.spellings();
     let g = audit_draw::grade(
         registry.store(),
         &d,
@@ -2286,6 +2288,7 @@ fn grade_door(
         closed,
         settle,
         &caller.principal,
+        &spellings,
     )
     .map_err(failed)?;
     // record 58 P2: a month over the rule opens a rule review, once

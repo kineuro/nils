@@ -243,7 +243,7 @@ cases:
     flags:
       siemens_haste_3d: true
     axes:
-      technique: HASTE
+      technique: SSTSE
 
   - name: guard, a Siemens 3D SPACE stays 3D-TSE
     stack:

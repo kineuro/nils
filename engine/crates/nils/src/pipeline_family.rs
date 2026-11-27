@@ -619,7 +619,7 @@ pub(crate) fn route_stacks(
     let mut facts = pipeline_pack::facts_for(store, &of, &host);
     for (u, f_) in units.iter().zip(facts.iter_mut()) {
         let t1w: Vec<i64> = u.of.by_role.get("t1w").cloned().unwrap_or_default();
-        let same = pipeline_pack::same_protocol(store, &t1w);
+        let same = pipeline_pack::same_protocol(store, &host, &t1w);
         family::set_unit_facts(f_, u.days.len(), same);
     }
     Ok(units
@@ -978,7 +978,7 @@ pub(crate) fn replay(registry: &mut Registry, dir: &Path, ask: &PersonAsk) -> Re
     let mut facts: Vec<Facts> = pipeline_pack::facts_for(store, &of, &host);
     for ((u, days), f_) in with.iter().zip(facts.iter_mut()) {
         let t1w: Vec<i64> = u.by_role.get("t1w").cloned().unwrap_or_default();
-        let same = pipeline_pack::same_protocol(store, &t1w);
+        let same = pipeline_pack::same_protocol(store, &host, &t1w);
         family::set_unit_facts(f_, days.len().max(1), same);
     }
     let now: Vec<Routing> = facts
