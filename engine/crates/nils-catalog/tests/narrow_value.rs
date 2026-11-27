@@ -953,6 +953,81 @@ fn the_clauses_measured_are_the_answer_s_own_sets_and_the_smallest_first() {
     }
 }
 
+/// A value clause in a set several others draw from is measured where it
+/// bites. In the shared set the fine value keeps most rows, so nothing was
+/// said; a set drawn from it holds a kind of scan nearly all of which the
+/// fine split put under the sibling, and there the same clause drops
+/// nearly every row. The clause is measured in each stack set on the
+/// answer's path that is drawn from its own, with that set's other
+/// conditions, and the warning names the set where the rule holds, at the
+/// clause's own path.
+#[test]
+fn a_fine_value_in_a_shared_set_is_measured_in_the_sets_drawn_from_it() {
+    for mut l in labs() {
+        let (counts, _) = plant(&mut l, false);
+        let brain = counts[&("body_part", "brain")];
+        // a kind of scan that ends above the neck: every brain holds it,
+        // and a few of the stacks labelled brain and neck
+        let few = (brain / 6).max(1) as usize;
+        let kind = common::replant(&mut l, "base_basis", |i| {
+            (i % 20 == 0 || (i % 20 == 1 && i / 20 < few)).then_some("physics")
+        });
+        let few = few as i64;
+        assert_eq!(kind["physics"], brain + few, "{}", l.name);
+        assert!(few * 5 < brain + few && brain >= 3 * few, "{}", l.name);
+        let sets = |out: &str| {
+            doc(
+                json!({
+                    "base": {"grain": "stack", "where": [is("body_part", "brain-neck")]},
+                    "kind": {"grain": "stack", "from": "base", "where": [is("base_basis", "physics")]},
+                    "other": {"grain": "stack", "from": "base", "where": [is("directory_type", "anat")]},
+                    "visits": {"grain": "session", "has": [
+                        {"set": "kind", "min": 1},
+                        {"set": "other", "min": 1}
+                    ]}
+                }),
+                out,
+            )
+        };
+        let text = sets("visits");
+        for d in diagnosed(&mut l, &text, &quasi()) {
+            assert!(d.valid, "{}", l.name);
+            let w = narrow(&d);
+            assert_eq!(w.len(), 1, "{}: {:?}", l.name, d.warnings);
+            // at the clause, which stands in the shared set
+            assert_eq!(w[0].0, "sets.base.where[0]", "{}", l.name);
+            assert_eq!(
+                w[0].1,
+                format!(
+                    "kind: with the set's other conditions, body_part = brain-neck (written in \
+                     base, which kind is drawn from) keeps {} of {} stacks; brain holds {} of the \
+                     rest. If any head of body_region is meant, write body_region = head, which \
+                     covers brain and brain-neck.",
+                    n(few),
+                    n(brain + few),
+                    n(brain)
+                ),
+                "{}",
+                l.name
+            );
+            assert_eq!(
+                w[0].2,
+                "to keep them all, write [\"=\",{},[\"axis\",{},\"body_region\"],\"head\"] at \
+                 sets.base.where[0], which kind and every other set drawn from base reads; where \
+                 only brain-neck is meant, change nothing",
+                "{}",
+                l.name
+            );
+        }
+        // the shared set alone keeps most of its rows, and the sets drawn
+        // from it are not on its answer's path: nothing is measured there
+        let alone = sets("base");
+        for d in diagnosed(&mut l, &alone, &quasi()) {
+            assert_eq!(narrow(&d), [], "{}", l.name);
+        }
+    }
+}
+
 /// A clause that says its value is meant as written (`exact: true`) is a
 /// narrowing on purpose: it selects what the plain clause selects, and is
 /// warned of nowhere.

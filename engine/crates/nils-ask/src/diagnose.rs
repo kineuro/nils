@@ -2454,14 +2454,28 @@ fn rows_by_value(
 /// thing, a spine beside a brain; the coarse axis itself has nothing
 /// wider; an axis that holds several values a stack has no siblings.
 ///
+/// A clause is measured where it bites. A set several others are drawn
+/// from (`from`) often holds the value clause they share, and there the
+/// fine value may keep most rows while in one of the sets drawn from it,
+/// with that set's own conditions, it drops nearly all: a kind of scan the
+/// fine split put under the sibling. So a clause is measured in its own
+/// set and in each stack set on the answer's path that is drawn from it,
+/// in one step or several: that set with the one clause left out and
+/// every other condition of it applied, by the value of the axis. The
+/// warning is raised for the first of them the rule holds in, once a
+/// clause, at the clause's own path; the message names the set the rule
+/// held in, and says where the clause is written when that is another.
+///
 /// A clause that carries `exact: true` says its value is meant as
 /// written, and is never measured.
 ///
-/// It costs one statement a clause, the set without the clause grouped by
-/// the axis, for [`NARROW_CLAUSES`] clauses of a document at most: those
-/// of the sets the answer reads its rows through first, and among them
+/// It costs one statement a measure, the set without the clause grouped by
+/// the axis, for [`NARROW_CLAUSES`] measures of a document at most: those
+/// in the sets the answer reads its rows through first, and among them
 /// the sets that hold the fewest rows first, since a set that came out
-/// small is the one a narrow value explains. The statement is read under
+/// small is the one a narrow value explains; a set drawn from another
+/// holds no more rows than it, so a clause is measured in the sets drawn
+/// from its own before its own. The statement is read under
 /// the caller's scope: a set whose own count the funnel holds back warns
 /// of nothing, and neither does a statement any of whose counts came back
 /// held, so the message names no count the caller could not see. A
@@ -2484,12 +2498,17 @@ fn narrow_values(
     if counter.spent() || matches!(counter.ahead, Ahead::Listed(_)) {
         return found;
     }
-    // The clauses to measure, each with the rows its set holds as the
-    // funnel counted them: the count of the set's last `where`, which is
-    // the count the clause's kept rows must be, and one the caller saw.
+    // The clauses to measure, each in a set it cuts: its own, and each
+    // stack set on the answer's path that is drawn from its own (`from`,
+    // in one step or several). With each, the rows that set holds as the
+    // funnel counted them, before any pick: the count the clause's kept
+    // rows must be there, and one the caller saw.
     struct Candidate<'a> {
+        /// The set the clause is written in, and its place there.
         set: &'a str,
         at: usize,
+        /// The set it is measured in.
+        target: &'a str,
         axis: String,
         of: crate::validate::AxisNames,
         kept: Vec<String>,
@@ -2499,80 +2518,112 @@ fn narrow_values(
     }
     let path = answer_path(ask);
     let mut candidates: Vec<Candidate<'_>> = Vec::new();
-    for name in order {
-        let Some(set) = ask.sets.get(name) else {
+    for target in order {
+        let target = target.as_str();
+        let Some(measured) = ask.sets.get(target) else {
             continue;
         };
-        if name.contains("__") || set.grain != Grain::Stack || set.where_.is_empty() {
+        if target.contains("__") || measured.grain != Grain::Stack {
             continue;
         }
         // held back, or not counted: nothing is said of the set
-        let last = format!("where {}", clause_text(&set.where_[set.where_.len() - 1]));
-        let Some(rows) = stage_counts.get(&(name.clone(), last)).and_then(|c| c.0) else {
+        let Some(rows) = rows_kept(target, measured, stage_counts) else {
             continue;
         };
-        for (i, c) in set.where_.iter().enumerate() {
-            // a value written as meant (`exact: true`) is on purpose
-            if crate::reading::is_exact(c) {
+        let on_path = path.iter().any(|p| p == target);
+        for name in drawn_from(ask, target) {
+            // a set drawn from the clause's own is measured where the
+            // answer reads its rows through it, and nowhere else
+            if name != target && !on_path {
                 continue;
             }
-            let Some((axis, of, kept)) = value_filter(c, counter.names) else {
+            let Some(set) = ask.sets.get(name) else {
                 continue;
             };
-            let kin = counter.names.axis_kin(&axis);
-            // a coarse value that covers every value kept, and some other
-            // value beside them: without one there is no sibling to count
-            let siblings_possible = kin.wider.iter().any(|w| {
-                kept.iter()
-                    .all(|k| w.values.iter().any(|(_, covers)| covers.contains(k)))
-                    && w.values.iter().any(|(_, covers)| {
-                        covers.iter().any(|k| kept.contains(k))
-                            && covers.iter().any(|k| !kept.contains(k))
-                    })
-            });
-            if kin.multi || !siblings_possible {
+            if name.contains("__") || set.grain != Grain::Stack {
                 continue;
             }
-            // A set that already keeps the coarse value that covers the
-            // values kept here, in a clause of its own or of a set it is
-            // drawn from, narrows on purpose: "the heads, and of those the
-            // brains" is what was written, and the wider clause to suggest
-            // is one the set already has.
-            if narrowed_on_purpose(ask, name, &kin, &kept, counter.names) {
+            // a set drawn from the clause's own that holds the same rows
+            // adds no condition: the measure there is the one in its own
+            if name != target && rows_kept(name, set, stage_counts) == Some(rows) {
                 continue;
             }
-            candidates.push(Candidate {
-                set: name,
-                at: i,
-                axis,
-                of,
-                kept,
-                kin,
-                rows,
-                on_path: path.iter().any(|p| p == name),
-            });
+            for (i, c) in set.where_.iter().enumerate() {
+                // a value written as meant (`exact: true`) is on purpose
+                if crate::reading::is_exact(c) {
+                    continue;
+                }
+                let Some((axis, of, kept)) = value_filter(c, counter.names) else {
+                    continue;
+                };
+                let kin = counter.names.axis_kin(&axis);
+                // a coarse value that covers every value kept, and some
+                // other value beside them: without one there is no sibling
+                // to count
+                let siblings_possible = kin.wider.iter().any(|w| {
+                    kept.iter()
+                        .all(|k| w.values.iter().any(|(_, covers)| covers.contains(k)))
+                        && w.values.iter().any(|(_, covers)| {
+                            covers.iter().any(|k| kept.contains(k))
+                                && covers.iter().any(|k| !kept.contains(k))
+                        })
+                });
+                if kin.multi || !siblings_possible {
+                    continue;
+                }
+                // A set that already keeps the coarse value that covers the
+                // values kept here, in a clause of its own or of a set it
+                // is drawn from, narrows on purpose: "the heads, and of
+                // those the brains" is what was written, and the wider
+                // clause to suggest is one the set already has. Read from
+                // the set measured, so a set drawn from the clause's own
+                // that keeps the coarse value itself is left alone too.
+                if narrowed_on_purpose(ask, target, &kin, &kept, counter.names) {
+                    continue;
+                }
+                candidates.push(Candidate {
+                    set: name,
+                    at: i,
+                    target,
+                    axis,
+                    of,
+                    kept,
+                    kin,
+                    rows,
+                    on_path,
+                });
+            }
         }
     }
     // the sets the answer reads its rows through first, and among them the
     // sets that hold the fewest rows; a stable sort, so the document's own
     // order decides between equals
     candidates.sort_by_key(|c| (!c.on_path, c.rows));
-    for c in candidates.iter().take(NARROW_CLAUSES) {
-        if counter.spent() {
+    // the clauses already warned of, each once, in the set where the rule
+    // first held; and the statements run
+    let mut warned: BTreeSet<(&str, usize)> = BTreeSet::new();
+    let mut measured = 0;
+    for c in &candidates {
+        if measured >= NARROW_CLAUSES || counter.spent() {
             break;
         }
-        let (name, i) = (c.set, c.at);
-        let Some(set) = ask.sets.get(name) else {
+        let (name, i, target) = (c.set, c.at, c.target);
+        if warned.contains(&(name, i)) {
+            continue;
+        }
+        let (Some(owner), Some(set)) = (ask.sets.get(name), ask.sets.get(target)) else {
             continue;
         };
-        let clause_here = &set.where_[i];
-        // the set with this one clause left out, every other condition
-        // applied, before any pick: by the value each row holds
+        let clause_here = &owner.where_[i];
+        // the set measured with this one clause left out, every other
+        // condition applied, before any pick: by the value each row holds
         let mut without = ask.clone();
-        let Some(lean) = without.sets.get_mut(name) else {
+        if let Some(lean) = without.sets.get_mut(name) {
+            lean.where_.remove(i);
+        }
+        let Some(lean) = without.sets.get(target) else {
             continue;
         };
-        lean.where_.remove(i);
         let Some(step) = steps(lean)
             .into_iter()
             .map(|(s, _)| s)
@@ -2581,8 +2632,9 @@ fn narrow_values(
             continue;
         };
         let other_conditions = step != Step::Source || lean.from.is_some();
+        measured += 1;
         let Some(by_value) =
-            rows_by_value(counter, registry, &without, name, &step, &c.axis, &c.of)
+            rows_by_value(counter, registry, &without, target, &step, &c.axis, &c.of)
         else {
             continue;
         };
@@ -2669,17 +2721,25 @@ fn narrow_values(
             ),
         };
         // never a clause the set already holds
-        if set.where_.contains(&clause) {
+        if owner.where_.contains(&clause) {
             continue;
         }
+        // where the rule holds in a set drawn from the clause's own, the
+        // message names that set and says where the clause is written
+        let drawn = name != target;
         let message = format!(
-            "{name}: {}{} keeps {} of {} {}s; {} of the rest. If any {} of {coarse_axis} is meant, write {words}, which covers {}.",
+            "{target}: {}{}{} keeps {} of {} {}s; {} of the rest. If any {} of {coarse_axis} is meant, write {words}, which covers {}.",
             if other_conditions {
                 "with the set's other conditions, "
             } else {
                 ""
             },
             clause_text(clause_here),
+            if drawn {
+                format!(" (written in {name}, which {target} is drawn from)")
+            } else {
+                String::new()
+            },
             grouped_digits(kept),
             grouped_digits(all),
             set.grain.name(),
@@ -2688,10 +2748,16 @@ fn narrow_values(
             listed(&covers, "and"),
         );
         let next = format!(
-            "to keep them all, write {} at sets.{name}.where[{i}]; where only {} is meant, change nothing",
+            "to keep them all, write {} at sets.{name}.where[{i}]{}; where only {} is meant, change nothing",
             serde_json::to_string(&clause).unwrap_or_default(),
+            if drawn {
+                format!(", which {target} and every other set drawn from {name} reads")
+            } else {
+                String::new()
+            },
             listed(&c.kept, "or"),
         );
+        warned.insert((name, i));
         found.push(Issue {
             code: Code::NarrowValue,
             path: format!("sets.{name}.where[{i}]"),
@@ -2704,6 +2770,35 @@ fn narrow_values(
         b.spent_in = None;
     }
     found
+}
+
+/// The rows a set holds before any pick, as the funnel counted them: the
+/// count of its last stage that is no pick. None where that count is held
+/// back or was not counted.
+fn rows_kept(name: &str, set: &Set, stage_counts: &StageCounts) -> Option<i64> {
+    let (_, label) = steps(set).into_iter().rfind(|(s, _)| *s != Step::Pick)?;
+    stage_counts.get(&(name.to_string(), label))?.0
+}
+
+/// A set and the sets it is drawn from (`from`), nearest first: the sets
+/// whose `where` clauses cut its rows.
+fn drawn_from<'a>(ask: &'a Ask, name: &'a str) -> Vec<&'a str> {
+    let mut out: Vec<&str> = Vec::new();
+    let mut at = Some(name);
+    while let Some(n) = at {
+        if out.contains(&n) {
+            break;
+        }
+        let Some(set) = ask.sets.get(n) else {
+            break;
+        };
+        out.push(n);
+        at = match &set.from {
+            Some(Src::Set(from)) => Some(from.as_str()),
+            _ => None,
+        };
+    }
+    out
 }
 
 /// The next call where the counts ran past their time: the job path, by the
