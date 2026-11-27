@@ -1100,6 +1100,88 @@ fn covers_without_coarse_of_and_coarse_of_without_covers_are_refused() {
     assert!(e.contains("no value of it covers a value"), "{e}");
 }
 
+/// A value of a coarse axis may list the values it covers that a question
+/// which writes one alone is read as it for (`read_for`). The loader holds
+/// the list to `covers`: a value of the finer axis, one this value covers,
+/// listed once, and the value covers another beside it.
+#[test]
+fn a_coarse_value_may_say_which_values_it_is_read_for() {
+    let with = |small: &str, large: &str| {
+        SIZE_AXIS
+            .replace("small: {covers: [a, beta]}", small)
+            .replace("large: {covers: [c]}", large)
+    };
+    let d = coarse(
+        &with(
+            "small: {covers: [a, beta], read_for: [beta]}",
+            "large: {covers: [c]}",
+        ),
+        SIZE_RULES,
+    );
+    let pack = nils_pack::load(d.path(), None).unwrap();
+    let size = &pack.axes[pack.axis_index("size").unwrap()];
+    // a value named by an identity it had before is the value
+    assert_eq!(size.values[0].read_for, ["b"]);
+    assert!(size.values[1].read_for.is_empty());
+    let kind = &pack.axes[pack.axis_index("kind").unwrap()];
+    assert!(kind.values.iter().all(|v| v.read_for.is_empty()));
+
+    let refused = |small: &str, large: &str| refusal(&coarse(&with(small, large), SIZE_RULES));
+    // no value of the finer axis
+    let e = refused(
+        "small: {covers: [a, beta], read_for: [d]}",
+        "large: {covers: [c]}",
+    );
+    assert!(e.contains("size.yml"), "{e}");
+    assert!(e.contains("values.small.read_for"), "{e}");
+    assert!(e.contains("d is no value of kind"), "{e}");
+    // a value another coarse value covers
+    let e = refused(
+        "small: {covers: [a, beta], read_for: [c]}",
+        "large: {covers: [c]}",
+    );
+    assert!(e.contains("values.small.read_for"), "{e}");
+    assert!(e.contains("small does not cover c"), "{e}");
+    // listed twice, by two of its names
+    let e = refused(
+        "small: {covers: [a, beta], read_for: [b, beta]}",
+        "large: {covers: [c]}",
+    );
+    assert!(e.contains("b is listed twice"), "{e}");
+    // a value that covers one thing is no wider than it
+    let e = refused(
+        "small: {covers: [a, beta]}",
+        "large: {covers: [c], read_for: [c]}",
+    );
+    assert!(e.contains("values.large.read_for"), "{e}");
+    assert!(e.contains("large covers c alone"), "{e}");
+    // and on an axis that is the coarse form of none
+    let d = coarse(
+        "axis: size\nkind: single\nvalues: {small: {read_for: [a]}, large: {}}\n",
+        SIZE_RULES,
+    );
+    let e = refusal(&d);
+    assert!(e.contains("values.small.read_for"), "{e}");
+    assert!(e.contains("size is the coarse form of no axis"), "{e}");
+}
+
+/// The shipped pack reads a brain written alone as the head, and no other
+/// value as anything.
+#[test]
+fn the_shipped_pack_reads_a_brain_written_alone_as_the_head() {
+    let pack = nils_pack::load(&common::shipped_mri(), None).unwrap();
+    for axis in &pack.axes {
+        for v in &axis.values {
+            let expected: &[&str] = if axis.name == "body_region" && v.id == "head" {
+                &["brain"]
+            } else {
+                &[]
+            };
+            assert_eq!(v.read_for, expected, "{}.{}", axis.name, v.id);
+        }
+    }
+}
+
 #[test]
 fn a_coarse_form_the_rules_fold_otherwise_is_refused() {
     // the declaration says b is small, and the rules decide large for it

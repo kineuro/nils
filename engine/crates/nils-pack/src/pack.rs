@@ -2454,6 +2454,10 @@ fn load_axis(
                 Some(t) => f.blame(yaml::texts(t, &format!("{at}.covers")))?,
                 None => Vec::new(),
             },
+            read_for: match v.get("read_for") {
+                Some(t) => f.blame(yaml::texts(t, &format!("{at}.read_for")))?,
+                None => Vec::new(),
+            },
         });
     }
     // An axis may say it is the coarse form of one declared before it, and

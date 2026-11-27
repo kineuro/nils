@@ -38,12 +38,21 @@
 # head, whichever of the two fine values a stack holds, so that is what the
 # head's description says.
 
+# `read_for` says which of the values a region covers a question means the
+# region by, when it writes that value alone: `head` is read for `brain`.
+# The ask reads `body_part = brain` in a question authored as text as
+# `body_region = head`, stores it so, and says so in its answer, with the
+# clause that keeps the fine value alone (`exact: true`). Only `brain` has
+# it: a neck is not every spine, so `neck` stays the fine part, and
+# `brain-neck`, `spine`, `chest` and `other` are taken as written. The
+# loader holds the list to `covers`. No rule and no sort reads it.
+
 axis: body_region
 kind: single
 coarse_of: body_part
 
 values:
-  'head': {terms: ['head', 'brain', 'skull', 'neuro'], covers: ['brain', 'brain-neck'], description: 'the head: what "a brain scan" or "a head scan" means in ordinary words, a brain or a brain and neck, however far down the stack reaches (body_part splits it into brain and brain-neck)'}
+  'head': {terms: ['head', 'brain', 'skull', 'neuro'], covers: ['brain', 'brain-neck'], read_for: ['brain'], description: 'the head: what "a brain scan" or "a head scan" means in ordinary words, a brain or a brain and neck, however far down the stack reaches (body_part splits it into brain and brain-neck)'}
   'spine': {terms: ['spine', 'neck', 'cervical spine', 'thoracic spine', 'lumbar spine', 'spinal cord', 'whole spine'], covers: ['spine', 'neck'], description: 'the spine or the neck: any level of the spine, and imaging aimed at the neck''s soft tissue or vessels (body_part splits it into spine and neck)'}
   'chest': {terms: ['chest', 'thorax', 'lungs'], covers: ['chest']}
   'other': {terms: ['unknown', 'other body part', 'phantom', 'whole body'], covers: ['other'], description: 'none of the others, or not known: as for the body part''s other'}

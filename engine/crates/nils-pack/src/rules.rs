@@ -377,6 +377,13 @@ pub struct AxisValue {
     /// rules decide, and the loader refuses a pack whose rules fold
     /// otherwise.
     pub covers: Vec<String>,
+    /// On a value of a coarse axis: the values among [`AxisValue::covers`],
+    /// by identity, that a question which writes one of them alone is read
+    /// as this value for (`read_for`). The MRI pack's `head` is read for
+    /// `brain`: "a brain scan" in ordinary words is the head, whichever of
+    /// its fine values a stack holds. The ask reads it where a document is
+    /// authored as text, and says so; no rule and no sort reads it.
+    pub read_for: Vec<String>,
 }
 
 /// How an axis value is reached other than by a word, kept in the words the

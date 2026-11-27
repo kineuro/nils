@@ -17,8 +17,18 @@
 //! axis: body_region
 //! coarse_of: body_part
 //! values:
-//!   head: {covers: [brain, brain-neck]}
+//!   head: {covers: [brain, brain-neck], read_for: [brain]}
 //! ```
+//!
+//! A third key, `read_for` on a value of the coarse axis, lists the values
+//! it covers that a question which writes one of them alone is read as the
+//! coarse value for: "a brain scan" in ordinary words is the head, so the
+//! ask reads `body_part = brain` in an authored question as `body_region =
+//! head` and says so. It is a declaration and no heuristic: a fine value
+//! that is not listed is taken as written. The loader holds it to `covers`
+//! ([`declared`]): each listed value is one the value covers, and the value
+//! covers another beside it, since a value that covers one thing is no
+//! wider than it.
 //!
 //! The keys decide nothing the rules decide. The rules decide, and the
 //! loader holds the declaration to them twice: [`declared`] when the axis file is read (the
@@ -52,6 +62,15 @@ pub(crate) fn declared(
     before: &[Axis],
 ) -> R<()> {
     let Some(fine_name) = coarse_of else {
+        if let Some(v) = values.iter().find(|v| !v.read_for.is_empty()) {
+            return Err(Error::at(
+                format!("values.{}.read_for", v.id),
+                format!(
+                    "{name} is the coarse form of no axis; read_for is read beside coarse_of \
+                     and covers, and lists values this one covers"
+                ),
+            ));
+        }
         if let Some(v) = values.iter().find(|v| !v.covers.is_empty()) {
             return Err(Error::at(
                 format!("values.{}.covers", v.id),
@@ -108,6 +127,42 @@ pub(crate) fn declared(
                 ));
             }
         }
+    }
+    // What a value is read for is held to what it covers: each value listed
+    // is one it covers, by any name of it, and it covers another beside it.
+    for v in values.iter_mut() {
+        let at = format!("values.{}.read_for", v.id);
+        let mut listed: Vec<String> = Vec::new();
+        for r in &v.read_for {
+            let Some(i) = fine.value_index(r) else {
+                return Err(Error::at(at, format!("{r} is no value of {fine_name}")));
+            };
+            let id = fine.values[i].id.clone();
+            if !v.covers.contains(&id) {
+                return Err(Error::at(
+                    at,
+                    format!(
+                        "{} does not cover {id}; a value is read for values it covers",
+                        v.id
+                    ),
+                ));
+            }
+            if listed.contains(&id) {
+                return Err(Error::at(at, format!("{id} is listed twice")));
+            }
+            listed.push(id);
+        }
+        if !listed.is_empty() && v.covers.len() < 2 {
+            return Err(Error::at(
+                at,
+                format!(
+                    "{} covers {} alone; a value read for another covers one more beside it, \
+                     or it is no wider than the value written",
+                    v.id, listed[0]
+                ),
+            ));
+        }
+        v.read_for = listed;
     }
     Ok(())
 }
