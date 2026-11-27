@@ -407,6 +407,10 @@ pub enum Code {
     /// share of its rows, and sibling values of the axis hold most of the
     /// rest.
     NarrowValue,
+    /// A diagnosis's warning: a stack set keeps no row, and it keeps rows
+    /// with this one clause left out, so this clause and the clause the set
+    /// came to nothing at hold together on no stack.
+    EmptiedBy,
 }
 
 impl Code {
@@ -436,6 +440,7 @@ impl Code {
             Code::SequenceBeforeWhere => "sequence_before_where",
             Code::SequenceInherited => "sequence_inherited",
             Code::NarrowValue => "narrow_value",
+            Code::EmptiedBy => "emptied_by",
         }
     }
 
@@ -450,6 +455,7 @@ impl Code {
                 | Code::SequenceBeforeWhere
                 | Code::SequenceInherited
                 | Code::NarrowValue
+                | Code::EmptiedBy
         )
     }
 }

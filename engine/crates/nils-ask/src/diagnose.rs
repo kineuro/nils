@@ -1998,6 +1998,9 @@ fn counted(
             &validated.order,
             &stage_counts,
         ));
+        // a stack set two of its clauses emptied, one of them often
+        // written in a set it is drawn from
+        warnings.extend(emptied_by(&mut counter, registry, ask, &stage_counts));
     }
     // unresolved values
     let mut unresolved = Vec::new();
@@ -2008,11 +2011,16 @@ fn counted(
             unresolved.push(json!({"values": name, "upload": decl.upload, "shape": shape}));
         }
     }
-    // the zero row explanation, in domain words
-    let answer_rows = stage_counts
+    // the zero row explanation, in domain words. The answer's rows are
+    // those of the last stage the funnel counted of its set, in the order
+    // of the stages: read from the counts keyed by a stage's name, the last
+    // was the name that sorts last, and `source` sorts after every `has`,
+    // so a session set that came to nothing at a `has` read the rows it
+    // started from and a count of nothing explained nothing.
+    let answer_rows = funnel
         .iter()
-        .rfind(|((s, _), _)| *s == ask.out.set)
-        .map(|(_, c)| c.0);
+        .rfind(|s| s.set == ask.out.set)
+        .map(|s| s.rows);
     let zero_rows = match answer_rows {
         Some(Some(0)) => funnel
             .iter()
@@ -2247,6 +2255,10 @@ pub const NARROW_CLAUSES: usize = 3;
 
 /// The most sibling values a warning names, the largest first.
 pub const NARROW_NAMED: usize = 3;
+
+/// The most clauses of one document that are left out, one at a time, to
+/// find the clause that emptied a set ([`emptied_by`]): one statement each.
+pub const EMPTIED_CLAUSES: usize = 4;
 
 /// A `where` clause that keeps the stacks holding one of the values of an
 /// axis it writes out (`=`, `has`, or `in` with a list): the axis, its
@@ -2799,6 +2811,190 @@ fn drawn_from<'a>(ask: &'a Ask, name: &'a str) -> Vec<&'a str> {
         };
     }
     out
+}
+
+/// A stack set that came to nothing because two of its clauses hold
+/// together on no stack. An item of a question is often drawn from a set
+/// several items share, and a clause of the shared set (`disposition =
+/// acquisition`) can rule out every stack the item's own value is on (a
+/// base contrast only scanner-derived stacks hold). The count is nought,
+/// the zero row explanation names the clause the set came to nothing at,
+/// and nothing said that the other clause, written somewhere else, is why.
+///
+/// For each stack set on the answer's path that holds rows before its own
+/// `where` and none after it, the clause it came to nothing at is the
+/// first of its own clauses whose stage kept no row. The set is then
+/// counted with one other clause left out at a time: each clause that
+/// keeps values of an axis it writes out ([`value_filter`]), of the sets
+/// it is drawn from, nearest first, and then of its own. Where exactly one
+/// of the clauses left out leaves the set with rows, that clause is warned
+/// of at its own path: with the set's other conditions it and the clause
+/// the set came to nothing at hold together on no stack, and the message
+/// says both in the document's words and how many rows the set holds
+/// without it. Where none does, the set is empty for another reason, and
+/// where several do no one clause is to blame: nothing is said.
+///
+/// A set that is empty before any clause of its own is left: the set it
+/// is drawn from came to nothing, and that set is on the answer's path and
+/// is looked at itself.
+///
+/// It costs one statement a clause left out, [`EMPTIED_CLAUSES`] of a
+/// document at most, so in a set with more value clauses than that the
+/// one clause is found among those left out and the rest are not tried.
+/// As for [`narrow_values`]: nothing is counted once the time for the
+/// counts is spent or while the statements are listed to run ahead, the
+/// time these counts run past is not taken from the parts counted before
+/// them, a set whose own count the funnel holds back is not looked at,
+/// and a count that comes back held is a set with rows whose number is
+/// not said.
+fn emptied_by(
+    counter: &mut Counter<'_>,
+    registry: &mut Registry,
+    ask: &Ask,
+    stage_counts: &StageCounts,
+) -> Vec<Issue> {
+    let mut found = Vec::new();
+    if counter.spent() || matches!(counter.ahead, Ahead::Listed(_)) {
+        return found;
+    }
+    let mut left_out = 0;
+    'sets: for name in answer_path(ask) {
+        let Some(set) = ask.sets.get(&name) else {
+            continue;
+        };
+        if name.contains("__") || set.grain != Grain::Stack || set.where_.is_empty() {
+            continue;
+        }
+        let rows_at = |label: String| stage_counts.get(&(name.clone(), label)).and_then(|c| c.0);
+        // rows before its own clauses, and none after them
+        let before = steps(set)
+            .into_iter()
+            .find(|(s, _)| *s == before_where(set))
+            .and_then(|(_, label)| rows_at(label));
+        if !before.is_some_and(|n| n > 0) || rows_kept(&name, set, stage_counts) != Some(0) {
+            continue;
+        }
+        // the clause it came to nothing at
+        let Some(emptied_at) = set
+            .where_
+            .iter()
+            .position(|c| rows_at(format!("where {}", clause_text(c))) == Some(0))
+        else {
+            continue;
+        };
+        let chain = drawn_from(ask, &name);
+        // the other clauses that keep values of an axis: those of the sets
+        // it is drawn from first, which are not written on the item
+        let mut others: Vec<(&str, usize)> = Vec::new();
+        for owner in chain.iter().skip(1).chain(chain.first()) {
+            let Some(of) = ask.sets.get(*owner) else {
+                continue;
+            };
+            if owner.contains("__") || of.grain != Grain::Stack {
+                continue;
+            }
+            for (i, c) in of.where_.iter().enumerate() {
+                if (*owner == name && i == emptied_at) || value_filter(c, counter.names).is_none() {
+                    continue;
+                }
+                others.push((*owner, i));
+            }
+        }
+        // each left out in turn: the rows the set then holds, none where
+        // they are held back
+        let mut frees: Vec<(&str, usize, Option<i64>)> = Vec::new();
+        for (owner, i) in others {
+            if counter.spent() {
+                break 'sets;
+            }
+            // the bound: the one clause is looked for among those left out
+            if left_out >= EMPTIED_CLAUSES {
+                break;
+            }
+            let mut without = ask.clone();
+            if let Some(lean) = without.sets.get_mut(owner) {
+                lean.where_.remove(i);
+            }
+            let Some(step) = without.sets.get(&name).and_then(|lean| {
+                steps(lean)
+                    .into_iter()
+                    .map(|(s, _)| s)
+                    .rfind(|s| *s != Step::Pick)
+            }) else {
+                continue;
+            };
+            left_out += 1;
+            let v = variant(&without, &name, &step, Level::Count);
+            let Ok(count) = counter.count(registry, &v) else {
+                continue;
+            };
+            if counter.spent() {
+                break 'sets;
+            }
+            if count.rows != Some(0) {
+                frees.push((owner, i, count.rows));
+            }
+        }
+        let [(owner, i, rows)] = frees.as_slice() else {
+            continue;
+        };
+        let (Some(of), grain) = (ask.sets.get(*owner), set.grain.name()) else {
+            continue;
+        };
+        let this = clause_text(&of.where_[*i]);
+        let that = clause_text(&set.where_[emptied_at]);
+        let inherited = *owner != name;
+        // whether anything but the two clauses chooses the set's rows
+        let clauses: usize = chain
+            .iter()
+            .filter_map(|n| ask.sets.get(*n))
+            .map(|s| s.where_.len())
+            .sum();
+        let other_conditions = clauses > 2
+            || chain.iter().filter_map(|n| ask.sets.get(*n)).any(|s| {
+                !(s.near.is_empty() && s.attach.is_empty() && s.has.is_empty())
+                    || matches!(&s.from, Some(src) if !matches!(src, Src::Set(_)))
+            });
+        let holds = match rows {
+            Some(1) => format!("1 {grain}"),
+            Some(n) => format!("{} {grain}s", grouped_digits(*n)),
+            None => format!("{grain}s, their number held back"),
+        };
+        let message = format!(
+            "{name} keeps no {grain}: {}{this}{} and {that} hold together on no {grain}. Without {this}, {name} holds {holds}.",
+            if other_conditions {
+                "with the set's other conditions, "
+            } else {
+                ""
+            },
+            if inherited {
+                format!(" (written in {owner}, which {name} is drawn from)")
+            } else {
+                String::new()
+            },
+        );
+        let next = if inherited {
+            let parent = chain.get(1).copied().unwrap_or(*owner);
+            format!(
+                "where the question's words did not put {this} on {name}, draft {name} on its own instead of from: {parent}, with the clauses it needs and without that one; where they did, no {grain} holds both and the answer stands"
+            )
+        } else {
+            format!(
+                "where the question's words did not put {this} on {name}, leave sets.{name}.where[{i}] out; where they did, no {grain} holds both and the answer stands"
+            )
+        };
+        found.push(Issue {
+            code: Code::EmptiedBy,
+            path: format!("sets.{owner}.where[{i}]"),
+            message,
+            next,
+        });
+    }
+    // these counts are a hint: the time they ran past is not the counts'
+    if let Some(b) = &mut counter.budget {
+        b.spent_in = None;
+    }
+    found
 }
 
 /// The next call where the counts ran past their time: the job path, by the
