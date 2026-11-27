@@ -62,6 +62,17 @@ answer into the coarse one and refuses a pack whose rules fold otherwise, and
 the ask's catalog serves them. An engine that does not know the keys loads the
 pack as it did. The manifest is unchanged.
 
+Added in place to version 11, additively, as an axis file grew one more key
+an older engine does not read and an older pack never writes: `read_for` on a
+value of an axis that is the coarse form of another, the values it covers
+that a question authored as text is read as this value for when it writes
+one of them alone (the MRI pack's `head` is read for `brain`). The loader
+holds it to `covers`: each value listed is one the value covers, listed once,
+and the value covers another beside it. No rule and no sort reads it; the
+ask reads it at the doors that repair authored text, says each reading, and
+its catalog serves it. An engine that does not know the key loads the pack as
+it did and reads nothing wider. The manifest is unchanged.
+
 The engine's own copy of the version is `nils_pack::CONTRACT`; a test keeps
 the two the same and keeps every manifest key the loader reads on the schema.
 
