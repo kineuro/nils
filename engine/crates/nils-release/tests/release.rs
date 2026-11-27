@@ -2623,3 +2623,94 @@ fn both_stacks_of_an_enhanced_file_are_released() {
         .collect();
     assert_eq!(written.len(), 1, "{written:?}");
 }
+
+/// One spelling of a value in a row: a selection that names a value of an
+/// axis in an older word selects the stacks that hold the value in any of
+/// its spellings, and a word that names no value of the axis is refused
+/// with the values it could have been.
+#[test]
+fn a_selection_by_axis_value_reads_the_value_not_the_text() {
+    use nils_registry::schema;
+    use nils_registry::store::{Insert, Param};
+    use nils_release::select::{self, How, Item};
+    let source = tree();
+    let home_dir = TempDir::new("select-spelling-home");
+    let (_home, mut reg) = registry(&home_dir, &source);
+    let stacks: Vec<i64> = {
+        let store = reg.store();
+        store
+            .query(
+                &format!("SELECT id FROM {} ORDER BY id", store.qualified("stack")),
+                &[],
+            )
+            .unwrap()
+            .iter()
+            .map(|r| r.int(0).unwrap())
+            .collect()
+    };
+    assert!(stacks.len() >= 2, "{stacks:?}");
+    // the first stack was sorted by an older pack, the second by this one
+    let rows = [
+        (stacks[0], "technique", "FLASH"),
+        (stacks[0], "base", "T2*w"),
+        (stacks[0], "post_contrast", "1"),
+        (stacks[1], "technique", "SPGRE"),
+        (stacks[1], "base", "T2starw"),
+        (stacks[1], "post_contrast", "given"),
+    ];
+    for (stack, axis, value) in rows {
+        reg.store()
+            .insert(
+                &Insert::new(
+                    schema::table("classification_axis"),
+                    &["stack_id", "axis", "value", "confidence", "tier"],
+                ),
+                &[vec![
+                    Param::Int(stack),
+                    Param::from(axis),
+                    Param::from(value),
+                    Param::Double(1.0),
+                    Param::from("certain"),
+                ]],
+            )
+            .unwrap();
+    }
+    for (axis, word) in [
+        ("technique", "FLASH"),
+        ("technique", "SPGRE"),
+        ("technique", "SP-GRE"),
+        ("base", "T2*w"),
+        ("base", "T2starw"),
+        ("post_contrast", "1"),
+        ("post_contrast", "given"),
+    ] {
+        let item = Item::Axis(axis.into(), word.into());
+        let resolved =
+            select::resolve(&mut reg, std::slice::from_ref(&item), Some(pack())).unwrap();
+        assert!(
+            resolved.unresolved.is_empty(),
+            "{axis}={word}: {resolved:?}"
+        );
+        assert_eq!(
+            resolved.items[0].1,
+            How::Axis { stacks: 2 },
+            "{axis}={word} counts both stacks"
+        );
+        let got = run::preview(reg.store(), &resolved.selection).unwrap();
+        assert_eq!(got.stacks, 2, "{axis}={word}: {got:?}");
+    }
+    // a value no stack holds selects none, as it did
+    let item = Item::Axis("post_contrast".into(), "0".into());
+    let resolved = select::resolve(&mut reg, std::slice::from_ref(&item), Some(pack())).unwrap();
+    assert_eq!(resolved.items[0].1, How::Axis { stacks: 0 });
+    // a word that is no value of the axis is refused, and says what is
+    let item = Item::Axis("technique".into(), "VIBEY".into());
+    let resolved = select::resolve(&mut reg, std::slice::from_ref(&item), Some(pack())).unwrap();
+    assert!(resolved.items.is_empty(), "{resolved:?}");
+    assert_eq!(resolved.unresolved.len(), 1);
+    let why = &resolved.unresolved[0].1;
+    assert!(
+        why.contains("VIBEY") && why.contains("SPGRE") && why.contains("VIGRE"),
+        "{why}"
+    );
+}

@@ -241,11 +241,7 @@ pub fn replay_with(pack: &Pack, packet: &Value, constraints: &Value) -> Result<V
             .values
             .iter()
             .filter(|v| !v.is_empty() && a.default.as_deref() != Some(v.as_str()))
-            .map(|v| {
-                a.id_of_stored(v)
-                    .map(str::to_string)
-                    .unwrap_or_else(|| v.clone())
-            })
+            .map(|v| a.id_of(v).map(str::to_string).unwrap_or_else(|| v.clone()))
             .collect();
         decided.insert(a.name.clone(), v);
     }

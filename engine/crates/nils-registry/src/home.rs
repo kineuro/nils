@@ -402,6 +402,7 @@ impl Home {
             migrated: Vec::new(),
             swept: None,
             mended: None,
+            spellings: Default::default(),
         })
     }
 
@@ -486,6 +487,7 @@ impl Home {
             migrated,
             swept: None,
             mended,
+            spellings: Default::default(),
         };
         if registry.meta.never_kept_by_shape.is_none()
             && let Ok(Some(swept)) = crate::shape_sweep::run(&mut registry)
@@ -653,6 +655,7 @@ pub struct Registry {
     migrated: Vec<i64>,
     swept: Option<crate::shape_sweep::Swept>,
     mended: Option<crate::stack_axis::Mended>,
+    spellings: crate::spelling::Source,
 }
 
 impl fmt::Debug for Registry {
@@ -702,6 +705,33 @@ impl Registry {
     /// reached around the engine.
     pub fn mended(&self) -> Option<&crate::stack_axis::Mended> {
         self.mended.as_ref()
+    }
+
+    /// Give the registry what a row stores for every other name of an axis
+    /// value, as the pack in force answers it ([`crate::spelling`]): every
+    /// decision written through this registry from here on is written in
+    /// the stored form.
+    pub fn spell(&mut self, spellings: crate::spelling::Spellings) {
+        self.spellings = crate::spelling::Source::Known(std::sync::Arc::new(spellings));
+    }
+
+    /// As [`Registry::spell`], asked for when the first decision is
+    /// written: an opener that would have to load a pack to know, and
+    /// writes a decision in few of its commands. An earlier
+    /// [`Registry::spell`] stands.
+    pub fn spell_from(
+        &mut self,
+        source: impl Fn() -> Option<crate::spelling::Spellings> + Send + Sync + 'static,
+    ) {
+        if matches!(self.spellings, crate::spelling::Source::Unset) {
+            self.spellings = crate::spelling::Source::Lazy(std::sync::Arc::new(source));
+        }
+    }
+
+    /// The spellings this registry writes by; none where nothing gave any,
+    /// and a text is then written as it was given.
+    pub fn spellings(&mut self) -> std::sync::Arc<crate::spelling::Spellings> {
+        self.spellings.get()
     }
 
     pub fn keys(&self) -> KeyStore {

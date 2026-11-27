@@ -169,6 +169,15 @@ pub struct Classified {
     /// of one image each, information and no longer a question.
     #[serde(default)]
     pub split_notes: i64,
+    /// What a decision on one of two axes the pack declares the coarse and
+    /// the fine form of one thing (`coarse_of`) did to the other, a stack
+    /// counted once per axis: `<fine axis>:set_aside`, a rule's value the
+    /// decided coarse value does not cover, left with no row;
+    /// `<coarse axis>:folded`, a coarse value decided by a decided finer
+    /// one; and `<coarse axis>:apart`, two decisions that do not agree,
+    /// left as they are and never asked about.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub coarse: std::collections::BTreeMap<String, i64>,
     /// Record 55 F2 and F5: the post-contrast label written after the
     /// disposition, over every subject with an MR stack
     /// (`crate::contrast::Labelled`).
@@ -221,6 +230,7 @@ impl Classified {
             asks_missing: Vec::new(),
             disagreements: std::collections::BTreeMap::new(),
             split_notes: 0,
+            coarse: std::collections::BTreeMap::new(),
             seconds: 0.0,
             peak_rss: None,
             contrast: None,
@@ -282,6 +292,7 @@ impl Classified {
         }
         add(&mut self.disagreements, o.disagreements);
         self.split_notes += o.split_notes;
+        add(&mut self.coarse, o.coarse);
         self.cancelled |= o.cancelled;
     }
 
@@ -400,6 +411,14 @@ impl fmt::Display for Classified {
                 f,
                 "  split noted      {:>12}   stacks of a series split into single images",
                 self.split_notes
+            )?;
+        }
+        if !self.coarse.is_empty() {
+            writeln!(
+                f,
+                "  two grains       {:>12}   an axis held to a decision on its coarse or fine form: {}",
+                total(&self.coarse),
+                line(&self.coarse)
             )?;
         }
         if !self.disagreements.is_empty() {

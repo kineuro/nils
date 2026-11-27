@@ -55,7 +55,7 @@ cases:
       fov_y: 300
       image_role: original_primary
     axes:
-      technique: CE-MRA
+      technique: CEMRA
       base: T1w
       disposition: acquisition
       role: ''
@@ -78,7 +78,7 @@ cases:
       fov_y: 300
       image_role: original_primary
     axes:
-      technique: CE-MRA
+      technique: CEMRA
       base: T1w
       role: ''
 

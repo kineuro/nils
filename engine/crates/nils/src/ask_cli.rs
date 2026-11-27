@@ -857,8 +857,11 @@ fn diagnose_cmd(home: &Home, args: AskDiagnoseArgs) -> Result<(), Exit> {
         );
     }
     for d in doc["drops"].as_array().into_iter().flatten() {
+        // each with its set: the drops of the sets the answer reads its
+        // rows through are listed beside its own, in rows of their set
         println!(
-            "drop   {}: {} to {} rows, {} unknown",
+            "drop   {}/{}: {} to {} rows, {} unknown",
+            text_of(&d["set"]),
             text_of(&d["clause"]),
             d["before"],
             d["after"],

@@ -99,6 +99,12 @@
       "subjects": 1550,
       "hash": "251bd11f0975e95030761e453e93498098d39deabf4e84f0b8f1319a2f59bd6a",
       "held": false
+    },
+    "17-narrow-value": {
+      "rows": 0,
+      "subjects": 0,
+      "hash": "675cfcd56e5a65f0db0bdcec4ddb3fd30c39397f651637d3e68c986f4208ea9d",
+      "held": false
     }
   },
   "sqlite": {
@@ -190,6 +196,12 @@
       "rows": 1720,
       "subjects": 1573,
       "hash": "2ff112c103fe9ca9edfc6dfce445432627c56271bf1f6a9937910cb4b5cf0839",
+      "held": false
+    },
+    "17-narrow-value": {
+      "rows": 0,
+      "subjects": 0,
+      "hash": "675cfcd56e5a65f0db0bdcec4ddb3fd30c39397f651637d3e68c986f4208ea9d",
       "held": false
     }
   }

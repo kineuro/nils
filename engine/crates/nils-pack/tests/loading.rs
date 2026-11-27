@@ -855,3 +855,476 @@ fn a_normalized_text_leaves_out_the_field_a_vendor_fills_with_something_else() {
     let why = refusal(&d);
     assert!(why.contains("unless_vendor is not a key here"), "{why}");
 }
+
+/// The good pack, plus an axis of three kinds and its coarse form of two
+/// sizes, folded by a rule set: `a` and `b` are small, `c` is large.
+fn coarse(size_axis: &str, size_rules: &str) -> Dir {
+    let d = good();
+    d.file(
+        "pack.yml",
+        "\
+pack: t
+version: 1.0.0
+contract: 1
+modality: MR
+parsers: [parsers.yml]
+flags: [flags.yml]
+axes: [axes/kind.yml, axes/size.yml]
+rules: [rules/kind.yml, rules/size.yml]
+order: [kind, size]
+",
+    )
+    .file(
+        "axes/kind.yml",
+        "axis: kind\nkind: single\nvalues: {a: {}, b: {aliases: [beta]}, c: {}}\n",
+    )
+    .file("axes/size.yml", size_axis)
+    .file(
+        "rules/kind.yml",
+        "\
+rule_set: kind
+decides: [kind]
+tiers: {stated: 0.9}
+order: [original]
+rules:
+  original:
+    clauses: [{flag: is_original, tier: stated}]
+    set: {kind: a}
+",
+    )
+    .file("rules/size.yml", size_rules);
+    d
+}
+
+const SIZE_AXIS: &str = "\
+axis: size
+kind: single
+coarse_of: kind
+values:
+  small: {covers: [a, beta]}
+  large: {covers: [c]}
+";
+
+const SIZE_RULES: &str = "\
+rule_set: size
+decides: [size]
+tiers: {stated: 0.9}
+order: [small, large]
+rules:
+  small:
+    clauses: [{when: {any: [{axis: kind, is: a}, {axis: kind, is: b}]}, cite: small, source: kind}]
+    set: {size: small}
+  large:
+    clauses: [{when: {axis: kind, is: c}, cite: large, source: kind}]
+    set: {size: large}
+";
+
+#[test]
+fn an_axis_may_say_it_is_the_coarse_form_of_another() {
+    let d = coarse(SIZE_AXIS, SIZE_RULES);
+    let pack = nils_pack::load(d.path(), None).unwrap();
+    let size = &pack.axes[pack.axis_index("size").unwrap()];
+    assert_eq!(size.coarse_of.as_deref(), Some("kind"));
+    // a covered value named by an identity it had before is the value
+    assert_eq!(size.values[0].covers, ["a", "b"]);
+    assert_eq!(size.values[1].covers, ["c"]);
+    let kind = &pack.axes[pack.axis_index("kind").unwrap()];
+    assert_eq!(kind.coarse_of, None);
+    assert!(kind.values.iter().all(|v| v.covers.is_empty()));
+    // what a catalog serves: the coarse forms of the fine axis
+    let of = nils_pack::coarse::of(&pack.axes, "kind");
+    assert_eq!(of.len(), 1);
+    assert_eq!(of[0].0, "size");
+    assert_eq!(of[0].1[0].0, "small");
+    assert!(nils_pack::coarse::of(&pack.axes, "size").is_empty());
+}
+
+/// What a sort reads of a coarse form: the coarse value that covers a
+/// value of the finer axis, whether one covers another, and the pairs that
+/// do not agree, each by any name of a value and as a row stores it.
+#[test]
+fn a_coarse_form_folds_and_covers_by_any_name_of_a_value() {
+    let d = coarse(SIZE_AXIS, SIZE_RULES);
+    let pack = nils_pack::load(d.path(), None).unwrap();
+    let forms = nils_pack::coarse::forms(&pack);
+    assert_eq!(forms.len(), 1);
+    let f = forms[0];
+    assert_eq!(
+        (f.coarse.name.as_str(), f.fine.name.as_str()),
+        ("size", "kind")
+    );
+    assert_eq!(f.fold("a"), Some(Some("small")));
+    assert_eq!(f.fold("beta"), Some(Some("small")), "a name b had before");
+    assert_eq!(f.fold(" c "), Some(Some("large")));
+    assert_eq!(f.fold(""), None, "an axis that holds nothing");
+    assert_eq!(f.fold("zebra"), None, "no value of the finer axis");
+    assert_eq!(f.covers("small", "b"), Some(true));
+    assert_eq!(f.covers("large", "a"), Some(false));
+    assert_eq!(f.covers("large", ""), None);
+    assert_eq!(f.covers("", "a"), None);
+    assert_eq!(f.covers("huge", "a"), None);
+    let words = |list: &[&str]| list.iter().map(|w| w.to_string()).collect::<Vec<_>>();
+    assert_eq!(
+        f.apart(),
+        [
+            ("small".to_string(), words(&["c"])),
+            ("large".to_string(), words(&["a", "b"])),
+        ]
+    );
+
+    // a finer value no coarse value covers folds to nothing
+    let d = coarse(&SIZE_AXIS.replace("[a, beta]", "[a]"), SIZE_RULES_A);
+    let pack = nils_pack::load(d.path(), None).unwrap();
+    let f = nils_pack::coarse::forms(&pack)[0];
+    assert_eq!(f.fold("b"), Some(None));
+    assert_eq!(f.covers("small", "b"), Some(false));
+
+    // an axis that holds several values is no form a sort holds a stack to
+    let d = coarse(
+        &SIZE_AXIS.replace("kind: single", "kind: multi"),
+        SIZE_RULES,
+    );
+    let pack = nils_pack::load(d.path(), None).unwrap();
+    assert!(nils_pack::coarse::forms(&pack).is_empty());
+    // and a pack that declares none has none
+    let pack = nils_pack::load(good().path(), None).unwrap();
+    assert!(nils_pack::coarse::forms(&pack).is_empty());
+}
+
+/// The size rules where `b` is covered by no size: only `a` is small.
+const SIZE_RULES_A: &str = "\
+rule_set: size
+decides: [size]
+tiers: {stated: 0.9}
+order: [small, large]
+rules:
+  small:
+    clauses: [{when: {axis: kind, is: a}, cite: small, source: kind}]
+    set: {size: small}
+  large:
+    clauses: [{when: {axis: kind, is: c}, cite: large, source: kind}]
+    set: {size: large}
+";
+
+#[test]
+fn the_shipped_pack_says_the_body_region_is_the_body_part_s_coarse_form() {
+    let pack = nils_pack::load(&common::shipped_mri(), None).unwrap();
+    let region = &pack.axes[pack.axis_index("body_region").unwrap()];
+    assert_eq!(region.coarse_of.as_deref(), Some("body_part"));
+    let covers = |id: &str| -> Vec<&str> {
+        region
+            .values
+            .iter()
+            .find(|v| v.id == id)
+            .unwrap()
+            .covers
+            .iter()
+            .map(String::as_str)
+            .collect()
+    };
+    assert_eq!(covers("head"), ["brain", "brain-neck"]);
+    assert_eq!(covers("spine"), ["spine", "neck"]);
+    assert_eq!(covers("chest"), ["chest"]);
+    assert_eq!(covers("other"), ["other"]);
+    // the word names the region, and no longer the fine value beside it
+    let part = &pack.axes[pack.axis_index("body_part").unwrap()];
+    let brain = part.values.iter().find(|v| v.id == "brain").unwrap();
+    assert!(
+        !brain.terms.iter().any(|t| t == "head"),
+        "{:?}",
+        brain.terms
+    );
+    let head = region.values.iter().find(|v| v.id == "head").unwrap();
+    assert!(head.terms.iter().any(|t| t == "head"));
+    assert!(head.description.as_deref().unwrap().contains("brain scan"));
+}
+
+#[test]
+fn a_coarse_form_of_an_axis_that_is_not_declared_before_it_is_refused() {
+    let d = coarse(
+        &SIZE_AXIS.replace("coarse_of: kind", "coarse_of: sort"),
+        SIZE_RULES,
+    );
+    let e = refusal(&d);
+    assert!(e.contains("size.yml:3:"), "{e}");
+    assert!(e.contains("coarse_of"), "{e}");
+    assert!(
+        e.contains("no axis named sort is declared before size"),
+        "{e}"
+    );
+
+    let d = coarse(
+        &SIZE_AXIS.replace("coarse_of: kind", "coarse_of: size"),
+        SIZE_RULES,
+    );
+    let e = refusal(&d);
+    assert!(
+        e.contains("size cannot be the coarse form of itself"),
+        "{e}"
+    );
+}
+
+#[test]
+fn a_covered_value_that_is_no_value_of_the_finer_axis_is_refused() {
+    let d = coarse(&SIZE_AXIS.replace("[c]", "[c, d]"), SIZE_RULES);
+    let e = refusal(&d);
+    assert!(e.contains("size.yml"), "{e}");
+    assert!(e.contains("values.large.covers"), "{e}");
+    assert!(e.contains("d is no value of kind"), "{e}");
+}
+
+#[test]
+fn a_value_covered_twice_is_refused() {
+    let d = coarse(&SIZE_AXIS.replace("[c]", "[c, b]"), SIZE_RULES);
+    let e = refusal(&d);
+    assert!(e.contains("values.large.covers"), "{e}");
+    assert!(e.contains("b is covered by small already"), "{e}");
+
+    let d = coarse(&SIZE_AXIS.replace("[c]", "[c, c]"), SIZE_RULES);
+    let e = refusal(&d);
+    assert!(e.contains("c is listed twice"), "{e}");
+}
+
+#[test]
+fn covers_without_coarse_of_and_coarse_of_without_covers_are_refused() {
+    let d = coarse(&SIZE_AXIS.replace("coarse_of: kind\n", ""), SIZE_RULES);
+    let e = refusal(&d);
+    assert!(e.contains("values.small.covers"), "{e}");
+    assert!(e.contains("size is the coarse form of no axis"), "{e}");
+
+    let d = coarse(
+        "axis: size\nkind: single\ncoarse_of: kind\nvalues: {small: {}, large: {}}\n",
+        SIZE_RULES,
+    );
+    let e = refusal(&d);
+    assert!(e.contains("no value of it covers a value"), "{e}");
+}
+
+#[test]
+fn a_coarse_form_the_rules_fold_otherwise_is_refused() {
+    // the declaration says b is small, and the rules decide large for it
+    let rules = SIZE_RULES
+        .replace(
+            "{any: [{axis: kind, is: a}, {axis: kind, is: b}]}",
+            "{axis: kind, is: a}",
+        )
+        .replace(
+            "{when: {axis: kind, is: c}",
+            "{when: {any: [{axis: kind, is: c}, {axis: kind, is: b}]}",
+        );
+    let e = refusal(&coarse(SIZE_AXIS, &rules));
+    assert!(e.contains("axis size.values"), "{e}");
+    assert!(
+        e.contains("covers says a kind of b is small of size, and the rules decide large"),
+        "{e}"
+    );
+
+    // a value the declaration leaves out and the rules fold
+    let e = refusal(&coarse(&SIZE_AXIS.replace("[a, beta]", "[a]"), SIZE_RULES));
+    assert!(
+        e.contains("covers says a kind of b is nothing of size, and the rules decide small"),
+        "{e}"
+    );
+
+    // a value the declaration covers and no rule folds
+    let rules = SIZE_RULES.replace(
+        "{any: [{axis: kind, is: a}, {axis: kind, is: b}]}",
+        "{axis: kind, is: a}",
+    );
+    let e = refusal(&coarse(SIZE_AXIS, &rules));
+    assert!(
+        e.contains("covers says a kind of b is small of size, and the rules decide nothing"),
+        "{e}"
+    );
+}
+
+#[test]
+fn a_coarse_form_the_rules_read_from_the_file_is_refused() {
+    // the size is read off the image type, not folded from the kind: the
+    // refusal names the rule and what it reads, and is not the comparison
+    // of the values, which a flag that never holds on an empty stack
+    // would fail for another reason
+    let rules = "\
+rule_set: size
+decides: [size]
+tiers: {stated: 0.9}
+order: [small]
+rules:
+  small:
+    clauses: [{flag: is_original, tier: stated}]
+    set: {size: small}
+";
+    let e = refusal(&coarse(SIZE_AXIS, rules));
+    assert!(e.contains("axis size.coarse_of"), "{e}");
+    assert!(
+        e.contains("the rules do not decide size from kind alone"),
+        "{e}"
+    );
+    assert!(!e.contains("covers says"), "{e}");
+
+    // the two folding rules, each as the declaration says, and one rule
+    // tried before them that reads a flag: every value folds as declared
+    // over a stack that says nothing, and an original image of kind a
+    // would still be sorted large against `covers`
+    let rules = SIZE_RULES
+        .replace("order: [small, large]", "order: [original, small, large]")
+        .replace(
+            "rules:\n",
+            "rules:\n  original:\n    clauses: [{flag: is_original, tier: stated}]\n    set: {size: large}\n",
+        );
+    assert!(rules.contains("original:"), "{rules}");
+    let e = refusal(&coarse(SIZE_AXIS, &rules));
+    assert!(e.contains("axis size.coarse_of"), "{e}");
+    assert!(
+        e.contains(
+            "the rules do not decide size from kind alone: size/original reads the flag is_original"
+        ),
+        "{e}"
+    );
+}
+
+/// A pack whose `kind` axis stores labels and has every sort of name: an
+/// identity, an identity it had before, a label, and the spelling rows kept
+/// when the label changed; and whose `disposition` stores identities, one
+/// of them with an earlier spelling.
+fn spelled() -> nils_pack::Pack {
+    let d = phased();
+    d.file(
+        "axes/kind.yml",
+        "axis: kind\nkind: single\nstores: label\nvalues:\n  a: {label: A1, stored: OLD-A, aliases: [was-a]}\n  b: {label: B}\n",
+    )
+    .file(
+        "axes/disposition.yml",
+        "axis: disposition\nphase: disposition\nkind: single\nvalues: {keep: {aliases: ['1']}, drop: {aliases: ['0']}}\n",
+    );
+    nils_pack::load(d.path(), None).unwrap()
+}
+
+#[test]
+fn every_name_of_a_value_reads_as_the_value_and_one_is_stored() {
+    let pack = spelled();
+    let kind = pack.axis("kind").unwrap();
+    // identity, an earlier identity, the label and the stored spelling
+    for name in ["a", "was-a", "A1", "OLD-A"] {
+        assert_eq!(kind.id_of(name), Some("a"), "{name}");
+        assert_eq!(kind.stored_of(name), Some("OLD-A"), "{name}");
+    }
+    for name in ["b", "B"] {
+        assert_eq!(kind.id_of(name), Some("b"), "{name}");
+        assert_eq!(kind.stored_of(name), Some("B"), "{name}");
+    }
+    assert_eq!(kind.id_of("neither"), None);
+    assert_eq!(kind.stored_of("neither"), None);
+    // an axis that stores identities reads a spelling it stored before
+    let disposition = pack.axis("disposition").unwrap();
+    assert_eq!(disposition.stored_of("1"), Some("keep"));
+    assert_eq!(disposition.id_of("0"), Some("drop"));
+    assert_eq!(disposition.words_of_stored("1"), "keep");
+    // what a person reads is the label, whichever name the row holds
+    assert_eq!(kind.words_of_stored("a"), "A1");
+    assert_eq!(kind.words_of_stored("OLD-A"), "A1");
+    assert_eq!(kind.label_of_stored("was-a"), "A1");
+}
+
+#[test]
+fn a_text_is_written_in_the_stored_form_and_compared_as_values() {
+    let pack = spelled();
+    let kind = pack.axis("kind").unwrap();
+    // each comma-joined value, a value named twice once, an unknown kept
+    assert_eq!(kind.stored_text("A1"), "OLD-A");
+    assert_eq!(kind.stored_text("b, was-a, a"), "B,OLD-A");
+    assert_eq!(kind.stored_text("neither,b"), "neither,B");
+    assert_eq!(kind.stored_text(""), "");
+    assert!(kind.same("a", "OLD-A"));
+    assert!(kind.same("B,a", "was-a, b"));
+    assert!(!kind.same("a", "b"));
+    assert!(!kind.same("a", ""));
+    // by the pack, for a caller that has an axis's name
+    assert_eq!(pack.stored_text("kind", "a"), "OLD-A");
+    assert_eq!(pack.stored_text("no_such_axis", "a"), "a");
+    assert_eq!(pack.id_of("kind", "A1"), Some("a"));
+    assert_eq!(pack.id_of("kind", "neither"), None);
+}
+
+#[test]
+fn the_other_spellings_of_a_pack_are_listed_for_a_store_that_holds_none() {
+    let pack = spelled();
+    let kind = pack.axis("kind").unwrap();
+    let mut other = kind.spellings();
+    other.sort();
+    let pair = |a: &str, b: &str| (a.to_string(), b.to_string());
+    assert_eq!(
+        other,
+        vec![
+            pair("A1", "OLD-A"),
+            pair("a", "OLD-A"),
+            pair("b", "B"),
+            pair("was-a", "OLD-A"),
+        ]
+    );
+    let names = pack.names();
+    let of = |axis: &str, text: &str| {
+        names
+            .iter()
+            .find(|(a, t, _, _)| a == axis && t == text)
+            .map(|(_, _, stored, id)| (stored.as_str(), id.as_str()))
+    };
+    assert_eq!(of("kind", "OLD-A"), Some(("OLD-A", "a")));
+    assert_eq!(of("kind", "was-a"), Some(("OLD-A", "a")));
+    assert_eq!(of("disposition", "1"), Some(("keep", "keep")));
+    assert_eq!(of("disposition", "keep"), Some(("keep", "keep")));
+    assert_eq!(of("kind", "neither"), None);
+}
+
+/// One spelling of a value in a row: a name belongs to one value of an axis,
+/// whichever kind of name it is, and a pack that shares one is refused with
+/// both values named.
+#[test]
+fn a_name_shared_by_two_values_of_an_axis_is_refused_naming_both() {
+    let cases = [
+        // an alias that is another value's label
+        (
+            "stores: label\nvalues: {a: {label: X}, b: {aliases: [X]}}",
+            "X is a name of both a and b",
+        ),
+        // a label that is another value's identity
+        (
+            "stores: label\nvalues: {a: {label: b}, b: {}}",
+            "b is a name of both a and b",
+        ),
+        // an alias that is another value's identity
+        (
+            "values: {a: {}, b: {aliases: [a]}}",
+            "already names another value",
+        ),
+        // a stored word that is another value's identity
+        (
+            "stores: label\nvalues: {a: {stored: b}, b: {}}",
+            "already names another value",
+        ),
+        // two labels alike
+        (
+            "stores: label\nvalues: {a: {label: X}, b: {label: X}}",
+            "X is a name of both a and b",
+        ),
+        // an alias two values have
+        ("values: {a: {aliases: [Z]}, b: {aliases: [Z]}}", "Z"),
+    ];
+    for (body, want) in cases {
+        let d = phased();
+        d.file(
+            "axes/kind.yml",
+            &format!("axis: kind\nkind: single\n{body}\n"),
+        );
+        let e = refusal(&d);
+        assert!(e.contains(want), "{body}: {e}");
+        assert!(e.contains("axes/kind.yml"), "{body}: {e}");
+    }
+    // distinct names load, a label equal to its own value's identity among them
+    let d = phased();
+    d.file(
+        "axes/kind.yml",
+        "axis: kind\nkind: single\nstores: label\nvalues: {a: {label: a, aliases: [old]}, b: {label: B}}\n",
+    );
+    nils_pack::load(d.path(), None).expect("distinct names load");
+}

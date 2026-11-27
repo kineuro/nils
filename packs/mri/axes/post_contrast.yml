@@ -6,10 +6,19 @@
 # Three states, and the third is not a value: a stack with nothing to say
 # either way is unknown, and v0 stores null rather than a guess.
 
+#
+# A row stores the word, `given` or `not_given`: the value's identity, which
+# is what a person's decision, a campaign's answer and the image model's
+# class have always written. v0 stored `1` and `0`, and so did this pack
+# until a row was made to hold one spelling of a value whoever wrote it.
+# `1` and `0` stay names of the two values (`aliases`), so a registry an
+# older version of the pack sorted, a question and a decision written with
+# them still read as the value, and `nils repair axis-values` moves the
+# rows to the word.
+
 axis: post_contrast
 kind: single
-stores: label
 
 values:
-  given: {label: '1', terms: ['post contrast', 'post-contrast', 'contrast enhanced', 'gadolinium', 'Gd', '+C', 'CE', 'post gad', 'T1+C']}
-  not_given: {label: '0', terms: ['pre contrast', 'pre-contrast', 'native', 'non-contrast', 'no contrast', 'plain', 'pre gad']}
+  given: {aliases: ['1'], terms: ['post contrast', 'post-contrast', 'contrast enhanced', 'gadolinium', 'Gd', '+C', 'CE', 'post gad', 'T1+C']}
+  not_given: {aliases: ['0'], terms: ['pre contrast', 'pre-contrast', 'native', 'non-contrast', 'no contrast', 'plain', 'pre gad']}

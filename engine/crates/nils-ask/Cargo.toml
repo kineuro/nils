@@ -12,6 +12,7 @@ publish.workspace = true
 
 [dependencies]
 nils-registry.workspace = true
+nils-session.workspace = true
 
 blake2.workspace = true
 hex.workspace = true

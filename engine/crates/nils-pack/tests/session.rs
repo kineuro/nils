@@ -116,7 +116,7 @@ fn the_mri_session_pass_decides_only_from_a_related_computed_output() {
         [
             (axis("provenance"), vec!["RawRecon".to_string()]),
             (axis("construct"), vec!["Magnitude".to_string()]),
-            (axis("base"), vec!["T2*w".to_string()]),
+            (axis("base"), vec!["T2starw".to_string()]),
         ]
     );
     assert!((a.confidence - 0.65).abs() < 1e-9);

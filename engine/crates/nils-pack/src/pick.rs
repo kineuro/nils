@@ -254,6 +254,50 @@ pub struct Model {
     /// Pack contract 9: how a near tie is decided, best first. Empty, a near
     /// tie is a `too_close` border, as before.
     pub near_tie: Vec<Order>,
+    /// One spelling of a value in a row: for each axis, every other name of
+    /// a value with what a row stores for it
+    /// ([`crate::rules::Axis::spellings`]). The model's tokens are compiled
+    /// to the stored form, so whoever reads the rows it scores reads each
+    /// value through [`Model::stored`].
+    pub spellings: BTreeMap<String, BTreeMap<String, String>>,
+    /// The coarse forms the pack declares of the axes a pick reads
+    /// ([`Coarse`]), so that a stack with no value on the fine axis can be
+    /// judged by the coarse one.
+    pub coarse: Vec<Coarse>,
+}
+
+/// An axis the pack declares the coarse form of another, with what each of
+/// its values covers, all in the form a row stores.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Coarse {
+    /// The finer axis.
+    pub fine: String,
+    /// The coarse axis.
+    pub coarse: String,
+    /// By value of the coarse axis, the values of the fine axis it covers.
+    pub covers: BTreeMap<String, Vec<String>>,
+}
+
+impl Model {
+    /// Whether a candidate with no value on the fine axis `fine` holds a
+    /// value on its coarse form that covers one of `wanted` (the fine
+    /// words as a row stores them). None where the candidate holds no
+    /// coarse value either, or the pack declares no coarse form of `fine`:
+    /// nobody said.
+    pub fn coarse_covers(&self, fine: &str, c: &Candidate, wanted: &[&str]) -> Option<bool> {
+        let mut said = None;
+        for form in self.coarse.iter().filter(|f| f.fine == fine) {
+            let held = c.get(&form.coarse).trim();
+            if held.is_empty() {
+                continue;
+            }
+            let held = self.stored(&form.coarse, held);
+            let covered = form.covers.get(held);
+            let hit = covered.is_some_and(|l| l.iter().any(|w| wanted.contains(&w.as_str())));
+            said = Some(said.unwrap_or(false) || hit);
+        }
+        said
+    }
 }
 
 /// One condition on a stack's values, by the name a pick reads (pack
@@ -396,6 +440,16 @@ pub struct Family {
 }
 
 impl Model {
+    /// What a row stores for the value a row's text names on an axis; the
+    /// text where it is the stored form already, names no value, or the
+    /// name is no axis (a fingerprint column).
+    pub fn stored<'a>(&'a self, axis: &str, text: &'a str) -> &'a str {
+        self.spellings
+            .get(axis)
+            .and_then(|names| names.get(text))
+            .map_or(text, String::as_str)
+    }
+
     /// Every name this model reads, so that a caller knows what to fetch.
     ///
     /// Collected from the model rather than listed beside it, because a list
@@ -449,6 +503,14 @@ impl Model {
             out.extend(c.when.iter().chain(&c.unless).map(|x| x.of().to_string()));
         }
         out.extend(self.near_tie.iter().map(|o| o.of.clone()));
+        // the coarse form of an axis read, where the fine value is absent
+        let coarse: Vec<String> = self
+            .coarse
+            .iter()
+            .filter(|f| out.contains(&f.fine))
+            .map(|f| f.coarse.clone())
+            .collect();
+        out.extend(coarse);
         out.sort();
         out.dedup();
         out
@@ -1302,6 +1364,8 @@ mod tests {
             families: Vec::new(),
             candidates: BTreeMap::new(),
             near_tie: Vec::new(),
+            spellings: BTreeMap::new(),
+            coarse: Vec::new(),
         }
     }
 
@@ -1532,6 +1596,8 @@ mod tests {
             families,
             candidates: BTreeMap::new(),
             near_tie: Vec::new(),
+            spellings: BTreeMap::new(),
+            coarse: Vec::new(),
         }
     }
 

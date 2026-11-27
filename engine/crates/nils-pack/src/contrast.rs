@@ -286,6 +286,20 @@ impl Region {
             _ => Region::None,
         }
     }
+
+    /// From the body part, and from the decided body region of a stack
+    /// whose body part that decision set aside, as the MRI pack spells
+    /// them. Such a stack holds no body part, and the region is what was
+    /// decided of it: read by its body part alone it was in no exam's
+    /// bracket, whatever the region said.
+    pub fn of_body(part: Option<&str>, set_aside_by: Option<&str>) -> Region {
+        match (part.filter(|p| !p.is_empty()), set_aside_by) {
+            (Some(_), _) => Region::of_body_part(part),
+            (None, Some("head")) => Region::Head,
+            (None, Some("spine")) => Region::Spine,
+            (None, _) => Region::None,
+        }
+    }
 }
 
 /// Who gave a T1-family stack's certified answer.

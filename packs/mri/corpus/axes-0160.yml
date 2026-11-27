@@ -65,7 +65,7 @@ cases:
       flip_angle: 90
       echo_train_length: 28
     axes:
-      technique: RESTORE
+      technique: DETSE
       modifier: Radial
 
   # --- B2 (dev-2's, on a new spelling): GE's `PROPks` is a PROPELLER
@@ -84,7 +84,7 @@ cases:
       flip_angle: 120
       echo_train_length: 1
     axes:
-      technique: TIRM
+      technique: IRTSE
       modifier: 'FLAIR,Radial'
 
   - name: a word that only starts with prop takes no Radial
@@ -236,7 +236,7 @@ cases:
       flip_angle: 180
       echo_train_length: 15
     axes:
-      technique: TIRM
+      technique: IRTSE
       modifier: FLAIR
       base: T2w
 
@@ -258,7 +258,7 @@ cases:
       split_reason: multi_echo
       stacks_in_series: 2
     axes:
-      technique: TIRM
+      technique: IRTSE
       modifier: FLAIR
 
   # --- H4: ADC in a Siemens protocol name, on the acquired diffusion image
@@ -279,7 +279,7 @@ cases:
       echo_time: 139
       flip_angle: 90
     axes:
-      technique: DWI-EPI
+      technique: DWIEPI
       construct: 'ND,Trace'
       base: DWI
 

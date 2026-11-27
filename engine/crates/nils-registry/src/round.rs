@@ -470,7 +470,11 @@ pub type RulesAnswers = BTreeMap<i64, BTreeMap<String, (Option<String>, bool)>>;
 
 /// The rules' answer on each axis of each stack: its value (values joined
 /// in order for a multi-valued axis, none for "no value"), and whether a
-/// person's or an agent's decision set it.
+/// decision set it. A value folded from a decision on the finer of two
+/// axes is a decision's, and so is the absence of a value that a decision
+/// on the other axis set aside ([`crate::coarse`]): neither is what the
+/// rules said, and nothing that holds the rules' answer against another
+/// opinion may read it so.
 pub fn rules_answers(store: &mut Store, stacks: &[i64]) -> Result<RulesAnswers, StoreError> {
     let mut rows: BTreeMap<i64, BTreeMap<String, (BTreeSet<String>, bool)>> = BTreeMap::new();
     for chunk in stacks.chunks(500) {
@@ -495,8 +499,13 @@ pub fn rules_answers(store: &mut Store, stacks: &[i64]) -> Result<RulesAnswers, 
             if let Some(v) = r.opt_text(2)?.filter(|v| !v.is_empty()) {
                 e.0.insert(v.to_string());
             }
-            if r.text(3)? == "decision" {
+            if crate::coarse::decided(r.text(3)?) {
                 e.1 = true;
+            }
+        }
+        for (stack, axes) in crate::coarse::set_aside(store, chunk)? {
+            for axis in axes {
+                rows.entry(stack).or_default().entry(axis).or_default().1 = true;
             }
         }
         // a decision put in force on the stack since it was last sorted (an

@@ -259,6 +259,23 @@ fn classify(
         c.questions.push(format!("classify.{}", b.kind));
     }
     let any = decisions.any();
+    // as the sort does it: a decision on one of two axes the pack declares
+    // the coarse and the fine form of one thing holds the other to it
+    // ([`crate::coarse`]), worked out first, since a decision that gave way
+    // to one of higher standing on the other grain is not applied
+    let forms = crate::coarse::forms(pack);
+    let held = if any && !forms.is_empty() {
+        crate::coarse::held(&forms, &v, |axis| {
+            decisions
+                .for_stack(ids, stack, &axis.name)
+                .map(|d| crate::coarse::Standing {
+                    value: d.stored(Some(axis)),
+                    author: d.author.clone(),
+                })
+        })
+    } else {
+        crate::coarse::Held::default()
+    };
     for a in &v.axes {
         let Some(i) = pack.axis_index(&a.axis) else {
             continue;
@@ -272,12 +289,18 @@ fn classify(
         };
         c.own[i] = split(&value);
         c.said[i] = true;
-        if let Some(d) = any
+        if let Some(d) = (any && !held.overruled(&a.axis))
             .then(|| decisions.for_stack(ids, stack, &a.axis))
             .flatten()
         {
-            let decided = d.value.clone().unwrap_or_default();
-            if decided != value && !pack.review.by_model.contains(&a.axis) && !d.saw(&value) {
+            // as the sort does it: the decision in the stored form of the
+            // value it names, held against the rules' answer as values
+            let axis = &pack.axes[i];
+            let decided = d.stored(Some(axis));
+            if !axis.same(&decided, &value)
+                && !pack.review.by_model.contains(&a.axis)
+                && !d.saw(Some(axis), &value)
+            {
                 c.questions.push(format!("{}:decision", a.axis));
             }
             value = decided;
@@ -292,16 +315,43 @@ fn classify(
     }
     if any {
         for (i, a) in pack.axes.iter().enumerate() {
-            if a.phase != AxisPhase::Class || c.said[i] {
+            if a.phase != AxisPhase::Class || c.said[i] || held.overruled(&a.name) {
                 continue;
             }
             if let Some(d) = decisions.for_stack(ids, stack, &a.name) {
                 c.axes[i] = InForce {
-                    values: split(d.value.as_deref().unwrap_or("")),
+                    values: split(&d.stored(Some(a))),
                     tier: "decision".into(),
                     confidence: 1.0,
                 };
                 c.decided.push(i);
+            }
+        }
+        // A value set aside leaves its axis empty, and a folded one holds
+        // the value that covers the decided one. Either is held by a
+        // decision: a rule change that moves what the rules say of such an
+        // axis moves nothing in force.
+        for s in &held.set_aside {
+            if let Some(i) = pack.axis_index(&s.axis) {
+                c.axes[i] = InForce::default();
+                if !c.decided.contains(&i) {
+                    c.decided.push(i);
+                }
+            }
+        }
+        for f in &held.folded {
+            if let Some(i) = pack.axis_index(&f.axis) {
+                c.axes[i] = match &f.value {
+                    Some(value) => InForce {
+                        values: split(value),
+                        tier: crate::coarse::TIER.into(),
+                        confidence: crate::coarse::CONFIDENCE,
+                    },
+                    None => InForce::default(),
+                };
+                if !c.decided.contains(&i) {
+                    c.decided.push(i);
+                }
             }
         }
     }

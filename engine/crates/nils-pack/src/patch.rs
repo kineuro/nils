@@ -112,6 +112,7 @@ fn keys_of(kind: &str) -> &'static [&'static str] {
             "after",
             "position",
             "bids",
+            "within",
         ],
         "add_rule" => &[
             "axis",
@@ -439,6 +440,9 @@ enum What {
         words: Vec<String>,
         anchor: Option<Anchor>,
         bids: Option<Value>,
+        /// The coarse axis and its value that covers the new one, where
+        /// the pack declares a coarse form of the axis.
+        within: Option<(String, String)>,
     },
     AddRule {
         axis: String,
@@ -913,6 +917,29 @@ fn read_op(
                 Some(v) => texts_of(v, "words")?,
                 None => Vec::new(),
             };
+            let within = match m.get("within") {
+                None => None,
+                Some(w) => {
+                    let place = w.as_object().filter(|o| o.len() == 2);
+                    let word = |k: &str| {
+                        place
+                            .and_then(|o| o.get(k))
+                            .and_then(Value::as_str)
+                            .map(str::trim)
+                            .filter(|t| !t.is_empty())
+                            .map(str::to_string)
+                    };
+                    match (word("axis"), word("value")) {
+                        (Some(axis), Some(value)) => Some((axis, value)),
+                        _ => {
+                            return Err(
+                                "within is {axis, value}: the coarse axis and its value that covers the new one"
+                                    .into(),
+                            );
+                        }
+                    }
+                }
+            };
             What::AddValue {
                 axis: needs(m, "axis")?,
                 value: needs(m, "value")?,
@@ -920,6 +947,7 @@ fn read_op(
                 words,
                 anchor: Anchor::of(m, false)?,
                 bids: m.get("bids").cloned(),
+                within,
             }
         }
         "add_rule" => {
@@ -1653,6 +1681,7 @@ fn apply_one(docs: &mut Docs, op: &Op) -> R<Vec<String>> {
             words,
             anchor,
             bids,
+            within,
         } => add_value(
             docs,
             op,
@@ -1662,6 +1691,7 @@ fn apply_one(docs: &mut Docs, op: &Op) -> R<Vec<String>> {
             words,
             anchor.as_ref(),
             bids.as_ref(),
+            within.as_ref(),
         ),
         What::AddRule {
             axis,
@@ -2231,6 +2261,7 @@ fn add_value(
     words: &[String],
     anchor: Option<&Anchor>,
     bids: Option<&Value>,
+    within: Option<&(String, String)>,
 ) -> R<Vec<String>> {
     let rel = docs.axis_rel(axis)?.ok_or_else(|| {
         let names = docs.axis_names().unwrap_or_default();
@@ -2294,6 +2325,35 @@ fn add_value(
     }
     v["values"][value] = body;
     docs.set(&rel, v);
+    // The value's place under a coarse axis. A pack that declares a coarse
+    // form of the axis is held to it when it loads: the rules must fold
+    // each value into the coarse value declared to cover it. A new value a
+    // rule of the same patch folds needs its place in `covers`, and this
+    // writes it; the loader then holds the two against each other.
+    if let Some((coarse, covering)) = within {
+        let coarse_rel = docs
+            .axis_rel(coarse)?
+            .ok_or_else(|| op.refuse(format!("within: the pack has no axis named {coarse}")))?;
+        let mut c = docs.value(&coarse_rel)?.clone();
+        if c.get("coarse_of").and_then(Value::as_str) != Some(axis) {
+            return Err(op.refuse(format!(
+                "within: {coarse} is not declared the coarse form of {axis} (coarse_of)"
+            )));
+        }
+        if !c["values"].get(covering).is_some_and(Value::is_object) {
+            return Err(op.refuse(format!(
+                "within: {covering} is no value of {coarse}, by its identity"
+            )));
+        }
+        let mut covers = match c["values"][covering].get("covers") {
+            None | Some(Value::Null) => Vec::new(),
+            Some(list) => texts_of(list, "covers").map_err(|e| op.refuse(e))?,
+        };
+        covers.push(value.to_string());
+        c["values"][covering]["covers"] = json!(covers);
+        docs.set(&coarse_rel, c);
+        changes.push(format!("{coarse}={covering} covers {value}"));
+    }
     if let Some(b) = bids {
         changes.extend(bids_name(docs, op, axis, value, b)?);
     }

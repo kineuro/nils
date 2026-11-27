@@ -92,7 +92,7 @@ cases:
       echo_train_length: 25
       pixel_bandwidth: 380
     axes:
-      technique: DWI-TSE
+      technique: DWITSE
       base: DWI
 
   - name: an unnamed Philips b=1000 image read out at a turbo spin echo's bandwidth is a DWI-TSE
@@ -111,7 +111,7 @@ cases:
       echo_train_length: 37
       pixel_bandwidth: 374
     axes:
-      technique: DWI-TSE
+      technique: DWITSE
       construct: Trace
       base: DWI
 
@@ -132,7 +132,7 @@ cases:
       echo_train_length: 49
       pixel_bandwidth: 1236
     axes:
-      technique: DWI-EPI
+      technique: DWIEPI
       base: DWI
 
   - name: a Siemens HASTE diffusion is a DWI-TSE
@@ -150,7 +150,7 @@ cases:
       flip_angle: 150
       echo_train_length: 128
     axes:
-      technique: DWI-TSE
+      technique: DWITSE
       base: DWI
 
   - name: a Siemens BLADE diffusion is a DWI-TSE and no EPI
@@ -168,7 +168,7 @@ cases:
       flip_angle: 150
       echo_train_length: 30
     axes:
-      technique: DWI-TSE
+      technique: DWITSE
       base: DWI
 
   - name: a GE PROPELLER diffusion written in research mode is a DWI-TSE
@@ -185,7 +185,7 @@ cases:
       flip_angle: 90
       echo_train_length: 20
     axes:
-      technique: DWI-TSE
+      technique: DWITSE
       base: DWI
 
   - name: a GE PROPELLER diffusion written SE with its PROPELLER option is a DWI-TSE
@@ -203,7 +203,7 @@ cases:
       flip_angle: 90
       echo_train_length: 20
     axes:
-      technique: DWI-TSE
+      technique: DWITSE
       base: DWI
 
   - name: a GE T2 PROPELLER with a b value GE wrote and no diffusion named stays a TSE
@@ -238,7 +238,7 @@ cases:
       flip_angle: 90
       echo_train_length: 1
     axes:
-      technique: DWI-EPI
+      technique: DWIEPI
       base: DWI
 
   # --- N4: a Philips diffusion image with a positive b value written PROJECTION IMAGE is Trace
@@ -261,7 +261,7 @@ cases:
       pixel_bandwidth: 1300
     axes:
       provenance: RawRecon
-      technique: DWI-EPI
+      technique: DWIEPI
       construct: Trace
 
   - name: a Philips b=0 image written PROJECTION IMAGE is no trace
@@ -311,7 +311,7 @@ cases:
       echo_time: 1.5
       flip_angle: 70
     axes:
-      technique: FIESTA
+      technique: bSSFP
       base: T2w
 
   - name: a Siemens CISS is T2w
@@ -327,7 +327,7 @@ cases:
       echo_time: 2.4
       flip_angle: 50
     axes:
-      technique: CISS
+      technique: pcbSSFP
       base: T2w
 
   - name: a 2D balanced FFE at a flip of 8 degrees is proton-density-like
@@ -343,7 +343,7 @@ cases:
       echo_time: 2.1
       flip_angle: 8
     axes:
-      technique: FIESTA
+      technique: bSSFP
       base: PDw
 
   - name: an inversion-prepared balanced scan follows its preparation, not the convention
@@ -360,7 +360,7 @@ cases:
       inversion_time: 800
       flip_angle: 50
     axes:
-      technique: FIESTA
+      technique: bSSFP
       base: T1w
 
   # --- R1: a GE research-mode SWI with a train of 32 or more is EPI
@@ -420,8 +420,8 @@ cases:
       flip_angle: 25
       echo_train_length: 1
     axes:
-      technique: FISP
-      base: 'T2*w'
+      technique: SSFPFID
+      base: T2starw
 
   - name: a GE GRASS at TE 15 ms is T2*w by its long repetition time and low flip
     stack:
@@ -436,8 +436,8 @@ cases:
       echo_time: 15
       flip_angle: 20
     axes:
-      technique: FISP
-      base: 'T2*w'
+      technique: SSFPFID
+      base: T2starw
 
   - name: a GE spoiled gradient echo at a long repetition time is no GRASS
     stack:
@@ -451,7 +451,7 @@ cases:
       echo_time: 15
       flip_angle: 20
     axes:
-      technique: FLASH
+      technique: SPGRE
 
   - name: a GE steady-state gradient echo at a balanced scan's repetition time is no GRASS
     stack:

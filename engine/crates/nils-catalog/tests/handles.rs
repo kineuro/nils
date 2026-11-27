@@ -934,3 +934,185 @@ fn promotion_hashes_under_the_registry_s_locale() {
         );
     }
 }
+
+/// The sessions of one subject taken away behind the engine's back, as an
+/// engine that merged and built nothing left them.
+fn drop_sessions(l: &mut Lab, subject: i64) {
+    let store = l.registry.store();
+    let ids = format!(
+        "SELECT id FROM {} WHERE subject_id = {subject}",
+        store.qualified("session_cache")
+    );
+    for t in ["session_label", "session_cache_study"] {
+        let sql = format!(
+            "DELETE FROM {} WHERE session_id IN ({ids})",
+            store.qualified(t)
+        );
+        store.execute(&sql, &[]).unwrap();
+    }
+    let sql = format!(
+        "DELETE FROM {} WHERE subject_id = {subject}",
+        store.qualified("session_cache")
+    );
+    store.execute(&sql, &[]).unwrap();
+}
+
+fn count_of(answer: &nils_ask::exec::Answer) -> i64 {
+    match answer.rows[0].0[0] {
+        Cell::Int(n) => n,
+        ref other => panic!("a count: {other:?}"),
+    }
+}
+
+/// The kept answer of a question, as the door looks for it before a run.
+fn kept(l: &mut Lab, ask: &Ask) -> Option<handle::Handle> {
+    nils_ask::run::cached(
+        &mut l.registry,
+        ask.clone(),
+        &l.catalog,
+        &common::quasi(),
+        Some("0.0.0-test"),
+        &Scheme::default(),
+    )
+    .unwrap_or_else(|e| panic!("{}: {e}", l.name))
+    .map(|(h, _)| h)
+}
+
+/// An answer kept while a subject had no sessions, as an engine that read
+/// the cache as it stood kept it: the question's statement run with no
+/// build before it, and its answer saved at the epoch of that moment.
+fn kept_short(l: &mut Lab, ask: &Ask) -> (handle::Handle, i64) {
+    let scope = common::quasi();
+    let prepared = nils_ask::prepare(ask.clone(), &l.catalog, &scope).unwrap();
+    let (_, answer) = run_ask(l, ask.clone());
+    let epoch = l.registry.meta().epoch;
+    let digest = Scheme::default().digest();
+    let spec = Spec {
+        name: None,
+        grain: Grain::Session,
+        ask: Some(&prepared.ask),
+        params: json!({}),
+        selection_versions: json!([]),
+        values_unresolved: json!({}),
+        provenance: Provenance {
+            principal: "tester",
+            node: "lab",
+            pack_version: Some("0.0.0-test"),
+            epoch,
+            scheme_digest: Some(&digest),
+            disclosure: "local",
+            suppression: nils_ask::run::suppression_of(&scope),
+        },
+        page_rows: 5,
+    };
+    let h = handle::save(l.registry.store(), &spec, &answer).unwrap();
+    (h, count_of(&answer))
+}
+
+/// A kept answer is the one a run would give again only while the sessions
+/// it was made from stand. An answer kept while a subject had no sessions
+/// is not served once they are built, whoever builds them: the look for
+/// the kept answer itself, another reader's refresh, or a rebuild. And a
+/// cache that is up to date moves nothing, so the answer kept from it is
+/// served.
+#[test]
+fn an_answer_kept_while_sessions_were_missing_is_not_served_again() {
+    for mut l in labs() {
+        let ask = parse(
+            &json!({
+                "ast_version": 1,
+                "name": "every session",
+                "sets": {"visits": {"grain": "session"}},
+                "out": {"set": "visits", "level": "count"},
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let whole = count_of(&go(&mut l, ask.clone(), None, false).answer);
+        // nothing moved: the answer kept is served, and the look for it
+        // moved no epoch
+        let epoch = l.registry.meta().epoch;
+        assert!(kept(&mut l, &ask).is_some(), "{}", l.name);
+        assert_eq!(l.registry.meta().epoch, epoch, "{}", l.name);
+
+        let sql = format!(
+            "SELECT MIN(subject_id) FROM {}",
+            l.registry.store().qualified("session_cache")
+        );
+        let subject = l.registry.store().query(&sql, &[]).unwrap()[0]
+            .int(0)
+            .unwrap();
+
+        // 1. the door looks for the kept answer before anything else reads
+        //    a session: the look builds the sessions and finds no answer
+        drop_sessions(&mut l, subject);
+        // (the answer kept from the whole cache goes with the epoch the
+        //  short one is kept at, so only the short one could be served)
+        l.registry.store().begin().unwrap();
+        l.registry.next_epoch().unwrap();
+        l.registry.store().commit().unwrap();
+        let (short, n) = kept_short(&mut l, &ask);
+        assert!(n < whole, "{}: {n} of {whole}", l.name);
+        let before = l.registry.meta().epoch;
+        assert_eq!(short.epoch, before);
+        assert!(
+            kept(&mut l, &ask).is_none(),
+            "{}: an answer without the subject's sessions was served",
+            l.name
+        );
+        assert!(l.registry.meta().epoch > before, "{}", l.name);
+        let again = go(&mut l, ask.clone(), None, false);
+        assert_eq!(count_of(&again.answer), whole, "{}", l.name);
+        assert_eq!(again.handle.epoch, l.registry.meta().epoch, "{}", l.name);
+        // and the answer made from the whole cache is served from then on
+        assert_eq!(
+            kept(&mut l, &ask).map(|h| h.id),
+            Some(again.handle.id),
+            "{}",
+            l.name
+        );
+
+        // 2. another reader's refresh builds them: the epoch moves with
+        //    the build, and the same question asked again counts the subject
+        drop_sessions(&mut l, subject);
+        l.registry.store().begin().unwrap();
+        l.registry.next_epoch().unwrap();
+        l.registry.store().commit().unwrap();
+        let (short, n) = kept_short(&mut l, &ask);
+        assert!(n < whole, "{}", l.name);
+        let built = nils_session::refresh(&mut l.registry, &Scheme::default()).unwrap();
+        assert_eq!(built.rebuilt, 1, "{}", l.name);
+        assert_eq!(built.epoch, Some(short.epoch + 1), "{}", l.name);
+        assert_eq!(l.registry.meta().epoch, short.epoch + 1, "{}", l.name);
+        assert!(kept(&mut l, &ask).is_none(), "{}", l.name);
+        // a set read from the short answer is read again, not as kept
+        let from = parse(
+            &json!({
+                "ast_version": 1,
+                "name": "the sessions of a kept answer",
+                "sets": {"visits": {"grain": "session", "from": format!("handle:{}", short.id)}},
+                "out": {"set": "visits", "level": "count"},
+            })
+            .to_string(),
+        )
+        .unwrap();
+        refresh(&mut l);
+        let out = go(&mut l, from, None, false);
+        assert_eq!(out.drift.len(), 1, "{}", l.name);
+        assert_eq!(out.drift[0].handle, short.id, "{}", l.name);
+        assert_eq!(
+            count_of(&go(&mut l, ask.clone(), None, false).answer),
+            whole,
+            "{}",
+            l.name
+        );
+
+        // 3. a refresh that finds everything as it should be moves nothing
+        let epoch = l.registry.meta().epoch;
+        let found = nils_session::refresh(&mut l.registry, &Scheme::default()).unwrap();
+        assert_eq!((found.rebuilt, found.epoch), (0, None), "{}", l.name);
+        l.registry.refresh_meta().unwrap();
+        assert_eq!(l.registry.meta().epoch, epoch, "{}", l.name);
+        assert!(kept(&mut l, &ask).is_some(), "{}", l.name);
+    }
+}

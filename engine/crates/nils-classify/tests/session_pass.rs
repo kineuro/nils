@@ -280,7 +280,7 @@ fn a_silent_ge_swi_is_decided_from_its_session_and_flagged() {
         assert_eq!(
             axes(&mut reg, "9.1.1"),
             want(&[
-                ("base", "T2*w", "session"),
+                ("base", "T2starw", "session"),
                 ("construct", "Magnitude", "session"),
                 ("provenance", "RawRecon", "session"),
             ]),
@@ -360,7 +360,7 @@ fn a_silent_ge_swi_is_decided_from_its_session_and_flagged() {
         assert_eq!(
             axes(&mut reg, "9.1.1"),
             want(&[
-                ("base", "T2*w", "session"),
+                ("base", "T2starw", "session"),
                 ("construct", "Magnitude", "session"),
                 ("provenance", "RawRecon", "session"),
             ]),
@@ -389,7 +389,7 @@ fn a_silent_ge_swi_is_decided_from_its_session_and_flagged() {
         assert_eq!(
             axes(&mut reg, "9.1.1"),
             want(&[
-                ("base", "T2*w", "session"),
+                ("base", "T2starw", "session"),
                 ("construct", "Magnitude", "session"),
                 ("provenance", "RawRecon", "session"),
             ]),

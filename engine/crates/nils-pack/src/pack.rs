@@ -324,6 +324,75 @@ impl Pack {
     pub fn axis_index(&self, name: &str) -> Option<usize> {
         self.axes.iter().position(|a| a.name == name)
     }
+
+    /// An axis by its name.
+    pub fn axis(&self, name: &str) -> Option<&Axis> {
+        self.axes.iter().find(|a| a.name == name)
+    }
+
+    /// What a row of an axis stores for a text ([`Axis::stored_text`]); the
+    /// text as it is where the pack has no such axis.
+    pub fn stored_text(&self, axis: &str, text: &str) -> String {
+        match self.axis(axis) {
+            Some(a) => a.stored_text(text),
+            None => text.to_string(),
+        }
+    }
+
+    /// The identity of the value a row's text names on an axis
+    /// ([`Axis::id_of`]); none where the pack has no such axis or the text
+    /// names no value of it.
+    pub fn id_of(&self, axis: &str, text: &str) -> Option<&str> {
+        self.axis(axis).and_then(|a| a.id_of(text))
+    }
+
+    /// The name tokens that are not the word a row stores: for every group
+    /// of the BIDS mapping's `acq` that reads an axis and does not say its
+    /// tokens are words of their own (`own_words`), each (axis, value,
+    /// token, stored word) where the two differ. A registry and a release
+    /// say one word for a value, so `nils pack validate` refuses a pack
+    /// that has any; loading does not, since a pack written before the
+    /// rule must still load where it is pinned.
+    pub fn token_drift(&self) -> Vec<(String, String, String, String)> {
+        let mut out = Vec::new();
+        for group in &self.bids.acq {
+            if group.own_words.is_some() {
+                continue;
+            }
+            let Some(axis) = self.axis(&group.from) else {
+                continue;
+            };
+            for (value, token) in &group.tokens {
+                let Some(stored) = axis.stored_of(value) else {
+                    continue;
+                };
+                if stored != token {
+                    out.push((
+                        axis.name.clone(),
+                        value.clone(),
+                        token.clone(),
+                        stored.to_string(),
+                    ));
+                }
+            }
+        }
+        out
+    }
+
+    /// Every name of every value of every axis as the resolver reads it,
+    /// as (axis, text, stored, identity): [`Axis::names`] over the pack.
+    /// What a store that holds no pack is given to write, read and repair
+    /// by.
+    pub fn names(&self) -> Vec<(String, String, String, String)> {
+        self.axes
+            .iter()
+            .flat_map(|a| {
+                a.names()
+                    .into_iter()
+                    .map(|(text, stored, id)| (a.name.clone(), text, stored, id))
+            })
+            .collect()
+    }
 }
 
 /// Load a pack, with an overlay when one is given.
@@ -1076,6 +1145,8 @@ fn build_unjudged(dir: &Path, overlay: Option<&Overlay>) -> R<Pack> {
 
     // Record 53: a session pass's siblings are seen by the fields it names.
     crate::session::check(&pack)?;
+    // An axis declared the coarse form of another is folded so by the rules.
+    crate::coarse::folded(&pack)?;
     Ok(pack)
 }
 
@@ -1461,10 +1532,15 @@ fn load_bids(f: &File, axes: &[Axis], into: &mut crate::bids::Mapping) -> R<()> 
                 }
                 tokens.insert(value.clone(), token);
             }
+            let own_words = match im.get("own_words") {
+                Some(w) => Some(f.blame(yaml::text(w, &format!("{at}.own_words")))?),
+                None => None,
+            };
             into.acq.push(crate::bids::Tokens {
                 from,
                 modes,
                 tokens,
+                own_words,
             });
         }
     }
@@ -2374,8 +2450,20 @@ fn load_axis(
                 Some(t) => f.blame(yaml::texts(t, &format!("{at}.aliases")))?,
                 None => Vec::new(),
             },
+            covers: match v.get("covers") {
+                Some(t) => f.blame(yaml::texts(t, &format!("{at}.covers")))?,
+                None => Vec::new(),
+            },
         });
     }
+    // An axis may say it is the coarse form of one declared before it, and
+    // each of its values which values of that axis it covers.
+    let coarse_of = match m.get("coarse_of") {
+        Some(c) => Some(f.blame(yaml::text(c, "coarse_of"))?),
+        None => None,
+    };
+    crate::coarse::declared(&name, coarse_of.as_deref(), &mut values, axes)
+        .map_err(|e| e.in_file(&f.path, Some(&f.source)))?;
 
     // An alias is a name a value had before, so it names that value alone:
     // never another value's identity, and never two values at once.
@@ -2435,6 +2523,35 @@ fn load_axis(
                 format!("{s} already names another value of {name}"),
             )
             .in_file(&f.path, Some(&f.source)));
+        }
+    }
+
+    // The resolver reads a text as the value that has it as its identity,
+    // an alias, its label or its stored spelling, in that order, so a text
+    // two values both have is read as one of them and the other's rows and
+    // decisions would change value with a repair. Refused here, naming both.
+    for (i, v) in values.iter().enumerate() {
+        for w in values.iter().skip(i + 1) {
+            let mine = std::iter::once(&v.id)
+                .chain(&v.aliases)
+                .chain(std::iter::once(&v.label))
+                .chain(v.stored.iter());
+            let theirs: Vec<&String> = std::iter::once(&w.id)
+                .chain(&w.aliases)
+                .chain(std::iter::once(&w.label))
+                .chain(w.stored.iter())
+                .collect();
+            if let Some(shared) = mine.into_iter().find(|n| theirs.contains(n)) {
+                return Err(Error::at(
+                    format!("values.{}", w.id),
+                    format!(
+                        "{shared} is a name of both {} and {} on {name}; a name (identity, \
+                         alias, label or stored spelling) belongs to one value",
+                        v.id, w.id
+                    ),
+                )
+                .in_file(&f.path, Some(&f.source)));
+            }
         }
     }
 
@@ -2685,6 +2802,7 @@ fn load_axis(
             default,
             default_confidence,
             stores_label,
+            coarse_of,
         },
         set: RuleSet {
             name,
@@ -3372,6 +3490,40 @@ fn load_pick(f: &File, axes: &[Axis], contract: u32) -> R<crate::pick::Model> {
         yaml::number(yaml::get(mm, key, at)?, at)
     };
 
+    // One spelling of a value in a row: a word a pick file uses for a value
+    // of an axis is held in the form a row stores, as the rows a pick reads
+    // are ([`crate::pick::Model::stored`]). A word that names no value of the
+    // axis (`Unknown`, a number) stays as written.
+    let stored_in = |of: &str, word: &str| -> String {
+        axes.iter()
+            .find(|a| a.name == of)
+            .and_then(|a| a.stored_of(word))
+            .map_or_else(|| word.to_string(), str::to_string)
+    };
+    // The keys of a table over the values of `of`, in the stored form. Two
+    // keys that name one value are a refusal: one would silently win.
+    let keyed = |of: &str, t: BTreeMap<String, f64>, at: &str| -> R<BTreeMap<String, f64>> {
+        let mut out = BTreeMap::new();
+        for (k, n) in t {
+            let s = stored_in(of, &k);
+            if out.insert(s.clone(), n).is_some() {
+                return Err(Error::at(
+                    at,
+                    format!("two keys of this table name the value {s} of {of}"),
+                ));
+            }
+        }
+        Ok(out)
+    };
+    let keyed_roles = |of: &str,
+                       t: BTreeMap<String, BTreeMap<String, f64>>,
+                       at: &str|
+     -> R<BTreeMap<String, BTreeMap<String, f64>>> {
+        t.into_iter()
+            .map(|(role, tab)| Ok((role, keyed(of, tab, at)?)))
+            .collect()
+    };
+
     let roles = f.blame(yaml::texts(yaml::get(m, "roles", &at)?, "roles"))?;
     // A pick names roles, and a role is a value of the `role` axis. Naming one
     // the pack has not got is a typo that would otherwise pick nothing and say
@@ -3400,21 +3552,29 @@ fn load_pick(f: &File, axes: &[Axis], contract: u32) -> R<crate::pick::Model> {
         let weight = f.blame(number_at(cm, "weight", &at))?;
         let kind_name = f.blame(yaml::text(yaml::get(cm, "kind", &at)?, &at))?;
         let kind = match kind_name.as_str() {
-            "choice" => Kind::Choice {
-                of: f.blame(named(cm, "of", &at))?,
-                scores: f.blame(table(yaml::get(cm, "scores", &at)?, &at))?,
-                missing: f.blame(number_at(cm, "missing", &at))?,
-                crowded_by: match cm.get("crowded_by") {
+            "choice" => {
+                let of = f.blame(named(cm, "of", &at))?;
+                let scores = f.blame(keyed(
+                    &of,
+                    f.blame(table(yaml::get(cm, "scores", &at)?, &at))?,
+                    &at,
+                ))?;
+                let missing = f.blame(number_at(cm, "missing", &at))?;
+                let crowded_by = match cm.get("crowded_by") {
                     None => None,
                     Some(v) => {
                         let b = f.blame(yaml::obj(v, &at))?;
-                        Some((
-                            f.blame(yaml::text(yaml::get(b, "value", &at)?, &at))?,
-                            f.blame(number_at(b, "by", &at))?,
-                        ))
+                        let value = f.blame(yaml::text(yaml::get(b, "value", &at)?, &at))?;
+                        Some((stored_in(&of, &value), f.blame(number_at(b, "by", &at))?))
                     }
-                },
-            },
+                };
+                Kind::Choice {
+                    of,
+                    scores,
+                    missing,
+                    crowded_by,
+                }
+            }
             "tier" => {
                 let mut bonuses = Vec::new();
                 if let Some(bs) = cm.get("bonuses") {
@@ -3424,33 +3584,50 @@ fn load_pick(f: &File, axes: &[Axis], contract: u32) -> R<crate::pick::Model> {
                             None => (None, Vec::new()),
                             Some(n) => {
                                 let nm = f.blame(yaml::obj(n, &at))?;
-                                (
-                                    Some(f.blame(named(nm, "of", &at))?),
-                                    f.blame(yaml::texts(yaml::get(nm, "any", &at)?, &at))?,
-                                )
+                                let nof = f.blame(named(nm, "of", &at))?;
+                                let any = f
+                                    .blame(yaml::texts(yaml::get(nm, "any", &at)?, &at))?
+                                    .iter()
+                                    .map(|w| stored_in(&nof, w))
+                                    .collect();
+                                (Some(nof), any)
                             }
                         };
+                        let bof = f.blame(named(bm, "of", &at))?;
+                        let token = f.blame(yaml::text(yaml::get(bm, "token", &at)?, &at))?;
                         bonuses.push(Bonus {
-                            of: f.blame(named(bm, "of", &at))?,
-                            token: f.blame(yaml::text(yaml::get(bm, "token", &at)?, &at))?,
+                            token: stored_in(&bof, &token),
+                            of: bof,
                             amount: f.blame(number_at(bm, "amount", &at))?,
                             needs: needs.0,
                             needs_any: needs.1,
                         });
                     }
                 }
+                let of = f.blame(named(cm, "of", &at))?;
                 Kind::Tier {
-                    of: f.blame(named(cm, "of", &at))?,
-                    per_role: f.blame(per_role(yaml::get(cm, "per_role", &at)?, &at))?,
+                    per_role: f.blame(keyed_roles(
+                        &of,
+                        f.blame(per_role(yaml::get(cm, "per_role", &at)?, &at))?,
+                        &at,
+                    ))?,
+                    of,
                     missing: f.blame(number_at(cm, "missing", &at))?,
                     bonuses,
                 }
             }
-            "tokens" => Kind::Tokens {
-                of: f.blame(named(cm, "of", &at))?,
-                base: f.blame(number_at(cm, "base", &at))?,
-                per_role: f.blame(per_role(yaml::get(cm, "per_role", &at)?, &at))?,
-            },
+            "tokens" => {
+                let of = f.blame(named(cm, "of", &at))?;
+                Kind::Tokens {
+                    base: f.blame(number_at(cm, "base", &at))?,
+                    per_role: f.blame(keyed_roles(
+                        &of,
+                        f.blame(per_role(yaml::get(cm, "per_role", &at)?, &at))?,
+                        &at,
+                    ))?,
+                    of,
+                }
+            }
             "percentile" => Kind::Percentile {
                 of: f.blame(named(cm, "of", &at))?,
                 population: f.blame(yaml::text(yaml::get(cm, "population", &at)?, &at))?,
@@ -3520,9 +3697,14 @@ fn load_pick(f: &File, axes: &[Axis], contract: u32) -> R<crate::pick::Model> {
         None => None,
         Some(v) => {
             let pm = f.blame(yaml::obj(v, &at))?;
+            let of = f.blame(named(pm, "of", &at))?;
             Some(Penalty {
-                of: f.blame(named(pm, "of", &at))?,
-                by_value: f.blame(table(yaml::get(pm, "by_value", &at)?, &at))?,
+                by_value: f.blame(keyed(
+                    &of,
+                    f.blame(table(yaml::get(pm, "by_value", &at)?, &at))?,
+                    &at,
+                ))?,
+                of,
             })
         }
     };
@@ -3712,18 +3894,24 @@ fn load_pick(f: &File, axes: &[Axis], contract: u32) -> R<crate::pick::Model> {
                 if values.is_empty() {
                     return Err(here(Error::at(format!("{bat}.is"), "names no value")));
                 }
-                Some((f.blame(named(fm, "of", &bat))?, values))
+                let of = f.blame(named(fm, "of", &bat))?;
+                let values = values.iter().map(|w| stored_in(&of, w)).collect();
+                Some((of, values))
             }
         },
         dixon_vs_plain: match border_obj("dixon_vs_plain")? {
             None => None,
             Some(pm) => {
                 let bat = format!("{at}.borders.dixon_vs_plain");
+                let of = f.blame(named(pm, "of", &bat))?;
                 Some(Plain {
                     family: f.blame(yaml::text(yaml::get(pm, "family", &bat)?, &bat))?,
-                    of: f.blame(named(pm, "of", &bat))?,
                     plain_without: f
-                        .blame(yaml::texts(yaml::get(pm, "plain_without", &bat)?, &bat))?,
+                        .blame(yaml::texts(yaml::get(pm, "plain_without", &bat)?, &bat))?
+                        .iter()
+                        .map(|w| stored_in(&of, w))
+                        .collect(),
+                    of,
                     within: f.blame(fraction(pm, "within", &bat))?,
                 })
             }
@@ -3812,10 +4000,27 @@ fn load_pick(f: &File, axes: &[Axis], contract: u32) -> R<crate::pick::Model> {
                 format!("the family {name} is declared twice"),
             )));
         }
+        // One spelling of a value in a row: a token that names a value of
+        // an axis is held in the form a row stores, as the rows a pick
+        // reads are ([`crate::pick::Model::stored`]). The MP2RAGE family's
+        // `UniformDenoised` is stored `Denoised`, and written as the
+        // identity it never met a row the rules wrote.
+        let over = f.blame(named(fm, "over", &fat))?;
+        let as_stored = |of: &str, token: String| -> String {
+            axes.iter()
+                .find(|a| a.name == of)
+                .and_then(|a| a.stored_of(&token))
+                .map_or(token.clone(), str::to_string)
+        };
+        let canonical = canonical
+            .into_iter()
+            .map(|token| as_stored(&over, token))
+            .collect();
+        let when = (when.0.clone(), as_stored(&when.0, when.1));
         families.push(crate::pick::Family {
             name,
             when,
-            over: f.blame(named(fm, "over", &fat))?,
+            over,
             ignoring,
             canonical,
             apart_without_canonical,
@@ -4015,6 +4220,41 @@ fn load_pick(f: &File, axes: &[Axis], contract: u32) -> R<crate::pick::Model> {
         families,
         candidates,
         near_tie,
+        spellings: axes
+            .iter()
+            .map(|a| (a.name.clone(), a.spellings().into_iter().collect()))
+            .filter(|(_, names): &(String, BTreeMap<String, String>)| !names.is_empty())
+            .collect(),
+        coarse: axes
+            .iter()
+            .filter_map(|coarse| {
+                let fine = axes
+                    .iter()
+                    .find(|a| Some(a.name.as_str()) == coarse.coarse_of.as_deref())?;
+                if coarse.multi || fine.multi {
+                    return None;
+                }
+                let covers = coarse
+                    .values
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, v)| !v.covers.is_empty())
+                    .map(|(i, v)| {
+                        let words = v
+                            .covers
+                            .iter()
+                            .filter_map(|id| fine.stored_of(id).map(str::to_string))
+                            .collect();
+                        (coarse.stored(i).to_string(), words)
+                    })
+                    .collect();
+                Some(crate::pick::Coarse {
+                    fine: fine.name.clone(),
+                    coarse: coarse.name.clone(),
+                    covers,
+                })
+            })
+            .collect(),
     })
 }
 

@@ -122,7 +122,10 @@ pub fn run(pack: &Pack, cases: &[(std::path::PathBuf, Case)], what: &str) -> R<(
                 .in_file(file, None));
             }
             let got = answer(axis);
-            if got != *want {
+            // a case names a value by any of its names: one written when
+            // the pack stored another spelling of it still says the value
+            let same = pack.axis(axis).is_some_and(|a| a.same(&got, want));
+            if !same {
                 failures.push(format!(
                     "  {}: {axis} is {got:?}, the case says {want:?}",
                     case.name

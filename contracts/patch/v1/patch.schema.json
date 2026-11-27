@@ -326,6 +326,16 @@
             "evidence": {
               "description": "Where it came from: a proposal, a review item, a finding, as a word or a mapping (for example {proposal: 12}). Required here or as the patch's own evidence."
             },
+            "within": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["axis", "value"],
+              "properties": {
+                "axis": {"type": "string", "minLength": 1},
+                "value": {"type": "string", "minLength": 1}
+              },
+              "description": "Added in place, additively, on 2026-11-27. The new value's place under a coarse axis: the axis the pack declares the coarse form of this one (coarse_of) and the identity of its value that covers the new one. The operation adds the new value to that value's covers. A pack that declares a coarse form is held to it when it loads, so a new value that a rule of the same patch folds into the coarse axis needs this place."
+            },
             "axis": {
               "type": "string"
             },

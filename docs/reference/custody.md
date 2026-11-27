@@ -82,7 +82,7 @@ Every store the registry at `<home>` keeps (backend sqlite), rendered by `nils c
 | owner | the pack's author for the rules, the reviewers for the decisions |
 | kept | until the next run of that job replaces it; a decision until withdrawn, and a withdrawn one for good |
 | read | `nils explain <stack>`<br>`nils review list`<br>`nils pack show <name>` |
-| change | `nils fingerprint`<br>`nils classify`<br>`nils classify --no-votes`<br>`nils review decide <id> --value <v>` |
+| change | `nils fingerprint`<br>`nils classify`<br>`nils classify --no-votes`<br>`nils review decide <id> --value <v>`<br>`nils repair axis-values [--apply]` |
 | export | `nils explain <stack> --json`<br>`nils classify votes [--out <file>] [--axis <axis>]` |
 | delete | with the registry |
 
@@ -208,7 +208,7 @@ Every store the registry at `<home>` keeps (backend sqlite), rendered by `nils c
 | owner | the registry's operator |
 | kept | no retention: rebuildable, and dropped on rebuild (Wave 4b section 14.1) |
 | read | `nils session list` |
-| change | no command |
+| change | `nils session rebuild`<br>`nils repair sessions` |
 | export | no command |
 | delete | with the registry, or by the next rebuild |
 

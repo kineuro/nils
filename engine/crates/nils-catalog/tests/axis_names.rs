@@ -1,10 +1,11 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 //! Wave 7a: an axis value in a document names the value, whichever of its
-//! names the document writes. A pack may store a value's label rather than
-//! its identity (`stores: label`): the rules write `1` for post_contrast's
-//! `given` and `T2*w` for base's `T2starw`, and a person's decision may hold
-//! the identity. Both forms are planted on each backend's synthetic
+//! names the document writes. A row holds the one name the pack stores for
+//! a value, and a registry an earlier version of the pack sorted, or one
+//! whose decisions were written as their author spelled them, holds others:
+//! `1` for post_contrast's `given`, `T2*w` for base's `T2starw`. Both forms
+//! are planted on each backend's synthetic
 //! registry, and every answer is held against the rows as planted: `=`,
 //! `<>`, `in`, `not_in` and `has` by identity and by label, the visits with
 //! contrast found through `has`, a group keyed by such an axis counting each
@@ -516,8 +517,8 @@ fn a_group_keyed_by_an_axis_counts_each_value_once_in_the_form_rows_store() {
         let a = answer(&mut l, group(json!(["axis", {}, "post_contrast"]), None));
         let rest = (p.stacks.len() - p.given.len() - p.not_given.len()) as i64;
         let want = BTreeMap::from([
-            (Some("1".to_string()), p.given.len() as i64),
-            (Some("0".to_string()), p.not_given.len() as i64),
+            (Some("given".to_string()), p.given.len() as i64),
+            (Some("not_given".to_string()), p.not_given.len() as i64),
             (None, rest),
         ]);
         assert_eq!(grouped(&a, "post_contrast"), want, "{}", l.name);
@@ -567,7 +568,7 @@ fn a_group_keyed_by_an_axis_counts_each_value_once_in_the_form_rows_store() {
             );
             assert_eq!(
                 grouped(&a, "post_contrast"),
-                BTreeMap::from([(Some("1".to_string()), p.given.len() as i64)]),
+                BTreeMap::from([(Some("given".to_string()), p.given.len() as i64)]),
                 "{}: {value}",
                 l.name
             );
@@ -587,8 +588,8 @@ fn a_group_keyed_by_an_axis_counts_each_value_once_in_the_form_rows_store() {
         assert_eq!(
             grouped(&a, "post_contrast"),
             BTreeMap::from([
-                (Some("1".to_string()), p.given.len() as i64),
-                (Some("0".to_string()), p.not_given.len() as i64),
+                (Some("given".to_string()), p.given.len() as i64),
+                (Some("not_given".to_string()), p.not_given.len() as i64),
             ]),
             "{}",
             l.name
@@ -618,12 +619,17 @@ fn the_catalog_says_what_rows_store_and_its_sampler_and_a_draft_agree() {
                 .clone()
         };
         let pc = of("post_contrast");
-        assert_eq!(pc["stores"], "label", "{}: {pc}", l.name);
+        assert_eq!(pc["stores"], "id", "{}: {pc}", l.name);
+        // (beside what the pack says the value means, which the catalog
+        // serves with the names)
         assert!(
             pc["values"]
                 .as_array()
                 .unwrap()
-                .contains(&json!({"id": "given", "label": "1"})),
+                .iter()
+                .any(|v| v["id"] == "given"
+                    && v["label"] == "given"
+                    && v["aliases"] == json!(["1"])),
             "{}: {pc}",
             l.name
         );
@@ -644,19 +650,19 @@ fn the_catalog_says_what_rows_store_and_its_sampler_and_a_draft_agree() {
         assert_eq!(sample.kind, "values", "{}", l.name);
         let items: BTreeMap<String, i64> = sample.items.iter().cloned().collect();
         assert_eq!(
-            items.get("1"),
+            items.get("given"),
             Some(&(p.given.len() as i64)),
             "{}: {items:?}",
             l.name
         );
         assert_eq!(
-            items.get("0"),
+            items.get("not_given"),
             Some(&(p.not_given.len() as i64)),
             "{}: {items:?}",
             l.name
         );
         assert!(
-            !items.contains_key("given") && !items.contains_key("not_given"),
+            !items.contains_key("1") && !items.contains_key("0"),
             "{}: {items:?}",
             l.name
         );

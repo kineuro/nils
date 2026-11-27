@@ -480,7 +480,7 @@ pub(crate) fn broken_constraints(
             .unwrap_or_default()
             .into_iter()
             .filter(|v| !v.is_empty() && a.default.as_deref() != Some(v.as_str()))
-            .map(|v| a.id_of_stored(&v).map(str::to_string).unwrap_or(v))
+            .map(|v| a.id_of(&v).map(str::to_string).unwrap_or(v))
             .collect();
         decided.insert(a.name.clone(), values);
     }
@@ -631,7 +631,12 @@ impl Decided {
     /// it in view: a person's decision is final evidence, never a rule, so
     /// a sort asks about it again only when a newer rules version moves
     /// the rules' answer from what the person saw.
-    pub fn saw(&self, rules: &str) -> bool {
+    ///
+    /// The two are held against each other as the values they name
+    /// ([`nils_pack::rules::Axis::same`]): the rules' answer the person saw
+    /// may be in the spelling an older version of the pack stored, and a
+    /// word that changed moved no answer.
+    pub fn saw(&self, axis: Option<&nils_pack::rules::Axis>, rules: &str) -> bool {
         // the values of a multi-valued axis, whatever order they were
         // stored or read in
         let set = |v: &str| {
@@ -647,7 +652,23 @@ impl Decided {
         };
         self.rules_in_view
             .as_deref()
-            .is_some_and(|seen| set(seen) == set(rules))
+            .is_some_and(|seen| match axis {
+                Some(a) => a.same(seen, rules),
+                None => set(seen) == set(rules),
+            })
+    }
+
+    /// The decision's value as a row stores it: the stored form of the
+    /// value its text names ([`nils_pack::rules::Axis::stored_text`]),
+    /// whichever of the value's names its author wrote. The sort writes
+    /// this and never the text, so a row can hold no other spelling even
+    /// from a decision written before decisions were normalised.
+    pub fn stored(&self, axis: Option<&nils_pack::rules::Axis>) -> String {
+        let text = self.value.as_deref().unwrap_or_default();
+        match axis {
+            Some(a) => a.stored_text(text),
+            None => text.to_string(),
+        }
     }
 }
 
@@ -660,7 +681,7 @@ impl Decided {
 /// keyword classifier disagrees, answering nothing for 4,692 of that cohort's
 /// 4,699 stacks. A value a model produced may not sit where a rule's answer
 /// belongs and look the same.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Author {
     /// The name, the account or the model's registered id.
     pub who: String,
@@ -1096,6 +1117,7 @@ pub(crate) fn notes_of(
     verdict: &nils_pack::Verdict,
     split: Option<serde_json::Value>,
     below: Vec<serde_json::Value>,
+    set_aside: Vec<serde_json::Value>,
 ) -> Option<serde_json::Value> {
     let mut notes = serde_json::Map::new();
     if !verdict.overrides.is_empty() {
@@ -1112,6 +1134,11 @@ pub(crate) fn notes_of(
     }
     if !verdict.equal_rank.is_empty() {
         notes.insert("equal_rank".into(), serde_json::json!(verdict.equal_rank));
+    }
+    // a rule's value set aside for a committed coarse one: the axis has no
+    // row left to say it on
+    if !set_aside.is_empty() {
+        notes.insert("set_aside".into(), serde_json::Value::Array(set_aside));
     }
     (!notes.is_empty()).then_some(serde_json::Value::Object(notes))
 }
@@ -1465,6 +1492,9 @@ fn run(
     // Record 48: the constraints the rules' own answer must keep, the same
     // ones a rater's answer is held to, worked out once for the run.
     let constraints = nils_pack::legal::class_constraints(pack);
+    // The axes the pack declares the coarse form of another (`coarse_of`):
+    // a decision on one of the two holds the other to it.
+    let forms = crate::coarse::forms(pack);
     let mut windows = Windows::new(store, settings, with_ids);
     let now = now_iso();
     let voters = if settings.votes {
@@ -1615,24 +1645,69 @@ fn run(
             }
             report.broken_stacks += i64::from(!doubted.is_empty());
 
+            // Two axes that say one thing at two grains (the pack's
+            // `coarse_of`). The rules folded their own answer of the finer
+            // axis, and a decision is applied below, after they ran: so a
+            // decision on one of the two holds the other to it here
+            // ([`crate::coarse`]). A rule's value never stands against a
+            // committed answer. Nothing is worked out where the pack
+            // declares no such axes or nothing was decided at all.
+            let coarse = if any_decision && !forms.is_empty() {
+                crate::coarse::held(&forms, &verdict, |axis| {
+                    decisions
+                        .for_stack(ids, &stack, &axis.name)
+                        .map(|d| crate::coarse::Standing {
+                            value: d.stored(Some(axis)),
+                            author: d.author.clone(),
+                        })
+                })
+            } else {
+                crate::coarse::Held::default()
+            };
+            for axis in &coarse.apart {
+                *report.coarse.entry(format!("{axis}:apart")).or_insert(0) += 1;
+            }
+
             for a in &verdict.axes {
+                // A rule's value that a committed coarse value does not
+                // cover is set aside: the axis gets no row, as where no rule
+                // answered, and the evidence below keeps the rules' answer
+                // and says what set it aside. Not a question, and not a weak
+                // answer to note: it is no answer any more.
+                if coarse.set_aside(&a.axis).is_some() {
+                    *report
+                        .coarse
+                        .entry(format!("{}:set_aside", a.axis))
+                        .or_insert(0) += 1;
+                    continue;
+                }
                 let mut value = a.stored();
                 let mut tier = a.tier.clone();
-                let written = if doubted.iter().any(|b| b.axes.contains(&a.axis)) {
+                let mut written = if doubted.iter().any(|b| b.axes.contains(&a.axis)) {
                     a.confidence.min(BROKEN_CONFIDENCE)
                 } else {
                     a.confidence
                 };
-                if let Some(d) = any_decision
+                // a decision that gave way to one of higher standing on
+                // the other grain is not applied: the fold below writes
+                // the axis
+                if let Some(d) = (any_decision && !coarse.overruled(&a.axis))
                     .then(|| decisions.for_stack(ids, &stack, &a.axis))
                     .flatten()
                 {
-                    let decided = d.value.clone().unwrap_or_default();
+                    // the last guard of one spelling in a row: the decision
+                    // in the stored form of the value it names, and held
+                    // against the rules' answer as values, not as text
+                    let axis = pack.axis(&a.axis);
+                    let decided = d.stored(axis);
+                    let differs = match axis {
+                        Some(x) => !x.same(&decided, &value),
+                        None => decided != value,
+                    };
                     // Record 55 H3: no question at all on an axis an image
                     // model answers; its decision standing over the rules is
                     // how that axis is answered.
-                    if decided != value && !pack.review.by_model.contains(&a.axis) && !d.saw(&value)
-                    {
+                    if differs && !pack.review.by_model.contains(&a.axis) && !d.saw(axis, &value) {
                         // The rule's answer is computed as usual and the
                         // decision wins; the disagreement is the review item,
                         // not the decision.
@@ -1665,15 +1740,31 @@ fn run(
                     // same, which is v0's 4,692 body parts.
                     authored.push((a.axis.clone(), value.clone(), d.clone()));
                 }
-                // What decided each axis, counted: a rule that fires on a
-                // sixth of the archive is a question about the rule, and the
-                // count is how it is asked. Asking it once per stack is what
-                // makes v0's queue unreadable.
-                *report
-                    .by_tier
-                    .entry(format!("{}:{}", a.axis, tier))
-                    .or_insert(0) += 1;
-                axes.extend(axis_rows(stack_id, &a.axis, &value, written, &tier));
+                // A committed value of the finer axis decides this one: the
+                // coarse value that covers it, at a decision's confidence,
+                // and not what the rules' own finer value folded to. Where no
+                // coarse value covers the decided one the axis gets no row.
+                let folded = coarse.folded(&a.axis);
+                if let Some(f) = folded {
+                    *report
+                        .coarse
+                        .entry(format!("{}:folded", a.axis))
+                        .or_insert(0) += 1;
+                    value = f.value.clone().unwrap_or_default();
+                    tier = crate::coarse::TIER.to_string();
+                    written = crate::coarse::CONFIDENCE;
+                }
+                if !folded.is_some_and(|f| f.value.is_none()) {
+                    // What decided each axis, counted: a rule that fires on a
+                    // sixth of the archive is a question about the rule, and
+                    // the count is how it is asked. Asking it once per stack
+                    // is what makes v0's queue unreadable.
+                    *report
+                        .by_tier
+                        .entry(format!("{}:{}", a.axis, tier))
+                        .or_insert(0) += 1;
+                    axes.extend(axis_rows(stack_id, &a.axis, &value, written, &tier));
+                }
                 // What a person is asked about, and where the number comes
                 // from: the pack declares it per axis, because what counts as
                 // a weak answer is knowledge about the domain and not about
@@ -1689,7 +1780,8 @@ fn run(
                 // asking, not the pack. Never on an axis an image model
                 // answers (the body part), which its own run asks about.
                 let below = settings.review_below.unwrap_or(pack.review.below(&a.axis));
-                let empty = value.is_empty();
+                // a folded value is a decision's, never a rule's weak answer
+                let empty = value.is_empty() || folded.is_some();
                 let weak =
                     !empty && a.confidence > 0.0 && nils_pack::weaker_than(a.confidence, below);
                 // The population the threshold decides by its boundary: an
@@ -1768,9 +1860,15 @@ fn run(
             // stack, and asked about once the passes ran, where it matters.
             for axis in &verdict.unresolved {
                 *report.unresolved.entry(axis.clone()).or_insert(0) += 1;
+                // An axis a committed answer on the other grain settled is
+                // not one nobody answered: a value set aside, and a coarse
+                // axis folded from a decided value, to a value or to none
+                // where no value covers it, are never asked about.
                 if !verdict.silent
                     && !sealed_window.contains(&stack_id)
                     && asks_missing.contains(axis)
+                    && coarse.set_aside(axis).is_none()
+                    && coarse.folded(axis).is_none()
                 {
                     pending_missing.push((stack_id, axis.clone()));
                 }
@@ -1790,13 +1888,14 @@ fn run(
                 for a in &pack.axes {
                     if a.phase != nils_pack::rules::AxisPhase::Class
                         || verdict.axes.iter().any(|v| v.axis == a.name)
+                        || coarse.overruled(&a.name)
                     {
                         continue;
                     }
                     let Some(d) = decisions.for_stack(ids, &stack, &a.name) else {
                         continue;
                     };
-                    let value = d.value.clone().unwrap_or_default();
+                    let value = d.stored(Some(a));
                     report.decided += 1;
                     *report
                         .by_tier
@@ -1804,6 +1903,41 @@ fn run(
                         .or_insert(0) += 1;
                     axes.extend(axis_rows(stack_id, &a.name, &value, 1.0, "decision"));
                     authored.push((a.name.clone(), value, d.clone()));
+                }
+            }
+            // A decision set aside on an axis the rules said nothing about
+            // is counted here, since the loop over the verdict never met it.
+            for s in &coarse.set_aside {
+                if !verdict.axes.iter().any(|v| v.axis == s.axis) {
+                    *report
+                        .coarse
+                        .entry(format!("{}:set_aside", s.axis))
+                        .or_insert(0) += 1;
+                }
+            }
+            // And a coarse axis the rules said nothing about, because they
+            // said nothing of the finer one, where a committed value of the
+            // finer axis decides it.
+            for f in &coarse.folded {
+                if verdict.axes.iter().any(|v| v.axis == f.axis) {
+                    continue;
+                }
+                *report
+                    .coarse
+                    .entry(format!("{}:folded", f.axis))
+                    .or_insert(0) += 1;
+                if let Some(value) = &f.value {
+                    *report
+                        .by_tier
+                        .entry(format!("{}:{}", f.axis, crate::coarse::TIER))
+                        .or_insert(0) += 1;
+                    axes.extend(axis_rows(
+                        stack_id,
+                        &f.axis,
+                        value,
+                        crate::coarse::CONFIDENCE,
+                        crate::coarse::TIER,
+                    ));
                 }
             }
 
@@ -1848,7 +1982,57 @@ fn run(
                     d.author.campaign.map_or(Param::Null, Param::Int),
                 ]);
             }
-            report.evidence += (verdict.evidence.len() + authored.len()) as i64;
+            // What a decision on the other grain did, beside the rules' own
+            // evidence, which stays: the value it set aside, with what did,
+            // and the value it folded, with what it was folded from. Each
+            // names who decided the value that did it, as a decision's own
+            // row does, so that a value a model's answer folded never reads
+            // as a rule's; a decision that gave way is named in what the
+            // row cites.
+            let told = coarse
+                .set_aside
+                .iter()
+                .map(|s| {
+                    (
+                        &s.axis,
+                        "",
+                        crate::coarse::SET_ASIDE,
+                        &s.by_axis,
+                        s.cited(),
+                        &s.by,
+                    )
+                })
+                .chain(coarse.folded.iter().map(|f| {
+                    (
+                        &f.axis,
+                        f.value.as_deref().unwrap_or_default(),
+                        crate::coarse::TIER,
+                        &f.from_axis,
+                        f.cited(),
+                        &f.by,
+                    )
+                }));
+            for (axis, value, tier, read, cited, by) in told {
+                evidence.push(vec![
+                    Param::Int(stack_id),
+                    Param::from(axis.as_str()),
+                    Param::from(value),
+                    Param::from(tier),
+                    Param::Double(crate::coarse::CONFIDENCE),
+                    Param::from(crate::coarse::RULE_SET),
+                    Param::from(read.as_str()),
+                    Param::from(read.as_str()),
+                    Param::from(cited),
+                    Param::from(by.who.as_str()),
+                    Param::from(by.kind.as_str()),
+                    by.model.map_or(Param::Null, Param::Int),
+                    by.campaign.map_or(Param::Null, Param::Int),
+                ]);
+            }
+            report.evidence += (verdict.evidence.len()
+                + authored.len()
+                + coarse.set_aside.len()
+                + coarse.folded.len()) as i64;
             report.silent += i64::from(verdict.silent);
             // record 48, D1 of the move: a stack of a sample sealed now raises
             // no review item, and its classification says it raised none
@@ -1858,7 +2042,8 @@ fn run(
             }
             report.review_items += raised;
             report.written += 1;
-            let notes = notes_of(&verdict, split, notes_below);
+            let set_aside = coarse.set_aside.iter().map(|s| s.note()).collect();
+            let notes = notes_of(&verdict, split, notes_below, set_aside);
             classes.push(vec![
                 Param::Int(stack_id),
                 Param::from(pack.name.as_str()),
@@ -2179,10 +2364,18 @@ fn dispose(
                 continue;
             }
             // One row per value, so a multi-valued axis arrives as rows.
-            decided
+            // The rules of this phase hold a row against the stored form
+            // they were compiled to, so a row is read as the value it names
+            // ([`nils_pack::rules::Axis::stored_of`]): a row an older
+            // version of the pack wrote in another spelling still seeds.
+            let value = value.trim();
+            let value = pack.axes[a].stored_of(value).unwrap_or(value);
+            let seeded = &mut decided
                 .entry(r.int(0)?)
-                .or_insert_with(|| vec![Vec::new(); pack.axes.len()])[a]
-                .push(value.trim().to_string());
+                .or_insert_with(|| vec![Vec::new(); pack.axes.len()])[a];
+            if !seeded.iter().any(|v| v == value) {
+                seeded.push(value.to_string());
+            }
         }
 
         let empty: Vec<Vec<String>> = vec![Vec::new(); pack.axes.len()];

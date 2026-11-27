@@ -101,7 +101,7 @@ cases:
       inversion_time: 2400
       echo_train_length: 0
     axes:
-      technique: TIRM
+      technique: IRTSE
       modifier: FLAIR
 
   - name: an old GE FLAIR in research mode named mrcflair is an IR-TSE
@@ -119,7 +119,7 @@ cases:
       flip_angle: 90
       echo_train_length: 16
     axes:
-      technique: TIRM
+      technique: IRTSE
 
   - name: a Philips FLAIR written M_IR is an IR-TSE
     stack:
@@ -135,7 +135,7 @@ cases:
       inversion_time: 1900
       echo_train_length: 21
     axes:
-      technique: TIRM
+      technique: IRTSE
       modifier: FLAIR
 
   - name: a FLAIR read out by an EPI is no IR-TSE
@@ -151,7 +151,7 @@ cases:
       echo_time: 90
       inversion_time: 2500
     axes:
-      technique: SE-EPI
+      technique: SEEPI
 
   # --- GE's PROPELLER by its other names
 
@@ -203,7 +203,7 @@ cases:
       flip_angle: 125
       echo_train_length: 8
     axes:
-      technique: TIRM
+      technique: IRTSE
       modifier: 'FLAIR,Radial'
       base: T1w
 
@@ -287,7 +287,7 @@ cases:
     axes:
       construct: FA
       provenance: DTIRecon
-      technique: DWI-EPI
+      technique: DWIEPI
 
   - name: a GE ExpAtt- output is an eADC of a plain DWI
     stack:
@@ -342,7 +342,7 @@ cases:
       diffusion_b_value: 0
     axes:
       construct: ADC
-      technique: DWI-EPI
+      technique: DWIEPI
 
   # --- a GE SWI magnitude named without GE's prefix
 
@@ -363,7 +363,7 @@ cases:
     axes:
       provenance: RawRecon
       construct: ''
-      base: 'T2*w'
+      base: T2starw
       technique: EPI
 
   - name: a GE SWI output named SWI is the SWI image
@@ -401,7 +401,7 @@ cases:
       flip_angle: 55
       echo_train_length: 8
     axes:
-      technique: MEDIC
+      technique: combMEGRE
 
   - name: a series named for its 8 echoes with no sequence tags is a multi-echo GRE
     stack:
@@ -429,7 +429,7 @@ cases:
       echo_time: 4
       flip_angle: 20
     axes:
-      technique: FLASH
+      technique: SPGRE
 
   # --- BOLD with no readout stated
 
@@ -444,7 +444,7 @@ cases:
       temporal_positions: 500
     axes:
       technique: BOLD
-      base: 'T2*w'
+      base: T2starw
 
   - name: a spin-echo BOLD run is not taken for a gradient-echo one
     stack:
@@ -622,8 +622,8 @@ cases:
       flip_angle: 28
       echo_train_length: 5
     axes:
-      technique: MEDIC
-      base: 'T2*w'
+      technique: combMEGRE
+      base: T2starw
 
   - name: a Philips T1-FFE of one echo is no combined multi-echo GRE
     stack:
@@ -638,7 +638,7 @@ cases:
       flip_angle: 70
       echo_train_length: 1
     axes:
-      technique: FLASH
+      technique: SPGRE
 
   # --- techniques by the header's own terms
 
@@ -655,7 +655,7 @@ cases:
       echo_time: 4.2
       flip_angle: 15
     axes:
-      technique: TurboFLASH
+      technique: FSPGRE
 
   # MRI pack 0.18.0: record 48, "Rulings after the re-adjudication" (Nima,
   # 2026-09-30): this pattern, `SS\SK` with FAST_GEMS and not spoiled, is
@@ -673,7 +673,7 @@ cases:
       echo_time: 1.4
       flip_angle: 30
     axes:
-      technique: FISP
+      technique: SSFPFID
 
   - name: a Siemens 3D inflow angiography named ANGIO is a TOF
     stack:
@@ -705,7 +705,7 @@ cases:
       flip_angle: 25
     # MRI pack 0.18.0: CE-MRA, the value the vocabulary lacked.
     axes:
-      technique: CE-MRA
+      technique: CEMRA
 
   - name: a Siemens BLADE with RESTORE is the flip-back TSE with blades
     stack:
@@ -720,7 +720,7 @@ cases:
       echo_time: 106
       echo_train_length: 28
     axes:
-      technique: RESTORE
+      technique: DETSE
       modifier: Radial
 
   - name: a Philips SmartBrain survey is a localizer and no MPRAGE

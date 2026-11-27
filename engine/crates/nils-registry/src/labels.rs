@@ -2890,6 +2890,9 @@ fn import_within(
     dry_run: bool,
     mut out: Imported,
 ) -> Result<Imported, Error> {
+    // one spelling of a value in a row: a label is held, compared and
+    // written in the stored form of the value it names
+    let spellings = registry.spellings();
     let store = registry.store();
     if matches!(store, Store::Postgres { .. }) {
         store.batch(&format!(
@@ -2900,7 +2903,7 @@ fn import_within(
     let tree = stacks_of_series(store, labels)?;
     let every: Vec<i64> = tree.values().flatten().map(|(k, _, _)| *k).collect();
     let sealed = sealed_for_writes(store, &every)?;
-    let mut standing = Standings::read(store, axis)?;
+    let mut standing = Standings::read(store, axis, &spellings)?;
     let now = now_iso();
     // what to write: the stacks, in order, with the value and the date
     let mut writes: Vec<(i64, String, String)> = Vec::new();
@@ -2910,6 +2913,7 @@ fn import_within(
             out.refused_values += 1;
             continue;
         }
+        let value = spellings.stored(axis, &value);
         let Some(at) = instant_of(&l.date) else {
             out.bad_dates += 1;
             continue;
@@ -3090,7 +3094,14 @@ enum Held {
 }
 
 impl Standings {
-    fn read(store: &mut Store, axis: &str) -> Result<Standings, Error> {
+    /// What stands, an imported label's value in the stored form, so that
+    /// an import that finds its own earlier answer in another spelling
+    /// counts it already held.
+    fn read(
+        store: &mut Store,
+        axis: &str,
+        spellings: &crate::spelling::Spellings,
+    ) -> Result<Standings, Error> {
         let sql = format!(
             "SELECT scope, ref, author_kind, author_version, value FROM {} WHERE axis = {} \
              AND withdrawn_at IS NULL AND (staged_at IS NULL OR committed_at IS NOT NULL) ORDER BY id",
@@ -3116,7 +3127,11 @@ impl Standings {
                 "stack" => {
                     s.stack.insert(
                         reference,
-                        (kind, imported, r.opt_text(4)?.map(str::to_string)),
+                        (
+                            kind,
+                            imported,
+                            r.opt_text(4)?.map(|v| spellings.stored(axis, v)),
+                        ),
                     );
                 }
                 "series" if person => {

@@ -85,7 +85,9 @@ Facts come from the registry, never from a pack's own reading of a header.
 | The host | `host.cores`, `host.memory_gb`, `host.gpu`, `host.gpu_memory_gb`, `host.runtime` |
 | The person | `goal` and the pack's switches |
 
-A fact the registry cannot tell is `unknown`. A hard need on an unknown fact
+A fact read from a classification axis (`base`, `post_contrast`,
+`body_part`) is the value's identity, whichever of the value's names the
+registry's row holds. A fact the registry cannot tell is `unknown`. A hard need on an unknown fact
 skips the session with "cannot tell: <fact>", and a person may let it run
 (the unit then records the person as the one who chose). A soft need on an
 unknown fact adds its caveat.

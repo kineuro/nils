@@ -276,6 +276,24 @@ T2* scans counted none of what the rules had found; a handle records
 `axis_values: any_name` in its suppression, so no answer cached before is
 served again.
 
+**What a value means** is the pack's to say, and the catalog serves it beside
+the names: each value's `description`, a line, and its `terms`, other words a
+person knows it by, where the pack gives them. The terms explain a value and
+are no names of it: a document still names a value by its identity, its label
+or an alias. A pack may also hold one fact at two grains, and says so in the
+coarse axis's file: `coarse_of: <axis>` on the axis and `covers: [<values>]`
+on each of its values (the MR pack's `body_region` is the coarse form of
+`body_part`, and its `head` covers `brain` and `brain-neck`, the fine split of
+the head by how far down the stack reaches). The loader holds the declaration
+to the rules that fold the fine answer into the coarse one, so the two cannot
+drift. The catalog serves it from both sides: the coarse axis carries
+`coarse_of` and each of its values `covers`, and each value of the fine axis
+carries `within`, the coarser value that covers it (`{axis, value}`), the
+wider choice where any of the values it covers will do. "A brain scan" in
+ordinary words is `body_region = head`; `body_part = brain` is the stacks
+that end above the neck and no others. A diagnosis warns where a draft wrote
+the fine value and left most rows with its sibling (`narrow_value`, §10).
+
 **share** names its denominator. A denominator is an uncorrelated scalar count
 over a named set, legal only in a denominator position and only at count or
 distinct, so no generic join enters through that door (C39):
@@ -371,8 +389,8 @@ is a `min` over that event set.
     `ambiguous_parent`, `unknown_value`, `unknown_level`, `forbidden_field`,
     `federated_scope`, `scheme_mismatch`, `selection_outdated`,
     `binding_dropped`, `missing_order`, `not_releasable`, `truncated`,
-    `stale_options`, the warnings `sequence_before_where` and `sequence_inherited` (§5.4), and one
-    warning only a diagnosis gives, `reversed_dates` (§10). Repair inserts a missing `{}`, wraps a lone clause and
+    `stale_options`, the warnings `sequence_before_where` and `sequence_inherited` (§5.4), and two
+    warnings only a diagnosis gives, `reversed_dates` and `narrow_value` (§10). Repair inserts a missing `{}`, wraps a lone clause and
     maps operator and unit aliases; it never rewrites a value and never guesses
     among candidates.
 15. Sensitivity is one policy evaluated in the catalog per (principal, role,
@@ -825,12 +843,47 @@ must not guess them (C20, D36):
   `years_between`, in the clause, bound in the same set or in a set it is
   drawn from) above a positive
   bound, keeps no row, and keeps rows with the two dates the other way
-  round, counted only for a stage that kept nothing; a one line zero-row explanation in
-  domain words; per clause and per null drop counts; ties per pick; unresolved
+  round, counted only for a stage that kept nothing, and `narrow_value`
+  (below); a one line zero-row explanation in
+  domain words; per clause and per null drop counts, for the `where` clauses
+  of the answer's set and of each set it reads its rows through (the set it
+  is drawn `from` or is `of`, each set a `has` of it reads, and theirs in
+  turn), each drop naming its `set`, the answer's own first; ties per pick; unresolved
   values rows; rows coarser than a clause's unit; the cost class; and the
   **funnel** (Q1): the count of subjects surviving each named set from the
   cohort down, so an author sees where subjects fall out. The leave-one-out
   variant is a job, not a sync call.
+  `narrow_value` is a filter on one value of an axis that threw away what
+  the value's siblings hold. It is raised for a `where` clause of any stack
+  set of the document that keeps the stacks holding a value it writes out
+  (`=`, `has`, or `in` with a list), on an axis the pack declares a coarse
+  form of, where the clause kept less than one in five of the rows before
+  it, other values of the axis hold more than half of the rows it dropped,
+  and the values the kept value's coarse value also covers hold together
+  three times the kept rows or more (three rows or more where nothing was
+  kept). Those covered siblings need not hold most of what was dropped. The warning names the coarse axis and
+  value as the wider choice: "scans: body_part = brain kept 31 of 4,210
+  stacks; brain-neck holds 3,900 of the rest. If any head of body_region is
+  meant, write body_region = head, which covers brain and brain-neck."
+  `path` is the clause (`sets.<set>.where[i]`) and `next` holds the clause
+  to write in its place. A sibling under another coarse value is another
+  thing and is never warned about, and neither is the coarse axis itself,
+  nor an axis the pack declares no coarse form of: a count alone cannot
+  tell a value mistaken for its sibling from a value that is rare, and on
+  an axis one value dominates every filter on another would be warned
+  about. It costs one statement, the rows before the clause by their
+  value, for each such clause that kept so little, three clauses of a
+  document at most, read under the caller's own scope: a stage whose count
+  is held back warns of nothing, and neither does a clause any of whose
+  sibling counts came back held, so the message never puts a shown count
+  beside a held one. It is not given where the request asks for keys,
+  since a stage's rows are then the keys listed, cut at the cap of a list;
+  nor for a clause on a value where the same set, or a set it is drawn
+  `from`, already keeps the coarse value that covers it (`body_region =
+  head` and then `body_part = brain`), which is a narrowing written on
+  purpose: `next` never names a clause the set already has. It is not
+  counted once the time for the counts is spent, and the document is valid
+  either way.
 - **preview**: 10 rows or the count, by level.
 - **describe**: one deterministic sentence per set in deal breaker order
   (membership, then counts, then sameness), the conventions block (windows in

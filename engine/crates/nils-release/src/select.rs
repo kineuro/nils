@@ -337,9 +337,49 @@ pub fn resolve(
                     ));
                     continue;
                 }
-                let stacks = axis_count(registry, axis, value)?;
+                // One spelling of a value in a row: the text names a value of
+                // the axis, and a row may hold it in any of its names (a
+                // registry sorted by an older pack, a decision), so every
+                // name of the value is selected. A text that names no value
+                // of an axis that lists its values is refused, not an empty
+                // selection.
+                let mut names = vec![value.clone()];
+                if let Some(a) = pack.and_then(|p| p.axes.iter().find(|a| a.name == *axis))
+                    && !a.values.is_empty()
+                {
+                    match a.value_named(value) {
+                        Some(i) => {
+                            let id = &a.values[i].id;
+                            names = a
+                                .names()
+                                .into_iter()
+                                .filter(|(_, _, of)| of == id)
+                                .map(|(n, _, _)| n)
+                                .collect();
+                            if !names.contains(value) {
+                                names.push(value.clone());
+                            }
+                        }
+                        None => {
+                            out.unresolved.push((
+                                item.clone(),
+                                format!(
+                                    "{value} is no value of {axis}; its values are {}",
+                                    (0..a.values.len())
+                                        .map(|i| a.stored(i))
+                                        .collect::<Vec<_>>()
+                                        .join(", ")
+                                ),
+                            ));
+                            continue;
+                        }
+                    }
+                }
+                let stacks = axis_count(registry, axis, &names)?;
                 out.items.push((item.clone(), How::Axis { stacks }));
-                out.selection.axes.push((axis.clone(), value.clone()));
+                for n in names {
+                    out.selection.axes.push((axis.clone(), n));
+                }
             }
         }
     }
@@ -495,21 +535,26 @@ fn cohort_members(registry: &mut Registry, name: &str) -> Result<Option<Vec<Stri
 }
 
 /// How many stacks hold `value` on `axis`.
-fn axis_count(registry: &mut Registry, axis: &str, value: &str) -> Result<i64, Error> {
+fn axis_count(registry: &mut Registry, axis: &str, names: &[String]) -> Result<i64, Error> {
     let store = registry.store();
     let d = store.dialect();
+    let marks = (0..names.len())
+        .map(|i| d.param(i + 2, Type::Text))
+        .collect::<Vec<_>>()
+        .join(", ");
     // record 48, D1 of the move: a stack of a sample sealed now is not
     // counted, as no release carries one
     let sql = format!(
-        "SELECT COUNT(DISTINCT a.stack_id) FROM {} a WHERE a.axis = {} AND a.value = {} \
+        "SELECT COUNT(DISTINCT a.stack_id) FROM {} a WHERE a.axis = {} AND a.value IN ({marks}) \
          AND NOT EXISTS (SELECT 1 FROM {} ss WHERE ss.stack_id = a.stack_id AND ss.unsealed_at IS NULL)",
         store.qualified("classification_axis"),
         d.param(1, Type::Text),
-        d.param(2, Type::Text),
         store.qualified("sealed_stack")
     );
+    let mut params = vec![Param::from(axis)];
+    params.extend(names.iter().map(|n| Param::from(n.as_str())));
     Ok(store
-        .query_opt(&sql, &[Param::from(axis), Param::from(value)])?
+        .query_opt(&sql, &params)?
         .map(|r| r.int(0))
         .transpose()?
         .unwrap_or(0))

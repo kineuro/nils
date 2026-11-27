@@ -624,6 +624,18 @@ pub(crate) fn text(doc: &Value) -> String {
             b["tier"].as_str().unwrap_or_default()
         ));
     }
+    // a rule's value a decided coarse value does not cover: the axis has
+    // no row above to say it on
+    for s in notes["set_aside"].as_array().into_iter().flatten() {
+        out.push_str(&format!(
+            "  {} {} by {} set aside: {} {} was decided and does not cover it\n",
+            s["axis"].as_str().unwrap_or_default(),
+            s["value"].as_str().unwrap_or_default(),
+            s["tier"].as_str().unwrap_or_default(),
+            s["by"]["axis"].as_str().unwrap_or_default(),
+            s["by"]["value"].as_str().unwrap_or_default()
+        ));
+    }
     let unresolved: Vec<&str> = notes["unresolved"]
         .as_array()
         .into_iter()

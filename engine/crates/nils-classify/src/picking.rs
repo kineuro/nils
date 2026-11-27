@@ -795,13 +795,14 @@ fn session_err(e: nils_session::Error) -> Error {
 
 /// Every stack that holds a role, with the values this model reads.
 fn read_rows(store: &mut Store, model: &Model, subject: Option<&str>) -> Result<Vec<Row>, Error> {
-    read_named(store, &carried(model), subject, None)
+    read_named(store, model, &carried(model), subject, None)
 }
 
 /// Every stack that holds a role, with the values of `reads`: of one
 /// subject by code, of a set of subjects by id, or of every subject.
 pub(crate) fn read_named(
     store: &mut Store,
+    model: &Model,
     reads: &[String],
     subject: Option<&str>,
     subjects: Option<&BTreeSet<i64>>,
@@ -810,15 +811,16 @@ pub(crate) fn read_named(
         let mut out = Vec::new();
         let ids: Vec<i64> = ids.iter().copied().collect();
         for chunk in ids.chunks(SCANS_CHUNK) {
-            out.extend(read_some(store, reads, subject, Some(chunk))?);
+            out.extend(read_some(store, model, reads, subject, Some(chunk))?);
         }
         return Ok(out);
     }
-    read_some(store, reads, subject, None)
+    read_some(store, model, reads, subject, None)
 }
 
 fn read_some(
     store: &mut Store,
+    model: &Model,
     reads: &[String],
     subject: Option<&str>,
     ids: Option<&[i64]>,
@@ -902,7 +904,11 @@ fn read_some(
         };
         // One row per value (Wave 4a §6.1): a role arrives as rows, and an
         // axis a pick reads is joined back into the text the model matches
-        // a token against.
+        // a token against. Each row is read as the value it names, in the
+        // stored form the model's tokens were compiled to: a row an older
+        // version of the pack wrote in another spelling is the same value,
+        // and two spellings of one contrast are no twin across contrast.
+        let value = model.stored(axis, value.trim());
         if axis == nils_pack::matters::PICK_CANDIDATES {
             rows[i].roles.push(value.trim().to_string());
         }
@@ -2492,6 +2498,8 @@ mod tests {
             families: family.into_iter().collect(),
             candidates: BTreeMap::new(),
             near_tie: Vec::new(),
+            spellings: BTreeMap::new(),
+            coarse: Vec::new(),
         }
     }
 

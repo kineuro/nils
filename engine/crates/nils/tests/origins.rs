@@ -576,6 +576,139 @@ fn round(pg: Option<(String, String)>) {
     assert_eq!(bp["values"], json!(["spine"]), "{bp}");
     assert_eq!(bp["origin"], "rules", "{bp}");
     assert_eq!(bp["state"], "current", "{bp}");
+
+    // Two grains of one answer: the pack declares the body region the
+    // coarse form of the body part. A person decides the spine scan's
+    // region is the chest, which does not cover the rules' spine: the body
+    // part is set aside, and the door lists it with who set it aside,
+    // where the sort holds no row for it. A model's body part on the brain
+    // scan decides its region, and the region reads as the model's answer
+    // folded, never as the rules'.
+    let decide = |stack: i64, axis: &str, value: &str, who: &str, kind: &str| {
+        home.exec(&format!(
+            "INSERT INTO {{decision}} (scope, ref, axis, value, actor, author_kind, decided_at) \
+             VALUES ('stack', '{stack}', '{axis}', '{value}', '{who}', '{kind}', '2026-01-03T00:00:00Z')"
+        ));
+    };
+    decide(spine, "body_region", "chest", "dana@lab", "person");
+    // the campaign's answer on the brain scan withdrawn, so that a model's
+    // is the one in force there
+    home.exec(&format!(
+        "UPDATE {{decision}} SET withdrawn_at = '2026-01-02T00:00:00Z' \
+         WHERE ref = '{brain}' AND axis = 'body_part' AND withdrawn_at IS NULL"
+    ));
+    decide(brain, "body_part", "brain-neck", "bodypart-net", "model");
+    let resorted = |stack: i64| {
+        let doc = home.json(
+            "cleo@lab",
+            &[
+                "origins",
+                "--stack",
+                &stack.to_string(),
+                "--resort",
+                "--json",
+            ],
+        );
+        assert_eq!(doc["resort"]["state"], "done", "{doc}");
+        doc["origins"].clone()
+    };
+    let doc = resorted(spine);
+    assert_eq!(doc["unsorted"], 0, "{doc}");
+    let region = axis_of(&doc, spine, "body_region");
+    assert_eq!(region["values"], json!(["chest"]), "{region}");
+    assert_eq!(region["origin"], "decision", "{region}");
+    let bp = axis_of(&doc, spine, "body_part");
+    assert_eq!(bp["values"], json!([]), "{bp}");
+    assert_eq!(bp["origin"], "none", "{bp}");
+    assert_eq!(bp["state"], "set_aside", "{bp}");
+    assert_eq!(bp["from"]["set_aside_by"]["axis"], "body_region", "{bp}");
+    assert_eq!(bp["from"]["set_aside_by"]["by"], "dana@lab", "{bp}");
+    assert_eq!(bp["from"]["set_aside_by"]["kind"], "person", "{bp}");
+    assert_eq!(
+        bp["words"], "set aside by body_region: chest was decided and does not cover spine",
+        "{bp}"
+    );
+    assert_eq!(bp["line"], "set aside by body_region", "{bp}");
+    assert!(
+        bp["rules"]
+            .as_array()
+            .is_some_and(|r| r.iter().any(|e| e["value"] == "spine")),
+        "{bp}: the rules' answer that was set aside"
+    );
+    let text = home.ok("cleo@lab", &["origins", "--stack", &spine.to_string()]);
+    assert!(text.contains("set aside by body_region"), "{text}");
+
+    let doc = resorted(brain);
+    let bp = axis_of(&doc, brain, "body_part");
+    assert_eq!(bp["values"], json!(["brain-neck"]), "{bp}");
+    assert_eq!(bp["origin"], "model", "{bp}");
+    let region = axis_of(&doc, brain, "body_region");
+    assert_eq!(region["values"], json!(["head"]), "{region}");
+    assert_eq!(region["tier"], "folded", "{region}");
+    assert_eq!(region["origin"], "model", "{region}: not the rules'");
+    assert_eq!(region["state"], "current", "{region}");
+    assert_eq!(region["from"]["by"], "bodypart-net", "{region}");
+    assert_eq!(
+        region["from"]["folded_from"]["axis"], "body_part",
+        "{region}"
+    );
+    assert!(
+        region["line"]
+            .as_str()
+            .unwrap()
+            .starts_with("folded from body_part, model"),
+        "{region}"
+    );
+    assert_eq!(
+        region["rules"].as_array().map(Vec::len),
+        Some(0),
+        "{region}: no rule carried the value"
+    );
+    // the reader door says who set the folded value, and from which axis
+    let served = Served::start(&home);
+    let read = served.get(&format!("/api/stacks/{brain}/why"), REVIEWS);
+    drop(served);
+    let folded = read["axes"]
+        .as_array()
+        .and_then(|a| a.iter().find(|x| x["axis"] == "body_region"))
+        .unwrap_or_else(|| panic!("{read}"));
+    assert_eq!(folded["set_by"]["kind"], "model", "{folded}");
+    assert_eq!(folded["set_by"]["actor"], "bodypart-net", "{folded}");
+    assert_eq!(
+        folded["set_by"]["folded_from"]["axis"], "body_part",
+        "{folded}"
+    );
+    assert!(folded["set_by"]["decision"].is_null(), "{folded}");
+
+    // the decisions withdrawn and no sort since: both say so, and the
+    // scans count as not sorted
+    home.exec(
+        "UPDATE {decision} SET withdrawn_at = '2026-01-04T00:00:00Z' \
+         WHERE decided_at = '2026-01-03T00:00:00Z'",
+    );
+    let doc = home.json(
+        "cleo@lab",
+        &["origins", "--stack", &spine.to_string(), "--json"],
+    );
+    assert_eq!(doc["unsorted"], 1, "{doc}");
+    assert_eq!(
+        axis_of(&doc, spine, "body_part")["state"],
+        "withdrawn",
+        "{doc}"
+    );
+    let doc = home.json(
+        "cleo@lab",
+        &["origins", "--stack", &brain.to_string(), "--json"],
+    );
+    assert_eq!(
+        axis_of(&doc, brain, "body_region")["state"],
+        "withdrawn",
+        "{doc}"
+    );
+    let doc = resorted(spine);
+    let bp = axis_of(&doc, spine, "body_part");
+    assert_eq!(bp["values"], json!(["spine"]), "{bp}");
+    assert_eq!(bp["origin"], "rules", "{bp}");
 }
 
 #[test]

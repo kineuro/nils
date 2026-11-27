@@ -1055,6 +1055,13 @@ fn apply_as(
             )));
         }
     }
+    // One spelling of a value in a row: the text is written in the stored
+    // form of the value it names, whoever gave it and whichever of the
+    // value's names they used (`crate::spelling`). A text that names no
+    // value is written as it was given.
+    let value: Option<String> = a.value.map(|v| registry.spellings().stored(&axis, v));
+    let value = value.as_deref();
+    let store = registry.store();
     let written = (|| -> Result<(i64, Vec<i64>, i64), Error> {
         // The earlier decision on the same key gives way to this one; it is
         // withdrawn, never deleted. A staged one replaces only staged ones.
@@ -1111,7 +1118,7 @@ fn apply_as(
                     Param::from(scope.as_str()),
                     Param::from(reference.as_str()),
                     Param::from(axis.as_str()),
-                    a.value.map_or(Param::Null, Param::from),
+                    value.map_or(Param::Null, Param::from),
                     Param::from(a.author.who),
                     Param::from(a.author.kind),
                     version.map_or(Param::Null, Param::from),
@@ -1148,7 +1155,7 @@ fn apply_as(
             .int(0)?;
         let answer = serde_json::json!({
             "axis": axis,
-            "value": a.value,
+            "value": value,
             "actor": a.author.who,
             "author_kind": a.author.kind,
             "model_version": version,
@@ -1260,7 +1267,7 @@ fn apply_as(
             policy: None,
             job_id: None,
             details: Some(serde_json::json!({
-                "value": a.value, "author_kind": a.author.kind,
+                "value": value, "author_kind": a.author.kind,
                 "model_version": version, "model_id": a.author.model,
                 "campaign_id": a.campaign, "why": a.why, "staged": stage,
             })),
@@ -1800,7 +1807,7 @@ fn reached(store: &mut Store, staged: &[&Staged]) -> Result<BTreeMap<i64, Vec<i6
 }
 
 /// [`reached`], by (decision id, scope, ref).
-fn reached_keys(
+pub(crate) fn reached_keys(
     store: &mut Store,
     staged: &[(i64, &str, &str)],
 ) -> Result<BTreeMap<i64, Vec<i64>>, StoreError> {
@@ -1898,9 +1905,41 @@ pub fn holds_now(
         crate::labels::Error::Store(s) => Error::Store(s),
         other => refused(other.to_string()),
     })?;
+    // a decision that is not a person's may have given way, at the stack's
+    // last sort, to a person's on the other of two axes that say one thing
+    // at two grains ([`crate::coarse`]): the axis then holds what the sort
+    // wrote, the value folded from the person's answer or nothing
+    let mut lower: Vec<i64> = Vec::new();
     for l in decided {
         if let Some(stack) = l.stack_id {
             out.insert(stack, value_set(l.value.as_deref()));
+            if l.author_kind != "person" {
+                lower.push(stack);
+            }
+        }
+    }
+    let aside = crate::coarse::set_aside(store, &lower)?;
+    for chunk in lower.chunks(500) {
+        let sql = format!(
+            "SELECT stack_id, value FROM {} WHERE axis = {} AND tier = '{}' AND stack_id IN ({})",
+            store.qualified("classification_axis"),
+            store.dialect().param(1, Type::Text),
+            crate::coarse::FOLDED,
+            id_list(chunk)
+        );
+        let mut folded: BTreeMap<i64, Vec<String>> = BTreeMap::new();
+        for r in store.query(&sql, &[Param::from(axis)])? {
+            folded
+                .entry(r.int(0)?)
+                .or_default()
+                .extend(value_set(r.opt_text(1)?));
+        }
+        for s in chunk {
+            if let Some(v) = folded.remove(s) {
+                out.insert(*s, v);
+            } else if aside.get(s).is_some_and(|a| a.contains(axis)) {
+                out.insert(*s, Vec::new());
+            }
         }
     }
     let rest: Vec<i64> = stacks

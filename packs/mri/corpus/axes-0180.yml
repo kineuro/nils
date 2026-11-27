@@ -270,7 +270,7 @@ cases:
     flags:
       has_se: false
     axes:
-      technique: DWI-EPI
+      technique: DWIEPI
 
   # --- A7: a base the words and the echo time tell
 
@@ -331,8 +331,8 @@ cases:
       n_instances: 30
       n_slices: 30
     axes:
-      technique: GRE-EPI
-      base: T2*w
+      technique: GREEPI
+      base: T2starw
 
   # --- A8, case 23: GE's MRF_GEMS alone is no fingerprinting
 
@@ -378,7 +378,7 @@ cases:
       echo_time: 80
     axes:
       provenance: DTIRecon
-      technique: DWI-EPI
+      technique: DWIEPI
       construct: FA
       base: DWI
 
@@ -396,7 +396,7 @@ cases:
       has_gre: false
     axes:
       provenance: RawRecon
-      technique: DWI-EPI
+      technique: DWIEPI
       base: DWI
 
   - name: a GE header with ScanningSequence GE and named ScanOptions stays a gradient echo
@@ -425,7 +425,7 @@ cases:
       inversion_time: 2400
     axes:
       provenance: EPIMix
-      technique: SE-EPI
+      technique: SEEPI
       modifier: FLAIR
       base: T2w
 
@@ -442,7 +442,7 @@ cases:
       inversion_time: 2400
     axes:
       provenance: NeuroMix
-      technique: HASTE
+      technique: SSTSE
 
   - name: an EPIMix ADC is a diffusion EPI's map
     stack:
@@ -453,7 +453,7 @@ cases:
       text_series_description: 'EPIMix ADC'
     axes:
       provenance: EPIMix
-      technique: DWI-EPI
+      technique: DWIEPI
       construct: ADC
       base: DWI
 
@@ -469,7 +469,7 @@ cases:
       echo_time: 90
     axes:
       provenance: EPIMix
-      technique: SE-EPI
+      technique: SEEPI
       base: T2w
 
   # --- A11: names read as what they do not mean
@@ -595,8 +595,8 @@ cases:
       n_instances: 30
       n_slices: 30
     axes:
-      technique: GRE-EPI
-      base: T2*w
+      technique: GREEPI
+      base: T2starw
 
   - name: a gradient-echo EPI that states a b value is no diffusion
     stack:
@@ -613,8 +613,8 @@ cases:
       n_instances: 30
       n_slices: 30
     axes:
-      technique: GRE-EPI
-      base: T2*w
+      technique: GREEPI
+      base: T2starw
 
   - name: a Philips FFE named T2-weighted at an echo time of 10 ms is T2*-weighted
     stack:
@@ -628,7 +628,7 @@ cases:
       echo_time: 10
       flip_angle: 18
     axes:
-      base: T2*w
+      base: T2starw
 
   # --- 0.18.1: a position display's name is the name of the series it plans
 
@@ -683,7 +683,7 @@ cases:
     flags:
       is_t2_named_gre: true
     axes:
-      base: T2*w
+      base: T2starw
 
   # --- A13, case 26: GE FLEX is Dixon
 
@@ -784,7 +784,7 @@ cases:
       diffusion_b_value: 1000
     axes:
       provenance: RawRecon
-      technique: RESOLVE
+      technique: rsEPI
       construct: eADC
       base: DWI
 
@@ -803,7 +803,7 @@ cases:
       echo_train_length: 53
     axes:
       provenance: RawRecon
-      technique: DWI-EPI
+      technique: DWIEPI
       construct: Trace
       base: DWI
 
@@ -837,7 +837,7 @@ cases:
       echo_time: 6
       flip_angle: 15
     axes:
-      technique: GRE-EPI
+      technique: GREEPI
       base: T1w
 
   - name: a GE TRICKS is a contrast-enhanced angiography
@@ -853,7 +853,7 @@ cases:
       echo_time: 1.3
       flip_angle: 30
     axes:
-      technique: CE-MRA
+      technique: CEMRA
       base: T1w
 
   - name: a GE 2D gradient echo named SPGR with FAST_GEMS is a fast spoiled gradient echo
@@ -870,7 +870,7 @@ cases:
       echo_time: 4
       flip_angle: 70
     axes:
-      technique: TurboFLASH
+      technique: FSPGRE
 
   - name: a GE fast unspoiled gradient echo SS and SK with FAST_GEMS is SS-GRE
     stack:
@@ -885,7 +885,7 @@ cases:
       echo_time: 2
       flip_angle: 30
     axes:
-      technique: FISP
+      technique: SSFPFID
 
   - name: a GE MEMP of one echo is a spin echo, not a multi-echo one
     stack:
@@ -917,7 +917,7 @@ cases:
       repetition_time: 5000
       echo_time: 2
     axes:
-      technique: TurboFLASH
+      technique: FSPGRE
       construct: 'B1map,ND'
       base: ''
 
@@ -936,7 +936,7 @@ cases:
       echo_train_length: 53
       pixel_bandwidth: 2000
     axes:
-      technique: DWI-EPI
+      technique: DWIEPI
       base: DWI
 
   # --- A18, case 28: localizers
@@ -998,7 +998,7 @@ cases:
       flip_angle: 15
     axes:
       provenance: RawRecon
-      base: T2*w
+      base: T2starw
 
   - name: a GE Silent MRA written with the ASL token is no ASL M0 scan
     stack:
@@ -1055,7 +1055,7 @@ cases:
       echo_time: 60
       flip_angle: 180
     axes:
-      technique: SE-EPI
+      technique: SEEPI
 
   - name: a Siemens epir written GR is a spin-echo EPI with its inversion
     stack:
@@ -1071,7 +1071,7 @@ cases:
       inversion_time: 2500
       flip_angle: 180
     axes:
-      technique: SE-EPI
+      technique: SEEPI
       modifier: FLAIR
 
   - name: a Siemens epfid written SE is a gradient-echo EPI
@@ -1088,7 +1088,7 @@ cases:
       n_instances: 30
       n_slices: 30
     axes:
-      technique: GRE-EPI
+      technique: GREEPI
 
   # --- case 2: GE VASCTOF_GEMS
 
@@ -1106,7 +1106,7 @@ cases:
       echo_time: 1.5
       flip_angle: 30
     axes:
-      technique: CE-MRA
+      technique: CEMRA
 
   - name: a GE sagittal 3D SPGR with VASCTOF_GEMS is no TOF
     stack:
@@ -1121,7 +1121,7 @@ cases:
       echo_time: 4
       flip_angle: 20
     axes:
-      technique: FLASH
+      technique: SPGRE
 
   - name: a GE TOF with VASCTOF_GEMS stays TOF
     stack:
@@ -1169,7 +1169,7 @@ cases:
       echo_time: 3
       flip_angle: 50
     axes:
-      technique: FIESTA
+      technique: bSSFP
 
   - name: a Siemens CISS stays CISS
     stack:
@@ -1181,7 +1181,7 @@ cases:
       text_series_description: 't2_ci3d_tra'
       text_sequence_name: '*ci3d1'
     axes:
-      technique: CISS
+      technique: pcbSSFP
 
   # --- case 6: a diffusion SBRef
 
@@ -1218,7 +1218,7 @@ cases:
       n_slices: 20
     axes:
       technique: Perfusion
-      base: T2*w
+      base: T2starw
 
   - name: a Siemens DSC run of 50 volumes stays perfusion-weighted
     stack:
@@ -1251,7 +1251,7 @@ cases:
       echo_time: 2.2
       flip_angle: 55
     axes:
-      technique: CISS
+      technique: pcbSSFP
       base: T2w
 
   - name: a GE FIESTA named COR is no FIESTA-C
@@ -1268,7 +1268,7 @@ cases:
       echo_time: 2.2
       flip_angle: 55
     axes:
-      technique: FIESTA
+      technique: bSSFP
 
   # --- case 14: Philips MAXIMUM
 
@@ -1324,7 +1324,7 @@ cases:
       inversion_time: 840
       echo_train_length: 9
     axes:
-      technique: TIRM
+      technique: IRTSE
       modifier: FLAIR
       base: T1w
 
@@ -1342,7 +1342,7 @@ cases:
       inversion_time: 840
       echo_train_length: 9
     axes:
-      technique: TIRM
+      technique: IRTSE
       modifier: IR
       base: T1w
 
@@ -1428,4 +1428,4 @@ cases:
       echo_time: 2.2
       flip_angle: 55
     axes:
-      technique: FIESTA
+      technique: bSSFP

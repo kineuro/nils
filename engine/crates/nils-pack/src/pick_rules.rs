@@ -166,6 +166,46 @@ pub struct RoleRules {
     pub slice_thickness_at_most_mm: Option<f64>,
 }
 
+impl RoleRules {
+    /// These rules with each kind key's technique written as a row stores
+    /// it. A key saved when the pack stored another spelling (`2D TIRM`)
+    /// then names the kind a candidate has now (`2D IRTSE`); a technique
+    /// that names no value of the axis stays as written, and a key that two
+    /// spellings make one is kept once, at its first place.
+    pub fn stored(&self, model: &Model) -> RoleRules {
+        let mut r = self.clone();
+        r.kinds_in_order = stored_keys(model, &self.kinds_in_order);
+        r.not_used = stored_keys(model, &self.not_used);
+        r
+    }
+}
+
+/// One kind key by the stored word of its technique.
+pub fn stored_key(model: &Model, key: &str) -> String {
+    let (d, contrast, t) = parts_of(key);
+    let t = model.stored("technique", t);
+    let mut out = if d.is_empty() {
+        t.to_string()
+    } else {
+        format!("{d} {t}")
+    };
+    if contrast {
+        out.push_str(CONTRAST);
+    }
+    out
+}
+
+fn stored_keys(model: &Model, keys: &[String]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::with_capacity(keys.len());
+    for k in keys {
+        let k = stored_key(model, k);
+        if !out.contains(&k) {
+            out.push(k);
+        }
+    }
+    out
+}
+
 /// The five weights of the score within a kind, by the components they
 /// weigh (`slices`, `fov`, `mod`, `orient`, `complete`).
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -302,6 +342,19 @@ impl Rules {
     /// The rules of one role.
     pub fn role(&self, role: &str) -> Option<&RoleRules> {
         self.roles.iter().find(|(r, _)| r == role).map(|(_, x)| x)
+    }
+
+    /// These rules with every kind key written by the form a row stores for
+    /// its technique ([`RoleRules::stored`]).
+    pub fn stored(&self, model: &Model) -> Rules {
+        Rules {
+            roles: self
+                .roles
+                .iter()
+                .map(|(n, r)| (n.clone(), r.stored(model)))
+                .collect(),
+            within: self.within.clone(),
+        }
     }
 
     /// Read and check a document (section 1, "checked on save"). What it
@@ -767,9 +820,12 @@ pub fn dimension_of(c: &Candidate) -> &str {
         .unwrap_or("")
 }
 
-/// Whether a candidate's contrast was given: the post-contrast axis `1`.
+/// Whether a candidate's contrast was given: the post-contrast axis
+/// `given`, or `1` as a pack before 1.5 stored it. A candidate's values
+/// are read in the stored form of the pack that scores them
+/// ([`crate::pick::Model::stored`]), which is one or the other.
 pub fn contrast_given(c: &Candidate) -> bool {
-    holds(c.get("post_contrast"), "1")
+    holds(c.get("post_contrast"), "given") || holds(c.get("post_contrast"), "1")
 }
 
 /// A candidate's kind (section 2): its dimension, its technique and its
@@ -885,6 +941,7 @@ pub struct KindOrder {
 
 impl KindOrder {
     pub fn new(model: &Model, role: &str, rules: &RoleRules) -> KindOrder {
+        let rules = rules.stored(model);
         KindOrder {
             named: rules
                 .kinds_in_order
@@ -939,14 +996,29 @@ pub fn kind_allowed(r: &RoleRules, kind: &str) -> bool {
 /// Whether a candidate of a kind is allowed by a role's rules: its kind, and
 /// its body part and slice thickness. A thickness nothing recorded is not
 /// over a limit, because an absence is not a measurement.
-pub fn allowed(r: &RoleRules, c: &Candidate, kind: &str) -> bool {
+pub fn allowed(model: &Model, r: &RoleRules, c: &Candidate, kind: &str) -> bool {
     if !kind_allowed(r, kind) {
         return false;
     }
     if r.body_part == BodyPart::Brain {
         let part = c.get("body_part").trim();
-        if !part.is_empty() && !holds(part, "brain") && !holds(part, "brain-neck") {
-            return false;
+        if !part.is_empty() {
+            if !holds(part, "brain") && !holds(part, "brain-neck") {
+                return false;
+            }
+        } else {
+            // No body part: a stack whose body part was set aside by a
+            // decided region has none, and nobody said "not a head" in it.
+            // Where the pack declares a coarse form of the body part and
+            // the stack holds a value on it, that value has to cover a
+            // brain; with neither, nobody said and the stack is admitted.
+            let wanted = [
+                model.stored("body_part", "brain"),
+                model.stored("body_part", "brain-neck"),
+            ];
+            if model.coarse_covers("body_part", c, &wanted) == Some(false) {
+                return false;
+            }
         }
     }
     if let Some(limit) = r.slice_thickness_at_most_mm
@@ -1000,6 +1072,8 @@ struct Take {
 #[derive(Debug, Clone)]
 pub struct Chooser<'a> {
     pub rules: &'a Rules,
+    /// The same rules with each kind key's technique in the stored form.
+    kept: Rules,
     pub model: &'a Model,
     /// The pick model with the rules' weights, `dim`, `tech` and `share` at
     /// nought and no penalty: the score within a kind.
@@ -1024,6 +1098,7 @@ impl<'a> Chooser<'a> {
         scoring.penalty = None;
         Chooser {
             rules,
+            kept: rules.stored(model),
             model,
             scoring,
             partial_below: model
@@ -1052,7 +1127,7 @@ impl<'a> Chooser<'a> {
         visits: &[Vec<Candidate>],
         reference: Option<&Reference>,
     ) -> Vec<Chosen> {
-        let (Some(r), Some(order)) = (self.rules.role(role), self.order(role)) else {
+        let (Some(r), Some(order)) = (self.kept.role(role), self.order(role)) else {
             return visits.iter().map(|_| Chosen::default()).collect();
         };
         let mut out: Vec<Chosen> = Vec::with_capacity(visits.len());
@@ -1065,7 +1140,7 @@ impl<'a> Chooser<'a> {
                 if !held.contains(&kind) {
                     held.push(kind.clone());
                 }
-                if !allowed(r, c, &kind) {
+                if !allowed(self.model, r, c, &kind) {
                     continue;
                 }
                 for (part, moment) in takes_apart(c) {
@@ -1498,6 +1573,8 @@ mod tests {
             families: Vec::new(),
             candidates: BTreeMap::new(),
             near_tie: Vec::new(),
+            spellings: BTreeMap::new(),
+            coarse: Vec::new(),
         }
     }
 
@@ -1624,6 +1701,16 @@ mod tests {
             "2D TSE +C"
         );
         assert_eq!(c(&[("post_contrast", "0")]), "Unknown");
+        // the contrast by the word a row stores, and by the digit a pack
+        // before 1.5 stored: one value, one kind
+        assert_eq!(
+            c(&[("technique", "TSE"), ("post_contrast", "given")]),
+            c(&[("technique", "TSE"), ("post_contrast", "1")])
+        );
+        assert_eq!(
+            c(&[("technique", "TSE"), ("post_contrast", "not_given")]),
+            c(&[("technique", "TSE"), ("post_contrast", "0")])
+        );
         assert_eq!(parts_of("2D TSE +C"), ("2D", true, "TSE"));
         assert_eq!(parts_of("Unknown"), ("", false, "Unknown"));
     }

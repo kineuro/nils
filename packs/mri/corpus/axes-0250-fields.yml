@@ -27,7 +27,7 @@ cases:
     flags:
       philips_tfe_no_prepulse: true
     axes:
-      technique: TurboFLASH
+      technique: FSPGRE
 
   - name: a Philips 3D TFE without MP whose Prepulse Type is INV is an MPRAGE
     stack:
@@ -66,7 +66,7 @@ cases:
     flags:
       philips_tfe_cant_tell: false
     axes:
-      technique: TurboFLASH
+      technique: FSPGRE
 
   # --- AngioFlag
 
@@ -162,7 +162,7 @@ cases:
       echo_time: 8
       flip_angle: 15
     axes:
-      base: T2*w
+      base: T2starw
 
   - name: guard, an inversion in the STIR window stating Acquisition Contrast T1 stays T2-weighted
     stack:

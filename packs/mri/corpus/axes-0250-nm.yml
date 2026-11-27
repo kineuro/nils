@@ -236,7 +236,7 @@ cases:
     flags:
       siemens_stir_named_without_inversion: false
     axes:
-      technique: TIRM
+      technique: IRTSE
       modifier: STIR
 
   - name: a SPACE inversion recovery reformat at a short TI is STIR by its stem
@@ -384,7 +384,7 @@ cases:
     flags:
       siemens_pulse_tse_restore: true
     axes:
-      technique: RESTORE
+      technique: DETSE
 
   - name: a Siemens pre-turbo dual-echo spin echo split by echo is ME-SE
     stack:

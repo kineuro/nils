@@ -526,6 +526,42 @@ and exclusion belong to the axis, not to the rule set that produced a value,
 because they are facts about what the axis means. The result is sorted and
 de-duplicated before it is stored, as v0 does.
 
+A value may say what it is for a person: `description`, a line, and `terms`,
+other words it goes by (vendors' names, spellings, a radiologist's words). No
+rule reads either, so neither moves a stack; a reader's search, a rater's
+prompt and the ask's catalog show them.
+
+**An axis may be the coarse form of another.** Where a pack holds one fact at
+two grains, the coarse axis's file says so, and each of its values says which
+values of the finer axis it covers:
+
+```yaml
+axis: body_region
+kind: single
+coarse_of: body_part                      # an axis declared before this one
+values:
+  head:  {covers: [brain, brain-neck]}    # values of body_part, by identity
+  spine: {covers: [spine, neck]}
+```
+
+The two keys decide nothing the rules decide: the rule set that folds the fine
+answer into the coarse one does. They say the relation where a person, or a
+model, drafting a question can read it, and the loader holds them to the rules
+so the two cannot drift. They are also what the sort holds a stack to where a
+decision stands on one of the two axes (§8.3). A pack is refused where `coarse_of` names no axis declared
+before this one, where a covered value is no value of that axis (an identity
+it had before a rename names it), where a value is covered twice, where
+`covers` is written without `coarse_of` or `coarse_of` without any `covers`,
+where the rules do not decide the coarse axis from the fine one alone (any
+rule that writes the coarse axis and reads a flag, a field or a text of the
+file, or another axis than the fine one, at whatever tier), and where, for any
+value of the fine axis, the rules decide another coarse value than the one
+declared to cover it, or one where none is declared, or none where one is.
+The last check is the pack's own evaluation, the one that carries a rater's
+answer through the rules (`nils pack derive`): each fine value in turn is
+given as the answer over a stack that says nothing else. A pack without the
+keys loads as before, and an engine that does not know them ignores them.
+
 ### 6.4 Text and its normalization
 
 Keywords are matched against a blob the **pack** builds from the folded text of
@@ -928,6 +964,91 @@ v0 protects exactly one axis this way (body part, through a committed profile in
 the application database) and lets the next sort revert everything else. That is
 the behaviour C15 was written against, and the gate will show it as a class of
 difference: stacks where v0 reverted a human and v1 did not.
+
+**Two grains of one answer.** Where the pack declares one axis the coarse form
+of another (§6.3, `coarse_of`), the rules fold their own answer of the finer
+axis into the coarse one, and a decision arrives after they ran. Left there, a
+value the rules read off a word in the header stands beside a committed coarse
+value that does not cover it, and a committed value of the finer axis leaves
+the coarse one at what the header's word folded to. A committed answer is the
+point of committing, so the sort holds a stack's two rows to the declaration
+wherever a decision is in force on one of them, for every such pair of axes of
+the class phase that hold one value each:
+
+| the finer axis | the coarse axis | what the sort writes |
+|---|---|---|
+| the rules' value, or none | the rules' value, or none | both as the rules decided them |
+| the rules' value | a decision that covers it | both as they are |
+| the rules' value | a decision that does not cover it | no value on the finer axis; the decision on the coarse one |
+| a decision | no decision | the decision; the coarse value that covers it, tier `folded`, confidence 1.0 |
+| a decision | a decision that covers it | both as they are |
+| a decision | a decision of higher standing that does not cover it | the coarse decision; no value on the finer axis, whose decision is set aside as a rule's value is |
+| a decision of higher standing | a decision that does not cover it | the finer decision; the coarse value that covers it, tier `folded`, as where the coarse axis had no decision |
+| a decision | a decision of the same standing that does not cover it | both as they are, and counted |
+
+Standing is what ranks two decisions on one axis (C15): a person's over an
+agent's over a model's. It ranks them across the two axes as well, so a
+person who corrects one axis is not left beside a model's answer on the other
+that says otherwise. Two people, or two models, who do not agree are both left.
+
+- **Set aside.** The finer axis is left with no row, which is what an axis
+  holds where no rule answered it: a row with no value is an axis decided to
+  nothing, and nothing decided that here. The rules' evidence stays, a row
+  beside it says which decision set the value aside (tier `set_aside`, rule
+  set `coarse_of`, the coarse axis as its rule and its source, and the
+  author of that decision in the row's author columns, as a decision's own
+  row names its author), and the classification's notes list it
+  (`set_aside`: the axis, the value, its tier and confidence, and under `by`
+  the axis and value that set it aside with who decided them, `who` and
+  `kind`), since the axis has no row left to show it on. Where a decision
+  of lower standing gave way, it is not applied: no row and no evidence row
+  of its own is written for it, the mark cites it ("small was decided and
+  does not cover c, which <who> (model) decided") and the note names its
+  author under `decided_by`. It is no question, a missing one included: the
+  rules answered, and the answer lost to a committed one. The evidence row
+  of tier `set_aside` is the mark every reader tells "set aside" from
+  "nobody said" by (`nils_registry::coarse::set_aside`).
+- **Folded.** The coarse row is the value declared to cover the decided one,
+  whatever the rules' own finer value folded to, and no row where no value
+  covers it. Its confidence is a decision's, 1.0: a fold adds no doubt to the
+  answer it folds, and the confidence a folding rule states is that of a word
+  in the header, which is not what was folded here. Its tier is `folded` and
+  not `decision`, because no decision was made on this axis and a door that
+  looks for one would find none. The evidence row (tier `folded`, rule set
+  `coarse_of`, the finer axis as its rule and its source) names the value it
+  was folded from and, in its author columns, who decided that value, the
+  model where a model did; where the fold stands over a decision of lower
+  standing on the coarse axis it cites that one too. The rules' own evidence
+  stays beside it. A folded value is a decision's and never the rules':
+  whatever tells "the rules said this" from "someone decided this" reads
+  the tier through one function (`nils_registry::coarse::decided`), so the
+  origins and reader doors say who decided and what it was folded from, and
+  System 1's gate, the audit frame and a question's rules in view do not
+  take it for a rule's answer. A coarse axis the rules said nothing of,
+  folded to a value or to none where no value covers the decided one, is
+  never asked about as missing.
+- **Apart.** Two decisions of one standing that do not agree are both
+  somebody's committed answer. The sort takes no side and asks nothing;
+  `nils status` counts the stacks, by coarse axis, for the people who decided.
+
+A decision that an axis holds nothing, or whose text names no value of its
+axis, moves nothing on the other axis. A stack with no decision on either axis
+is sorted as the rules alone sort it, and so is every stack under a pack that
+declares no coarse form. Where a pack stacks three grains, a value folded from
+the finest is read as committed by the form above it, with the standing of the
+decision it was folded from: the fold runs up, and a decision on the top grain
+is held against it as against a decision. Setting aside does not run down: a
+decided top value that does not cover the rules' middle value sets that aside
+and leaves the finest axis as the rules decided it. Where two coarse axes fold
+one finer axis and a decision on one of them set the rules' finer value aside,
+the other coarse axis does not keep what the rules folded from that value: it
+is set aside with it, unless it has a decision of its own. A withdrawn
+decision gives the rows back at the next sort, a decision at any scope (stack,
+group, series, subject, origin) holds the stacks it reaches, and a staged
+answer nobody committed moves nothing. The rehearsal of a rule
+change (`nils_classify::effect`) reads the same table, from the one function
+the sort reads (`nils_classify::coarse::held`), and the sort's report counts
+what it did (`coarse`: `<axis>:set_aside`, `<axis>:folded`, `<axis>:apart`).
 
 ## 9. The pipeline
 

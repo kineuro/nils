@@ -448,7 +448,15 @@ fn the_sessions_of_v0_s_nine_reasons_ask_nothing_on_postgres_too() {
 /// Record 51: v0's MP2RAGE preference. A session of an MP2RAGE's four
 /// images is one candidate, its denoised uniform image, and no retake; a
 /// session that ran it three times is.
+///
+/// The rows hold the denoised uniform image as the rules write it: by the
+/// word the pack stores for the construct (`Denoised`), not by its identity
+/// (`UniformDenoised`), which is how the pick file names it. Planted by the
+/// identity, as this test once did, the family's first choice met the rows
+/// only here and never in a registry the rules had sorted.
 fn mp2rage(home: &Home) {
+    /// What a row stores for the construct `UniformDenoised`.
+    const DENOISED: &str = "Denoised";
     let p = packs();
     let mut store = home.store();
     let subjects = first_studies(&mut store);
@@ -466,7 +474,7 @@ fn mp2rage(home: &Home) {
             of("INV1", "176"),
             of("INV2", "176"),
             of("Uniform", "176"),
-            of("UniformDenoised", "176"),
+            of(DENOISED, "176"),
         ],
     );
     let denoised = ids[3];
@@ -475,15 +483,15 @@ fn mp2rage(home: &Home) {
         &mut store,
         ids3,
         &[
-            of("UniformDenoised", "176"),
-            of("UniformDenoised", "176"),
-            of("UniformDenoised", "176"),
+            of(DENOISED, "176"),
+            of(DENOISED, "176"),
+            of(DENOISED, "176"),
             of("INV2", "176"),
         ],
     );
     // A population of MP2RAGE sessions beside them.
     for (_, ids) in &subjects[2..14] {
-        plant(&mut store, &ids[..1], &[of("UniformDenoised", "176")]);
+        plant(&mut store, &ids[..1], &[of(DENOISED, "176")]);
     }
     home.json(&["pick", "run", "--pack-dir", &p, "--json"]);
     // The run's pick of a subject's occasion: its stacks and its borders.

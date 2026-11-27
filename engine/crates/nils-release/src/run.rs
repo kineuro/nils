@@ -6158,7 +6158,7 @@ pub fn name_of(
             .axes
             .iter()
             .find(|x| x.name == axis)
-            .and_then(|x| x.id_of_stored(stored))
+            .and_then(|x| x.id_of(stored))
             .map(str::to_string)
     };
     let ids_of = |axis: &str, stored: Option<&str>| -> Vec<String> {
@@ -6181,7 +6181,7 @@ pub fn name_of(
                 .as_deref()
                 == Some("given")
         }
-        None => get("post_contrast") == Some("1"),
+        None => matches!(get("post_contrast"), Some("given") | Some("1")),
     };
     // the folder of its own the pack gives it under `anat/` (record 55 C4):
     // SyMRI's, which holds its acquisition too, told by its technique
@@ -6455,7 +6455,7 @@ fn places(
             pack.axes
                 .iter()
                 .find(|x| x.name == axis)
-                .and_then(|x| x.id_of_stored(stored))
+                .and_then(|x| x.id_of(stored))
                 .map(str::to_string)
         };
         let ids_of = |axis: &str, stored: Option<&str>| -> Vec<String> {
@@ -7556,7 +7556,7 @@ pub(crate) fn name_words(
     );
     let provenance = a.get("provenance").map(|v| {
         pack.and_then(|p| p.axes.iter().find(|x| x.name == "provenance"))
-            .and_then(|x| x.id_of_stored(v))
+            .and_then(|x| x.id_of(v))
             .map_or_else(|| v.clone(), str::to_string)
     });
     let family = crate::family::spelled(
@@ -8201,6 +8201,74 @@ mod tests {
         // with no pack served nothing knows SyMRI's folder by its technique
         let n = name_of(None, &acquisition, &facts);
         assert_eq!((n.datatype, n.folder.as_str()), ("other", "anat"));
+    }
+
+    /// One spelling of a value in a row, and every spelling read as the
+    /// value: a scan is named the same whichever name of a value its rows
+    /// hold, the descriptive name and the BIDS name alike. A decision that
+    /// held the identity `given` lost its contrast entity before.
+    #[test]
+    fn a_scan_is_named_the_same_whichever_spelling_its_rows_hold() {
+        let facts = nils_classify::effect::NameFacts {
+            orientation: Some("SAGITTAL".into()),
+            mr_acquisition_type: Some("3D".into()),
+            ..Default::default()
+        };
+        let named = |base: &str, technique: &str, contrast: &str| {
+            let n = name_of(
+                Some(mri()),
+                &stored(&[
+                    ("provenance", "RawRecon"),
+                    ("base", base),
+                    ("technique", technique),
+                    ("post_contrast", contrast),
+                    ("directory_type", "anat"),
+                    ("disposition", "acquisition"),
+                ]),
+                &facts,
+            );
+            (n.name, n.bids, n.folder)
+        };
+        // every name of every value of the three axes a name reads here
+        let names_of = |axis: &str| -> Vec<Vec<String>> {
+            let a = mri().axis(axis).unwrap();
+            a.values
+                .iter()
+                .map(|v| {
+                    a.names()
+                        .into_iter()
+                        .filter(|(_, _, id)| *id == v.id)
+                        .map(|(text, _, _)| text)
+                        .collect()
+                })
+                .collect()
+        };
+        for names in names_of("post_contrast") {
+            let first = named("T1w", "MPRAGE", &names[0]);
+            for other in &names[1..] {
+                assert_eq!(named("T1w", "MPRAGE", other), first, "{other}");
+            }
+        }
+        for names in names_of("technique") {
+            let first = named("T1w", &names[0], "given");
+            for other in &names[1..] {
+                assert_eq!(named("T1w", other, "given"), first, "{other}");
+            }
+        }
+        for names in names_of("base") {
+            let first = named(&names[0], "GRE", "not_given");
+            for other in &names[1..] {
+                assert_eq!(named(other, "GRE", "not_given"), first, "{other}");
+            }
+        }
+        // and the contrast is in the name by either spelling
+        let (given, bids, _) = named("T1w", "MPRAGE", "given");
+        let (not_given, _, _) = named("T1w", "MPRAGE", "not_given");
+        assert_ne!(given, not_given);
+        assert!(given.contains("CE"), "{given}");
+        assert!(bids.is_some_and(|b| b.contains("ce-")), "the BIDS name too");
+        assert_eq!(named("T1w", "MPRAGE", "1").0, given);
+        assert_eq!(named("T1w", "MPRAGE", "0").0, not_given);
     }
 
     fn state(place: Place, extensions: &[&str]) -> State {

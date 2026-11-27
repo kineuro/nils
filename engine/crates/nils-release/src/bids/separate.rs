@@ -406,6 +406,7 @@ mod tests {
                 tokens: [("Distorted".to_string(), "Distorted".to_string())]
                     .into_iter()
                     .collect(),
+                own_words: None,
             }],
             ..Mapping::default()
         }

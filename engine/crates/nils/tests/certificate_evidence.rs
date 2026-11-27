@@ -751,7 +751,7 @@ fn flow(pg: Option<(String, String)>) {
     let (decision, at, value, committed, withdrawn) = staged[0].clone();
     assert_eq!(
         (at.as_str(), value.as_deref(), committed, withdrawn),
-        (bare_d.to_string().as_str(), Some("T2*w"), false, false),
+        (bare_d.to_string().as_str(), Some("T2starw"), false, false),
         "{staged:?}"
     );
     assert_eq!(

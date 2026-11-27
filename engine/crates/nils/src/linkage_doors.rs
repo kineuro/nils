@@ -424,6 +424,16 @@ fn imports(
         registry
             .refresh_meta()
             .map_err(|e| Reply::error(500, e.to_string()))?;
+        // a map that merged subjects dropped their sessions: built again
+        // here, as after `nils linkage merge`. The map is applied either
+        // way; what a build leaves undone the next question builds
+        if report.written()
+            && !report.merges.is_empty()
+            && let Err(e) = crate::session_schemes::rebuild_after_merges(registry, &report.merges)
+        {
+            // said in the service's log, as the command line says it
+            eprintln!("nils: the merged subjects' sessions were not built again: {e}");
+        }
         let mut answer = report.as_json();
         answer["job"] = serde_json::Value::Null;
         answer["state"] = serde_json::json!(if report.conflicts.is_empty() {

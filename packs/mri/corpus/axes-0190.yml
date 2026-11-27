@@ -14,11 +14,11 @@ cases:
 
   - name: an enhanced spin echo with EPI is SE-EPI
     stack: {image_type: 'ORIGINAL\PRIMARY\M\NONE', mr_acquisition_type: 2D, manufacturer: Philips, echo_pulse_sequence: SPIN, echo_planar_pulse_sequence: 'YES', multiple_spin_echo: 'NO', repetition_time: 3000, echo_time: 80, flip_angle: 90}
-    axes: {technique: SE-EPI}
+    axes: {technique: SEEPI}
 
   - name: an enhanced gradient echo with EPI is GRE-EPI
     stack: {image_type: 'ORIGINAL\PRIMARY\M\NONE', mr_acquisition_type: 2D, manufacturer: Philips, echo_pulse_sequence: GRADIENT, echo_planar_pulse_sequence: 'YES', repetition_time: 2000, echo_time: 30, flip_angle: 75}
-    axes: {technique: GRE-EPI}
+    axes: {technique: GREEPI}
 
   - name: an enhanced object with both echoes and EPI is GRASE
     stack: {image_type: 'ORIGINAL\PRIMARY\M\NONE', mr_acquisition_type: 3D, manufacturer: Philips, echo_pulse_sequence: BOTH, echo_planar_pulse_sequence: 'YES', repetition_time: 4000, echo_time: 20, flip_angle: 90}
@@ -26,7 +26,7 @@ cases:
 
   - name: an enhanced single-shot spin echo train is SS-TSE
     stack: {image_type: 'ORIGINAL\PRIMARY\M\NONE', mr_acquisition_type: 2D, manufacturer: Philips, echo_pulse_sequence: SPIN, multiple_spin_echo: 'YES', echo_planar_pulse_sequence: 'NO', segmented_k_space_traversal: FULL, repetition_time: 1000, echo_time: 90, flip_angle: 90, echo_train_length: 120}
-    axes: {technique: HASTE}
+    axes: {technique: SSTSE}
 
   - name: an enhanced 3D spin echo train is 3D-TSE
     stack: {image_type: 'ORIGINAL\PRIMARY\M\NONE', mr_acquisition_type: 3D, manufacturer: Philips, echo_pulse_sequence: SPIN, multiple_spin_echo: 'YES', echo_planar_pulse_sequence: 'NO', segmented_k_space_traversal: PARTIAL, repetition_time: 2500, echo_time: 250, flip_angle: 90, echo_train_length: 150}
@@ -42,19 +42,19 @@ cases:
 
   - name: an enhanced gradient echo in free precession is bSSFP
     stack: {image_type: 'ORIGINAL\PRIMARY\M\NONE', mr_acquisition_type: 3D, manufacturer: Philips, echo_pulse_sequence: GRADIENT, echo_planar_pulse_sequence: 'NO', steady_state_pulse_sequence: FREE_PRECESSION, repetition_time: 5, echo_time: 2.5, flip_angle: 50}
-    axes: {technique: FIESTA}
+    axes: {technique: bSSFP}
 
   - name: an enhanced transverse steady state is SS-GRE
     stack: {image_type: 'ORIGINAL\PRIMARY\M\NONE', mr_acquisition_type: 2D, manufacturer: Philips, echo_pulse_sequence: GRADIENT, echo_planar_pulse_sequence: 'NO', steady_state_pulse_sequence: TRANSVERSE, repetition_time: 20, echo_time: 5, flip_angle: 30}
-    axes: {technique: FISP}
+    axes: {technique: SSFPFID}
 
   - name: an enhanced time-reversed steady state is SSFP
     stack: {image_type: 'ORIGINAL\PRIMARY\M\NONE', mr_acquisition_type: 3D, manufacturer: Philips, echo_pulse_sequence: GRADIENT, echo_planar_pulse_sequence: 'NO', steady_state_pulse_sequence: TIME_REVERSED, repetition_time: 10, echo_time: 5, flip_angle: 30}
-    axes: {technique: PSIF}
+    axes: {technique: SSFPecho}
 
   - name: an enhanced spoiled gradient echo is SP-GRE
     stack: {image_type: 'ORIGINAL\PRIMARY\M\NONE', mr_acquisition_type: 3D, manufacturer: Philips, echo_pulse_sequence: GRADIENT, echo_planar_pulse_sequence: 'NO', steady_state_pulse_sequence: LONGITUDINAL, spoiling: RF_AND_GRADIENT, repetition_time: 8, echo_time: 4, flip_angle: 8}
-    axes: {technique: FLASH}
+    axes: {technique: SPGRE}
 
   - name: an enhanced time of flight is TOF-MRA
     stack: {image_type: 'ORIGINAL\PRIMARY\M\NONE', mr_acquisition_type: 3D, manufacturer: Philips, echo_pulse_sequence: GRADIENT, echo_planar_pulse_sequence: 'NO', time_of_flight_contrast: 'YES', steady_state_pulse_sequence: LONGITUDINAL, repetition_time: 23, echo_time: 3.5, flip_angle: 18}
@@ -89,7 +89,7 @@ cases:
   - name: a classic image with ScanningSequence reads as before, the module being absent
     stack: {image_type: 'ORIGINAL\PRIMARY\M\ND', scanning_sequence: GR, sequence_variant: 'SP\OSP', mr_acquisition_type: 3D, manufacturer: SIEMENS, text_sequence_name: '*fl3d1', repetition_time: 8, echo_time: 4, flip_angle: 8}
     flags: {mech_gradient: false, mech_spin: false}
-    axes: {technique: FLASH}
+    axes: {technique: SPGRE}
 
   # --- case 16: an MR spectroscopy object by its SOP class
 

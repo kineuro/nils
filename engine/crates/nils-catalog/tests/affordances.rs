@@ -554,10 +554,17 @@ fn the_funnel_names_the_set_where_each_planted_negative_falls_out() {
                 _ => assert!(at.is_none(), "{note}"),
             }
         }
-        // the answer's clauses and what they dropped; the picks and their ties
-        assert_eq!(d.drops.len(), 1);
+        // the answer's clauses and what they dropped, first, then those of
+        // the sets it reads its rows through; the picks and their ties
+        assert_eq!(d.drops.iter().filter(|x| x.set == "answer").count(), 1);
+        assert_eq!(d.drops[0].set, "answer");
         assert!(d.drops[0].before >= d.drops[0].after, "{:?}", d.drops);
         assert!(d.drops[0].clause.starts_with("where comparable.largest"));
+        assert!(d.drops.len() > 1, "{:?}", d.drops);
+        for x in &d.drops[1..] {
+            assert!(d.funnel.iter().any(|s| s.set == x.set), "{x:?}");
+            assert!(x.set != "answer" && x.before >= x.after, "{x:?}");
+        }
         let ties: BTreeMap<&str, Option<i64>> =
             d.ties.iter().map(|(s, n)| (s.as_str(), *n)).collect();
         assert!(

@@ -212,32 +212,34 @@ compatibility:
   # and `candidate_empty` are the atoms that reach it.
   subject: {text: scanning_sequence, case: upper}
   default_family: OTHER
+  # Keyed by the word a row stores for the technique, which is what the
+  # vote reads: when a value's stored word changes, its key here changes
+  # with it, or the value falls to the default family.
   family_of:
     SE: SE
     TSE: SE
-    HASTE: SE
-    RESTORE: SE
+    SSTSE: SE
+    DETSE: SE
     MESE: SE
     MDME: SE
     SPACE: SE
-    TIRM: SE
+    IRTSE: SE
     3D-TSE: SE
     SS-TSE: SE
     IR-TSE: SE
     ME-SE: SE
     VFA-TSE: SE
-    DWI-TSE: SE
+    DWITSE: SE
     GRE: GRE
-    FLASH: GRE
+    SPGRE: GRE
     MPRAGE: GRE
     MEMPRAGE: GRE
     MP2RAGE: GRE
     TOF-MRA: GRE
     PC-MRA: GRE
     SWI: GRE
-    CISS: GRE
+    pcbSSFP: GRE
     bSSFP: GRE
-    FIESTA: GRE
     DESS: GRE
     SSFP: GRE
     QALAS: GRE
@@ -245,18 +247,18 @@ compatibility:
     SP-GRE: GRE
     SS-GRE: GRE
     FSP-GRE: GRE
-    VFA-GRE: GRE
+    VFAGRE: GRE
     ME-GRE: GRE
     EPI: EPI
-    DWI-EPI: EPI
+    DWIEPI: EPI
     BOLD-EPI: EPI
-    GRE-EPI: EPI
-    SE-EPI: EPI
+    GREEPI: EPI
+    SEEPI: EPI
     GRASE: EPI
     ASL: OTHER
     Perfusion: OTHER
     # MRI pack 0.18.0 (vocabulary)
-    CE-MRA: GRE
+    CEMRA: GRE
     ZTE: GRE
     MRS: OTHER
     MRF: OTHER

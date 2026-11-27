@@ -80,7 +80,7 @@ cases:
       readout_not_spin_echo: true
     axes:
       provenance: Localizer
-      technique: FLASH
+      technique: SPGRE
       base: T2w
 
   - name: a position display written SE and IR, whose sequence name is a FLASH, is read by the FLASH
@@ -100,7 +100,7 @@ cases:
       posdisp_gre: true
     axes:
       provenance: Localizer
-      technique: FLASH
+      technique: SPGRE
 
   - name: a position display named for the diffusion it plans takes no diffusion technique
     stack:
@@ -119,7 +119,7 @@ cases:
       gre_scout_readout: true
     axes:
       provenance: Localizer
-      technique: FLASH
+      technique: SPGRE
 
   - name: a Siemens TSE that is no position display keeps its TSE
     stack:
@@ -161,8 +161,8 @@ cases:
       ge_fast_gre_psd: true
       readout_not_spin_echo: true
     axes:
-      technique: FISP
-      base: 'T2*w'
+      technique: SSFPFID
+      base: T2starw
 
   - name: a GE efgre3d reformat named for a cube FIESTA is the FIESTA, not a 3D TSE
     stack:
@@ -182,7 +182,7 @@ cases:
     flags:
       readout_not_spin_echo: true
     axes:
-      technique: FIESTA
+      technique: bSSFP
       base: T2w
 
   - name: a GE FSE by its pulse sequence and its name stays a TSE
@@ -231,7 +231,7 @@ cases:
       has_se: false
     axes:
       technique: MEGRE
-      base: 'T2*w'
+      base: T2starw
 
   - name: a GE research-mode series named T2 at flip 90 with a train stays a spin echo
     stack:
@@ -293,8 +293,8 @@ cases:
     flags:
       has_se: false
     axes:
-      technique: FLASH
-      base: 'T2*w'
+      technique: SPGRE
+      base: T2starw
 
   # --- the final certificate's GE groups (A2, A3, A8, A9, A11 and three
   # single stacks): flags.yml, section 20
@@ -317,7 +317,7 @@ cases:
       ge_spgr_named: true
       ge_vasctof_as_tof: false
     axes:
-      technique: FLASH
+      technique: SPGRE
       base: MTw
 
   - name: guard, a GE 3D TOF named so with VASCTOF_GEMS stays TOF-MRA
@@ -479,7 +479,7 @@ cases:
       ge_qsm_me_combined: true
     axes:
       provenance: ProjectionDerived
-      technique: MEDIC
+      technique: combMEGRE
       construct: MinIP
 
   - name: the MAG output of GE's multi-echo QSM is one echo, a multi-echo GRE
@@ -672,7 +672,7 @@ cases:
       ge_ksepi_3d_short: true
       ge_spgr_epi: true
     axes:
-      technique: GRE-EPI
+      technique: GREEPI
 
   - name: guard, a GE ksepi 3D susceptibility EPI at a long TE stays an EPI
     stack:
@@ -988,7 +988,7 @@ cases:
     flags:
       tof_letters_inside_a_word: true
     axes:
-      technique: FLASH
+      technique: SPGRE
 
   - name: guard, a GE 2D TOF named by its pulse sequence stays a time of flight
     stack:
@@ -1064,7 +1064,7 @@ cases:
     flags:
       b0_image_trace_named: true
     axes:
-      technique: DWI-EPI
+      technique: DWIEPI
       construct: ND
       base: DWI
 
@@ -1539,7 +1539,7 @@ cases:
     flags:
       r8_spoiled_t1_gre_named_t2: false
     axes:
-      base: 'T2*w'
+      base: T2starw
 
   - name: R2, a STIR named T2 at TE 30 ms keeps T2w, between PD and T2, and stands for no role
     stack:
@@ -1607,7 +1607,7 @@ cases:
     flags:
       r8_t2_named_gre_short_te: true
     axes:
-      base: 'T2*w'
+      base: T2starw
       contrast_mix: PD_T2star
       base_basis: name+physics
 
@@ -1828,7 +1828,7 @@ cases:
     flags:
       is_ce_mra: true
     axes:
-      technique: CE-MRA
+      technique: CEMRA
       base: T1w
 
   - name: guard, a Siemens VIBE given contrast and named for nothing more stays a VIBE
@@ -1848,7 +1848,7 @@ cases:
     flags:
       is_ce_mra: false
     axes:
-      technique: VIBE
+      technique: VIGRE
 
   # A TWIST-VIBE dynamic run that names no angiography is left out of
   # CE-MRA; since pack 0.25.0 (round 5, case 1) it is DCE, and its map

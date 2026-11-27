@@ -1427,7 +1427,7 @@ pub(crate) fn route(
                 let home = doors.home.clone();
                 let spawned = std::thread::Builder::new()
                     .name("nils-campaign-close".into())
-                    .spawn(move || match home.open() {
+                    .spawn(move || match home.open().map(crate::spelling::attached) {
                         Ok(mut registry) => {
                             let now = nils_registry::time::now_iso();
                             let _ = guarded_close(&mut registry, &run, job, &now);

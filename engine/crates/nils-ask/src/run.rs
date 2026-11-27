@@ -259,6 +259,22 @@ pub(crate) struct Runner<'a> {
     pub(crate) reader: Option<&'a mut Store>,
     /// Record 48, D1 of the move: the scope reads sealed stacks.
     pub(crate) unsealed: bool,
+    /// Whether the session cache has been brought up to date for this
+    /// question: done once, before its first statement that reads a
+    /// session. A cell, so that the runners one question makes one after
+    /// another (a funnel lists its statements, then counts them) share it.
+    pub(crate) sessions_fresh: &'a std::cell::Cell<bool>,
+}
+
+/// Whether a statement reads the session cache: every read of a session,
+/// its studies or its label goes through `session_cache` or
+/// `session_cache_study`, by those names on either backend.
+fn reads_sessions(compiled: &Compiled) -> bool {
+    compiled.sql.contains("session_cache")
+        || compiled
+            .list_guard
+            .as_deref()
+            .is_some_and(|g| g.contains("session_cache"))
 }
 
 impl Runner<'_> {
@@ -311,7 +327,89 @@ impl Runner<'_> {
             limit,
             withhold_sealed: !self.unsealed,
         };
-        Ok(compile(ask, validated, &ctx)?)
+        let compiled = compile(ask, validated, &ctx)?;
+        // The sessions are a cache, and a question reads them as they
+        // stand: a subject whose timeline changed since the last build (a
+        // merge drops both subjects' rows; a digest adds studies) had no
+        // session, or old ones, in every answer until another reader built
+        // them. So the cache is brought up to date before the first
+        // statement that reads it, under the scheme the question names, on
+        // the registry's own connection: committed before the statement
+        // runs, wherever it runs. A cache that is up to date costs a few
+        // reads (`nils_session::refresh`). A cache that cannot be brought
+        // up to date fails the question, which is never answered from
+        // sessions known to be missing.
+        self.freshen(registry, &compiled)?;
+        Ok(compiled)
+    }
+
+    /// The session cache brought up to date for a statement that reads it,
+    /// once a question.
+    fn freshen(&mut self, registry: &mut Registry, compiled: &Compiled) -> Result<(), RunError> {
+        if !self.sessions_fresh.get() && reads_sessions(compiled) {
+            nils_session::refresh(registry, self.scheme).map_err(|e| {
+                RunError::Message(format!(
+                    "the sessions are out of date and could not be built: {e}; \
+                     nils session rebuild builds them"
+                ))
+            })?;
+            self.sessions_fresh.set(true);
+        }
+        Ok(())
+    }
+
+    /// The sessions brought up to date for a question before anything of
+    /// it is judged against the epoch: a build that wrote a session moves
+    /// the epoch, and an answer kept before it (the question's own, or a
+    /// handle one of its sets is read from) is then no longer this epoch's.
+    /// The statements are the ones a run compiles first, the answer's and
+    /// the count under each share; one that does not compile yet is left to
+    /// the run, which says why.
+    pub(crate) fn sessions_first(
+        &mut self,
+        registry: &mut Registry,
+        ask: &Ask,
+        validated: &Validated,
+        scope: &Scope,
+    ) -> Result<(), RunError> {
+        let (dialect, schema) = match self.reader.as_deref_mut() {
+            Some(r) => (r.dialect(), r.schema().map(str::to_string)),
+            None => (
+                registry.store().dialect(),
+                registry.store().schema().map(str::to_string),
+            ),
+        };
+        let ctx = Context {
+            names: self.names,
+            dialect,
+            schema,
+            window_days: self.scheme.window_days,
+            scheme_digest: self.scheme.digest(),
+            after: None,
+            limit: None,
+            withhold_sealed: !self.unsealed,
+        };
+        if let Ok(compiled) = compile(ask, validated, &ctx) {
+            self.freshen(registry, &compiled)?;
+        }
+        for m in &ask.out.measures {
+            for (kind, spec) in &m.0 {
+                if self.sessions_fresh.get() {
+                    return Ok(());
+                }
+                if kind == "share"
+                    && let Some(set) = spec.get("over").and_then(Value::as_str)
+                {
+                    let counted = count_level(ask, set);
+                    if let Ok(v) = validate(&counted, self.names, scope)
+                        && let Ok(compiled) = compile(&counted, &v.counting_all(), &ctx)
+                    {
+                        self.freshen(registry, &compiled)?;
+                    }
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Run a statement on the door's reader, or the registry's own
@@ -357,11 +455,37 @@ pub fn cached(
     let prepared = prepare(ask, names, scope)?;
     let hash = prepared.hash.clone();
     let mut ask = prepared.ask;
-    inline_selections(registry, &mut ask)?;
+    let inlined = inline_selections(registry, &mut ask)?;
     // one place of truth for the main scans (2026-10-11): a pick run moves
     // no epoch, so an answer that reads picks is never the cache's
     if reads_picks(&ask) {
         return Ok(None);
+    }
+    // An answer kept while a subject had no sessions is not the answer a
+    // run would give now. A run brings the sessions up to date before it
+    // reads them, and so does the look for its kept answer: a build that
+    // wrote a session moves the epoch, and the answer kept before it is
+    // not found below.
+    {
+        let validated = if inlined.is_empty() {
+            prepared.validated
+        } else {
+            validate(&ask, names, scope).map_err(AskError::Invalid)?
+        };
+        let sessions_fresh = std::cell::Cell::new(false);
+        let mut runner = Runner {
+            names,
+            scheme,
+            bounds: Bounds {
+                timeout_ms: 0,
+                max_rows: 0,
+                max_bytes: 0,
+            },
+            reader: None,
+            unsealed: scope.unsealed,
+            sessions_fresh: &sessions_fresh,
+        };
+        runner.sessions_first(registry, &ask, &validated, scope)?;
     }
     let epoch_now = registry.meta().epoch;
     for s in ask.sets.values() {
@@ -426,6 +550,18 @@ fn run_at(registry: &mut Registry, req: Request<'_>, depth: usize) -> Result<Out
     } else {
         validate(&ask, req.names, req.scope).map_err(AskError::Invalid)?
     };
+    // the sessions first: a build that writes one moves the epoch, and a
+    // handle source kept before it is then at another epoch
+    let sessions_fresh = std::cell::Cell::new(false);
+    Runner {
+        names: req.names,
+        scheme: req.scheme,
+        bounds: req.bounds,
+        reader: lend(&mut reader),
+        unsealed: req.scope.unsealed,
+        sessions_fresh: &sessions_fresh,
+    }
+    .sessions_first(registry, &ask, &validated, req.scope)?;
     // a handle source at another epoch, or expired, is re-evaluated
     let epoch_now = registry.meta().epoch;
     let mut drift = Vec::new();
@@ -531,6 +667,7 @@ fn run_at(registry: &mut Registry, req: Request<'_>, depth: usize) -> Result<Out
         bounds: req.bounds,
         reader: lend(&mut reader),
         unsealed: req.scope.unsealed,
+        sessions_fresh: &sessions_fresh,
     };
     let (compiled, mut answer) = runner.answer(registry, &ask, &validated, req.after, req.limit)?;
     // the post pass
@@ -678,7 +815,9 @@ fn run_at(registry: &mut Registry, req: Request<'_>, depth: usize) -> Result<Out
         principal: req.principal,
         node: req.node,
         pack_version: req.pack_version,
-        epoch: epoch_now,
+        // as it stands now: a statement of the post pass may have been the
+        // first to read a session and built some
+        epoch: registry.meta().epoch,
         scheme_digest: Some(&scheme_digest),
         disclosure,
         suppression,

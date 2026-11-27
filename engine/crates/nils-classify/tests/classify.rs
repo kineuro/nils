@@ -579,11 +579,30 @@ fn a_model_s_answer_does_not_read_like_a_rule_s() {
 
         // The whole point, stated as the query an auditor would run: every
         // value that did not come from a rule can be found.
-        let authored = one(
+        // The model's body part, and the body region the sort folded from
+        // it: a value derived from a model's answer names the model too, and
+        // never reads as a rule's.
+        let authored = rows(
             &mut reg,
-            "SELECT COUNT(*) FROM {classification_evidence} WHERE author_kind = 'model'",
+            "SELECT axis, tier FROM {classification_evidence} WHERE author_kind = 'model' ORDER BY axis",
         );
-        assert_eq!(authored, 1, "{name}");
+        let authored: Vec<(String, String)> = authored
+            .iter()
+            .map(|r| {
+                (
+                    r.text(0).unwrap().to_string(),
+                    r.text(1).unwrap().to_string(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            authored,
+            [
+                ("body_part".to_string(), "decision".to_string()),
+                ("body_region".to_string(), "folded".to_string()),
+            ],
+            "{name}"
+        );
     }
 }
 
@@ -1092,7 +1111,8 @@ cases:
         }
         // and the signals over the batch read the same rows back
         let scope = nils_classify::scope::Scope::parse("batch:1").unwrap();
-        let signals = nils_classify::signals::signals(reg.store(), &scope).unwrap();
+        let signals =
+            nils_classify::signals::signals(reg.store(), &Default::default(), &scope).unwrap();
         assert_eq!(
             signals["diagnostics"]["overlay_unused"], 2,
             "{name}: {signals}"
@@ -1142,7 +1162,8 @@ cases:
             "{name}: {signals}"
         );
         let origin = nils_classify::scope::Scope::parse("origin:SYNTHETIC").unwrap();
-        let by_origin = nils_classify::signals::signals(reg.store(), &origin).unwrap();
+        let by_origin =
+            nils_classify::signals::signals(reg.store(), &Default::default(), &origin).unwrap();
         assert_eq!(
             by_origin["diagnostics"]["overlay_unused"], 2,
             "{name}: {by_origin}"
@@ -2155,7 +2176,8 @@ fn the_text_an_unresolved_axis_was_matched_against_is_sampled_bounded_and_withhe
             "{name}"
         );
         let scope = nils_classify::scope::Scope::parse("batch:1").unwrap();
-        let signals = nils_classify::signals::signals(reg.store(), &scope).unwrap();
+        let signals =
+            nils_classify::signals::signals(reg.store(), &Default::default(), &scope).unwrap();
         let counted = signals["diagnostics"]["axis_unresolved"]
             .as_i64()
             .unwrap_or_else(|| panic!("{name}: no axis is unresolved: {signals}"));
@@ -2352,7 +2374,7 @@ fn an_answer_that_breaks_the_pack_s_own_constraint_is_kept_doubted_and_asked() {
         let (technique, technique_conf, _) = axis_of(&mut reg, "technique");
         assert_eq!(
             (base.as_str(), technique.as_str()),
-            ("T2*w", "TSE"),
+            ("T2starw", "TSE"),
             "{name}"
         );
         assert_eq!(
@@ -2390,7 +2412,7 @@ fn an_answer_that_breaks_the_pack_s_own_constraint_is_kept_doubted_and_asked() {
             serde_json::json!(["P8", "IM2"]),
             "{name}: {e}"
         );
-        assert_eq!(e["decided"]["base"], "T2*w", "{name}: {e}");
+        assert_eq!(e["decided"]["base"], "T2starw", "{name}: {e}");
         assert_eq!(
             report.broken.get("excluded:t2star-not-spin-echo"),
             Some(&1),
@@ -2848,7 +2870,11 @@ fn only_a_missing_answer_that_matters_is_asked_and_the_rest_is_kept() {
                 "SELECT value FROM {{classification_axis}} WHERE axis = 'post_contrast' AND stack_id = {given}"
             ),
         );
-        assert_eq!(stated[0].opt_text(0).unwrap(), Some("1"), "{name}: given");
+        assert_eq!(
+            stated[0].opt_text(0).unwrap(),
+            Some("given"),
+            "{name}: given"
+        );
     }
 }
 
@@ -3296,4 +3322,145 @@ fn a_decision_made_with_the_rules_answer_in_view_is_asked_again_only_when_the_ru
             "{name}: the rules moved, so a person is asked"
         );
     }
+}
+
+/// One spelling of a value in a row: the sort writes a decision's value in
+/// the stored form of the value it names, whichever of the value's names
+/// the decision holds (its identity where the pack stores a label, a
+/// spelling an older version of the pack stored), on an axis the rules
+/// answered and on one they left unsaid; and the read model follows.
+#[test]
+fn a_decision_in_another_spelling_is_sorted_into_the_stored_form() {
+    let pack = nils_pack::load(&packs(), None).expect("the MRI pack loads");
+    // a technique whose identity is not what a row stores, and any name of
+    // a post-contrast value that is not what a row stores
+    let technique = pack.axis("technique").unwrap();
+    let (by_identity, stored_technique) = technique
+        .spellings()
+        .into_iter()
+        .find(|(text, _)| technique.values.iter().any(|v| v.id == *text))
+        .expect("a technique that stores another word than its identity");
+    let contrast = pack.axis("post_contrast").unwrap();
+    let (another, stored_contrast) = contrast
+        .spellings()
+        .into_iter()
+        .next()
+        .expect("a post-contrast value with another spelling");
+    for lab in labs() {
+        let name = lab.name;
+        let dir = tree();
+        let mut reg = prepare(&lab, &dir);
+        nils_classify::classify::classify(&mut reg, &pack, &Default::default(), &Cancel::new())
+            .unwrap();
+        let stack = one(&mut reg, "SELECT stack_id FROM {classification}");
+        let rules = axis_of(&mut reg, "technique").0;
+        assert_ne!(rules, stored_technique, "{name}: the rules say another");
+        for (axis, value, in_view) in [
+            ("technique", by_identity.as_str(), Some(rules.as_str())),
+            ("post_contrast", another.as_str(), None),
+        ] {
+            reg.store()
+                .insert(
+                    &Insert::new(
+                        nils_registry::schema::table("decision"),
+                        &[
+                            "scope",
+                            "ref",
+                            "axis",
+                            "value",
+                            "actor",
+                            "author_kind",
+                            "decided_at",
+                            "rules_in_view",
+                        ],
+                    ),
+                    &[vec![
+                        Param::from("stack"),
+                        Param::from(stack.to_string()),
+                        Param::from(axis),
+                        Param::from(value),
+                        Param::from("a person"),
+                        Param::from("person"),
+                        Param::from(nils_registry::time::now_iso()),
+                        in_view.map_or(Param::Null, Param::from),
+                    ]],
+                )
+                .unwrap();
+        }
+        nils_classify::classify::classify(&mut reg, &pack, &Default::default(), &Cancel::new())
+            .unwrap();
+        let held = |reg: &mut Registry, axis: &str| -> Vec<(String, String)> {
+            rows(
+                reg,
+                &format!(
+                    "SELECT COALESCE(value, ''), tier FROM {{classification_axis}} WHERE axis = '{axis}'"
+                ),
+            )
+            .iter()
+            .map(|r| (r.text(0).unwrap().to_string(), r.text(1).unwrap().to_string()))
+            .collect()
+        };
+        assert_eq!(
+            held(&mut reg, "technique"),
+            [(stored_technique.clone(), "decision".to_string())],
+            "{name}: the identity {by_identity} is stored as the pack stores it"
+        );
+        assert_eq!(
+            held(&mut reg, "post_contrast"),
+            [(stored_contrast.clone(), "decision".to_string())],
+            "{name}: {another} is stored as the pack stores it"
+        );
+        // the evidence of who decided carries the stored form too
+        let said = rows(
+            &mut reg,
+            "SELECT value FROM {classification_evidence} WHERE tier = 'decision' ORDER BY axis",
+        )
+        .iter()
+        .map(|r| r.text(0).unwrap().to_string())
+        .collect::<Vec<_>>();
+        assert_eq!(
+            said,
+            [stored_contrast.clone(), stored_technique.clone()],
+            "{name}"
+        );
+        axes_agree(&mut reg, "a sort over decisions in another spelling");
+    }
+}
+
+/// A decision and the rules' answer are held against each other as values:
+/// the rules' answer a person saw in the spelling an older pack stored is
+/// the answer the rules still give, and a decision's own text is read as
+/// the value it names.
+#[test]
+fn a_decision_is_held_against_the_rules_as_values_not_as_text() {
+    let pack = nils_pack::load(&packs(), None).expect("the MRI pack loads");
+    let axis = pack.axis("post_contrast").unwrap();
+    let (another, stored) = axis.spellings().into_iter().next().unwrap();
+    let decided = nils_classify::classify::Decided {
+        value: Some(another.clone()),
+        scope: "stack".into(),
+        author: nils_classify::classify::Author {
+            who: "a person".into(),
+            kind: "person".into(),
+            version: None,
+            model: None,
+            campaign: None,
+        },
+        rules_in_view: Some(another.clone()),
+    };
+    assert_eq!(decided.stored(Some(axis)), stored);
+    assert_eq!(decided.stored(None), another, "with no axis, the text");
+    assert!(decided.saw(Some(axis), &stored), "one value, two spellings");
+    assert!(decided.saw(Some(axis), &another));
+    assert!(!decided.saw(None, &stored), "as text they differ");
+    let other = axis
+        .values
+        .iter()
+        .map(|v| v.id.as_str())
+        .find(|id| axis.stored_of(id) != Some(stored.as_str()))
+        .unwrap();
+    assert!(
+        !decided.saw(Some(axis), other),
+        "another value was not seen"
+    );
 }

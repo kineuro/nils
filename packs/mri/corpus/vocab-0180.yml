@@ -20,7 +20,7 @@ cases:
       echo_time: 1.1
       flip_angle: 25
     axes:
-      technique: CE-MRA
+      technique: CEMRA
       base: T1w
 
   - name: a TOF named so and given contrast stays TOF, not CE-MRA
@@ -141,7 +141,7 @@ cases:
       echo_time: 40
     axes:
       provenance: NeuroMix
-      technique: GRE-EPI
+      technique: GREEPI
 
   - name: an EPIMix stays EPIMix
     stack:

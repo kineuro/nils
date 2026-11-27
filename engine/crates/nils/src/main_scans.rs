@@ -143,6 +143,24 @@ pub(crate) fn visits_cached(
     Ok(())
 }
 
+/// The whole session cache brought up to date before a door reads it as
+/// it stands for subjects it does not name one by one (a cohort's members):
+/// a subject a merge left, or one digested since the last build, has no
+/// session in the cache until something builds them, and a door that reads
+/// the rows as they are shows it with none. One pass of reads for the whole
+/// registry where nothing changed (`nils_session::refresh`), so a cohort of
+/// any size costs the same. Under the default scheme, which is the window
+/// these doors read unless the cache was built under another; then the
+/// cache is left to the reader that built it.
+pub(crate) fn sessions_fresh(registry: &mut Registry) -> Result<(), Reply> {
+    let scheme = nils_registry::session::Scheme::default();
+    if crate::viewer::window(registry.store()).map_err(failed)? != scheme.window_days {
+        return Ok(());
+    }
+    nils_session::refresh(registry, &scheme).map_err(failed)?;
+    Ok(())
+}
+
 /// The scope a door names: in the body's `scope`, at the top of the body,
 /// or in the query.
 pub(crate) fn scope_of(

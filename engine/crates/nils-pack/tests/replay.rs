@@ -116,7 +116,7 @@ fn a_packet_s_session_list_exercises_the_session_pass() {
     let r = nils_pack::replay::replay(&pack, &swan(sibling(json!(true)))).unwrap();
     assert_eq!(r["values"]["construct"], "Magnitude", "{r}");
     assert_eq!(r["values"]["provenance"], "RawRecon", "{r}");
-    assert_eq!(r["values"]["base"], "T2*w", "{r}");
+    assert_eq!(r["values"]["base"], "T2starw", "{r}");
     assert_eq!(r["tiers"]["construct"], "session", "{r}");
     assert_eq!(
         r["session"][0]["rule"], "ge_swan_beside_its_computed_output",

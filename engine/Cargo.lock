@@ -1772,6 +1772,7 @@ dependencies = [
  "blake2",
  "hex",
  "nils-registry",
+ "nils-session",
  "schemars",
  "serde",
  "serde-saphyr",

@@ -11,7 +11,10 @@ kind: single
 # nobody could decide is left unsaid.
 # v0 stores the name and not the identity, which is how `T2starw` came to be
 # written `T2*w` in 7,358 rows. Here the identity is the identity and the
-# label is what a row stores.
+# label is what a row stores, except for `T2starw`: a row stores a plain
+# word of letters and digits, the one a release name can carry, so it
+# stores `T2starw`, and `T2*w` stays the word a person is shown and a name
+# of the value that old rows, questions and decisions still read by.
 stores: label
 
 values:
@@ -34,6 +37,7 @@ values:
   'T2starw':
     terms: ['T2*', 'T2 star', 'T2star weighted', 'GRE T2*']
     label: 'T2*w'
+    stored: T2starw
   'T2w': {terms: ['T2', 'T2 weighted']}
   'PDw': {terms: ['PD', 'proton density weighted']}
   'T1w': {terms: ['T1', 'T1 weighted']}

@@ -24,11 +24,26 @@
 # vessels (larynx, thyroid, carotids), and the coarse mode folds it into
 # the spine.
 
+# `coarse_of` and `covers` say that relation in the vocabulary itself, for
+# whoever drafts a question: this axis is the coarse form of the body part,
+# and each region names the body parts it covers. They decide nothing the
+# rules decide. The loader holds them to the folding rules
+# (rules/body_region.yml), so the two cannot drift, and the catalog serves
+# them beside each value's description and terms. The sort reads them where
+# a decision stands on one of the two axes, since the rules fold their own
+# body part and a decision arrives after them: a body part the rules read
+# off a word never stands beside a committed region that does not cover it
+# (it is set aside, and the stack has no body part), and a committed body
+# part decides the region where none was committed. A person who asks for "a brain scan" nearly always means the
+# head, whichever of the two fine values a stack holds, so that is what the
+# head's description says.
+
 axis: body_region
 kind: single
+coarse_of: body_part
 
 values:
-  'head': {terms: ['head', 'brain', 'skull', 'neuro'], description: 'the head: a brain, or a brain and neck (the fine mode''s brain and brain-neck)'}
-  'spine': {terms: ['spine', 'neck', 'cervical spine', 'thoracic spine', 'lumbar spine', 'spinal cord', 'whole spine'], description: 'the spine or the neck: any level of the spine, and imaging aimed at the neck''s soft tissue or vessels (the fine mode''s neck and spine)'}
-  'chest': {terms: ['chest', 'thorax', 'lungs']}
-  'other': {terms: ['unknown', 'other body part', 'phantom', 'whole body'], description: 'none of the others, or not known: as for the body part''s other'}
+  'head': {terms: ['head', 'brain', 'skull', 'neuro'], covers: ['brain', 'brain-neck'], description: 'the head: what "a brain scan" or "a head scan" means in ordinary words, a brain or a brain and neck, however far down the stack reaches (body_part splits it into brain and brain-neck)'}
+  'spine': {terms: ['spine', 'neck', 'cervical spine', 'thoracic spine', 'lumbar spine', 'spinal cord', 'whole spine'], covers: ['spine', 'neck'], description: 'the spine or the neck: any level of the spine, and imaging aimed at the neck''s soft tissue or vessels (body_part splits it into spine and neck)'}
+  'chest': {terms: ['chest', 'thorax', 'lungs'], covers: ['chest']}
+  'other': {terms: ['unknown', 'other body part', 'phantom', 'whole body'], covers: ['other'], description: 'none of the others, or not known: as for the body part''s other'}

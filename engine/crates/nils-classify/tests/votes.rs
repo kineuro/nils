@@ -260,7 +260,7 @@ fn hearing_every_rule_changes_no_verdict_and_the_matrix_covers_every_decided_axi
             assert!(set.rules.iter().any(|x| x.id == r[3]), "{name}: {r:?}");
             let axis = &pack.axes[pack.axis_index(&r[1]).expect("an axis")];
             assert!(
-                r[5].is_empty() || axis.id_of_stored(&r[5]).is_some(),
+                r[5].is_empty() || axis.id_of(&r[5]).is_some(),
                 "{name}: {r:?} is no value of {}",
                 axis.name
             );

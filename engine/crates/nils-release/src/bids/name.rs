@@ -325,7 +325,7 @@ fn build_with(
     // Record 55 C4: what the suffix already says is not said again in the
     // BIDS name. The informative name says everything, as v0's does.
     // Record 55 C4: a token that is the suffix itself is not said twice
-    // (`MEGRE` on `_MEGRE`); one the suffix does not say stays (`TOFMRA` on
+    // (`MEGRE` on `_MEGRE`); one the suffix does not say stays (`TOF` on
     // `_angio`, `MP2RAGE` on `_UNIT1`).
     let mut parts = acq_label(facts, map, naming, &named.suffix);
     for (at, token) in spelled {
@@ -424,7 +424,7 @@ impl Name {
         stem.strip_prefix("sub-x_").unwrap_or(&stem).to_string()
     }
 
-    /// The same for a derivative, with its `desc-` (`acq-Ax+3D+TOFMRA_desc-MIP_angio`).
+    /// The same for a derivative, with its `desc-` (`acq-Ax+3D+TOF_desc-MIP_angio`).
     pub fn label_with_desc(&self, desc: &str) -> String {
         let stem = self.stem_with_desc("x", "", desc);
         stem.strip_prefix("sub-x_").unwrap_or(&stem).to_string()
@@ -644,6 +644,7 @@ mod tests {
                 .iter()
                 .map(|(v, t)| (v.to_string(), t.to_string()))
                 .collect(),
+            own_words: None,
         }
     }
 
@@ -924,7 +925,7 @@ mod tests {
             ("Uniform", Some("T1w"), "sub-x_ses-1_UNIT1"),
             ("Denoised", Some("T1w"), "sub-x_ses-1_rec-Denoised_UNIT1"),
         ] {
-            let id = construct.id_of_stored(stored).expect("a stored construct");
+            let id = construct.id_of(stored).expect("a stored construct");
             let facts = Facts {
                 intent: Some("anat"),
                 constructs: vec![id],

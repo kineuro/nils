@@ -640,6 +640,11 @@ pub struct Corpus {
     axis_pool: Vec<Vec<Box<str>>>,
     axis_seen: Vec<HashMap<Box<str>, u16>>,
     axis_cells: Vec<u16>,
+    /// Per axis, every other name of a value with what a row stores for it
+    /// ([`crate::rules::Axis::spellings`]): a stack's axis is taken in as
+    /// the value it names, since a pass holds it against the stored form
+    /// its conditions and tables were written to.
+    spell: Vec<HashMap<String, String>>,
     pub ids: Vec<i64>,
     /// The pack's patterns, which a pass's `matches` names by number: the
     /// loader compiles a pass's patterns into the pack's list as it does a
@@ -693,6 +698,11 @@ impl Corpus {
             axis_pool: (0..pack.axes.len()).map(|_| vec![Box::from("")]).collect(),
             axis_seen: (0..pack.axes.len()).map(|_| HashMap::new()).collect(),
             axis_cells: Vec::new(),
+            spell: pack
+                .axes
+                .iter()
+                .map(|a| a.spellings().into_iter().collect())
+                .collect(),
             ids: Vec::new(),
             regexes: pack.regexes.clone(),
         }
@@ -742,7 +752,19 @@ impl Corpus {
             self.cells.push(ix);
         }
         for a in 0..self.axes {
-            let v = axis(a);
+            let mut v = axis(a);
+            // one spelling of a value: a row an older version of the pack
+            // wrote in another is read as the value it names, each of a
+            // multi-valued axis's comma-joined values
+            if !self.spell[a].is_empty()
+                && v.split(',').any(|part| self.spell[a].contains_key(part))
+            {
+                v = v
+                    .split(',')
+                    .map(|part| self.spell[a].get(part).map_or(part, String::as_str))
+                    .collect::<Vec<_>>()
+                    .join(",");
+            }
             let ix = if v.is_empty() {
                 0
             } else if let Some(i) = self.axis_seen[a].get(v.as_str()) {
