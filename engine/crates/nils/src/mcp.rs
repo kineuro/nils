@@ -64,7 +64,7 @@ fn input_schema(operation: &str) -> Value {
             "properties": {
                 "document": document,
                 "document_id": document_id,
-                "mode": {"type": "string", "enum": ["strict", "repair"], "description": "repair fixes what is structural first and reports it"},
+                "mode": {"type": "string", "enum": ["strict", "repair"], "description": "repair fixes what is structural first and reports it, and reads the values a question names by another word (another name of a value, a word the pack lists for one value, a fine value the pack reads as its wider one), each reading reported with what was written"},
             },
         }),
         "options" => json!({
@@ -144,7 +144,7 @@ fn input_schema(operation: &str) -> Value {
             "type": "object",
             "required": ["text"],
             "properties": {
-                "text": {"type": "string", "description": "A whole document as YAML or JSON; structural repairs are applied and reported, and a valid document is stored"},
+                "text": {"type": "string", "description": "A whole document as YAML or JSON; structural repairs are applied and reported, and a valid document is stored. The values it names by another word are read too (another name of a value, a word the pack lists for one value, a fine value the pack reads as its wider one): the document stored is the one read, and each reading is reported in repairs with what was written and what it was read as"},
             },
         }),
         "job" => json!({
