@@ -280,7 +280,12 @@ served again.
 the names: each value's `description`, a line, and its `terms`, other words a
 person knows it by, where the pack gives them. The terms explain a value and
 are no names of it: a document still names a value by its identity, its label
-or an alias. A pack may also hold one fact at two grains, and says so in the
+or an alias, and one that writes a term is refused as `unknown_value`. The
+refusal names what the text may mean, where a value has it as a name in
+another letter case or as a term: "BRAVO is not a value of axis technique;
+the pack lists it as a word for MPRAGE", or, where several values have it,
+"... the pack has it as a word for more than one value: Trace or isoDWI".
+Only a question authored as text has a term read as its value (below). A pack may also hold one fact at two grains, and says so in the
 coarse axis's file: `coarse_of: <axis>` on the axis and `covers: [<values>]`
 on each of its values (the MR pack's `body_region` is the coarse form of
 `body_part`, and its `head` covers `brain` and `brain-neck`, the fine split of
@@ -310,6 +315,20 @@ declares.
   where the vocabulary names exactly one value by the text. A name two
   values share is left as written and read as it always was. The clause
   selects the same rows before and after.
+  A text that names no value exactly is looked up among the names and
+  among the `terms` of every value of the axis, letter case and
+  surrounding white space aside, and where exactly one value has it the
+  clause is rewritten to that value's stored word: a vendor's word for a
+  sequence (`BRAVO` to `MPRAGE`, `spgr` to `SPGRE`), a name in another
+  letter case (`mprage`). The reading is a `word` like the others, and
+  its `what` says which it was: "On technique, the pack lists BRAVO as a
+  word for MPRAGE: it was read as MPRAGE, the word the pack stores." An
+  exact name always wins over a term and over a match in another case, so
+  nothing a document may write today is read differently (`MIP` is the
+  maximum projection, though the minimum projection lists `mIP`). A text
+  two or more values have is read as none of them, and the document is
+  refused as `unknown_value` with the values named, for whoever wrote it
+  to pick one.
 - **wider**: a pack may say, on a value of a coarse axis, which of the
   values it covers a question means the coarse value by when it writes
   that value alone: `read_for: [<values>]` beside `covers` (the MR pack's
@@ -328,6 +347,13 @@ declares.
   same axis, and in a list of several values. The catalog serves the
   declaration from both sides: the fine value carries `read_as: {axis,
   value}` and the coarse value `read_for`.
+  The word is read first, so a term of such a value written alone
+  (`body_part = neuro`) is read wider as the value is, in one reading of
+  kind `wider` whose `wrote` is the text as written; with `exact: true`
+  the term is still read as the value's stored word, and only the wider
+  reading is left out. The checks around a clause read every value in its
+  stored word as well: the wider value kept by a term of its own beside
+  the fine one is the narrowing on purpose it would be.
 
 A reading's entry carries `read` beside `path` and `what`: `{kind: word |
 wider, axis, wrote, as_axis, as_value}`, and for `wider` also `exact`, the
