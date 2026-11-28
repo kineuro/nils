@@ -1182,6 +1182,326 @@ fn the_shipped_pack_reads_a_brain_written_alone_as_the_head() {
     }
 }
 
+/// An axis may say which of its values a question counts unless it says
+/// otherwise (`ask_default`): values of the axis by any of their names,
+/// kept by identity, at least one, each once.
+#[test]
+fn an_axis_may_say_which_values_a_question_counts_by_default() {
+    let kind = |extra: &str| {
+        let d = coarse(SIZE_AXIS, SIZE_RULES);
+        d.file(
+            "axes/kind.yml",
+            &format!(
+                "axis: kind\nkind: single\n{extra}values: {{a: {{}}, b: {{aliases: [beta]}}, c: {{}}}}\n"
+            ),
+        );
+        d
+    };
+    let pack = nils_pack::load(kind("ask_default: [a, beta]\n").path(), None).unwrap();
+    assert_eq!(pack.axis("kind").unwrap().ask_default, ["a", "b"]);
+    assert!(pack.axis("size").unwrap().ask_default.is_empty());
+    let pack = nils_pack::load(kind("").path(), None).unwrap();
+    assert!(pack.axes.iter().all(|a| a.ask_default.is_empty()));
+
+    let e = refusal(&kind("ask_default: [a, d]\n"));
+    assert!(e.contains("kind.yml"), "{e}");
+    assert!(e.contains("ask_default"), "{e}");
+    assert!(e.contains("d is no value of kind"), "{e}");
+    let e = refusal(&kind("ask_default: [b, beta]\n"));
+    assert!(e.contains("b is listed twice"), "{e}");
+    let e = refusal(&kind("ask_default: []\n"));
+    assert!(e.contains("names no value"), "{e}");
+}
+
+/// The shipped pack counts the acquisitions and the scanner-derived images
+/// unless a question says otherwise, on its disposition and on no other
+/// axis, and ships no family file of its own yet.
+#[test]
+fn the_shipped_pack_counts_acquisitions_and_scanner_derived_images_by_default() {
+    let pack = nils_pack::load(&common::shipped_mri(), None).unwrap();
+    for axis in &pack.axes {
+        let expected: &[&str] = if axis.name == "disposition" {
+            &["acquisition", "scanner_derived"]
+        } else {
+            &[]
+        };
+        assert_eq!(axis.ask_default, expected, "{}", axis.name);
+    }
+}
+
+const FAMILY: &str = "\
+family: two-echo
+label: 'Two-echo imaging'
+terms: ['two echo', 'dual echo']
+summary: 'Two images of one excitation, an early echo and a late one.'
+products:
+  - id: first-echo
+    what: 'The early echo.'
+    acquired: true
+    where:
+      - ['=', {}, ['axis', {}, 'kind'], 'a']
+      - ['not', {}, ['in', {}, ['axis', {}, 'size'], ['large']]]
+    note: 'Makers name it differently.'
+  - id: difference
+    what: 'The late echo taken from the early one.'
+    acquired: false
+    where:
+      - ['=', {}, ['axis', {}, 'kind'], 'beta']
+ask:
+  - words: 'the early echo of each visit'
+    sets: |
+      early:
+        grain: stack
+        of: visits
+        where:
+          - ['=', {}, ['axis', {}, 'kind'], 'a']
+    note: 'The visit is the session.'
+raw:
+  - field: text_series_description
+    what: 'The maker words for the echo.'
+";
+
+/// A pack with the two axes of [`coarse`] and the family files given.
+fn with_families(files: &[(&str, &str)]) -> Dir {
+    let d = coarse(SIZE_AXIS, SIZE_RULES);
+    for (name, text) in files {
+        d.file(&format!("families/{name}"), text);
+    }
+    d
+}
+
+/// A pack may say how an acquisition family is filed, a file a family in a
+/// `families` folder the manifest does not name: each is read whole, in the
+/// order of the files' names, and a pack without the folder has none.
+#[test]
+fn a_pack_may_say_how_a_family_is_filed() {
+    let other = FAMILY
+        .replace("family: two-echo", "family: a-map")
+        .replace("Two-echo imaging", "A map");
+    let d = with_families(&[("two-echo.yml", FAMILY), ("a-map.yml", &other)]);
+    let pack = nils_pack::load(d.path(), None).unwrap();
+    let names: Vec<&str> = pack.families.iter().map(|f| f.family.as_str()).collect();
+    assert_eq!(names, ["a-map", "two-echo"]);
+    let f = &pack.families[1];
+    assert_eq!(f.label, "Two-echo imaging");
+    assert_eq!(f.terms, ["two echo", "dual echo"]);
+    assert_eq!(f.products.len(), 2);
+    assert_eq!(f.products[0].id, "first-echo");
+    assert!(f.products[0].acquired && !f.products[1].acquired);
+    assert_eq!(
+        f.products[0].where_[0],
+        serde_json::json!(["=", {}, ["axis", {}, "kind"], "a"])
+    );
+    assert_eq!(f.products[1].note, None);
+    assert_eq!(f.ask[0].words, "the early echo of each visit");
+    assert!(f.ask[0].sets.starts_with("early:\n  grain: stack\n"));
+    assert_eq!(f.raw[0].field, "text_series_description");
+    // as the catalog serves it: the clauses as arrays, the sets as text
+    let served = serde_json::to_value(f).unwrap();
+    assert_eq!(served["products"][0]["where"][0][3], "a");
+    assert!(served["products"][1].get("note").is_none());
+    assert!(served["ask"][0]["sets"].is_string());
+    // no folder, no family; and a file that is no YAML file is not read
+    let none = coarse(SIZE_AXIS, SIZE_RULES);
+    assert!(
+        nils_pack::load(none.path(), None)
+            .unwrap()
+            .families
+            .is_empty()
+    );
+    let d = with_families(&[("two-echo.yml", FAMILY), ("README.md", "not a family")]);
+    assert_eq!(nils_pack::load(d.path(), None).unwrap().families.len(), 1);
+    // a family without `raw` serves none
+    let bare = FAMILY.split("raw:").next().unwrap().to_string();
+    let d = with_families(&[("two-echo.yml", &bare)]);
+    let pack = nils_pack::load(d.path(), None).unwrap();
+    assert!(pack.families[0].raw.is_empty());
+    assert!(
+        serde_json::to_value(&pack.families[0])
+            .unwrap()
+            .get("raw")
+            .is_none()
+    );
+}
+
+/// What the loader holds a family file to, each refusal with the file and
+/// the path inside it.
+#[test]
+fn a_family_file_is_held_to_its_keys_its_names_and_the_pack_s_axes() {
+    let refused = |from: &str, to: &str, path: &str, why: &str| {
+        let text = FAMILY.replace(from, to);
+        assert_ne!(text, FAMILY, "{from}");
+        let e = refusal(&with_families(&[("two-echo.yml", &text)]));
+        assert!(e.contains("two-echo.yml"), "{from}: {e}");
+        assert!(e.contains(path), "{from}: {e}");
+        assert!(e.contains(why), "{from}: {e}");
+    };
+    // every key is known, at each depth
+    refused(
+        "summary:",
+        "colour: red\nsummary:",
+        "colour",
+        "colour is not a key here",
+    );
+    refused(
+        "    acquired: true\n",
+        "    acquired: true\n    weight: 3\n",
+        "products[0].weight",
+        "weight is not a key here",
+    );
+    refused(
+        "    note: 'The visit is the session.'\n",
+        "    answer: 4\n",
+        "ask[0].answer",
+        "answer is not a key here",
+    );
+    refused(
+        "  - field: text_series_description\n",
+        "  - field: text_series_description\n    type: text\n",
+        "raw[0].type",
+        "type is not a key here",
+    );
+    // the family is named as its file, in lower case letters, digits and
+    // hyphens, and so are its products, each once
+    refused(
+        "family: two-echo",
+        "family: two_echo",
+        "family",
+        "the family is two_echo and its file is two-echo",
+    );
+    refused(
+        "  - id: first-echo",
+        "  - id: First Echo",
+        "products[0].id",
+        "First Echo is not lower case letters, digits and hyphens",
+    );
+    refused(
+        "  - id: difference",
+        "  - id: first-echo",
+        "products[1].id",
+        "first-echo is a product of two-echo already",
+    );
+    // the words a person uses, and what the file must hold
+    refused(
+        "terms: ['two echo', 'dual echo']",
+        "terms: []",
+        "terms",
+        "at least one word",
+    );
+    refused("label: 'Two-echo imaging'\n", "", "", "needs label");
+    refused(
+        "    acquired: true\n",
+        "    acquired: 'yes'\n",
+        "products[0].acquired",
+        "expected true",
+    );
+    refused(
+        "    what: 'The early echo.'\n",
+        "    what: ''\n",
+        "products[0].what",
+        "is empty",
+    );
+    // a clause is a clause, of an axis the pack declares and a value of it
+    refused(
+        "      - ['=', {}, ['axis', {}, 'kind'], 'a']\n      - ['not'",
+        "      - ['=', ['axis', {}, 'kind'], 'a']\n      - ['not'",
+        "products[0].where[0]",
+        "a clause is [op, {options}, ...arguments]",
+    );
+    refused(
+        "['in', {}, ['axis', {}, 'size'], ['large']]",
+        "['in', {}, ['axis', {}, 'weight'], ['large']]",
+        "products[0].where[1][2][2]",
+        "no axis named weight in the pack",
+    );
+    refused(
+        "['in', {}, ['axis', {}, 'size'], ['large']]",
+        "['in', {}, ['axis', {}, 'size'], ['large', 'huge']]",
+        "products[0].where[1][2]",
+        "huge is no value of size",
+    );
+    // a value by an earlier name is a value
+    assert!(FAMILY.contains("'beta'"));
+    // no clause of a family says `exact`, in a product or in an example,
+    // at any depth
+    refused(
+        "    where:\n      - ['=', {}, ['axis', {}, 'kind'], 'a']\n      - ['not'",
+        "    where:\n      - ['=', {exact: true}, ['axis', {}, 'kind'], 'a']\n      - ['not'",
+        "products[0].where[0]",
+        "a family's clause carries no exact",
+    );
+    refused(
+        "['in', {}, ['axis', {}, 'size'], ['large']]",
+        "['in', {exact: false}, ['axis', {}, 'size'], ['large']]",
+        "products[0].where[1][2]",
+        "a family's clause carries no exact",
+    );
+    refused(
+        "          - ['=', {}, ['axis', {}, 'kind'], 'a']\n    note: 'The visit",
+        "          - ['=', {exact: true}, ['axis', {}, 'kind'], 'a']\n    note: 'The visit",
+        "ask[0].sets.early.where[0]",
+        "a family's clause carries no exact",
+    );
+    // the sets of an example are YAML that maps a name to a set, their
+    // clauses held as a product's
+    refused(
+        "    sets: |\n      early:\n        grain: stack\n        of: visits\n        where:\n          - ['=', {}, ['axis', {}, 'kind'], 'a']\n",
+        "    sets: |\n      - early\n",
+        "ask[0].sets",
+        "the sets map each set's name to the set",
+    );
+    refused(
+        "          - ['=', {}, ['axis', {}, 'kind'], 'a']\n    note: 'The visit",
+        "          - ['=', {}, ['axis', {}, 'kind'], 'z']\n    note: 'The visit",
+        "ask[0].sets.early.where[0]",
+        "z is no value of kind",
+    );
+    // and a family has a product and an example
+    let e = refusal(&with_families(&[(
+        "two-echo.yml",
+        "family: two-echo\nlabel: l\nterms: [t]\nsummary: s\nproducts: []\nask: []\n",
+    )]));
+    assert!(e.contains("a family leaves at least one product"), "{e}");
+}
+
+/// The shipped pack loads with a `families` folder beside its manifest:
+/// one invented family, written in the pack's own axes, in a copy of the
+/// pack.
+#[test]
+fn the_shipped_pack_loads_with_a_family_beside_it() {
+    let d = Dir::mri_copy("mri-family");
+    d.file(
+        "families/invented-pair.yml",
+        "\
+family: invented-pair
+label: 'An invented pair'
+terms: ['invented pair']
+summary: 'A magnitude and a phase of one acquisition, for a test.'
+products:
+  - id: magnitude
+    what: 'The magnitude image.'
+    acquired: true
+    where:
+      - ['=', {}, ['axis', {}, 'base'], 'T2starw']
+      - ['=', {}, ['axis', {}, 'disposition'], 'acquisition']
+      - ['not', {}, ['has', {}, ['axis', {}, 'construct'], 'Phase']]
+ask:
+  - words: 'the magnitude of each visit'
+    sets: |
+      magnitude:
+        grain: stack
+        where:
+          - ['=', {}, ['axis', {}, 'base'], 'T2starw']
+",
+    );
+    let pack = nils_pack::load(d.path(), None).unwrap_or_else(|e| panic!("{e}"));
+    assert_eq!(pack.families.len(), 1);
+    assert_eq!(pack.families[0].family, "invented-pair");
+    // and the pack as it ships has none
+    let shipped = nils_pack::load(&common::shipped_mri(), None).unwrap();
+    assert!(shipped.families.is_empty());
+}
+
 #[test]
 fn a_coarse_form_the_rules_fold_otherwise_is_refused() {
     // the declaration says b is small, and the rules decide large for it

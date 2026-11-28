@@ -289,6 +289,14 @@ pub struct Axis {
     /// that axis it covers ([`AxisValue::covers`]), and the rules that
     /// decide this axis fold them so, which the loader holds them to.
     pub coarse_of: Option<String>,
+    /// The values of the axis a question counts unless it says otherwise
+    /// (`ask_default`), by identity: the MRI pack's disposition counts the
+    /// acquisitions and the scanner-derived images, and a reformat or a
+    /// scout only where the words name one. The ask adds the clause to a
+    /// question authored as text whose stack sets name no value of the
+    /// axis, and says so; no rule and no sort reads it. Empty on every
+    /// other axis.
+    pub ask_default: Vec<String>,
 }
 
 /// When an axis is decided.

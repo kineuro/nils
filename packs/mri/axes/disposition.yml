@@ -23,6 +23,17 @@ tiers: {stated: 0.9}
 # below are what catch everything else.
 default: acquisition
 default_confidence: 0.7
+# The kinds of scan a question counts unless it says otherwise. A
+# scanner-derived image can be the very image a question means (an ADC map,
+# a synthetic contrast, a reconstruction the scanner made), so it is counted
+# beside the acquisitions. A reformat is another view of an acquisition the
+# session already holds, and a scout or a working scan is not what a
+# question usually wants: they are counted where the words name them, and
+# so is a display composite. The ask adds the clause to a question authored
+# as text whose stack sets name no disposition, says so, and names the
+# clause to write for the other kinds; a document that arrives structured is
+# taken as written. No rule and no sort reads the key.
+ask_default: [acquisition, scanner_derived]
 
 values:
   # What the scanner acquired and meant you to look at.

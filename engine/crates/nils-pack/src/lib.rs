@@ -22,6 +22,7 @@ pub mod engines;
 pub mod error;
 pub mod eval;
 pub mod expr;
+pub mod families;
 pub mod keywords;
 pub mod legal;
 pub mod level;

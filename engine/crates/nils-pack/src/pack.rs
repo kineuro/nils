@@ -112,6 +112,9 @@ pub struct ParserDef {
 /// A loaded pack.
 #[derive(Clone)]
 pub struct Pack {
+    /// How each acquisition family is filed (`families/<id>.yml`), in the
+    /// order of the files' names; none where the pack has no such folder.
+    pub families: Vec<crate::families::Family>,
     pub name: String,
     pub version: Version,
     pub contract: u32,
@@ -1106,9 +1109,14 @@ fn build_unjudged(dir: &Path, overlay: Option<&Overlay>) -> R<Pack> {
     // one automaton per text they search.
     let keywords = crate::keywords::Index::build(&mut rule_sets);
 
+    // How each acquisition family is filed, where the pack says: read by
+    // nothing here, served by the ask's catalog.
+    let families = crate::families::load(dir, &axes)?;
+
     let pack = Pack {
         keywords,
         derived,
+        families,
         axes,
         levels,
         mcp,
@@ -2469,6 +2477,38 @@ fn load_axis(
     crate::coarse::declared(&name, coarse_of.as_deref(), &mut values, axes)
         .map_err(|e| e.in_file(&f.path, Some(&f.source)))?;
 
+    // The values a question counts unless it says otherwise: values of this
+    // axis by any of their names, kept by identity, at least one, each once.
+    let mut ask_default: Vec<String> = Vec::new();
+    if let Some(d) = m.get("ask_default") {
+        let refuse = |why: String| Error::at("ask_default", why).in_file(&f.path, Some(&f.source));
+        for word in f.blame(yaml::texts(d, "ask_default"))? {
+            let found = values
+                .iter()
+                .find(|v| {
+                    v.id == word
+                        || v.label == word
+                        || v.stored.as_deref() == Some(word.as_str())
+                        || v.aliases.contains(&word)
+                })
+                .map(|v| v.id.clone());
+            let Some(id) = found else {
+                return Err(refuse(format!("{word} is no value of {name}")));
+            };
+            if ask_default.contains(&id) {
+                return Err(refuse(format!("{id} is listed twice")));
+            }
+            ask_default.push(id);
+        }
+        if ask_default.is_empty() {
+            return Err(refuse(
+                "names no value; a question counts at least one value of the axis, or the key \
+                 is left out"
+                    .to_string(),
+            ));
+        }
+    }
+
     // An alias is a name a value had before, so it names that value alone:
     // never another value's identity, and never two values at once.
     for (i, v) in values.iter().enumerate() {
@@ -2807,6 +2847,7 @@ fn load_axis(
             default_confidence,
             stores_label,
             coarse_of,
+            ask_default,
         },
         set: RuleSet {
             name,
