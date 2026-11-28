@@ -1,0 +1,66 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+family: t1-3d
+label: '3D T1-weighted (MPRAGE, BRAVO, 3D TFE, 3D spoiled GRE, SPACE and CUBE T1)'
+terms: ['3D T1', 'MPRAGE', 'MP-RAGE', 'BRAVO', 'FSPGR BRAVO', '3D TFE', 'IR-FSPGR', 'tfl3d', 'MEMPRAGE', '3D FSPGR', '3D SPGR', 'VIBE', 'SPACE T1', 'CUBE T1', 'VISTA T1', 'black blood T1', 'isotropic T1', 'volumetric T1']
+summary: 'A 3D T1-weighted acquisition: an inversion-prepared rapid gradient echo (MPRAGE and its vendor names), a spoiled or interpolated gradient echo, or a 3D turbo spin echo (SPACE, CUBE, VISTA), often after contrast. One acquisition leaves the volume and, from the console or a workstation, reformats in the other planes and sometimes maximum intensity projections.'
+products:
+  - id: mprage
+    what: 'The inversion-prepared 3D gradient echo volume, the T1 a morphometry pipeline reads. Technique MPRAGE (BRAVO and 3D TFE included) or MEMPRAGE.'
+    acquired: true
+    where:
+      - ['=', {}, ['axis', {}, 'base'], 'T1w']
+      - ['in', {}, ['axis', {}, 'technique'], ['MPRAGE', 'MEMPRAGE']]
+      - ['=', {}, ['axis', {}, 'disposition'], 'acquisition']
+  - id: gre-3d
+    what: 'A 3D spoiled or interpolated gradient echo T1 without inversion preparation (3D FLASH, SPGR, FSPGR, VIBE, LAVA, THRIVE).'
+    acquired: true
+    where:
+      - ['=', {}, ['axis', {}, 'base'], 'T1w']
+      - ['in', {}, ['axis', {}, 'technique'], ['SPGRE', 'FSPGRE', 'VIGRE']]
+      - ['=', {}, ['derived', {}, 'acquisition_type'], '3D']
+      - ['=', {}, ['axis', {}, 'disposition'], 'acquisition']
+    note: 'The Dixon parts of a 3D gradient echo are scanner-derived and in the dixon family.'
+  - id: tse-3d
+    what: 'A 3D turbo spin echo T1 (SPACE, CUBE, VISTA), often black blood after contrast.'
+    acquired: true
+    where:
+      - ['=', {}, ['axis', {}, 'base'], 'T1w']
+      - ['=', {}, ['axis', {}, 'technique'], 'SPACE']
+      - ['=', {}, ['axis', {}, 'disposition'], 'acquisition']
+    note: 'A real (phase-sensitive) inversion recovery SPACE is in the psir family.'
+  - id: reformat
+    what: 'A plane resliced from a 3D T1 volume (MPR).'
+    acquired: false
+    where:
+      - ['=', {}, ['axis', {}, 'base'], 'T1w']
+      - ['has', {}, ['axis', {}, 'construct'], 'MPR']
+      - ['=', {}, ['derived', {}, 'acquisition_type'], '3D']
+      - ['=', {}, ['axis', {}, 'disposition'], 'reformat']
+    note: 'As numerous as the volumes or more; the default kinds leave them out.'
+  - id: mip
+    what: 'A maximum intensity projection of a post-contrast 3D T1, a view of the vessels.'
+    acquired: false
+    where:
+      - ['=', {}, ['axis', {}, 'base'], 'T1w']
+      - ['in', {}, ['axis', {}, 'technique'], ['MPRAGE', 'SPGRE', 'FSPGRE', 'VIGRE']]
+      - ['has', {}, ['axis', {}, 'construct'], 'MIP']
+      - ['=', {}, ['axis', {}, 'disposition'], 'reformat']
+ask:
+  - words: 'MPRAGE scans without contrast'
+    sets: |
+      mprage:
+        grain: stack
+        where:
+          - ['=', {}, ['axis', {}, 'base'], 'T1w']
+          - ['=', {}, ['axis', {}, 'technique'], 'MPRAGE']
+          - ['=', {}, ['axis', {}, 'post_contrast'], 'not_given']
+    note: 'Most stacks have no post_contrast value at all; not_given counts only those the header or a step marked.'
+  - words: 'every 3D T1, reformats included'
+    sets: |
+      t1_all:
+        grain: stack
+        where:
+          - ['=', {}, ['axis', {}, 'base'], 'T1w']
+          - ['=', {}, ['derived', {}, 'acquisition_type'], '3D']
+          - ['in', {}, ['axis', {}, 'disposition'], ['acquisition', 'scanner_derived', 'reformat']]
+    note: 'A 3D planning scan also has base T1w; it stays out since its disposition is scout.'

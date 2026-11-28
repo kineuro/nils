@@ -1,0 +1,121 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+family: synthetic-mri
+label: 'Synthetic MRI (SyMRI, MAGiC, SyntAc) from a multi-dynamic multi-echo or QALAS acquisition'
+terms: ['SyMRI', 'MAGiC', 'SyntAc', 'synthetic MRI', 'MDME', 'QRAPMASTER', 'QALAS', '3D-QALAS', 'multi-dynamic multi-echo', 'quantitative MRI', 'relaxometry', 'qMaps', 'synthetic T1', 'synthetic T2', 'synthetic FLAIR', 'synthetic PD', 'synthetic STIR', 'synthetic DIR', 'synthetic PSIR', 'myelin map', 'SyMRI phase', 'SyMRI magnitude']
+summary: 'One quantitative acquisition (a multi-dynamic multi-echo spin echo, or a 3D QALAS) from which software fits T1, T2 and proton density maps and synthesises any weighting from them. One acquisition leaves the raw images of the fit (magnitude and phase at each delay and echo), the maps, the synthetic contrasts, and often colour pictures and screenshots of the viewer.'
+products:
+  - id: acquired-magnitude
+    what: 'The magnitude images of the multi-dynamic multi-echo or QALAS acquisition, at each saturation delay and echo: the raw input the maps are fitted from, not an image to read.'
+    acquired: true
+    where:
+      - ['in', {}, ['axis', {}, 'technique'], ['MDME', 'QALAS']]
+      - ['has', {}, ['axis', {}, 'construct'], 'Magnitude']
+      - ['=', {}, ['axis', {}, 'disposition'], 'working_scan']
+    note: 'A working scan: the default kinds leave it out, and it is not converted. No base contrast. GE writes its proton-density pass with no component token; it is filed Magnitude too.'
+  - id: acquired-phase
+    what: 'The phase images of the multi-dynamic multi-echo acquisition (Siemens and Philips; GE stores the real part instead). Raw input of the fit.'
+    acquired: true
+    where:
+      - ['in', {}, ['axis', {}, 'technique'], ['MDME', 'QALAS']]
+      - ['has', {}, ['axis', {}, 'construct'], 'Phase']
+      - ['=', {}, ['axis', {}, 'disposition'], 'working_scan']
+    note: 'These are most of the Phase stacks of a registry. A question about SWI or gradient-echo phase must keep them out, which the disposition acquisition does.'
+  - id: acquired-real
+    what: 'The real part of a GE MAGiC acquisition as acquired, the component GE stores in place of the phase.'
+    acquired: true
+    where:
+      - ['=', {}, ['axis', {}, 'technique'], 'MDME']
+      - ['has', {}, ['axis', {}, 'construct'], 'Real']
+  - id: synthetic-t1w
+    what: 'A T1-weighted image synthesised from the maps.'
+    acquired: false
+    where:
+      - ['=', {}, ['axis', {}, 'provenance'], 'SyMRI']
+      - ['has', {}, ['axis', {}, 'construct'], 'SyntheticT1w']
+      - ['=', {}, ['axis', {}, 'disposition'], 'scanner_derived']
+    note: 'Philips also writes copies marked secondary, which are filed reformat.'
+  - id: synthetic-t2w
+    what: 'A T2-weighted image synthesised from the maps.'
+    acquired: false
+    where:
+      - ['=', {}, ['axis', {}, 'provenance'], 'SyMRI']
+      - ['has', {}, ['axis', {}, 'construct'], 'SyntheticT2w']
+      - ['=', {}, ['axis', {}, 'disposition'], 'scanner_derived']
+  - id: synthetic-flair
+    what: 'A FLAIR synthesised from the maps: base T2w with modifier FLAIR, or base T1w with FLAIR for a synthetic T1 FLAIR.'
+    acquired: false
+    where:
+      - ['=', {}, ['axis', {}, 'provenance'], 'SyMRI']
+      - ['has', {}, ['axis', {}, 'construct'], 'SyntheticFLAIR']
+      - ['=', {}, ['axis', {}, 'disposition'], 'scanner_derived']
+  - id: synthetic-pdw
+    what: 'A proton-density-weighted image synthesised from the maps.'
+    acquired: false
+    where:
+      - ['=', {}, ['axis', {}, 'provenance'], 'SyMRI']
+      - ['has', {}, ['axis', {}, 'construct'], 'SyntheticPDw']
+      - ['=', {}, ['axis', {}, 'disposition'], 'scanner_derived']
+  - id: synthetic-stir-dir-psir
+    what: 'A STIR, double inversion recovery or phase-sensitive inversion recovery synthesised from the maps (modifier STIR, DIR or PSIR).'
+    acquired: false
+    where:
+      - ['=', {}, ['axis', {}, 'provenance'], 'SyMRI']
+      - ['or', {}, ['has', {}, ['axis', {}, 'construct'], 'SyntheticSTIR'], ['has', {}, ['axis', {}, 'construct'], 'SyntheticDIR'], ['has', {}, ['axis', {}, 'construct'], 'SyntheticPSIR']]
+      - ['in', {}, ['axis', {}, 'disposition'], ['scanner_derived', 'working_scan']]
+    note: 'The current rules file these three as working scans, not as scanner-derived images like the other synthetic contrasts, so a question that keeps the default kinds misses them: name both dispositions as here.'
+  - id: quantitative-maps
+    what: 'The fitted maps: T1, T2, proton density, R1 and R2, one map a stack, or the three in one series (MultiQmap, as GE MAGiC writes them). No base contrast.'
+    acquired: false
+    where:
+      - ['=', {}, ['axis', {}, 'provenance'], 'SyMRI']
+      - ['or', {}, ['has', {}, ['axis', {}, 'construct'], 'T1map'], ['has', {}, ['axis', {}, 'construct'], 'T2map'], ['has', {}, ['axis', {}, 'construct'], 'PDmap'], ['has', {}, ['axis', {}, 'construct'], 'R1map'], ['has', {}, ['axis', {}, 'construct'], 'R2map'], ['has', {}, ['axis', {}, 'construct'], 'MultiQmap']]
+    note: 'The single maps are scanner_derived. A MultiQmap series is stored encrypted and is filed acquisition by the current rules; it cannot be converted. A T1 map from an MP2RAGE or a mapping sequence of its own is no SyMRI map: the provenance keeps it out.'
+  - id: tissue-maps
+    what: 'Maps of tissue fractions or segmentations the software writes (CSF, white and grey matter, myelin).'
+    acquired: false
+    where:
+      - ['=', {}, ['axis', {}, 'provenance'], 'SyMRI']
+      - ['or', {}, ['has', {}, ['axis', {}, 'construct'], 'MyelinMap'], ['has', {}, ['axis', {}, 'construct'], 'Qmap']]
+    note: 'A myelin map is scanner_derived; a tissue map filed Qmap is a working scan under the current rules.'
+  - id: display-composite
+    what: 'A picture saved from the viewer in colour: a map or a segmentation drawn over a synthetic image. An image of a person, made for looking at, not for measuring.'
+    acquired: false
+    where:
+      - ['has', {}, ['axis', {}, 'construct'], 'DisplayComposite']
+      - ['=', {}, ['axis', {}, 'disposition'], 'display_composite']
+    note: 'Left out of every count and release unless the question names the disposition display_composite. Screenshots of the viewer are excluded and no question finds them.'
+ask:
+  - words: 'subjects with a synthetic MRI exam'
+    sets: |
+      symri_any:
+        grain: stack
+        where:
+          - ['=', {}, ['axis', {}, 'provenance'], 'SyMRI']
+          - ['=', {}, ['axis', {}, 'disposition'], 'scanner_derived']
+      visits:
+        grain: session
+        has: [{set: symri_any, min: 1}]
+      people:
+        grain: subject
+        has: [{set: visits, min: 1}]
+    note: 'A visit with any synthetic contrast or map. The raw MDME images are working scans and would need the disposition named.'
+  - words: 'the raw MDME magnitude and phase images that the SyMRI maps were made from'
+    sets: |
+      mdme_raw:
+        grain: stack
+        where:
+          - ['in', {}, ['axis', {}, 'technique'], ['MDME', 'QALAS']]
+          - ['=', {}, ['axis', {}, 'disposition'], 'working_scan']
+          - ['or', {}, ['has', {}, ['axis', {}, 'construct'], 'Magnitude'], ['has', {}, ['axis', {}, 'construct'], 'Phase'], ['has', {}, ['axis', {}, 'construct'], 'Real']]
+    note: 'Naming the disposition working_scan turns the default kinds off for this set.'
+  - words: 'synthetic T2 FLAIR images'
+    sets: |
+      syn_flair:
+        grain: stack
+        where:
+          - ['=', {}, ['axis', {}, 'provenance'], 'SyMRI']
+          - ['has', {}, ['axis', {}, 'construct'], 'SyntheticFLAIR']
+          - ['=', {}, ['axis', {}, 'base'], 'T2w']
+raw:
+  - field: text_series_description
+    what: 'Which map or synthetic contrast a SyMRI series is, where its construct is missing: the software names its outputs by the weighting (T1W, T2W, PDW, FLAIR, STIR, DIR, PSIR with a synthetic word) or the map (T1 map, T2 map, PD map, myelin).'

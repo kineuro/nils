@@ -1,0 +1,83 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+family: multi-echo-gre
+label: 'Multi-echo and T2* gradient echo (ME-GRE, MEDIC, MERGE, QSM, R2*)'
+terms: ['multi-echo GRE', 'MEGRE', 'ME-GRE', 'multi-echo gradient echo', 'MEDIC', 'MERGE', 'mFFE', 'M-FFE', 'combined echoes', 'T2*', 'T2 star', 'T2* GRE', 'gradient echo T2*', 'hemosiderin', 'QSM', 'quantitative susceptibility mapping', 'R2*', 'R2* map', 'STAGE']
+summary: 'A gradient echo read at one long echo time or at several echoes. One acquisition leaves a magnitude per echo (or one combined over the echoes, as MEDIC and MERGE do), often a phase per echo, and on some systems a QSM or an R2* map. Many are the sources of an SWI (see the swi family).'
+products:
+  - id: echo-magnitude
+    what: 'The magnitude at each echo, one stack per echo or one stack of all echoes. Base T2*w.'
+    acquired: true
+    where:
+      - ['=', {}, ['axis', {}, 'technique'], 'MEGRE']
+      - ['=', {}, ['axis', {}, 'base'], 'T2starw']
+      - ['=', {}, ['axis', {}, 'disposition'], 'acquisition']
+      - ['not', {}, ['has', {}, ['axis', {}, 'construct'], 'Phase']]
+    note: 'Only Siemens writes the construct Magnitude on it; never require it.'
+  - id: combined-magnitude
+    what: 'One magnitude image combined over the echoes (Siemens MEDIC, GE MERGE, Philips mFFE), a T2*-weighted image with less distortion and more signal; widely used in the cervical spine.'
+    acquired: true
+    where:
+      - ['=', {}, ['axis', {}, 'technique'], 'combMEGRE']
+      - ['=', {}, ['axis', {}, 'base'], 'T2starw']
+      - ['=', {}, ['axis', {}, 'disposition'], 'acquisition']
+    note: 'The technique says the echoes were combined. A mean over the echoes written as an extra series carries EchoCombined.'
+  - id: phase
+    what: 'The phase at each echo, the raw input of QSM and of a field map. No base contrast.'
+    acquired: true
+    where:
+      - ['in', {}, ['axis', {}, 'technique'], ['MEGRE', 'combMEGRE']]
+      - ['has', {}, ['axis', {}, 'construct'], 'Phase']
+      - ['=', {}, ['axis', {}, 'disposition'], 'acquisition']
+  - id: single-echo-t2star
+    what: 'A single-echo T2*-weighted gradient echo, the routine scan for blood products and calcification.'
+    acquired: true
+    where:
+      - ['in', {}, ['axis', {}, 'technique'], ['SPGRE', 'GRE']]
+      - ['=', {}, ['axis', {}, 'base'], 'T2starw']
+      - ['=', {}, ['axis', {}, 'disposition'], 'acquisition']
+      - ['not', {}, ['has', {}, ['axis', {}, 'construct'], 'Phase']]
+    note: 'The magnitude of a single-echo SWI is filed the same way; leave out the visits that hold an SWI image when only the plain T2* is wanted.'
+  - id: qsm
+    what: 'A quantitative susceptibility map computed from the phase.'
+    acquired: false
+    where:
+      - ['has', {}, ['axis', {}, 'construct'], 'QSM']
+      - ['not', {}, ['has', {}, ['axis', {}, 'construct'], 'Phase']]
+    note: 'Rare on scanners; most QSM is made offline and never enters the registry.'
+  - id: r2star-map
+    what: 'The R2* map, the relaxation rate R2* (the reciprocal of T2*) fitted over the echoes. No base contrast.'
+    acquired: false
+    where:
+      - ['has', {}, ['axis', {}, 'construct'], 'R2starmap']
+  - id: stage-output
+    what: 'An image computed by STAGE (strategically acquired gradient echo) from its echoes, a magnitude or a phase.'
+    acquired: false
+    where:
+      - ['=', {}, ['axis', {}, 'provenance'], 'STAGE']
+ask:
+  - words: 'T2* gradient echo scans, not SWI'
+    sets: |
+      t2star:
+        grain: stack
+        where:
+          - ['in', {}, ['axis', {}, 'technique'], ['SPGRE', 'GRE', 'MEGRE', 'combMEGRE']]
+          - ['=', {}, ['axis', {}, 'base'], 'T2starw']
+          - ['=', {}, ['axis', {}, 'disposition'], 'acquisition']
+      swi_image:
+        grain: stack
+        where:
+          - ['=', {}, ['axis', {}, 'base'], 'SWI']
+          - ['has', {}, ['axis', {}, 'construct'], 'SWI']
+      visits:
+        grain: session
+        has: [{set: t2star, min: 1}, {set: swi_image, max: 0}]
+    note: 'A visit with a T2* gradient echo and no SWI image, since an SWI''s own magnitude files as a T2*w gradient echo.'
+  - words: 'MEDIC of the cervical spine'
+    sets: |
+      medic:
+        grain: stack
+        where:
+          - ['=', {}, ['axis', {}, 'technique'], 'combMEGRE']
+          - ['=', {}, ['axis', {}, 'base'], 'T2starw']
+          - ['=', {}, ['axis', {}, 'body_region'], 'spine']
+    note: 'body_region spine covers the spine and the neck; the cervical level alone is not an axis value.'

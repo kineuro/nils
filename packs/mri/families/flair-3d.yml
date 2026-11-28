@@ -1,0 +1,50 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+family: flair-3d
+label: '3D FLAIR (SPACE FLAIR, CUBE FLAIR, VISTA FLAIR)'
+terms: ['3D FLAIR', 'SPACE FLAIR', 'CUBE FLAIR', 'VISTA FLAIR', '3D T2 FLAIR', 'sagittal 3D FLAIR', 'isotropic FLAIR', 'dark fluid 3D', 'FLAIR', 'DIR', 'double inversion recovery']
+summary: 'A 3D turbo spin echo with variable flip angles and a fluid-nulling inversion, usually sagittal and near isotropic. One acquisition leaves the 3D volume and, made by the console or a workstation, reformats in the other planes; a double inversion recovery (DIR) is the same sequence with a second inversion.'
+products:
+  - id: volume
+    what: 'The 3D FLAIR volume as acquired: base T2w, modifier FLAIR, technique SPACE (the stored word for every vendor''s 3D TSE).'
+    acquired: true
+    where:
+      - ['=', {}, ['axis', {}, 'base'], 'T2w']
+      - ['has', {}, ['axis', {}, 'modifier'], 'FLAIR']
+      - ['=', {}, ['derived', {}, 'acquisition_type'], '3D']
+      - ['=', {}, ['axis', {}, 'disposition'], 'acquisition']
+    note: 'Most 3D FLAIR also carry FatSat beside FLAIR; has FLAIR keeps both. GE may also export an unfiltered copy (construct ORIG) beside a filtered one, both acquisitions.'
+  - id: reformat
+    what: 'An axial or coronal plane resliced from the volume (MPR), filed reformat.'
+    acquired: false
+    where:
+      - ['=', {}, ['axis', {}, 'base'], 'T2w']
+      - ['has', {}, ['axis', {}, 'modifier'], 'FLAIR']
+      - ['has', {}, ['axis', {}, 'construct'], 'MPR']
+      - ['=', {}, ['axis', {}, 'disposition'], 'reformat']
+    note: 'Reformats outnumber the volumes by several times; a count of 3D FLAIR with them counts planes, not acquisitions. The default kinds leave them out.'
+  - id: dir
+    what: 'A 3D double inversion recovery: white matter and fluid nulled, for cortical lesions. Base T2w, modifier DIR.'
+    acquired: true
+    where:
+      - ['has', {}, ['axis', {}, 'modifier'], 'DIR']
+      - ['=', {}, ['derived', {}, 'acquisition_type'], '3D']
+      - ['=', {}, ['axis', {}, 'disposition'], 'acquisition']
+ask:
+  - words: 'how many 3D FLAIR scans'
+    sets: |
+      flair3d:
+        grain: stack
+        where:
+          - ['=', {}, ['axis', {}, 'base'], 'T2w']
+          - ['has', {}, ['axis', {}, 'modifier'], 'FLAIR']
+          - ['=', {}, ['derived', {}, 'acquisition_type'], '3D']
+    note: 'The default kinds keep the volumes and leave out the reformats and the planning scans that carry the FLAIR''s axes.'
+  - words: '3D FLAIR with its reformats'
+    sets: |
+      flair3d_all:
+        grain: stack
+        where:
+          - ['=', {}, ['axis', {}, 'base'], 'T2w']
+          - ['has', {}, ['axis', {}, 'modifier'], 'FLAIR']
+          - ['=', {}, ['derived', {}, 'acquisition_type'], '3D']
+          - ['in', {}, ['axis', {}, 'disposition'], ['acquisition', 'reformat']]

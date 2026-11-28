@@ -1,0 +1,43 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+family: bold
+label: 'BOLD functional MRI (fMRI, resting state, task)'
+terms: ['BOLD', 'fMRI', 'functional MRI', 'resting state', 'resting-state', 'rs-fMRI', 'task fMRI', 'ep2d_bold', 'multiband', 'SBRef', 'functional']
+summary: 'A gradient-echo (rarely spin-echo) EPI time series of the whole brain over minutes. One run leaves the time series, often a motion-corrected copy, a single-band reference for multiband runs, and on some consoles statistical maps.'
+products:
+  - id: run
+    what: 'The BOLD time series as acquired. Base T2*w, technique BOLD, directory type func.'
+    acquired: true
+    where:
+      - ['=', {}, ['axis', {}, 'technique'], 'BOLD']
+      - ['=', {}, ['axis', {}, 'disposition'], 'acquisition']
+      - ['not', {}, ['has', {}, ['axis', {}, 'modifier'], 'MoCo']]
+  - id: moco
+    what: 'The motion-corrected copy of the run the scanner writes beside it.'
+    acquired: false
+    where:
+      - ['=', {}, ['axis', {}, 'technique'], 'BOLD']
+      - ['has', {}, ['axis', {}, 'modifier'], 'MoCo']
+    note: 'Written original, so it is filed acquisition by ruling: leave out MoCo to count runs, or the count doubles where sites save it.'
+  - id: sbref
+    what: 'The single-band reference image of a multiband run (BIDS sbref).'
+    acquired: true
+    where:
+      - ['has', {}, ['axis', {}, 'construct'], 'SBRef']
+  - id: maps
+    what: 'Statistical or temporal maps a console computed from a run (a t-test map, a temporal standard deviation).'
+    acquired: false
+    where:
+      - ['or', {}, ['=', {}, ['axis', {}, 'provenance'], 'BOLDRecon'], ['has', {}, ['axis', {}, 'construct'], 'TTestMap'], ['has', {}, ['axis', {}, 'construct'], 'StdDevTime']]
+ask:
+  - words: 'resting-state fMRI runs'
+    sets: |
+      bold_runs:
+        grain: stack
+        where:
+          - ['=', {}, ['axis', {}, 'technique'], 'BOLD']
+          - ['=', {}, ['axis', {}, 'disposition'], 'acquisition']
+          - ['not', {}, ['has', {}, ['axis', {}, 'modifier'], 'MoCo']]
+    note: 'The axes do not tell resting state from a task; that is in the series name only.'
+raw:
+  - field: text_series_description
+    what: 'Whether a run is resting state or a task, and which task, is said only in the series or protocol name.'

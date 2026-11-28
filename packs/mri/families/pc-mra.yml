@@ -1,0 +1,40 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+family: pc-mra
+label: 'Phase-contrast angiography and flow (PC, 4D flow)'
+terms: ['phase contrast', 'phase-contrast MRA', 'PC MRA', 'PC angio', 'PCA', 'Qflow', 'flow quantification', '4D flow', 'velocity encoding', 'VENC', 'velocity', 'venography', 'CSF flow']
+summary: 'A gradient echo with bipolar velocity-encoding gradients. One acquisition leaves a magnitude image, signed velocity (phase) images per direction, an angiogram (speed or complex difference) and projections of it.'
+products:
+  - id: magnitude
+    what: 'The magnitude image of the phase-contrast acquisition. No base contrast.'
+    acquired: true
+    where:
+      - ['=', {}, ['axis', {}, 'technique'], 'PC']
+      - ['=', {}, ['axis', {}, 'disposition'], 'acquisition']
+      - ['not', {}, ['has', {}, ['axis', {}, 'construct'], 'Velocity']]
+    note: 'Philips writes the construct Magnitude on it; other makers write none. A GE 2D phase contrast collapsed into one image is its own image and filed here.'
+  - id: velocity
+    what: 'The velocity image: the phase difference scaled to velocity by the encoding velocity, one per encoded direction.'
+    acquired: false
+    where:
+      - ['has', {}, ['axis', {}, 'construct'], 'Velocity']
+    note: 'Not construct Phase: a phase contrast''s phase is its velocity.'
+  - id: angiogram
+    what: 'The speed or complex-difference image: bright vessels whatever the flow direction.'
+    acquired: false
+    where:
+      - ['has', {}, ['axis', {}, 'construct'], 'Speed']
+  - id: mip
+    what: 'A maximum intensity projection of the angiogram.'
+    acquired: false
+    where:
+      - ['=', {}, ['axis', {}, 'technique'], 'PC']
+      - ['has', {}, ['axis', {}, 'construct'], 'MIP']
+      - ['=', {}, ['axis', {}, 'disposition'], 'reformat']
+ask:
+  - words: 'phase-contrast velocity images'
+    sets: |
+      velocity:
+        grain: stack
+        where:
+          - ['has', {}, ['axis', {}, 'construct'], 'Velocity']
+    note: 'A question for "phase images" means SWI or gradient-echo phase, not these; a phase-contrast question names velocity.'

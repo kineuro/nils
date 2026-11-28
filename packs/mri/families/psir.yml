@@ -1,0 +1,44 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+family: psir
+label: 'Phase-sensitive and real inversion recovery (PSIR)'
+terms: ['PSIR', 'phase sensitive inversion recovery', 'phase-sensitive IR', 'real IR', 'real inversion recovery', 'TrueIR', 'SPACE IR', 'magnitude IR', 'inversion recovery']
+summary: 'An inversion recovery reconstructed so that the sign of the magnetisation is kept (the real part), which a magnitude image loses. One acquisition leaves the real (PSIR) image, sometimes the magnitude image beside it, and reformats; in the spinal cord and for cortical lesions it is read as a T1-weighted image.'
+products:
+  - id: real
+    what: 'The real (phase-sensitive) image as acquired. Base T1w, modifier PSIR, construct Real.'
+    acquired: true
+    where:
+      - ['has', {}, ['axis', {}, 'modifier'], 'PSIR']
+      - ['has', {}, ['axis', {}, 'construct'], 'Real']
+      - ['=', {}, ['axis', {}, 'disposition'], 'acquisition']
+  - id: magnitude
+    what: 'The magnitude image of the same inversion recovery: modifier IR (or FLAIR or STIR by its inversion time), no Real.'
+    acquired: true
+    where:
+      - ['has', {}, ['axis', {}, 'modifier'], 'IR']
+      - ['not', {}, ['has', {}, ['axis', {}, 'construct'], 'Real']]
+      - ['=', {}, ['axis', {}, 'disposition'], 'acquisition']
+    note: 'Modifier IR is any inversion recovery that is neither FLAIR, STIR, DIR nor PSIR; tie it to the PSIR by the visit.'
+  - id: reformat
+    what: 'A plane resliced from the real image.'
+    acquired: false
+    where:
+      - ['has', {}, ['axis', {}, 'construct'], 'Real']
+      - ['has', {}, ['axis', {}, 'construct'], 'MPR']
+      - ['=', {}, ['axis', {}, 'disposition'], 'reformat']
+    note: 'Some reformats keep modifier IR instead of PSIR, since the reformat''s own header does not say which component it is; the construct Real is the safer mark.'
+  - id: synthetic-psir
+    what: 'A PSIR synthesised from quantitative maps (see the synthetic-mri family).'
+    acquired: false
+    where:
+      - ['has', {}, ['axis', {}, 'construct'], 'SyntheticPSIR']
+      - ['in', {}, ['axis', {}, 'disposition'], ['scanner_derived', 'working_scan']]
+ask:
+  - words: 'PSIR scans'
+    sets: |
+      psir:
+        grain: stack
+        where:
+          - ['has', {}, ['axis', {}, 'modifier'], 'PSIR']
+          - ['=', {}, ['axis', {}, 'disposition'], 'acquisition']
+    note: 'The acquired PSIR alone; synthetic ones are a separate question.'

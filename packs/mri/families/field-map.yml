@@ -1,0 +1,35 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+family: field-map
+label: 'Field maps (B0 and B1) and distortion references'
+terms: ['field map', 'fieldmap', 'B0 map', 'B0 field map', 'phase difference', 'phasediff', 'B1 map', 'flip angle map', 'transmit field', 'DREAM', 'AFI', 'reverse phase encoding', 'reversed blip', 'TOPUP', 'pepolar', 'blip-up blip-down', 'fmap']
+summary: 'Scans acquired to correct other scans: a B0 field map (a dual-echo gradient echo whose phase difference measures the field), a B1 or flip-angle map of the transmit field, or a short EPI with the phase encoding reversed for a distortion correction. B0 maps and reversed phase-encoding EPIs are filed under the directory type fmap; a B1 map is fmap where synthetic MRI wrote it.'
+products:
+  - id: b0-map
+    what: 'The B0 field map, or the phase difference of a dual-echo gradient echo that measures it.'
+    acquired: true
+    where:
+      - ['has', {}, ['axis', {}, 'construct'], 'B0map']
+    note: 'Filed scanner_derived. The magnitude echoes of a field map are images, not the map, and carry no B0map; a phase difference whose header does not say field map may file as a plain Phase.'
+  - id: b1-map
+    what: 'A transmit field (B1) map, in percent of the nominal flip angle or in degrees.'
+    acquired: false
+    where:
+      - ['has', {}, ['axis', {}, 'construct'], 'B1map']
+  - id: reversed-pe-epi
+    what: 'An EPI of a few volumes with the phase encoding reversed (BIDS fmap epi), paired with a diffusion or BOLD run for distortion correction.'
+    acquired: true
+    where:
+      - ['has', {}, ['axis', {}, 'construct'], 'FieldmapRef']
+      - ['=', {}, ['axis', {}, 'disposition'], 'acquisition']
+    note: 'From a diffusion protocol its base is DWI: a question for diffusion images leaves it out with a clause on FieldmapRef.'
+ask:
+  - words: 'visits with a field map of any kind'
+    sets: |
+      fmap:
+        grain: stack
+        where:
+          - ['=', {}, ['axis', {}, 'directory_type'], 'fmap']
+      visits:
+        grain: session
+        has: [{set: fmap, min: 1}]
+    note: 'The directory type fmap gathers the B0 maps and the reversed phase-encoding EPIs; add a clause on B1map for transmit field maps filed elsewhere.'

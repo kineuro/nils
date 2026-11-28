@@ -1,0 +1,51 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+family: asl
+label: 'Arterial spin labelling perfusion (ASL)'
+terms: ['ASL', 'arterial spin labelling', 'arterial spin labeling', 'pCASL', 'PASL', '3D ASL', '3D GRASE ASL', 'spiral ASL', 'label and control', 'M0', 'M0 scan', 'perfusion-weighted', 'deltaM', 'CBF', 'cerebral blood flow']
+summary: 'Perfusion measured without contrast: blood is labelled magnetically, and the label and control images are subtracted. One acquisition leaves the label and control images, the difference (perfusion-weighted) image, an M0 proton-density reference, and a CBF map computed from them.'
+products:
+  - id: label-control
+    what: 'The label and control images as acquired. Base ASL, stored as magnitude images.'
+    acquired: true
+    where:
+      - ['=', {}, ['axis', {}, 'base'], 'ASL']
+      - ['=', {}, ['axis', {}, 'disposition'], 'acquisition']
+    note: 'Many systems (GE 3D spiral ASL) do not save them at all, only the difference image.'
+  - id: difference
+    what: 'The perfusion-weighted image: control minus label, subtracted by the scanner (BIDS deltam). Base PWI, construct DeltaM.'
+    acquired: false
+    where:
+      - ['has', {}, ['axis', {}, 'construct'], 'DeltaM']
+      - ['in', {}, ['axis', {}, 'disposition'], ['acquisition', 'scanner_derived']]
+    note: 'Filed scanner_derived where the header marks the subtraction (Siemens) and acquisition where it does not (GE): write both.'
+  - id: m0
+    what: 'The M0 (equilibrium magnetisation) image a CBF quantification divides by. Base PDw, construct M0.'
+    acquired: true
+    where:
+      - ['has', {}, ['axis', {}, 'construct'], 'M0']
+      - ['=', {}, ['axis', {}, 'disposition'], 'acquisition']
+    note: 'Some sequences keep the M0 as the first volume of the run instead of a stack of its own.'
+  - id: cbf
+    what: 'The cerebral blood flow map computed from the difference and the M0.'
+    acquired: false
+    where:
+      - ['has', {}, ['axis', {}, 'construct'], 'CBF']
+      - ['not', {}, ['=', {}, ['axis', {}, 'technique'], 'Perfusion']]
+      - ['in', {}, ['axis', {}, 'disposition'], ['scanner_derived', 'reformat']]
+    note: 'An ASL CBF map is meant to carry provenance ASLRecon, but a GE spiral ASL map is read today with another technique, so the clause keeps any CBF map that is not a DSC map. A map written secondary is filed reformat.'
+ask:
+  - words: 'ASL perfusion with an M0 scan'
+    sets: |
+      asl_any:
+        grain: stack
+        where:
+          - ['or', {}, ['=', {}, ['axis', {}, 'base'], 'ASL'], ['has', {}, ['axis', {}, 'construct'], 'DeltaM']]
+          - ['in', {}, ['axis', {}, 'disposition'], ['acquisition', 'scanner_derived']]
+      m0:
+        grain: stack
+        where:
+          - ['has', {}, ['axis', {}, 'construct'], 'M0']
+      visits:
+        grain: session
+        has: [{set: asl_any, min: 1}, {set: m0, min: 1}]
+    note: 'An ASL acquisition is found by its label and control images or its difference image, whichever the site saved; the technique ASL alone also holds the M0 and some maps.'

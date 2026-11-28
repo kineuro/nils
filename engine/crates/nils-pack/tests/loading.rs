@@ -1495,11 +1495,48 @@ ask:
 ",
     );
     let pack = nils_pack::load(d.path(), None).unwrap_or_else(|e| panic!("{e}"));
-    assert_eq!(pack.families.len(), 1);
-    assert_eq!(pack.families[0].family, "invented-pair");
-    // and the pack as it ships has none
     let shipped = nils_pack::load(&common::shipped_mri(), None).unwrap();
-    assert!(shipped.families.is_empty());
+    assert_eq!(pack.families.len(), shipped.families.len() + 1);
+    assert!(pack.families.iter().any(|f| f.family == "invented-pair"));
+    assert!(!shipped.families.iter().any(|f| f.family == "invented-pair"));
+}
+
+/// The families the pack ships: each loads, in the order of the files'
+/// names, with at least a word, a product and a worked example, and its
+/// file carries the licence line and no clause that says `exact`.
+#[test]
+fn the_shipped_pack_s_families_load() {
+    let dir = common::shipped_mri();
+    let pack = nils_pack::load(&dir, None).unwrap_or_else(|e| panic!("{e}"));
+    assert!(!pack.families.is_empty());
+    let names: Vec<&str> = pack.families.iter().map(|f| f.family.as_str()).collect();
+    let mut sorted = names.clone();
+    sorted.sort_unstable();
+    assert_eq!(names, sorted);
+    for f in &pack.families {
+        assert!(
+            !f.terms.is_empty() && !f.products.is_empty() && !f.ask.is_empty(),
+            "{}",
+            f.family
+        );
+        let text = std::fs::read_to_string(dir.join("families").join(format!("{}.yml", f.family)))
+            .unwrap();
+        assert!(
+            text.starts_with("# SPDX-License-Identifier: AGPL-3.0-only\n"),
+            "{}",
+            f.family
+        );
+        assert!(!text.contains("exact"), "{}", f.family);
+        // the words of a family are no value's stored spelling by accident:
+        // each is a text, trimmed
+        for t in &f.terms {
+            assert_eq!(t.trim(), t, "{}: {t:?}", f.family);
+        }
+    }
+    // a family's identity is its own
+    let mut ids: Vec<&str> = names.clone();
+    ids.dedup();
+    assert_eq!(ids.len(), names.len());
 }
 
 #[test]
