@@ -9,7 +9,7 @@
 # in slices 3, 4 and 6 of the wave.
 
 pack: mri
-version: 1.5.0
+version: 1.5.1
 contract: 11
 # The engines this pack works with (pack contract 10, record 55 B5): from the
 # first engine that reads rules releases on. An engine before it speaks pack
@@ -18,7 +18,10 @@ contract: 11
 # 1.5.0 narrows it: a row stores one plain word of a value, and an engine
 # before 1.0.0-beta.23 reads a row only in the word its own pack stores, so
 # it would not read the rows this pack writes beside the ones it wrote.
-engine: ">=1.0.0-beta.23, <2.0.0"
+# 1.5.1 narrows it again: its families, its default kinds of scan and its
+# reading of a brain are read by an engine from 1.0.0-beta.24 on, and an
+# older engine would load the pack and read none of them.
+engine: ">=1.0.0-beta.24, <2.0.0"
 modality: MR
 
 parsers:
