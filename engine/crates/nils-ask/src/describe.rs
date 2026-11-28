@@ -200,6 +200,13 @@ pub fn clause_text(c: &Clause) -> String {
     if strict {
         text.push_str(" (strict)");
     }
+    // a value clause that keeps the stacks with no value of the axis too
+    if matches!(op, "=" | "in")
+        && c.opts.get("unset").and_then(Value::as_bool) == Some(true)
+        && matches!(c.args.first(), Some(Arg::Clause(l)) if l.op == "axis")
+    {
+        text.push_str(" (or none yet)");
+    }
     text
 }
 

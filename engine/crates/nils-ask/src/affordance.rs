@@ -199,6 +199,12 @@ pub fn apply(
     }
     let mut ask = doc.ask.clone();
     let changed = moves::apply_moves(&mut ask, &opts, calls)?;
+    // A move writes for a person what a draft writes from their words, so
+    // the kinds of scan a question counts unless it says are the same in
+    // both: a stack set a move added gets the default clause, and a set
+    // given a clause that names its own kinds loses it. The sets touched
+    // are answered with their new sentences, which say the clause.
+    crate::reading::after_moves(&doc.ask, &mut ask, s.names);
     // strict validation of the result; an invalid document is not stored
     let prepared = prepare(ask.clone(), s.names, s.scope)?;
     let stored = document::put(

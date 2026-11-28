@@ -1939,6 +1939,7 @@ fn a_repair_carries_what_was_read_only_where_a_value_was() {
             as_axis: "technique".into(),
             as_value: "SPGRE".into(),
             exact: None,
+            as_values: None,
         }),
     };
     assert_eq!(

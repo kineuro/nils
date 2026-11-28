@@ -3394,7 +3394,17 @@ fn emptied_by(
                 String::new()
             },
         );
-        let next = if inherited {
+        // one of the two is the clause a question is read with where it
+        // names no value of the axis: what to do is to write the clause
+        // the words ask for
+        let by_default = crate::reading::counted_by_default(&of.where_[*i], counter.names)
+            .or_else(|| crate::reading::counted_by_default(&set.where_[emptied_at], counter.names));
+        let next = if let Some((axis, counted, example)) = by_default {
+            format!(
+                "a question counts {} of {axis} unless it says: where the words ask for another kind on {name}, write the {axis} clause they ask for in {name}, for example {example}; where they do not, no {grain} holds both and the answer stands",
+                listed(&counted, "and")
+            )
+        } else if inherited {
             let parent = chain.get(1).copied().unwrap_or(*owner);
             format!(
                 "where the question's words did not put {this} on {name}, draft {name} on its own instead of from: {parent}, with the clauses it needs and without that one; where they did, no {grain} holds both and the answer stands"

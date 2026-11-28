@@ -41,6 +41,17 @@
 //!   so a listed word of such a value (`neuro` for `brain`) is read wider
 //!   as the value itself is, in one reading that says what was written.
 //!
+//! - **default**: an axis may say which of its values a question counts
+//!   unless it says otherwise (`ask_default`: the MRI pack's disposition
+//!   counts the acquisitions and the scanner-derived images, and a
+//!   reformat, a scout or a working scan only where the words name one).
+//!   A stack set that names no value of that axis in a `where` clause,
+//!   neither itself nor a stack set it is drawn from, gets the clause that
+//!   keeps those values. It is written once for the sets that share it,
+//!   at the set the others are drawn from, and any clause on the axis in a
+//!   set or in a set it is drawn from turns it off for that set. It is
+//!   read last, after the words and the wider values.
+//!
 //! A document that arrives structured (a stored one, a strict door) never
 //! comes here: it is taken as written.
 
@@ -49,7 +60,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::ast::{Arg, Ask, Clause, Grain};
+use crate::ast::{Arg, Ask, Clause, Grain, Set, Src};
 use crate::describe::clause_text;
 use crate::diagnose::{narrowed_on_purpose, value_filter};
 use crate::repair::Repair;
@@ -61,6 +72,8 @@ use crate::validate::{Names, Spelling};
 pub struct Read {
     /// `word`: another name of the value, read as the stored word.
     /// `wider`: a fine value written alone, read as the value that covers it.
+    /// `default`: no value of the axis was written, and the values a
+    /// question counts unless it says were added.
     pub kind: String,
     pub axis: String,
     pub wrote: String,
@@ -70,6 +83,10 @@ pub struct Read {
     /// as a document writes it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exact: Option<String>,
+    /// For `default` alone: the values added, each in the word a row
+    /// stores; `as_value` is the same list as one text.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub as_values: Option<Vec<String>>,
 }
 
 /// Whether a clause says its value is meant as written.
@@ -135,6 +152,7 @@ pub fn read(ask: &mut Ask, names: &dyn Names) -> Vec<Repair> {
             words(c, &path, names, &mut out);
         }
     }
+    defaults(&mut view, &written, names, &mut out);
     // back into the document as it was written
     for (name, set) in ask.sets.iter_mut() {
         if let Some(read) = view.sets.get(name) {
@@ -150,6 +168,338 @@ pub fn read(ask: &mut Ask, names: &dyn Names) -> Vec<Repair> {
         }
     }
     out
+}
+
+/// Whether a clause names an axis anywhere in it.
+fn names_axis(c: &Clause, axis: &str) -> bool {
+    let mut all = Vec::new();
+    c.walk(&mut all);
+    all.iter()
+        .any(|x| x.op == "axis" && x.ref_name() == Some(axis))
+}
+
+/// The default reading: for each axis that says which of its values a
+/// question counts unless it says otherwise, the clause that keeps them,
+/// added to the stack sets that name no value of the axis.
+///
+/// The stack sets of a document are trees by `from`. A set is free where
+/// neither it nor a set it is drawn from names the axis in a `where`
+/// clause. The clause is written at the highest free set of a tree that
+/// no set drawn from it names the axis in: at the root for a chain that
+/// never names it, so the sets drawn from the root read it too and it is
+/// said once. Where a set drawn from a free set does name the axis, the
+/// free set is left as written, since a clause there would cut the set
+/// that asked for other values, and each of its other branches gets the
+/// clause at its own top.
+///
+/// Left as written: a set at another grain; a group and the result of an
+/// algebra, whose rows are other sets'; and a stack set that starts from a
+/// list (`from` a handle, a selection, a role or uploaded values), with
+/// the sets drawn from it: the list is what someone chose. A stack set
+/// that is `of` another set starts a tree of its own.
+fn defaults(
+    view: &mut Ask,
+    written: &BTreeMap<String, String>,
+    names: &dyn Names,
+    out: &mut Vec<Repair>,
+) {
+    for axis in names.axes() {
+        let kin = names.axis_kin(&axis);
+        let Some(of) = names
+            .axis_names(&axis)
+            .filter(|_| !kin.ask_default.is_empty())
+        else {
+            continue;
+        };
+        let word = |id: &String| {
+            of.values
+                .iter()
+                .find(|v| v.id == *id)
+                .map_or(id.clone(), |v| of.stored(v).to_string())
+        };
+        let counted: Vec<String> = kin.ask_default.iter().map(word).collect();
+        let left_out: Vec<String> = of
+            .values
+            .iter()
+            .filter(|v| !kin.ask_default.contains(&v.id))
+            .map(|v| of.stored(v).to_string())
+            .collect();
+        // a stack nothing has sorted yet holds no value: it is counted
+        // where the value a sort gives by default is one of those counted
+        let unset = kin
+            .default
+            .as_ref()
+            .is_some_and(|d| kin.ask_default.contains(d));
+        // the stack sets that hold rows of their own
+        let stack =
+            |set: &Set| set.grain == Grain::Stack && set.algebra.is_none() && set.group.is_none();
+        let parent = |sets: &BTreeMap<String, Set>, name: &str| -> Option<String> {
+            match &sets.get(name)?.from {
+                Some(Src::Set(p)) if sets.get(p).is_some_and(stack) => Some(p.clone()),
+                _ => None,
+            }
+        };
+        // by set: whether it, or a set it is drawn from, names the axis or
+        // starts from a list
+        let mut settled: BTreeMap<String, bool> = BTreeMap::new();
+        let order: Vec<String> = view.sets.keys().cloned().collect();
+        for name in &order {
+            let mut chain = vec![name.clone()];
+            while let Some(p) = parent(&view.sets, chain.last().expect("a set")) {
+                if chain.contains(&p) {
+                    break;
+                }
+                chain.push(p);
+            }
+            let is = chain.iter().any(|n| {
+                view.sets.get(n).is_none_or(|set| {
+                    !stack(set)
+                        || set.where_.iter().any(|c| names_axis(c, &axis))
+                        // a source that is no set of the document, or a set
+                        // of another grain
+                        || (set.from.is_some() && parent(&view.sets, n).is_none())
+                })
+            });
+            settled.insert(name.clone(), is);
+        }
+        // by set: whether a set drawn from it names the axis
+        let below = |sets: &BTreeMap<String, Set>, name: &str| {
+            sets.iter().any(|(other, set)| {
+                other != name && stack(set) && set.where_.iter().any(|c| names_axis(c, &axis)) && {
+                    let mut at = parent(sets, other);
+                    let mut seen = vec![other.clone()];
+                    let mut found = false;
+                    while let Some(p) = at {
+                        if p == name {
+                            found = true;
+                            break;
+                        }
+                        if seen.contains(&p) {
+                            break;
+                        }
+                        seen.push(p.clone());
+                        at = parent(sets, &p);
+                    }
+                    found
+                }
+            })
+        };
+        let holds: Vec<String> = order
+            .iter()
+            .filter(|name| {
+                settled.get(*name) == Some(&false)
+                    && !below(&view.sets, name)
+                    && parent(&view.sets, name).is_none_or(|p| below(&view.sets, &p))
+            })
+            .cloned()
+            .collect();
+        for name in holds {
+            let (Some(at), Some(set)) = (written.get(&name), view.sets.get_mut(&name)) else {
+                continue;
+            };
+            let clause = default_clause(&axis, &counted, unset);
+            let example = one_more(&axis, &counted, &left_out, unset);
+            out.push(Repair {
+                path: format!("{at}.where[{}]", set.where_.len()),
+                what: format!(
+                    "No clause of {name} names a {axis}, so {} was added: a question counts \
+                     those unless it says{}. {} stacks are left out. To count another kind, \
+                     write the {axis} clause the words ask for in {name}, for example {example}.",
+                    clause_text(&clause),
+                    if unset {
+                        format!(", and a stack that holds no {axis} yet with them")
+                    } else {
+                        String::new()
+                    },
+                    if left_out.is_empty() {
+                        "No other".to_string()
+                    } else {
+                        capital(&listed(&left_out))
+                    },
+                ),
+                read: Some(Read {
+                    kind: "default".to_string(),
+                    axis: axis.clone(),
+                    wrote: String::new(),
+                    as_axis: axis.clone(),
+                    as_value: counted.join(", "),
+                    exact: None,
+                    as_values: Some(counted.clone()),
+                }),
+            });
+            set.where_.push(clause);
+        }
+    }
+}
+
+/// The clause a question is read with where it names no value of an axis
+/// that says which of its values a question counts: those values, and,
+/// with `unset`, the stacks that hold no value of the axis yet.
+fn default_clause(axis: &str, counted: &[String], unset: bool) -> Clause {
+    let clause = Clause::new("in")
+        .arg(Arg::Clause(
+            Clause::new("axis").arg(Arg::Text(axis.to_string())),
+        ))
+        .arg(Arg::List(counted.iter().cloned().map(Arg::Text).collect()));
+    if unset {
+        clause.opt("unset", Value::Bool(true))
+    } else {
+        clause
+    }
+}
+
+/// Whether the default clause of an axis counts the stacks with no value
+/// of it yet: where the value a sort gives by default is among those a
+/// question counts.
+fn counts_unset(kin: &crate::validate::AxisKin) -> bool {
+    kin.default
+        .as_ref()
+        .is_some_and(|d| kin.ask_default.contains(d))
+}
+
+/// The default clause of an axis as the pack declares it, in the words a
+/// row stores; none where the axis counts every value. What the catalog
+/// serves beside `ask_default`, so nobody works the clause out again.
+pub fn default_clause_of(axis: &str, names: &dyn Names) -> Option<Clause> {
+    let kin = names.axis_kin(axis);
+    let of = names
+        .axis_names(axis)
+        .filter(|_| !kin.ask_default.is_empty())?;
+    let word = |id: &String| {
+        of.values
+            .iter()
+            .find(|v| v.id == *id)
+            .map_or(id.clone(), |v| of.stored(v).to_string())
+    };
+    let counted: Vec<String> = kin.ask_default.iter().map(word).collect();
+    Some(default_clause(axis, &counted, counts_unset(&kin)))
+}
+
+/// What the moves of a person changed, read as a question is: a stack set
+/// a move added gets the default clause of each axis that has one, and a
+/// set a move gave a clause that keeps values of such an axis loses the
+/// default clause it held, since the person now says which values are
+/// meant. `before` is the document the moves were applied to.
+///
+/// A new set gets the clause itself, also where it is drawn from a set of
+/// the document that names no value of the axis: that set was written
+/// before, and is not changed for the sake of a new one. Where the set it
+/// is drawn from, or one above it, names the axis already, or the new set
+/// starts from a list, is a group or the result of an algebra, nothing is
+/// added. A clause that takes values away (`<>`, `not_in`) leaves the
+/// default clause where it is: without it the set would count the kinds
+/// the default leaves out.
+pub fn after_moves(before: &Ask, after: &mut Ask, names: &dyn Names) {
+    for axis in names.axes() {
+        let Some(clause) = default_clause_of(&axis, names) else {
+            continue;
+        };
+        let stack =
+            |set: &Set| set.grain == Grain::Stack && set.algebra.is_none() && set.group.is_none();
+        let added: Vec<String> = after
+            .sets
+            .keys()
+            .filter(|n| !before.sets.contains_key(*n))
+            .cloned()
+            .collect();
+        for name in added {
+            // the new set and the sets it is drawn from
+            let mut chain = vec![name.clone()];
+            let mut listed = false;
+            while let Some(set) = after.sets.get(chain.last().expect("a set")) {
+                match &set.from {
+                    Some(Src::Set(p)) if !chain.contains(p) => chain.push(p.clone()),
+                    Some(Src::Set(_)) | None => break,
+                    Some(_) => {
+                        listed = true;
+                        break;
+                    }
+                }
+            }
+            let settled = listed
+                || chain.iter().any(|n| {
+                    after.sets.get(n).is_none_or(|set| {
+                        !stack(set) || set.where_.iter().any(|c| names_axis(c, &axis))
+                    })
+                });
+            if !settled && let Some(set) = after.sets.get_mut(&name) {
+                set.where_.push(clause.clone());
+            }
+        }
+        // a set that was there, given a clause that keeps values of the axis
+        for (name, set) in after.sets.iter_mut() {
+            let Some(was) = before.sets.get(name) else {
+                continue;
+            };
+            let says = set.where_.iter().any(|c| {
+                !was.where_.contains(c)
+                    && counted_by_default(c, names).is_none()
+                    && value_filter(c, names).is_some_and(|(a, _, _)| a == axis)
+            });
+            if says {
+                set.where_
+                    .retain(|c| !counted_by_default(c, names).is_some_and(|(a, _, _)| a == axis));
+            }
+        }
+    }
+}
+
+/// The clause that counts one more value of an axis than a question counts
+/// by default, as a document writes it: the example a reading and a
+/// warning give of the clause to write.
+fn one_more(axis: &str, counted: &[String], left_out: &[String], unset: bool) -> String {
+    let words: Vec<String> = counted
+        .iter()
+        .chain(left_out.first())
+        .map(|w| serde_json::to_string(w).unwrap_or_default())
+        .collect();
+    format!(
+        "[\"in\", {{{}}}, [\"axis\", {{}}, \"{axis}\"], [{}]]",
+        if unset { "unset: true" } else { "" },
+        words.join(", ")
+    )
+}
+
+/// Whether a clause keeps exactly the values its axis counts by default
+/// (`ask_default`), as the default reading writes it: the axis, those
+/// values in the words a row stores, and the example of the clause that
+/// counts one more.
+pub(crate) fn counted_by_default(
+    c: &Clause,
+    names: &dyn Names,
+) -> Option<(String, Vec<String>, String)> {
+    let (axis, of, kept) = value_filter(c, names)?;
+    let kin = names.axis_kin(&axis);
+    if kin.ask_default.is_empty()
+        || kept.len() != kin.ask_default.len()
+        || !kin.ask_default.iter().all(|d| kept.contains(d))
+    {
+        return None;
+    }
+    let word = |id: &String| {
+        of.values
+            .iter()
+            .find(|v| v.id == *id)
+            .map_or(id.clone(), |v| of.stored(v).to_string())
+    };
+    let counted: Vec<String> = kin.ask_default.iter().map(word).collect();
+    let left_out: Vec<String> = of
+        .values
+        .iter()
+        .filter(|v| !kin.ask_default.contains(&v.id))
+        .map(|v| of.stored(v).to_string())
+        .collect();
+    let example = one_more(&axis, &counted, &left_out, counts_unset(&kin));
+    Some((axis, counted, example))
+}
+
+/// A text with its first letter a capital.
+fn capital(text: &str) -> String {
+    let mut chars = text.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().chain(chars).collect(),
+        None => String::new(),
+    }
 }
 
 /// A clause with each value it writes out in the word the pack stores,
@@ -315,6 +665,7 @@ fn wider(
             as_axis: coarse_axis.axis.clone(),
             as_value,
             exact: Some(exact),
+            as_values: None,
         }),
     });
     *c = read;
@@ -366,6 +717,7 @@ fn words(c: &mut Clause, path: &str, names: &dyn Names, out: &mut Vec<Repair>) {
                     as_axis: axis.clone(),
                     as_value: stored.to_string(),
                     exact: None,
+                    as_values: None,
                 }),
             });
             *a = Arg::Text(stored.to_string());

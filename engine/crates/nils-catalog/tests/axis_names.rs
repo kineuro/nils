@@ -689,6 +689,10 @@ fn the_catalog_says_what_rows_store_and_its_sampler_and_a_draft_agree() {
                 "    grain: stack",
                 "    where:",
                 &format!("      - [\"=\", {{}}, [\"axis\", {{}}, \"post_contrast\"], {value}]"),
+                // the kinds of scan are named, so the draft counts every
+                // kind and not the default ones alone: the stacks planted
+                // are of any disposition
+                "      - [\"<>\", {}, [\"axis\", {}, \"disposition\"], \"excluded\"]",
                 "out: {set: scans, level: count}",
             ]
             .join("\n");

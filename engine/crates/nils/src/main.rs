@@ -5255,6 +5255,20 @@ fn pack_command(home: &Home, command: PackCommand) -> Result<(), Exit> {
                         shape.unreachable(),
                         shape.implications.len()
                     );
+                    // the families, held to what a question may write: the
+                    // ask's language and the fields every catalog has
+                    nils_catalog::families::held_alone(&pack).map_err(|e| fail(e.to_string()))?;
+                    if !pack.families.is_empty() {
+                        println!(
+                            "{} families: {}",
+                            pack.families.len(),
+                            pack.families
+                                .iter()
+                                .map(|f| f.family.as_str())
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        );
+                    }
                     // one word for a value, in the registry and in a file's
                     // name: a name token that is not the stored word, in a
                     // group that does not say its tokens are its own

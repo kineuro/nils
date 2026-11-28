@@ -1523,6 +1523,31 @@ impl<'a> Builder<'a> {
         }
     }
 
+    /// A clause that keeps the rows whose axis holds one of some values,
+    /// widened by its option `unset: true` to the rows that hold no value
+    /// of the axis at all: a stack nothing has sorted yet has no row on
+    /// the axis, and a clause that counts the axis's usual values would
+    /// leave every such stack out. Without the option the clause is as it
+    /// was.
+    fn or_unset(
+        &mut self,
+        c: &Clause,
+        axis: &str,
+        holds: String,
+        terms: &[(String, Term)],
+        alias: &str,
+        at: &str,
+    ) -> String {
+        if c.opts.get("unset").and_then(Value::as_bool) != Some(true) {
+            return holds;
+        }
+        let values = self.axis_values(axis, terms, alias, at);
+        format!(
+            "({holds} OR NOT EXISTS (SELECT 1 FROM {} WHERE ax.value IS NOT NULL))",
+            self.axis_rows(&values, "ax")
+        )
+    }
+
     /// Whether a row's axis holds a value: one of some texts, or one a
     /// condition on `ax.value` takes. Never null. On SQLite the value is
     /// read as text, as the column of `classification_axis` is, so a
@@ -4979,6 +5004,8 @@ impl<'a> Builder<'a> {
                     let exists = self.axis_holds(&values, &held);
                     return plain(if op == "<>" {
                         format!("NOT {exists}")
+                    } else if op == "=" {
+                        self.or_unset(c, axis, exists, terms, alias, at)
                     } else {
                         exists
                     });
@@ -5087,7 +5114,7 @@ impl<'a> Builder<'a> {
                     let values = self.axis_values(axis, terms, alias, at);
                     let exists = self.axis_holds(&values, &held);
                     return plain(if op == "in" {
-                        exists
+                        self.or_unset(c, axis, exists, terms, alias, at)
                     } else {
                         format!("NOT {exists}")
                     });

@@ -5745,7 +5745,34 @@ out: {set: eligible, level: count}
         }
     });
     let is = |axis: &str, value: &str| serde_json::json!(["=", {}, ["axis", {}, axis], value]);
-    let read = serde_json::json!([is("technique", "SPGRE"), is("body_region", "head")]);
+    // the kinds of scan a question counts unless it says: the clause a
+    // draft adds to a stack set that names no disposition, and its reading
+    let kinds = serde_json::json!([
+        "in",
+        {"unset": true},
+        ["axis", {}, "disposition"],
+        ["acquisition", "scanner_derived"]
+    ]);
+    let by_default = |set: &str, at: usize| {
+        serde_json::json!({
+            "path": format!("sets.{set}.where[{at}]"),
+            "what": format!(
+                "No clause of {set} names a disposition, so disposition among [acquisition, \
+                 scanner_derived] (or none yet) was added: a question counts those unless it \
+                 says, and a stack that holds no disposition yet with them. Reformat, \
+                 working_scan, scout, display_composite and excluded stacks are left out. To \
+                 count another kind, write the disposition clause the words ask for in {set}, \
+                 for example [\"in\", {{unset: true}}, [\"axis\", {{}}, \"disposition\"], \
+                 [\"acquisition\", \"scanner_derived\", \"reformat\"]]."
+            ),
+            "read": {
+                "kind": "default", "axis": "disposition", "wrote": "",
+                "as_axis": "disposition", "as_value": "acquisition, scanner_derived",
+                "as_values": ["acquisition", "scanner_derived"]
+            }
+        })
+    };
+    let read = serde_json::json!([is("technique", "SPGRE"), is("body_region", "head"), kinds]);
     let written = serde_json::json!([is("technique", "FLASH"), is("body_part", "brain")]);
 
     // the draft door
@@ -5758,7 +5785,7 @@ out: {set: eligible, level: count}
     assert_eq!(status, 200, "{drafted}");
     assert_eq!(
         drafted["repairs"],
-        serde_json::json!([word, wider]),
+        serde_json::json!([word, wider, by_default("eligible", 2)]),
         "{drafted}"
     );
     assert_eq!(
@@ -5855,15 +5882,18 @@ out: {set: eligible, level: count}
     assert_eq!(status, 200, "{drafted_word}");
     assert_eq!(
         drafted_word["repairs"],
-        serde_json::json!([{
-            "path": "sets.t1.where[0]",
-            "what": "On technique, the pack lists BRAVO as a word for MPRAGE: it was read as \
-                     MPRAGE, the word the pack stores.",
-            "read": {
-                "kind": "word", "axis": "technique", "wrote": "BRAVO",
-                "as_axis": "technique", "as_value": "MPRAGE"
-            }
-        }]),
+        serde_json::json!([
+            {
+                "path": "sets.t1.where[0]",
+                "what": "On technique, the pack lists BRAVO as a word for MPRAGE: it was read \
+                         as MPRAGE, the word the pack stores.",
+                "read": {
+                    "kind": "word", "axis": "technique", "wrote": "BRAVO",
+                    "as_axis": "technique", "as_value": "MPRAGE"
+                }
+            },
+            by_default("t1", 1)
+        ]),
         "{drafted_word}"
     );
     assert!(
@@ -5901,7 +5931,12 @@ out: {set: eligible, level: count}
     );
     assert_eq!(status, 200, "{shared}");
     assert_eq!(shared["document"], serde_json::Value::Null, "{shared}");
-    assert_eq!(shared["repairs"], serde_json::json!([]), "{shared}");
+    // nothing is read of the word; the kinds of scan are added all the same
+    assert_eq!(
+        shared["repairs"],
+        serde_json::json!([by_default("t", 1)]),
+        "{shared}"
+    );
     assert_eq!(
         shared["diagnosis"]["issues"][0]["message"],
         "isotropic DWI is not a value of axis construct; the pack has it as a word for more \

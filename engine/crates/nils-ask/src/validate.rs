@@ -139,6 +139,17 @@ pub struct AxisKin {
     pub coarse_of: Option<String>,
     /// The axes that are this one's coarse form.
     pub wider: Vec<WiderAxis>,
+    /// The values of the axis a question counts unless it says otherwise
+    /// (the pack's `ask_default`), by identity: a stack set of a question
+    /// authored as text that names no value of the axis is read as
+    /// keeping these ([`crate::reading`]). Empty where the pack declares
+    /// none, and then nothing is added.
+    pub ask_default: Vec<String>,
+    /// The value the pack's rules give the axis where nothing else says
+    /// (`default`), by identity, where it is a value of the axis. A stack
+    /// nothing has sorted yet holds no value; where this one is among
+    /// `ask_default`, the clause added by default counts such a stack too.
+    pub default: Option<String>,
 }
 
 /// An axis that is the coarse form of another: each of its values that
@@ -888,8 +899,12 @@ const NAME_OPTIONS: &[&str] = &["of", "over", "set"];
 /// (`["=", {exact: true}, ["axis", {}, "body_part"], "brain"]`): it changes
 /// nothing a clause selects, and tells a reading of authored text
 /// ([`crate::reading`]) and the `narrow_value` warning to leave the clause
-/// alone.
-const BOOL_OPTIONS: &[&str] = &["adjacent", "strict", "key", "exact"];
+/// alone. `unset` on `=` or `in` over an axis keeps the stacks that hold
+/// no value of the axis as well (`["in", {unset: true}, ["axis", {},
+/// "disposition"], ["acquisition", "scanner_derived"]]`): a stack nothing
+/// has sorted yet has no row on the axis, and the clause that counts the
+/// usual kinds of scan must not leave it out.
+const BOOL_OPTIONS: &[&str] = &["adjacent", "strict", "key", "exact", "unset"];
 
 /// A boolean option that holds something else.
 fn not_a_boolean(path: impl Into<String>, what: &str, key: &str, v: &Value) -> Issue {
