@@ -1,0 +1,71 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+family: dixon
+label: 'Dixon water and fat separation (Dixon, mDIXON, IDEAL, LAVA-Flex)'
+terms: ['Dixon', 'mDIXON', 'IDEAL', 'LAVA-Flex', 'Flex', 'VIBE-Dixon', 'two-point Dixon', 'WFS', 'WFOP', 'FatSep', 'water only', 'fat only', 'water image', 'fat image', 'in phase', 'in-phase', 'opposed phase', 'out of phase', 'chemical shift']
+summary: 'A gradient echo or spin echo read at two or more echo times so that water and fat can be separated. One acquisition leaves up to four images computed by the scanner: water only, fat only, in phase and opposed phase, each as its own stack, and often reformats of them.'
+products:
+  - id: water
+    what: 'The water-only image: fat removed by chemical-shift separation, the image usually read as a fat-suppressed T1 or T2.'
+    acquired: false
+    where:
+      - ['has', {}, ['axis', {}, 'construct'], 'Water']
+      - ['=', {}, ['axis', {}, 'disposition'], 'scanner_derived']
+    note: 'Its base is the weighting of the sequence (T1w for a gradient echo or a T1 TSE, T2w for a T2 TSE), and its modifiers hold Dixon.'
+  - id: fat
+    what: 'The fat-only image.'
+    acquired: false
+    where:
+      - ['has', {}, ['axis', {}, 'construct'], 'Fat']
+      - ['=', {}, ['axis', {}, 'disposition'], 'scanner_derived']
+    note: 'Sites often save fewer fat images than water images.'
+  - id: in-phase
+    what: 'The image at the echo time where water and fat signal add: a plain T1- or T2-weighted image of both.'
+    acquired: false
+    where:
+      - ['has', {}, ['axis', {}, 'construct'], 'InPhase']
+      - ['=', {}, ['axis', {}, 'disposition'], 'scanner_derived']
+    note: 'Not a phase image: in phase names the echo, and the image is a magnitude. A routine dual-echo gradient echo makes it without any Dixon separation; add the modifier Dixon for the Dixon ones alone.'
+  - id: opposed-phase
+    what: 'The image at the echo time where water and fat signal cancel, with the dark line at their borders.'
+    acquired: false
+    where:
+      - ['has', {}, ['axis', {}, 'construct'], 'OutPhase']
+      - ['=', {}, ['axis', {}, 'disposition'], 'scanner_derived']
+    note: 'Not a phase image either.'
+  - id: reformat
+    what: 'A plane resliced from one of the Dixon images on the console or a workstation, mostly of the in-phase or the water image.'
+    acquired: false
+    where:
+      - ['has', {}, ['axis', {}, 'modifier'], 'Dixon']
+      - ['has', {}, ['axis', {}, 'construct'], 'MPR']
+      - ['=', {}, ['axis', {}, 'disposition'], 'reformat']
+  - id: fat-fraction
+    what: 'A proton density fat fraction map. The vocabulary has the value FatFraction, but no rule writes it yet, so no stack carries it.'
+    acquired: false
+    where:
+      - ['has', {}, ['axis', {}, 'construct'], 'FatFraction']
+ask:
+  - words: 'Dixon water images'
+    sets: |
+      water:
+        grain: stack
+        where:
+          - ['has', {}, ['axis', {}, 'construct'], 'Water']
+          - ['has', {}, ['axis', {}, 'modifier'], 'Dixon']
+  - words: 'visits with both the water and the fat image of a Dixon'
+    sets: |
+      water:
+        grain: stack
+        where:
+          - ['has', {}, ['axis', {}, 'construct'], 'Water']
+      fat:
+        grain: stack
+        where:
+          - ['has', {}, ['axis', {}, 'construct'], 'Fat']
+      visits:
+        grain: session
+        has: [{set: water, min: 1}, {set: fat, min: 1}]
+    note: 'Every Dixon part is a scanner-derived image, so the default kinds keep them; "original Dixon images" has no answer on the axes, since even the in-phase echo is filed scanner-derived.'
+raw:
+  - field: private_frame_image_type
+    what: 'On a Philips enhanced object, the per-frame image type names the Dixon part (W, F, IP, OP) where the stack-level type does not.'

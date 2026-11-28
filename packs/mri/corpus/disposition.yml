@@ -331,3 +331,257 @@ cases:
       provenance: RawRecon
       disposition: acquisition
       directory_type: perf
+
+  # --- MRI pack 1.5.1, the ruling of 2026-11-28: an image the scanner
+  # computed from what it acquired, and that people use, is scanner_derived,
+  # never a working scan and never the acquisition. Invented stacks, in the
+  # shapes the makers write; beside each kind, the stacks that must not move.
+
+  # SyMRI's products the working-scan rule did not name.
+  - name: a synthetic DIR is a SyMRI product and converts
+    stack:
+      image_type: 'DERIVED\PRIMARY\DIR\SYNTHETIC'
+      text_series_description: 'SyMRI DIR'
+      image_role: derived
+    axes:
+      provenance: SyMRI
+      construct: SyntheticDIR
+      disposition: scanner_derived
+      convertible: 'yes'
+
+  - name: a synthetic PSIR is a SyMRI product and converts
+    stack:
+      image_type: 'DERIVED\PRIMARY\PSIR\SYNTHETIC'
+      text_series_description: 'SyMRI PSIR'
+      image_role: derived
+    axes:
+      provenance: SyMRI
+      construct: SyntheticPSIR
+      disposition: scanner_derived
+      convertible: 'yes'
+
+  - name: a synthetic STIR is a SyMRI product and converts
+    stack:
+      image_type: 'DERIVED\PRIMARY\T2STIR\SYNTHETIC'
+      text_series_description: 'SyMRI STIR'
+      image_role: derived
+    axes:
+      provenance: SyMRI
+      construct: SyntheticSTIR
+      disposition: scanner_derived
+      convertible: 'yes'
+
+  - name: a SyMRI tissue map is a SyMRI product and converts
+    stack:
+      image_type: 'DERIVED\PRIMARY\CSF'
+      scanning_sequence: SE
+      mr_acquisition_type: 2D
+      manufacturer: SIEMENS
+      text_series_description: 'CSF'
+      text_protocol_name: 'SyMRI'
+      image_role: derived
+    axes:
+      provenance: SyMRI
+      construct: Qmap
+      disposition: scanner_derived
+      convertible: 'yes'
+
+  - name: a SyMRI map set in one series is a SyMRI product and converts
+    stack:
+      image_type: 'DERIVED\PRIMARY\MULTI_QMAP\T1\T2\PD'
+      scanning_sequence: SE
+      sequence_variant: NONE
+      mr_acquisition_type: 2D
+      manufacturer: Philips Medical Systems
+      text_series_description: 'SyMaps (T1T2PD)'
+      n_slices: 30
+      repetition_time: 4500
+      echo_time: 100
+      image_role: derived
+    axes:
+      provenance: SyMRI
+      construct: MultiQmap
+      disposition: scanner_derived
+      convertible: 'yes'
+
+  - name: a SyMRI B1 map is a SyMRI product and converts
+    stack:
+      image_type: 'DERIVED\PRIMARY\B1MAP'
+      text_series_description: 'SyMRI B1 map'
+      image_role: derived
+    axes:
+      provenance: SyMRI
+      construct: B1map
+      disposition: scanner_derived
+      convertible: 'yes'
+
+  - name: guard, a QALAS image as acquired stays a working scan
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\M\DIS2D'
+      scanning_sequence: 'GR\IR'
+      sequence_variant: 'SK\SP\MP'
+      mr_acquisition_type: 3D
+      manufacturer: SIEMENS
+      text_sequence_name: 'qalas3d'
+      text_series_description: 'SyMRI 3D QALAS'
+      image_role: original_primary
+    axes:
+      provenance: RawRecon
+      technique: QALAS
+      disposition: working_scan
+      convertible: 'no'
+
+  # An encrypted SyMRI map set, which only the vendor's software opens.
+  - name: an encrypted SyMRI map set is scanner derived and still not converted
+    stack:
+      image_type: 'DERIVED\PRIMARY\MULTI_QMAP\ENCRYPTED'
+      scanning_sequence: SE
+      mr_acquisition_type: 2D
+      manufacturer: GE MEDICAL SYSTEMS
+      text_series_description: 'MAGiC QMaps'
+      image_role: derived
+    axes:
+      quality: Encrypted
+      provenance: SyMRI
+      construct: MultiQmap
+      disposition: scanner_derived
+      convertible: 'no'
+
+  - name: and so is Philips' encrypted map set
+    stack:
+      image_type: 'DERIVED\PRIMARY\MULTI_QMAP\T1\T2\PD\ENCRYPTED'
+      scanning_sequence: SE
+      sequence_variant: NONE
+      mr_acquisition_type: 2D
+      manufacturer: Philips Medical Systems
+      text_series_description: 'SyMaps (T1T2PD)'
+      n_slices: 30
+      repetition_time: 4500
+      echo_time: 100
+      image_role: derived
+    axes:
+      quality: Encrypted
+      provenance: SyMRI
+      construct: MultiQmap
+      disposition: scanner_derived
+      convertible: 'no'
+
+  # The perfusion outputs, on every maker; the ASL label and control images
+  # (above) and the M0 scan stay acquisitions.
+  - name: GE's perfusion-weighted ASL pass is scanner derived
+    stack:
+      image_type: 'DERIVED\PRIMARY\ASL\PERFUSION_ASL'
+      scanning_sequence: 'RM\IR'
+      scan_options: 'SPIRAL_GEMS'
+      mr_acquisition_type: 3D
+      manufacturer: GE MEDICAL SYSTEMS
+      ge_asl_contrast_technique: PSEUDOCONTINUOUS
+      text_series_description: 'Ax 3D ASL'
+      image_role: derived
+    axes:
+      construct: DeltaM
+      provenance: ASLRecon
+      disposition: scanner_derived
+      convertible: 'yes'
+      role: ''
+
+  - name: Philips' ASL difference image written ORIGINAL is scanner derived
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\PERFUSION\FFE'
+      scanning_sequence: GR
+      mr_acquisition_type: 2D
+      manufacturer: Philips Medical Systems
+      text_series_description: 'pCASL'
+      image_role: original_primary
+    axes:
+      construct: DeltaM
+      provenance: ASLRecon
+      disposition: scanner_derived
+      convertible: 'yes'
+
+  - name: an ASL CBF map is scanner derived
+    stack:
+      image_type: 'DERIVED\PRIMARY\ASL\CBF'
+      scanning_sequence: 'RM\IR'
+      mr_acquisition_type: 3D
+      manufacturer: GE MEDICAL SYSTEMS
+      text_series_description: 'Cerebral Blood Flow'
+      image_role: derived
+    axes:
+      construct: CBF
+      disposition: scanner_derived
+
+  - name: guard, GE's proton-density ASL pass stays the acquisition
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\ASL'
+      scanning_sequence: 'RM\IR'
+      scan_options: 'SPIRAL_GEMS'
+      mr_acquisition_type: 3D
+      manufacturer: GE MEDICAL SYSTEMS
+      ge_asl_contrast_technique: CONTINUOUS
+      text_series_description: 'Ax 3D ASL'
+      image_role: original_primary
+    axes:
+      construct: M0
+      provenance: RawRecon
+      disposition: acquisition
+
+  - name: guard, a Siemens M0 named for it stays the acquisition
+    stack:
+      image_type: 'ORIGINAL\PRIMARY\OTHER'
+      scanning_sequence: EP
+      sequence_variant: SK
+      manufacturer: SIEMENS
+      text_sequence_name: '*epfid2d1_64'
+      text_series_description: 'pcasl_M0'
+      n_instances: 1
+      n_slices: 1
+      image_role: original_primary
+    axes:
+      construct: M0
+      disposition: acquisition
+
+  - name: guard, an M0 scan written DERIVED is ASLRecon and stays the acquisition
+    stack:
+      image_type: 'DERIVED\PRIMARY\ASL'
+      scanning_sequence: EP
+      sequence_variant: SK
+      manufacturer: SIEMENS
+      text_sequence_name: '*epfid2d1_64'
+      text_series_description: 'pcasl_M0'
+      n_instances: 1
+      n_slices: 1
+      image_role: derived
+    axes:
+      construct: M0
+      provenance: ASLRecon
+      disposition: acquisition
+
+  - name: a DSC map with no construct of its own is scanner derived by its provenance
+    stack:
+      image_type: 'DERIVED\PRIMARY\PERFUSION\OEF MODEL BASED'
+      scanning_sequence: EP
+      sequence_variant: SK
+      manufacturer: SIEMENS
+      text_sequence_name: '*epfid2d1_128'
+      text_series_description: 'ep2d_perf_OEF'
+      image_role: derived
+    axes:
+      provenance: PerfusionRecon
+      construct: ''
+      disposition: scanner_derived
+      convertible: 'yes'
+
+  - name: an ASL output with no construct of its own is scanner derived by its provenance
+    stack:
+      image_type: 'DERIVED\PRIMARY\ASL'
+      scanning_sequence: 'RM\IR'
+      mr_acquisition_type: 3D
+      manufacturer: GE MEDICAL SYSTEMS
+      text_series_description: 'Transit Delay'
+      image_role: derived
+    axes:
+      provenance: ASLRecon
+      construct: ''
+      disposition: scanner_derived
+      convertible: 'yes'

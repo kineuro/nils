@@ -1,0 +1,37 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+family: tof-mra
+label: 'Time-of-flight MR angiography (TOF)'
+terms: ['TOF', 'time-of-flight', 'TOF MRA', 'MRA', 'MR angiography', 'inflow angiography', 'Inhance Inflow', 'circle of Willis', 'intracranial MRA', 'angio', 'MIP', 'maximum intensity projection']
+summary: 'A 3D (sometimes 2D) gradient echo in which inflowing blood is bright, without contrast. One acquisition leaves the source slices and, made by the scanner inline or by a workstation, maximum intensity projections at several angles and reformats.'
+products:
+  - id: source
+    what: 'The source slices as acquired: the volume a vessel analysis reads. Base T1w, technique TOF.'
+    acquired: true
+    where:
+      - ['=', {}, ['axis', {}, 'technique'], 'TOF']
+      - ['=', {}, ['axis', {}, 'disposition'], 'acquisition']
+    note: 'Often with the modifier MT (a magnetisation transfer pulse that darkens the background) and FlowComp.'
+  - id: mip
+    what: 'A maximum intensity projection of the source: the angiogram as a reader views it, one stack per projection angle or a rotating set.'
+    acquired: false
+    where:
+      - ['=', {}, ['axis', {}, 'technique'], 'TOF']
+      - ['has', {}, ['axis', {}, 'construct'], 'MIP']
+      - ['=', {}, ['axis', {}, 'disposition'], 'reformat']
+    note: 'A projection is a reformat whether the scanner made it inline (written original) or a workstation did. MIPs usually outnumber the source series.'
+  - id: reformat
+    what: 'A plane resliced from the source.'
+    acquired: false
+    where:
+      - ['=', {}, ['axis', {}, 'technique'], 'TOF']
+      - ['has', {}, ['axis', {}, 'construct'], 'MPR']
+      - ['=', {}, ['axis', {}, 'disposition'], 'reformat']
+ask:
+  - words: 'TOF angiography with its MIPs'
+    sets: |
+      tof:
+        grain: stack
+        where:
+          - ['=', {}, ['axis', {}, 'technique'], 'TOF']
+          - ['in', {}, ['axis', {}, 'disposition'], ['acquisition', 'reformat']]
+    note: 'The words ask for the projections, so the disposition reformat is named; without it the default kinds count the source alone.'

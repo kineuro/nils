@@ -293,7 +293,7 @@ values:
   Perfusion-EPI:
     terms: ['ep2d_perf', 'DSC perfusion', 'dynamic susceptibility contrast', 'bolus tracking']
     label: Perfusion
-    description: 'dynamic susceptibility contrast (DSC) perfusion, a gradient- or spin-echo EPI through a bolus'
+    description: 'Dynamic susceptibility contrast (DSC) perfusion, a gradient- or spin-echo EPI through a gadolinium bolus, stored as Perfusion. ASL and DCE have values of their own.'
     family: EPI
     # MRI pack 0.10.0: tried before BOLD, from a perfusion image type (not
     # ASL's), a map only DSC makes, or an EPI time series given contrast or
@@ -359,6 +359,7 @@ values:
       exclusive: is_mrf
   MDME:
     terms: ['QRAPMASTER', 'MAGiC', 'SyMRI acquisition', 'SyntAc']  # SyntAc: Philips [P23, MQ19]
+    description: 'The multi-dynamic multi-echo spin echo of synthetic MRI (QRAPMASTER; GE MAGiC, Philips SyntAc, also on Siemens). Its acquired images are working scans; the maps and synthetic contrasts made from them carry provenance SyMRI.'
     family: SE
     keywords:
       - mdme
@@ -385,6 +386,7 @@ values:
       exclusive: is_mavric
   '3D-TSE':
     terms: ['SPACE', 'CUBE', 'VISTA', '3D TSE', '3D FSE', 'MVOX', 'isoFSE', '3D FLAIR TSE', 'spc']
+    description: 'A 3D turbo spin echo with variable flip angles, stored as SPACE for every maker (Siemens SPACE, GE CUBE, Philips VISTA): 3D FLAIR, 3D T2, 3D T1 and DIR volumes.'
     # Ruling 23: SPACE stays its word, by Nima's ruling of 2026-10-15
     # (PROVENANCE.md): it is very widespread and well known.
     label: SPACE
@@ -538,6 +540,7 @@ values:
       exclusive: has_se
   QALAS:
     terms: ['3D-QALAS']
+    description: 'A 3D QALAS mapping acquisition (T1, T2 and proton density from one scan) used for synthetic MRI. Its acquired images are working scans.'
     family: GRE
     keywords:
       - qalas
@@ -659,6 +662,7 @@ values:
       combination: [ge_inhance_velocity]
   comb-ME-GRE:
     terms: ['MEDIC', 'MERGE', 'mFFE', 'M-FFE', 'combined multi-echo GRE', 'mEcho', 'ADAGE']  # [MQ9, V2, V1]
+    description: 'A multi-echo gradient echo whose echoes are combined into one magnitude image (Siemens MEDIC, GE MERGE, Philips mFFE), stored combMEGRE; also an SWI image combined over its echoes.'
     # Ruling 23: a generic word, not a vendor's (PROVENANCE.md); rows keep the old one.
     label: combMEGRE
     aliases: [MEDIC]
@@ -691,6 +695,7 @@ values:
       combination: [combined_echoes_stated]
   ME-GRE:
     terms: ['multi-echo GRE', 'MEGRE', 'multi-echo gradient echo']
+    description: 'A multi-echo gradient echo with its echoes kept apart, stored MEGRE: the source of an SWI, QSM, R2* or field map. A combined-echo one is combMEGRE.'
     label: MEGRE
     family: GRE
     keywords:

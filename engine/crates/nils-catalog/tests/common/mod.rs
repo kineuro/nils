@@ -226,3 +226,72 @@ pub fn set_param(ask: &mut Ask, name: &str, v: Value) {
         .unwrap_or_else(|| panic!("no parameter {name}"))
         .value = Some(v);
 }
+
+/// The stacks a stack set sees (none the pack excluded), in the order of
+/// their ids.
+pub fn stacks_seen(l: &mut Lab) -> Vec<i64> {
+    let store = l.registry.store();
+    let q = |t: &str| store.qualified(t);
+    let sql = format!(
+        "SELECT st.id FROM {stack} st JOIN {fp} f ON f.stack_id = st.id \
+         WHERE NOT EXISTS (SELECT 1 FROM {ax} x WHERE x.stack_id = st.id \
+         AND x.axis = 'disposition' AND x.value = 'excluded') ORDER BY st.id",
+        ax = q("classification_axis"),
+        stack = q("stack"),
+        fp = q("stack_fingerprint"),
+    );
+    store
+        .query(&sql, &[])
+        .unwrap()
+        .iter()
+        .map(|r| r.int(0).unwrap())
+        .collect()
+}
+
+/// Plant one axis over the stacks a stack set sees: whatever the registry
+/// said on it is taken away, and the stack at place `i` among them holds
+/// what `value` answers for `i`, or nothing. Answers how many stacks hold
+/// each value.
+pub fn replant(
+    l: &mut Lab,
+    axis: &'static str,
+    value: impl Fn(usize) -> Option<&'static str>,
+) -> BTreeMap<&'static str, i64> {
+    let stacks = stacks_seen(l);
+    let store = l.registry.store();
+    store
+        .execute(
+            &format!(
+                "DELETE FROM {} WHERE axis = '{axis}'",
+                store.qualified("classification_axis")
+            ),
+            &[],
+        )
+        .unwrap();
+    let mut counts: BTreeMap<&'static str, i64> = BTreeMap::new();
+    let mut rows: Vec<Vec<Param>> = Vec::new();
+    for (i, stack) in stacks.iter().enumerate() {
+        let Some(v) = value(i) else { continue };
+        *counts.entry(v).or_default() += 1;
+        rows.push(vec![
+            Param::Int(*stack),
+            Param::from(axis),
+            Param::from(v),
+            Param::Double(0.9),
+            Param::from("stated"),
+        ]);
+    }
+    for chunk in rows.chunks(500) {
+        store
+            .insert(
+                &Insert::new(
+                    table("classification_axis"),
+                    &["stack_id", "axis", "value", "confidence", "tier"],
+                ),
+                chunk,
+            )
+            .unwrap();
+    }
+    nils_registry::stack_axis::refresh(store, &stacks).unwrap();
+    counts
+}

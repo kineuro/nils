@@ -1,0 +1,35 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+family: scout
+label: 'Scouts, localizers and calibration scans'
+terms: ['scout', 'localizer', 'localiser', 'survey', 'tri-pilot', '3-plane localizer', 'AAHead_Scout', 'AutoAlign', 'SmartExam', 'position display', 'planning scan', 'calibration', 'ASSET calibration', 'coil sensitivity reference', 'prescan']
+summary: 'The low-resolution images taken to plan the real series, and the reference scans a scanner takes to calibrate its coils. They are images, but no one reads them for findings, and a count of scans leaves them out unless the words ask for them.'
+products:
+  - id: localizer
+    what: 'A planning scan: three orthogonal planes or a few slices, often 2D, sometimes a 3D head scout with its reformats, or a stitched survey of several stations.'
+    acquired: true
+    where:
+      - ['=', {}, ['axis', {}, 'disposition'], 'scout']
+    note: 'Scouts carry a base and a technique like any image (a T2w TSE scout, a T1w gradient-echo scout, even a DWI position display), so a question by weighting or technique alone counts them; the default kinds leave them out. Provenance is Localizer for most, RawRecon for a series named for planning with few slices.'
+  - id: calibration
+    what: 'A coil-sensitivity, receive-field or prescan reference image acquired to support reconstruction, not to be read (GE ASSET or 3D calibration, SENSE reference).'
+    acquired: true
+    where:
+      - ['=', {}, ['axis', {}, 'provenance'], 'Calibration']
+      - ['=', {}, ['axis', {}, 'disposition'], 'working_scan']
+    note: 'A working scan and not a scout; not converted.'
+ask:
+  - words: 'how many localizers'
+    sets: |
+      scouts:
+        grain: stack
+        where:
+          - ['=', {}, ['axis', {}, 'disposition'], 'scout']
+  - words: 'T2-weighted TSE scans, scouts included'
+    sets: |
+      t2_tse:
+        grain: stack
+        where:
+          - ['=', {}, ['axis', {}, 'base'], 'T2w']
+          - ['=', {}, ['axis', {}, 'technique'], 'TSE']
+          - ['in', {}, ['axis', {}, 'disposition'], ['acquisition', 'scanner_derived', 'scout']]
+    note: 'Without the words "scouts included", the default kinds count the TSE acquisitions alone.'

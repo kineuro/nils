@@ -24,7 +24,7 @@ use crate::moves::{self, MoveCall, MoveError, Options};
 use crate::repair::Repair;
 use crate::run::{RunError, Runner};
 use crate::validate::{Class, Code, Issue, Names, Scope, validate};
-use crate::{Error as AskError, parse_repaired, prepare};
+use crate::{Error as AskError, parse_read, prepare};
 
 #[derive(Debug)]
 pub enum AffordanceError {
@@ -44,6 +44,13 @@ pub enum AffordanceError {
         field: String,
         next: String,
     },
+    /// The value sampler was asked to search in a way it does not (a text
+    /// too short, a field whose values are not listed): the caller's to
+    /// change, with what to do next.
+    NoSearch {
+        message: String,
+        next: String,
+    },
     Message(String),
 }
 
@@ -59,6 +66,7 @@ impl fmt::Display for AffordanceError {
             AffordanceError::NoField { level, field, .. } => {
                 write!(f, "no field {field} at {level} in this scope")
             }
+            AffordanceError::NoSearch { message, .. } => f.write_str(message),
             AffordanceError::Message(m) => f.write_str(m),
         }
     }
@@ -191,6 +199,12 @@ pub fn apply(
     }
     let mut ask = doc.ask.clone();
     let changed = moves::apply_moves(&mut ask, &opts, calls)?;
+    // A move writes for a person what a draft writes from their words, so
+    // the kinds of scan a question counts unless it says are the same in
+    // both: a stack set a move added gets the default clause, and a set
+    // given a clause that names its own kinds loses it. The sets touched
+    // are answered with their new sentences, which say the clause.
+    crate::reading::after_moves(&doc.ask, &mut ask, s.names);
     // strict validation of the result; an invalid document is not stored
     let prepared = prepare(ask.clone(), s.names, s.scope)?;
     let stored = document::put(
@@ -319,7 +333,7 @@ pub fn count_rows(
 }
 
 /// What `draft` returns: the repairs, the diagnosis, and the document's
-/// handle when it validated.
+/// handle when it validated. A repair that read a value carries `read`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Drafted {
     pub repairs: Vec<Repair>,
@@ -334,8 +348,8 @@ pub fn compile_issues(registry: &mut Registry, ask: &Ask, s: &Setting<'_>) -> Ve
     crate::run::not_compilable(registry, ask, s.names, s.scope, s.scheme)
 }
 
-/// Parse an authored text with add only repair, diagnose it, and store it
-/// when it validates.
+/// Parse an authored text with add only repair, read its values from the
+/// vocabulary, diagnose it, and store it when it validates.
 pub fn draft(
     registry: &mut Registry,
     text: &str,
@@ -373,7 +387,10 @@ pub fn draft_beside(
     budget_ms: Option<u64>,
     beside: &mut [Store],
 ) -> Result<Drafted, AffordanceError> {
-    let (ask, repairs) = parse_repaired(text)?;
+    // the text's values are read from the vocabulary after the structural
+    // repair (`crate::reading`): what is diagnosed and stored is what was
+    // read, and each reading is an entry of the repairs
+    let (ask, repairs) = parse_read(text, s.names)?;
     // the diagnosis refuses what the validator and the compiler refuse
     // before it counts anything, and stores nothing then
     let diagnosis = diagnose_beside(
@@ -513,6 +530,73 @@ pub fn values(
     cap: usize,
     reader: Option<&mut Store>,
 ) -> Result<Sample, AffordanceError> {
+    values_containing(registry, level, field, s, cap, reader, None)
+}
+
+/// The fewest characters a search of a field's values takes.
+pub const CONTAINS_MIN: usize = 3;
+
+/// [`values`], of the values that contain a text, letter case aside: how a
+/// word that is not among a field's most common values is found (a niche
+/// product name in a series description). The values that match, with
+/// their counts, the most common first, under the same cap; `distinct` is
+/// how many values match.
+///
+/// Only a text field whose values are listed is searched. A field shown
+/// as shapes (quasi identifying, sensitive) is not: a search would say
+/// whether a value is there that the listing does not show. A stack's
+/// axis is not either, since its values are the catalog's own list. The
+/// text is [`CONTAINS_MIN`] characters or more, so a search is a word and
+/// not a walk through the alphabet.
+pub fn values_containing(
+    registry: &mut Registry,
+    level: &str,
+    field: &str,
+    s: &Setting<'_>,
+    cap: usize,
+    reader: Option<&mut Store>,
+    contains: Option<&str>,
+) -> Result<Sample, AffordanceError> {
+    let contains = contains.map(str::trim);
+    if let Some(text) = contains {
+        let listing =
+            format!("GET /api/ask/catalog/{level}/{field}/values lists the most common values");
+        if text.chars().count() < CONTAINS_MIN {
+            return Err(AffordanceError::NoSearch {
+                message: format!(
+                    "contains takes at least {CONTAINS_MIN} characters, and {text:?} has {}",
+                    text.chars().count()
+                ),
+                next: format!("search for a longer text; without contains, {listing}"),
+            });
+        }
+        let searched = s.names.field(level, field).filter(|info| {
+            !matches!(
+                info.class,
+                Class::QuasiIdentifying | Class::Sensitive | Class::Identifying
+            )
+        });
+        if s.names.field(level, field).is_some() && searched.is_none() {
+            return Err(AffordanceError::NoSearch {
+                message: format!(
+                    "the values of {level}.{field} are shown as shapes, and a field whose values are not listed is not searched"
+                ),
+                next: format!("without contains, {listing} as shapes"),
+            });
+        }
+        if s.names.field(level, field).is_none()
+            && level == "stack"
+            && s.names.axis_names(field).is_some()
+        {
+            return Err(AffordanceError::NoSearch {
+                message: format!(
+                    "{field} is an axis, and contains searches a text field: an axis's values are the catalog's own list"
+                ),
+                next: "GET /api/ask/catalog lists every value of the axis with its terms"
+                    .to_string(),
+            });
+        }
+    }
     // Wave 7a: a stack's axis is sampled as a field is, each value once in
     // the form the pack stores, a stack of several values under each
     let axis = level == "stack"
@@ -540,11 +624,20 @@ pub fn values(
     } else {
         cap.saturating_add(1)
     };
+    // the rows searched: every row of the level, or those whose value
+    // contains the text
+    let rows_of = || match contains {
+        Some(text) => serde_json::json!({
+            "grain": level,
+            "where": [["contains", {}, ["field", {}, field], text]]
+        }),
+        None => serde_json::json!({"grain": level}),
+    };
     let text = serde_json::json!({
         "ast_version": 1,
         "name": format!("values of {level}.{field}"),
         "sets": {
-            "v": {"grain": level},
+            "v": rows_of(),
             "g": {"grain": "group", "group": {"of": "v", "by": [key.clone()]}}
         },
         "keep": ["g"],
@@ -561,7 +654,7 @@ pub fn values(
         "ast_version": 1,
         "name": format!("distinct of {level}.{field}"),
         "sets": {
-            "v": {"grain": level},
+            "v": rows_of(),
             "g": {"grain": "group", "group": {"of": "v", "by": [key]}}
         },
         "keep": ["g"],

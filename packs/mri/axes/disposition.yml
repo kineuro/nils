@@ -23,25 +23,36 @@ tiers: {stated: 0.9}
 # below are what catch everything else.
 default: acquisition
 default_confidence: 0.7
+# The kinds of scan a question counts unless it says otherwise. A
+# scanner-derived image can be the very image a question means (an ADC map,
+# a synthetic contrast, a reconstruction the scanner made), so it is counted
+# beside the acquisitions. A reformat is another view of an acquisition the
+# session already holds, and a scout or a working scan is not what a
+# question usually wants: they are counted where the words name them, and
+# so is a display composite. The ask adds the clause to a question authored
+# as text whose stack sets name no disposition, says so, and names the
+# clause to write for the other kinds; a document that arrives structured is
+# taken as written. No rule and no sort reads the key.
+ask_default: [acquisition, scanner_derived]
 
 values:
   # What the scanner acquired and meant you to look at.
-  acquisition: {}
+  acquisition: {description: 'An image the scanner acquired and wrote as its own primary output, with nothing saying otherwise. With scanner_derived it is what a question counts unless the words name other kinds. Some images the scanner computed inline (an MP2RAGE UNI, a filtered copy) are filed here too.'}
   # The scanner made it from images it had just taken: an ADC map, a Trace, a
   # synthetic contrast, a quantitative map. An ordinary image, and one whose
   # provenance a reader has to be told.
-  scanner_derived: {}
+  scanner_derived: {description: 'An image the scanner computed from images it had just acquired, in the same series or beside it: a trace, an ADC or FA map, a Dixon part, an SWI image, a synthetic contrast, a perfusion or quantitative map, a subtraction. An ordinary image to read or measure; counted by default.'}
   # A workstation made it from images: a reformat, a projection.
-  reformat: {}
+  reformat: {description: 'An image made from other images by reslicing or projecting them: an MPR plane, a MIP or minIP (also when the scanner made it inline), a stitched whole-spine image, or a map a workstation or third-party software wrote. Left out of a count unless the words ask for reformats, projections or every image.'}
   # An intermediate the scanner used to make something else, and not an image
   # in its own right. The MDME container is the case that proves it (7.1).
-  working_scan: {}
+  working_scan: {description: 'An intermediate the scanner used to compute something else, not an image to read: the raw magnitude and phase of a synthetic MRI (MDME, QALAS) acquisition, a calibration or coil reference scan. Left out of counts and never converted unless named.'}
   # A planning scan.
-  scout: {}
+  scout: {description: 'A planning scan: a localizer, survey, tri-plane or 3D head scout, a position display. It carries a base and a technique like any image (a T2w TSE scout), so a question by weighting alone would count it; left out unless the words ask for scouts or localizers.'}
   # MRI pack 1.1.0 (record 55 C3): a picture made to be looked at, a map or a
   # segmentation saved in colour over a synthetic image. An image of a person,
   # classified and found like any other, and no material for an analysis: a
   # release leaves it out unless its selection names this disposition.
-  display_composite: {}
+  display_composite: {description: 'A picture saved from a viewer in colour for looking at, such as a synthetic MRI map or segmentation drawn over an image. An image of a person but not material for a measurement; left out of counts and releases unless named.'}
   # Not an image at all: a screen capture, an error map, a report.
-  excluded: {}
+  excluded: {description: 'Not an image of a person: a screen capture, a pasted report, an error image. No question reads these stacks.'}

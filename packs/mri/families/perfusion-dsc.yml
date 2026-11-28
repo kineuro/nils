@@ -1,0 +1,47 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+family: perfusion-dsc
+label: 'Dynamic susceptibility contrast perfusion (DSC)'
+terms: ['DSC', 'DSC perfusion', 'dynamic susceptibility contrast', 'bolus tracking', 'perfusion', 'PWI', 'ep2d_perf', 'CBV', 'rCBV', 'CBF', 'rCBF', 'MTT', 'TTP', 'Tmax', 'PBP', 'K2', 'leakage', 'perfusion maps']
+summary: 'A gradient- or spin-echo EPI repeated through a gadolinium bolus. One acquisition leaves the time series (often with a motion-corrected copy) and the maps computed from it: blood volume, blood flow, mean transit time, time to peak, Tmax, and on some systems the percentage of baseline at peak and a leakage map.'
+products:
+  - id: run
+    what: 'The time series of the bolus passage as acquired. Base PWI.'
+    acquired: true
+    where:
+      - ['=', {}, ['axis', {}, 'technique'], 'Perfusion']
+      - ['=', {}, ['axis', {}, 'disposition'], 'acquisition']
+      - ['not', {}, ['has', {}, ['axis', {}, 'modifier'], 'MoCo']]
+    note: 'Its post_contrast is given where the header says so; a DSC is by its nature during contrast.'
+  - id: moco
+    what: 'The motion-corrected copy of the run the scanner writes beside it.'
+    acquired: false
+    where:
+      - ['=', {}, ['axis', {}, 'technique'], 'Perfusion']
+      - ['has', {}, ['axis', {}, 'modifier'], 'MoCo']
+      - ['in', {}, ['axis', {}, 'disposition'], ['acquisition', 'scanner_derived']]
+    note: 'Written original by some makers and derived by others, so it is filed acquisition or scanner_derived: never count it as a second run.'
+  - id: maps
+    what: 'The maps computed from the run: CBV, CBF, MTT, TTP, Tmax, PBP (peak signal drop) and K2 (leakage). Provenance PerfusionRecon, base PWI.'
+    acquired: false
+    where:
+      - ['=', {}, ['axis', {}, 'provenance'], 'PerfusionRecon']
+      - ['in', {}, ['axis', {}, 'disposition'], ['scanner_derived', 'reformat']]
+    note: 'One map a stack, its construct naming it. Maps made by a workstation or by third-party software (written secondary) are filed reformat, so the default kinds leave them out: write the disposition as here to keep them.'
+ask:
+  - words: 'DSC perfusion with CBV maps'
+    sets: |
+      dsc:
+        grain: stack
+        where:
+          - ['=', {}, ['axis', {}, 'technique'], 'Perfusion']
+          - ['=', {}, ['axis', {}, 'disposition'], 'acquisition']
+      cbv:
+        grain: stack
+        where:
+          - ['has', {}, ['axis', {}, 'construct'], 'CBV']
+          - ['=', {}, ['axis', {}, 'provenance'], 'PerfusionRecon']
+          - ['in', {}, ['axis', {}, 'disposition'], ['scanner_derived', 'reformat']]
+      visits:
+        grain: session
+        has: [{set: dsc, min: 1}, {set: cbv, min: 1}]
+    note: 'An ASL CBF map is provenance ASLRecon and no DSC map: the provenance keeps it out.'

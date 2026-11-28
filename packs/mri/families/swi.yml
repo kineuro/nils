@@ -1,0 +1,127 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+family: swi
+label: 'Susceptibility-weighted imaging (SWI, SWAN)'
+terms: ['SWI', 'SWAN', 'SWIp', 'VenoBOLD', 'FSBB', 'BSI', 'susceptibility weighted', 'susceptibility-weighted imaging', 'filtered phase', 'SWI phase', 'SWI magnitude', 'venogram', 'minIP', 'QSM', 'R2* map']
+summary: 'A 3D gradient echo with a long echo time, often several echoes, whose magnitude and phase the scanner combines into the SWI image. One acquisition leaves the magnitude, the phase, the processed SWI image and its minimum intensity projection (the venogram); some leave a QSM or R2* map.'
+products:
+  - id: magnitude
+    what: 'The magnitude of the gradient echo as acquired, one stack per echo or one combined over the echoes: a T2*-weighted image.'
+    acquired: true
+    where:
+      - ['=', {}, ['axis', {}, 'base'], 'T2starw']
+      - ['=', {}, ['axis', {}, 'disposition'], 'acquisition']
+      - ['in', {}, ['axis', {}, 'technique'], ['SPGRE', 'GRE', 'MEGRE', 'combMEGRE', 'GREEPI', 'EPI']]
+      - ['not', {}, ['has', {}, ['axis', {}, 'construct'], 'Phase']]
+    note: 'Only Siemens writes the construct Magnitude here; GE and Philips per-echo magnitudes carry no construct, so never require Magnitude. Nothing on the axes ties a magnitude to its SWI: a plain T2* gradient echo or a MEDIC is filed the same way. Tie it by the visit, a session that also holds the SWI image.'
+  - id: phase
+    what: 'The phase of the gradient echo: on Siemens the raw, wrapped phase; on GE the phase after the scanner''s high-pass filter (SWI phase, SWAN filtered phase); on Philips the phase written with the SWIp. No base contrast.'
+    acquired: true
+    where:
+      - ['has', {}, ['axis', {}, 'construct'], 'Phase']
+      - ['=', {}, ['axis', {}, 'disposition'], 'acquisition']
+      - ['in', {}, ['axis', {}, 'technique'], ['SPGRE', 'GRE', 'MEGRE', 'combMEGRE', 'GREEPI', 'EPI']]
+    note: 'The axes do not tell a filtered phase from a raw one: both are construct Phase. The construct Filtered is an image-filter copy (GE FL:, Siemens Image Filter), never this phase. Most Phase stacks of a registry are MDME working scans of synthetic MRI: the disposition acquisition keeps them out. Tie a phase to its SWI by the visit.'
+  - id: swi-image
+    what: 'The processed SWI image: the magnitude multiplied by a mask made from the filtered phase, the image a reader looks at. Base SWI.'
+    acquired: false
+    where:
+      - ['=', {}, ['axis', {}, 'base'], 'SWI']
+      - ['has', {}, ['axis', {}, 'construct'], 'SWI']
+      - ['=', {}, ['axis', {}, 'disposition'], 'scanner_derived']
+    note: 'Provenance SWIRecon on every maker, NeuroMix for the SWI block of a NeuroMix exam. A multi-echo Siemens SWI writes one SWI image per echo and one combined over the echoes (construct EchoCombined), so a count of SWI images counts echoes: count visits for acquisitions.'
+  - id: minip
+    what: 'The minimum intensity projection of the SWI image over thick slabs: the venogram. Base SWI.'
+    acquired: false
+    where:
+      - ['=', {}, ['axis', {}, 'base'], 'SWI']
+      - ['has', {}, ['axis', {}, 'construct'], 'MinIP']
+      - ['=', {}, ['axis', {}, 'disposition'], 'reformat']
+    note: 'A projection is a reformat whether the scanner or a workstation made it, so the default kinds leave it out: a question that wants it names the disposition reformat.'
+  - id: mip
+    what: 'A maximum intensity projection of an SWI series. Base SWI.'
+    acquired: false
+    where:
+      - ['=', {}, ['axis', {}, 'base'], 'SWI']
+      - ['has', {}, ['axis', {}, 'construct'], 'MIP']
+      - ['=', {}, ['axis', {}, 'disposition'], 'reformat']
+  - id: reformat
+    what: 'A plane resliced from the SWI series on the console or a workstation, or a view of the SWIp made on the console. Base SWI.'
+    acquired: false
+    where:
+      - ['=', {}, ['axis', {}, 'base'], 'SWI']
+      - ['has', {}, ['axis', {}, 'construct'], 'MPR']
+      - ['=', {}, ['axis', {}, 'disposition'], 'reformat']
+  - id: qsm
+    what: 'A quantitative susceptibility map computed from the phase of the same acquisition.'
+    acquired: false
+    where:
+      - ['has', {}, ['axis', {}, 'construct'], 'QSM']
+      - ['not', {}, ['has', {}, ['axis', {}, 'construct'], 'Phase']]
+      - ['=', {}, ['axis', {}, 'disposition'], 'scanner_derived']
+    note: 'A phase whose protocol is named for QSM may carry QSM beside Phase; that stack is the source phase, not the map, which the clause on Phase leaves out.'
+  - id: r2star-map
+    what: 'An R2* map (the relaxation rate R2*, the reciprocal of T2*) fitted over the echoes of a multi-echo acquisition. No base contrast.'
+    acquired: false
+    where:
+      - ['has', {}, ['axis', {}, 'construct'], 'R2starmap']
+      - ['=', {}, ['axis', {}, 'disposition'], 'scanner_derived']
+ask:
+  - words: 'SWI-derived filtered phase images'
+    sets: |
+      visits:
+        grain: session
+        has: [{set: swi_image, min: 1}]
+      swi_image:
+        grain: stack
+        where:
+          - ['=', {}, ['axis', {}, 'base'], 'SWI']
+          - ['has', {}, ['axis', {}, 'construct'], 'SWI']
+          - ['=', {}, ['axis', {}, 'disposition'], 'scanner_derived']
+      swi_phase:
+        grain: stack
+        of: visits
+        where:
+          - ['has', {}, ['axis', {}, 'construct'], 'Phase']
+          - ['=', {}, ['axis', {}, 'disposition'], 'acquisition']
+          - ['in', {}, ['axis', {}, 'technique'], ['SPGRE', 'GRE', 'MEGRE', 'combMEGRE', 'GREEPI', 'EPI']]
+    note: 'The phase of an SWI acquisition is the phase of a visit that holds an SWI image. The axes do not split filtered from raw phase, so the answer says it counted every SWI phase; Filtered is never the construct for it.'
+  - words: 'the original magnitude and phase with the reconstructed SWI from the same acquisition'
+    sets: |
+      swi_image:
+        grain: stack
+        where:
+          - ['=', {}, ['axis', {}, 'base'], 'SWI']
+          - ['has', {}, ['axis', {}, 'construct'], 'SWI']
+          - ['=', {}, ['axis', {}, 'disposition'], 'scanner_derived']
+      swi_mag:
+        grain: stack
+        where:
+          - ['=', {}, ['axis', {}, 'base'], 'T2starw']
+          - ['=', {}, ['axis', {}, 'disposition'], 'acquisition']
+          - ['in', {}, ['axis', {}, 'technique'], ['SPGRE', 'GRE', 'MEGRE', 'combMEGRE', 'GREEPI', 'EPI']]
+          - ['not', {}, ['has', {}, ['axis', {}, 'construct'], 'Phase']]
+      swi_phase:
+        grain: stack
+        where:
+          - ['has', {}, ['axis', {}, 'construct'], 'Phase']
+          - ['=', {}, ['axis', {}, 'disposition'], 'acquisition']
+          - ['in', {}, ['axis', {}, 'technique'], ['SPGRE', 'GRE', 'MEGRE', 'combMEGRE', 'GREEPI', 'EPI']]
+      visits:
+        grain: session
+        has: [{set: swi_image, min: 1}, {set: swi_mag, min: 1}, {set: swi_phase, min: 1}]
+    note: '"Same acquisition" is read as the same visit: the ask does not tie the stacks of one acquisition together. Magnitude is never required as a construct, since only one maker writes it.'
+  - words: 'how many SWI scans'
+    sets: |
+      swi_image:
+        grain: stack
+        where:
+          - ['=', {}, ['axis', {}, 'base'], 'SWI']
+          - ['has', {}, ['axis', {}, 'construct'], 'SWI']
+          - ['=', {}, ['axis', {}, 'disposition'], 'scanner_derived']
+      visits:
+        grain: session
+        has: [{set: swi_image, min: 1}]
+    note: 'Count the visits, not the SWI images: a multi-echo SWI writes one image per echo and one combined.'
+raw:
+  - field: text_series_description
+    what: 'Where a question needs the filtered phase alone: GE names the series of its filtered phase with a prefix the console adds before the protocol name (a phase word joined to SWI), and a GE SWAN writes its filtered phase as a series of its own. Siemens and Philips name their phase with a phase word. Read it as header text, never as a sorting value.'

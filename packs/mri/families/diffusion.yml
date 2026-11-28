@@ -1,0 +1,109 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+family: diffusion
+label: 'Diffusion-weighted and diffusion tensor imaging (DWI, DTI)'
+terms: ['DWI', 'DTI', 'diffusion', 'diffusion weighted', 'diffusion tensor', 'trace', 'TRACEW', 'isotropic', 'isoDWI', 'ADC', 'ADC map', 'eADC', 'exponential ADC', 'FA', 'fractional anisotropy', 'colour FA', 'MD', 'mean diffusivity', 'AvDC', 'b0', 'b=0', 'b1000', 'RESOLVE', 'MUSE', 'readout-segmented', 'reversed phase encoding', 'blip-up blip-down', 'TOPUP', 'pepolar', 'SBRef', 'multi-shell', 'HARDI']
+summary: 'An echo-planar (or segmented, or turbo spin echo) acquisition with diffusion gradients at one or more b values and directions. One acquisition leaves the diffusion-weighted images as acquired (a b0 and the weighted volumes) and what the scanner computes from them: the trace (isotropic) image, the ADC and exponential ADC maps, and for a tensor acquisition the FA, colour FA and MD maps. A distortion-corrected study adds a short EPI with the phase encoding reversed.'
+products:
+  - id: dwi
+    what: 'The diffusion-weighted images as acquired: every direction and b value of the run, the b0 included where the scanner keeps it in the run.'
+    acquired: true
+    where:
+      - ['=', {}, ['axis', {}, 'base'], 'DWI']
+      - ['=', {}, ['axis', {}, 'disposition'], 'acquisition']
+      - ['not', {}, ['has', {}, ['axis', {}, 'construct'], 'FieldmapRef']]
+      - ['not', {}, ['has', {}, ['axis', {}, 'construct'], 'SBRef']]
+    note: 'Its readout is DWIEPI, rsEPI (readout-segmented, RESOLVE or MUSE), DWITSE (a turbo spin echo diffusion) or DWISTEAM. A copy the scanner registered carries the modifier MoCo; leave it out to count runs.'
+  - id: b0
+    what: 'An image at b value 0 (no diffusion weighting) saved as a stack of its own.'
+    acquired: true
+    where:
+      - ['=', {}, ['axis', {}, 'base'], 'DWI']
+      - ['=', {}, ['field', {}, 'dwi_b_value'], 0]
+      - ['=', {}, ['axis', {}, 'disposition'], 'acquisition']
+    note: 'Only where the b0 is a stack of its own. The b value is the first image''s: a Siemens trace series holds its b0 and its trace image in one stack and reads b value 0, and GE files often carry no b value at all, so a b value clause is a weak tool on diffusion.'
+  - id: trace
+    what: 'The trace-weighted (isotropic) image: the scanner''s mean over the diffusion directions at each b value, the image read clinically as "the DWI". Siemens names it TRACEW, Philips and GE isotropic.'
+    acquired: false
+    where:
+      - ['has', {}, ['axis', {}, 'construct'], 'Trace']
+      - ['=', {}, ['axis', {}, 'disposition'], 'scanner_derived']
+    note: 'A Siemens trace series often holds its b0 images too. isoDWI is another name for the same image that the rules no longer write. A trace a workstation made is a reformat.'
+  - id: adc
+    what: 'The apparent diffusion coefficient map computed from the b values.'
+    acquired: false
+    where:
+      - ['has', {}, ['axis', {}, 'construct'], 'ADC']
+      - ['=', {}, ['axis', {}, 'disposition'], 'scanner_derived']
+    note: 'Base DWI. Provenance RawRecon for a plain diffusion run and DTIRecon for a tensor run. An ADC a workstation computed is filed reformat.'
+  - id: eadc
+    what: 'The exponential ADC: the ratio of the weighted to the unweighted image, exp(-b ADC).'
+    acquired: false
+    where:
+      - ['has', {}, ['axis', {}, 'construct'], 'eADC']
+      - ['=', {}, ['axis', {}, 'disposition'], 'scanner_derived']
+  - id: fa
+    what: 'The fractional anisotropy map of a tensor acquisition, grey or colour coded by direction.'
+    acquired: false
+    where:
+      - ['has', {}, ['axis', {}, 'construct'], 'FA']
+      - ['=', {}, ['axis', {}, 'provenance'], 'DTIRecon']
+      - ['=', {}, ['axis', {}, 'disposition'], 'scanner_derived']
+    note: 'GE writes a second copy of its tensor maps from its workstation, filed reformat.'
+  - id: md
+    what: 'The mean diffusivity map of a tensor acquisition (GE names it AvDC).'
+    acquired: false
+    where:
+      - ['has', {}, ['axis', {}, 'construct'], 'MD']
+      - ['=', {}, ['axis', {}, 'provenance'], 'DTIRecon']
+  - id: reversed-pe
+    what: 'A short EPI, usually at b 0, with the phase encoding reversed, acquired for distortion correction (TOPUP, blip-up blip-down). Filed under fmap.'
+    acquired: true
+    where:
+      - ['has', {}, ['axis', {}, 'construct'], 'FieldmapRef']
+      - ['=', {}, ['axis', {}, 'disposition'], 'acquisition']
+    note: 'Its base is DWI where it came from a diffusion protocol; its directory type is fmap.'
+  - id: sbref
+    what: 'The single-band reference image of a multiband diffusion run.'
+    acquired: true
+    where:
+      - ['has', {}, ['axis', {}, 'construct'], 'SBRef']
+ask:
+  - words: 'DWI with an ADC map in the same visit'
+    sets: |
+      dwi:
+        grain: stack
+        where:
+          - ['=', {}, ['axis', {}, 'base'], 'DWI']
+          - ['=', {}, ['axis', {}, 'disposition'], 'acquisition']
+      adc:
+        grain: stack
+        where:
+          - ['has', {}, ['axis', {}, 'construct'], 'ADC']
+      visits:
+        grain: session
+        has: [{set: dwi, min: 1}, {set: adc, min: 1}]
+    note: 'Some sites keep only the trace and the ADC, not the acquired images: "a DWI" in ordinary words is often the trace; ask which is meant or count the trace too.'
+  - words: 'DTI FA maps'
+    sets: |
+      fa:
+        grain: stack
+        where:
+          - ['has', {}, ['axis', {}, 'construct'], 'FA']
+  - words: 'diffusion runs with a reversed phase-encoding b0 for distortion correction'
+    sets: |
+      dwi:
+        grain: stack
+        where:
+          - ['=', {}, ['axis', {}, 'base'], 'DWI']
+          - ['=', {}, ['axis', {}, 'disposition'], 'acquisition']
+          - ['not', {}, ['has', {}, ['axis', {}, 'construct'], 'FieldmapRef']]
+      rev:
+        grain: stack
+        where:
+          - ['has', {}, ['axis', {}, 'construct'], 'FieldmapRef']
+      visits:
+        grain: session
+        has: [{set: dwi, min: 1}, {set: rev, min: 1}]
+raw:
+  - field: text_sequence_name
+    what: 'Siemens writes the b value of each image in its sequence name, with a mark for a trace image; the stack keeps the first image''s, so a series holding b0 and trace reads the b0''s. Read it as header text, never as a sorting value.'

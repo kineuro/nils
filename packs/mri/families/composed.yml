@@ -1,0 +1,30 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+family: composed
+label: 'Composed (stitched) images: whole spine and other multi-station views'
+terms: ['composed', 'composite', 'composing', 'stitched', 'whole spine', 'whole-spine', 'total spine', 'MobiView', 'multi-station', 'station']
+summary: 'Several stations (fields of view) acquired one after another and stitched by the console or a workstation into one long image, most often the whole spine. The stations are acquisitions; the composed image is a reformat made from them.'
+products:
+  - id: stations
+    what: 'Each station as acquired: one field of view of the spine (cervical, thoracic, lumbar).'
+    acquired: true
+    where:
+      - ['=', {}, ['axis', {}, 'body_region'], 'spine']
+      - ['=', {}, ['axis', {}, 'disposition'], 'acquisition']
+      - ['not', {}, ['has', {}, ['axis', {}, 'construct'], 'Composed']]
+    note: 'A station and its composed image agree on every other axis; only the construct Composed and the disposition tell them apart.'
+  - id: composed-image
+    what: 'The stitched image of the stations, one plane of the whole spine.'
+    acquired: false
+    where:
+      - ['has', {}, ['axis', {}, 'construct'], 'Composed']
+      - ['=', {}, ['axis', {}, 'disposition'], 'reformat']
+    note: 'A reformat, so the default kinds leave it out: a question for the whole-spine image names the disposition reformat. A stitched survey is a scout.'
+ask:
+  - words: 'composed whole-spine T2 images'
+    sets: |
+      spine_comp:
+        grain: stack
+        where:
+          - ['has', {}, ['axis', {}, 'construct'], 'Composed']
+          - ['=', {}, ['axis', {}, 'base'], 'T2w']
+          - ['=', {}, ['axis', {}, 'disposition'], 'reformat']

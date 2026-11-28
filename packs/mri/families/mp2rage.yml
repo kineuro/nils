@@ -1,0 +1,75 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+family: mp2rage
+label: 'MP2RAGE (two inversions, UNI, T1 map)'
+terms: ['MP2RAGE', 'MP2 RAGE', 'INV1', 'INV2', 'first inversion', 'second inversion', 'UNI', 'UNI-DEN', 'uniform image', 'denoised UNI', 'MP2RAGE T1 map', 'FLAWS']
+summary: 'A 3D inversion-prepared gradient echo read at two inversion times. One acquisition leaves the two inversion images, the uniform T1-weighted image (UNI) computed from them, often a denoised UNI, and a T1 map; the console may add reformats of the UNI.'
+products:
+  - id: inv1
+    what: 'The image at the first, short inversion time: grey and white matter close to their nulls. No base contrast.'
+    acquired: true
+    where:
+      - ['has', {}, ['axis', {}, 'construct'], 'INV1']
+      - ['=', {}, ['axis', {}, 'disposition'], 'acquisition']
+    note: 'Its directory type is misc: on its own it is no anatomy image.'
+  - id: inv2
+    what: 'The image at the second, long inversion time: close to a proton-density image. No base contrast.'
+    acquired: true
+    where:
+      - ['has', {}, ['axis', {}, 'construct'], 'INV2']
+      - ['=', {}, ['axis', {}, 'disposition'], 'acquisition']
+  - id: uni
+    what: 'The uniform image: the two inversions combined so that receive bias and proton density cancel, the T1-weighted image a pipeline reads. Base T1w.'
+    acquired: false
+    where:
+      - ['has', {}, ['axis', {}, 'construct'], 'Uniform']
+      - ['=', {}, ['axis', {}, 'disposition'], 'acquisition']
+    note: 'Computed by the scanner, yet filed acquisition by the current rules, so "original acquisitions only" keeps it. Its background is noise; the denoised UNI is the one most pipelines take.'
+  - id: uni-den
+    what: 'The denoised uniform image (UNI-DEN), background noise suppressed. Base T1w, stored as Denoised.'
+    acquired: false
+    where:
+      - ['has', {}, ['axis', {}, 'construct'], 'Denoised']
+      - ['=', {}, ['axis', {}, 'disposition'], 'acquisition']
+  - id: t1-map
+    what: 'The T1 map computed from the two inversions. No base contrast.'
+    acquired: false
+    where:
+      - ['=', {}, ['axis', {}, 'technique'], 'MP2RAGE']
+      - ['has', {}, ['axis', {}, 'construct'], 'T1map']
+      - ['=', {}, ['axis', {}, 'disposition'], 'scanner_derived']
+  - id: reformat
+    what: 'Planes the console resliced from the UNI (or the other images) of the series.'
+    acquired: false
+    where:
+      - ['=', {}, ['axis', {}, 'technique'], 'MP2RAGE']
+      - ['has', {}, ['axis', {}, 'construct'], 'MPR']
+      - ['=', {}, ['axis', {}, 'disposition'], 'reformat']
+    note: 'Often more numerous than the UNI itself; the default kinds leave them out.'
+ask:
+  - words: 'MP2RAGE scans with both inversions and the UNI'
+    sets: |
+      inv1:
+        grain: stack
+        where:
+          - ['has', {}, ['axis', {}, 'construct'], 'INV1']
+      inv2:
+        grain: stack
+        where:
+          - ['has', {}, ['axis', {}, 'construct'], 'INV2']
+      uni:
+        grain: stack
+        where:
+          - ['or', {}, ['has', {}, ['axis', {}, 'construct'], 'Uniform'], ['has', {}, ['axis', {}, 'construct'], 'Denoised']]
+          - ['=', {}, ['axis', {}, 'disposition'], 'acquisition']
+      visits:
+        grain: session
+        has: [{set: inv1, min: 1}, {set: inv2, min: 1}, {set: uni, min: 1}]
+  - words: 'MPRAGE or MP2RAGE T1 scans'
+    sets: |
+      t1_3d:
+        grain: stack
+        where:
+          - ['=', {}, ['axis', {}, 'base'], 'T1w']
+          - ['in', {}, ['axis', {}, 'technique'], ['MPRAGE', 'MEMPRAGE', 'MP2RAGE']]
+          - ['=', {}, ['axis', {}, 'disposition'], 'acquisition']
+    note: 'The MP2RAGE inversions have no base, so base T1w keeps the UNI and the denoised UNI and leaves the inversions out.'

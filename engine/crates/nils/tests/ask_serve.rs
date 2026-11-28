@@ -5699,3 +5699,414 @@ fn the_count_of_a_group_set_says_its_subjects_at_every_door() {
         }
     }
 }
+
+/// What a question authored as text names a value by is read at the doors
+/// that repair, and said: the draft door and validation under repair read
+/// another name of a value as the word the pack stores, and a fine value
+/// the pack reads as its wider one where it is written alone; each reading
+/// is an entry of `repairs` with `read`, the document stored is the one
+/// read, and the catalog says which value is read as which. A door that
+/// takes a document as it is written reads nothing.
+#[test]
+fn the_doors_that_repair_read_a_value_and_say_so_and_the_others_take_it_as_written() {
+    let home = synthetic();
+    let server = Server::start(&home, 1000, &[]);
+    let text = "\
+ast_version: 1
+name: brain scans
+sets:
+  eligible:
+    grain: stack
+    where:
+      - [\"=\", {}, [\"axis\", {}, \"technique\"], \"FLASH\"]
+      - [\"=\", {}, [\"axis\", {}, \"body_part\"], \"brain\"]
+out: {set: eligible, level: count}
+";
+    let exact = "[\"=\", {exact: true}, [\"axis\", {}, \"body_part\"], \"brain\"]";
+    let word = serde_json::json!({
+        "path": "sets.eligible.where[0]",
+        "what": "On technique, FLASH is another name of SPGRE, the word the pack stores: it was \
+                 read as SPGRE.",
+        "read": {
+            "kind": "word", "axis": "technique", "wrote": "FLASH",
+            "as_axis": "technique", "as_value": "SPGRE"
+        }
+    });
+    let wider = serde_json::json!({
+        "path": "sets.eligible.where[1]",
+        "what": format!(
+            "body_part = brain was read as body_region = head, which covers brain and \
+             brain-neck: the pack reads brain written alone as the wider head. To keep brain \
+             alone, write {exact}."
+        ),
+        "read": {
+            "kind": "wider", "axis": "body_part", "wrote": "brain",
+            "as_axis": "body_region", "as_value": "head", "exact": exact
+        }
+    });
+    let is = |axis: &str, value: &str| serde_json::json!(["=", {}, ["axis", {}, axis], value]);
+    // the kinds of scan a question counts unless it says: the clause a
+    // draft adds to a stack set that names no disposition, and its reading
+    let kinds = serde_json::json!([
+        "in",
+        {"unset": true},
+        ["axis", {}, "disposition"],
+        ["acquisition", "scanner_derived"]
+    ]);
+    let by_default = |set: &str, at: usize| {
+        serde_json::json!({
+            "path": format!("sets.{set}.where[{at}]"),
+            "what": format!(
+                "No clause of {set} names a disposition, so disposition among [acquisition, \
+                 scanner_derived] (or none yet) was added: a question counts those unless it \
+                 says, and a stack that holds no disposition yet with them. Reformat, \
+                 working_scan, scout, display_composite and excluded stacks are left out. To \
+                 count another kind, write the disposition clause the words ask for in {set}, \
+                 for example [\"in\", {{unset: true}}, [\"axis\", {{}}, \"disposition\"], \
+                 [\"acquisition\", \"scanner_derived\", \"reformat\"]]."
+            ),
+            "read": {
+                "kind": "default", "axis": "disposition", "wrote": "",
+                "as_axis": "disposition", "as_value": "acquisition, scanner_derived",
+                "as_values": ["acquisition", "scanner_derived"]
+            }
+        })
+    };
+    let read = serde_json::json!([is("technique", "SPGRE"), is("body_region", "head"), kinds]);
+    let written = serde_json::json!([is("technique", "FLASH"), is("body_part", "brain")]);
+
+    // the draft door
+    let (status, drafted) = server.request(
+        "POST",
+        "/api/ask/draft",
+        Some(&body(serde_json::json!({"text": text}))),
+        None,
+    );
+    assert_eq!(status, 200, "{drafted}");
+    assert_eq!(
+        drafted["repairs"],
+        serde_json::json!([word, wider, by_default("eligible", 2)]),
+        "{drafted}"
+    );
+    assert_eq!(
+        drafted["diagnosis"]["repairs"], drafted["repairs"],
+        "{drafted}"
+    );
+    assert_eq!(drafted["diagnosis"]["valid"], true, "{drafted}");
+    let document = drafted["document"].as_i64().unwrap();
+    let (status, fetched) =
+        server.request("GET", &format!("/api/ask/documents/{document}"), None, None);
+    assert_eq!(status, 200, "{fetched}");
+    assert_eq!(
+        fetched["ask"]["sets"]["eligible"]["where"], read,
+        "{fetched}"
+    );
+
+    // validation under repair: the same readings, and the hash of the
+    // document a draft stores
+    let as_json = serde_json::json!({
+        "ast_version": 1, "name": "brain scans",
+        "sets": {"eligible": {"grain": "stack", "where": written}},
+        "out": {"set": "eligible", "level": "count"}
+    });
+    let (status, repaired) = server.request(
+        "POST",
+        "/api/ask/validate",
+        Some(&body(
+            serde_json::json!({"document": as_json, "mode": "repair"}),
+        )),
+        None,
+    );
+    assert_eq!(status, 200, "{repaired}");
+    assert_eq!(repaired["repairs"], drafted["repairs"], "{repaired}");
+    assert_eq!(repaired["hash"], drafted["hash"], "{repaired}");
+
+    // the doors that take a document as it is written: no reading, another
+    // hash, and the document stored as it was written
+    let (status, strict) = server.request(
+        "POST",
+        "/api/ask/validate",
+        Some(&body(serde_json::json!({"document": as_json}))),
+        None,
+    );
+    assert_eq!(status, 200, "{strict}");
+    assert_eq!(strict["repairs"], serde_json::json!([]), "{strict}");
+    assert_ne!(strict["hash"], drafted["hash"], "{strict}");
+    let (status, posted) = server.request(
+        "POST",
+        "/api/ask/documents",
+        Some(&body(serde_json::json!({"document": as_json}))),
+        None,
+    );
+    assert_eq!(status, 200, "{posted}");
+    let as_written = posted["document"].as_i64().unwrap();
+    assert_ne!(as_written, document);
+    let (status, fetched) = server.request(
+        "GET",
+        &format!("/api/ask/documents/{as_written}"),
+        None,
+        None,
+    );
+    assert_eq!(status, 200, "{fetched}");
+    assert_eq!(
+        fetched["ask"]["sets"]["eligible"]["where"], written,
+        "{fetched}"
+    );
+    let (status, diagnosed) = server.request(
+        "POST",
+        "/api/ask/diagnose",
+        Some(&body(serde_json::json!({"document_id": as_written}))),
+        None,
+    );
+    assert_eq!(status, 200, "{diagnosed}");
+    assert_eq!(diagnosed["repairs"], serde_json::json!([]), "{diagnosed}");
+
+    // a word the pack lists for one value is read at the draft door, and
+    // refused where a document is taken as it is written, which names the
+    // value
+    let listed = |word: &str| {
+        serde_json::json!({
+            "ast_version": 1, "name": "listed",
+            "sets": {"t1": {"grain": "stack", "where": [is("technique", word)]}},
+            "out": {"set": "t1", "level": "count"}
+        })
+    };
+    let (status, drafted_word) = server.request(
+        "POST",
+        "/api/ask/draft",
+        Some(&body(
+            serde_json::json!({"text": listed("BRAVO").to_string()}),
+        )),
+        None,
+    );
+    assert_eq!(status, 200, "{drafted_word}");
+    assert_eq!(
+        drafted_word["repairs"],
+        serde_json::json!([
+            {
+                "path": "sets.t1.where[0]",
+                "what": "On technique, the pack lists BRAVO as a word for MPRAGE: it was read \
+                         as MPRAGE, the word the pack stores.",
+                "read": {
+                    "kind": "word", "axis": "technique", "wrote": "BRAVO",
+                    "as_axis": "technique", "as_value": "MPRAGE"
+                }
+            },
+            by_default("t1", 1)
+        ]),
+        "{drafted_word}"
+    );
+    assert!(
+        drafted_word["document"].as_i64().is_some(),
+        "{drafted_word}"
+    );
+    for door in ["/api/ask/documents", "/api/ask/validate", "/api/ask/run"] {
+        let (status, refused) = server.request(
+            "POST",
+            door,
+            Some(&body(serde_json::json!({"document": listed("BRAVO")}))),
+            None,
+        );
+        assert_eq!(status, 400, "{door}: {refused}");
+        assert_eq!(
+            refused["issues"][0]["code"], "unknown_value",
+            "{door}: {refused}"
+        );
+        assert_eq!(
+            refused["issues"][0]["message"],
+            "BRAVO is not a value of axis technique; the pack lists it as a word for MPRAGE",
+            "{door}: {refused}"
+        );
+    }
+    // a word two values share is refused at the draft door too, by name
+    let (status, shared) = server.request(
+        "POST",
+        "/api/ask/draft",
+        Some(&body(serde_json::json!({"text": serde_json::json!({
+            "ast_version": 1,
+            "sets": {"t": {"grain": "stack", "where": [["has", {}, ["axis", {}, "construct"], "isotropic DWI"]]}},
+            "out": {"set": "t", "level": "count"}
+        }).to_string()}))),
+        None,
+    );
+    assert_eq!(status, 200, "{shared}");
+    assert_eq!(shared["document"], serde_json::Value::Null, "{shared}");
+    // nothing is read of the word; the kinds of scan are added all the same
+    assert_eq!(
+        shared["repairs"],
+        serde_json::json!([by_default("t", 1)]),
+        "{shared}"
+    );
+    assert_eq!(
+        shared["diagnosis"]["issues"][0]["message"],
+        "isotropic DWI is not a value of axis construct; the pack has it as a word for more \
+         than one value: Trace or isoDWI",
+        "{shared}"
+    );
+
+    // the catalog says which value is read as which
+    let (status, catalog) = server.request("GET", "/api/ask/catalog", None, None);
+    assert_eq!(status, 200, "{catalog}");
+    let value = |axis: &str, id: &str| -> serde_json::Value {
+        catalog["axes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|a| a["name"] == axis)
+            .unwrap()["values"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|v| v["id"] == id)
+            .unwrap()
+            .clone()
+    };
+    assert_eq!(
+        value("body_part", "brain")["read_as"],
+        serde_json::json!({"axis": "body_region", "value": "head"}),
+        "{catalog}"
+    );
+    assert!(value("body_part", "brain-neck").get("read_as").is_none());
+    assert_eq!(
+        value("body_region", "head")["read_for"],
+        serde_json::json!(["brain"])
+    );
+
+    // the keyboard says each reading, through the door and in process
+    let url = format!("http://127.0.0.1:{}", server.port);
+    let file = home.path().join("brain.ask.yml");
+    std::fs::write(&file, text).unwrap();
+    let f = file.to_str().unwrap();
+    let printed = run(
+        &home,
+        &["ask", "draft", "--server", &url, "--file", f],
+        None,
+    );
+    assert!(printed.contains("nils ask draft   document "), "{printed}");
+    assert!(
+        printed.contains(
+            "read    sets.eligible.where[1]: body_part = brain was read as body_region = head"
+        ),
+        "{printed}"
+    );
+    assert!(
+        printed.contains(
+            "read    sets.eligible.where[0]: On technique, FLASH is another name of SPGRE"
+        ),
+        "{printed}"
+    );
+    drop(server);
+    let p = packs();
+    let p = p.to_str().unwrap();
+    let printed = run(
+        &home,
+        &["ask", "draft", "--file", f, "--pack-dir", p, "--json"],
+        None,
+    );
+    let in_process: serde_json::Value = serde_json::from_str(&printed).unwrap();
+    assert_eq!(in_process["repairs"], drafted["repairs"], "{printed}");
+    assert_eq!(in_process["hash"], drafted["hash"], "{printed}");
+    let printed = run(
+        &home,
+        &["ask", "validate", "--repair", "--file", f, "--pack-dir", p],
+        None,
+    );
+    assert!(
+        printed.contains("repaired sets.eligible.where[1]: body_part = brain was read as"),
+        "{printed}"
+    );
+    // and a file validated as it is written is read as nothing
+    let printed = run(
+        &home,
+        &["ask", "validate", "--file", f, "--pack-dir", p, "--json"],
+        None,
+    );
+    let strict_file: serde_json::Value = serde_json::from_str(&printed).unwrap();
+    assert_eq!(strict_file["repairs"], serde_json::json!([]), "{printed}");
+    assert_eq!(strict_file["hash"], strict["hash"], "{printed}");
+}
+
+/// The values door searches a text field: `contains` answers the values
+/// that hold a text, letter case aside, under the same limit, and refuses
+/// a text too short and a field whose values are not listed.
+#[test]
+fn the_values_door_finds_the_values_that_hold_a_text() {
+    let home = synthetic();
+    let server = Server::start(&home, 1000, &[]);
+    let door = "/api/ask/catalog/stack/text_series_description/values";
+    let (status, listed) = server.request("GET", &format!("{door}?limit=50"), None, None);
+    assert_eq!(status, 200, "{listed}");
+    let value = listed["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|i| i[0].as_str())
+        .find(|v| {
+            *v != "null"
+                && v.chars().count() > 4
+                && v.chars().take(4).all(|c| c.is_ascii_alphanumeric())
+        })
+        .unwrap()
+        .to_string();
+    let needle: String = value.chars().take(4).collect::<String>().to_uppercase();
+    let (status, found) = server.request("GET", &format!("{door}?contains={needle}"), None, None);
+    assert_eq!(status, 200, "{found}");
+    assert_eq!(found["kind"], "values", "{found}");
+    let items = found["items"].as_array().unwrap();
+    assert!(!items.is_empty(), "{found}");
+    let plain = needle.to_lowercase();
+    assert!(
+        items
+            .iter()
+            .all(|i| i[0].as_str().unwrap().to_lowercase().contains(&plain)),
+        "{found}"
+    );
+    assert!(
+        items.iter().any(|i| i[0].as_str() == Some(value.as_str())),
+        "{found}"
+    );
+    assert_eq!(found["distinct"], items.len(), "{found}");
+    // under the limit
+    let (status, one) = server.request(
+        "GET",
+        &format!("{door}?contains={needle}&limit=1"),
+        None,
+        None,
+    );
+    assert_eq!(status, 200, "{one}");
+    assert_eq!(one["items"].as_array().unwrap().len(), 1, "{one}");
+    // no value holds the text
+    let (status, none) = server.request(
+        "GET",
+        &format!("{door}?contains=zzqqxx-no-such"),
+        None,
+        None,
+    );
+    assert_eq!(status, 200, "{none}");
+    assert_eq!(none["items"], serde_json::json!([]), "{none}");
+    assert_eq!(none["distinct"], 0, "{none}");
+    // too short: refused, with the least and what to do
+    let (status, short) = server.request("GET", &format!("{door}?contains=ab"), None, None);
+    assert_eq!(status, 400, "{short}");
+    assert!(
+        short["error"]
+            .as_str()
+            .is_some_and(|e| e.starts_with("contains takes at least 3 characters")),
+        "{short}"
+    );
+    assert!(short["next"].is_string(), "{short}");
+    // a field shown as shapes is not searched
+    let (status, shaped) = server.request(
+        "GET",
+        "/api/ask/catalog/stack/station_name/values?contains=station",
+        None,
+        None,
+    );
+    assert_eq!(status, 400, "{shaped}");
+    assert!(
+        shaped["error"]
+            .as_str()
+            .is_some_and(|e| e.contains("shown as shapes")),
+        "{shaped}"
+    );
+}

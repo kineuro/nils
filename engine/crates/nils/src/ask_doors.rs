@@ -17,7 +17,7 @@ use nils_ask::moves::{MOVE_KINDS_CAP, MoveCall};
 use nils_ask::run::{self, Request, RunError};
 use nils_ask::selection::{self, SelectionError};
 use nils_ask::validate::{Class, Scope};
-use nils_ask::{Error as AskError, diagnose, document, parse, parse_repaired, prepare, values};
+use nils_ask::{Error as AskError, diagnose, document, parse, parse_read, prepare, values};
 use nils_catalog::Catalog;
 use nils_pack::Pack;
 use nils_registry::Registry;
@@ -497,6 +497,15 @@ fn affordance_err(e: AffordanceError) -> Reply {
             }
             reply
         }
+        // the value sampler asked to search what it does not: the caller's
+        // to change
+        e @ AffordanceError::NoSearch { .. } => {
+            let mut reply = Reply::error(400, e.to_string());
+            if let AffordanceError::NoSearch { next, .. } = e {
+                reply.body["next"] = json!(next);
+            }
+            reply
+        }
         other => Reply::error(500, other.to_string()),
     }
 }
@@ -687,8 +696,11 @@ fn answer(
         ["api", "ask", "validate"] if post => {
             let repair = doc["mode"].as_str() == Some("repair");
             let (ask, repairs, stored) = if repair {
+                // repair is the authored treatment: the document's values
+                // are read from the vocabulary as the draft door reads them,
+                // so the hash answered is the one a draft of it would store
                 let text = doc["document"].to_string();
-                let (ask, repairs) = parse_repaired(&text).map_err(ask_err)?;
+                let (ask, repairs) = parse_read(&text, catalog).map_err(ask_err)?;
                 (ask, repairs, None)
             } else {
                 let (ask, stored) = document_of(registry, &doc)?;
@@ -723,7 +735,7 @@ fn answer(
                 "bound_hash": prepared.bound_hash,
                 "warnings": prepared.validated.warnings,
                 "pinned": prepared.pinned.iter().map(|(s, n, v)| json!({"set": s, "selection": n, "version": v})).collect::<Vec<_>>(),
-                "repairs": repairs.iter().map(|r| json!({"path": r.path, "what": r.what})).collect::<Vec<_>>(),
+                "repairs": repairs,
                 "order": prepared.validated.order,
             })))
         }
@@ -1092,8 +1104,18 @@ fn answer(
                 .and_then(|l| l.parse::<usize>().ok())
                 .unwrap_or(caps.options_values as usize)
                 .clamp(1, caps.options_values as usize);
-            let sample = affordance::values(registry, level, field, &s, cap, Some(reader))
-                .map_err(affordance_err)?;
+            // `contains`: the values that hold a text, letter case aside,
+            // for a word that is not among the most common values
+            let sample = affordance::values_containing(
+                registry,
+                level,
+                field,
+                &s,
+                cap,
+                Some(reader),
+                query.get("contains").map(String::as_str),
+            )
+            .map_err(affordance_err)?;
             Ok(Reply::ok(
                 serde_json::to_value(sample).unwrap_or(Value::Null),
             ))

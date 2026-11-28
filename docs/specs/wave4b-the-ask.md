@@ -280,7 +280,12 @@ served again.
 the names: each value's `description`, a line, and its `terms`, other words a
 person knows it by, where the pack gives them. The terms explain a value and
 are no names of it: a document still names a value by its identity, its label
-or an alias. A pack may also hold one fact at two grains, and says so in the
+or an alias, and one that writes a term is refused as `unknown_value`. The
+refusal names what the text may mean, where a value has it as a name in
+another letter case or as a term: "BRAVO is not a value of axis technique;
+the pack lists it as a word for MPRAGE", or, where several values have it,
+"... the pack has it as a word for more than one value: Trace or isoDWI".
+Only a question authored as text has a term read as its value (below). A pack may also hold one fact at two grains, and says so in the
 coarse axis's file: `coarse_of: <axis>` on the axis and `covers: [<values>]`
 on each of its values (the MR pack's `body_region` is the coarse form of
 `body_part`, and its `head` covers `brain` and `brain-neck`, the fine split of
@@ -291,8 +296,164 @@ drift. The catalog serves it from both sides: the coarse axis carries
 carries `within`, the coarser value that covers it (`{axis, value}`), the
 wider choice where any of the values it covers will do. "A brain scan" in
 ordinary words is `body_region = head`; `body_part = brain` is the stacks
-that end above the neck and no others. A diagnosis warns where a draft wrote
-the fine value and left most rows with its sibling (`narrow_value`, §10).
+that end above the neck and no others. A diagnosis warns where a document
+wrote a fine value and left most rows with its sibling (`narrow_value`, §10).
+
+**A question authored as text is read in the pack's words, and told so.**
+Where a document arrives as text and is repaired (the draft door, and
+validation under `mode: repair`), two things are read from the vocabulary
+after the structural repair, the document is rewritten, and each reading is
+an entry of `repairs` with what was written and what it was read as. What
+is stored, hashed, described and run is the document read. Nothing is
+counted and nothing is guessed: a reading is a lookup in what the pack
+declares.
+
+- **word**: a clause of a stack set's `where` that holds an axis against a
+  value it writes out (`=`, `<>`, `has`, `in`, `not_in`, at any depth) and
+  names the value by its identity, an earlier name or a label that is not
+  the word a row stores is rewritten to that word (`FLASH` to `SPGRE`),
+  where the vocabulary names exactly one value by the text. A name two
+  values share is left as written and read as it always was. The clause
+  selects the same rows before and after.
+  A text that names no value exactly is looked up among the names and
+  among the `terms` of every value of the axis, letter case and
+  surrounding white space aside, and where exactly one value has it the
+  clause is rewritten to that value's stored word: a vendor's word for a
+  sequence (`BRAVO` to `MPRAGE`, `spgr` to `SPGRE`), a name in another
+  letter case (`mprage`). The reading is a `word` like the others, and
+  its `what` says which it was: "On technique, the pack lists BRAVO as a
+  word for MPRAGE: it was read as MPRAGE, the word the pack stores." An
+  exact name always wins over a term and over a match in another case, so
+  nothing a document may write today is read differently (`MIP` is the
+  maximum projection, though the minimum projection lists `mIP`). A text
+  two or more values have is read as none of them, and the document is
+  refused as `unknown_value` with the values named, for whoever wrote it
+  to pick one.
+- **wider**: a pack may say, on a value of a coarse axis, which of the
+  values it covers a question means the coarse value by when it writes
+  that value alone: `read_for: [<values>]` beside `covers` (the MR pack's
+  `head` is read for `brain`, and for nothing else: a neck is not every
+  spine). The loader holds the list to `covers`: each value listed is one
+  the value covers, and it covers another beside it. A clause that keeps
+  exactly one such value (`=`, `has`, or `in` with the one value; itself a
+  `where` clause or a part of an `and` or an `or` of one) is rewritten to
+  the clause on the coarse axis, `["=", {}, ["axis", {}, "body_region"],
+  "head"]`. The fine value stays expressible, and is taken as written
+  where the clause carries the option `exact: true` (`["=", {exact: true},
+  ["axis", {}, "body_part"], "brain"]`, an option with no other effect),
+  where the set, or a set it is drawn `from`, already keeps the wider
+  value in a clause of its own (the heads, and of those the brains), under
+  a `not` and in `<>` and `not_in`, in an `or` beside another value of the
+  same axis, and in a list of several values. The catalog serves the
+  declaration from both sides: the fine value carries `read_as: {axis,
+  value}` and the coarse value `read_for`.
+  The word is read first, so a term of such a value written alone
+  (`body_part = neuro`) is read wider as the value is, in one reading of
+  kind `wider` whose `wrote` is the text as written; with `exact: true`
+  the term is still read as the value's stored word, and only the wider
+  reading is left out. The checks around a clause read every value in its
+  stored word as well: the wider value kept by a term of its own beside
+  the fine one is the narrowing on purpose it would be.
+
+- **default**: an axis may say which of its values a question counts
+  unless it says otherwise: `ask_default: [<values>]` in the axis's file,
+  values of that axis, at least one. The MR pack's `disposition` counts
+  `acquisition` and `scanner_derived`: a scanner-derived image can be the
+  very image a question means, a reformat is another view of an
+  acquisition the session already holds, and a scout or a working scan is
+  not what a question usually wants. A stack set that names no value of
+  that axis in a `where` clause, neither itself nor a stack set it is
+  drawn `from`, gets the clause that keeps those values, `["in", {unset:
+  true}, ["axis", {}, "disposition"], ["acquisition", "scanner_derived"]]`.
+  The option `unset: true` on `=` or `in` over an axis keeps the stacks
+  that hold no value of the axis as well: a stack nothing has sorted yet
+  has no disposition, and a clause that counts the usual kinds must not
+  leave a site that has not sorted yet with no scan at all. The reading
+  writes the option where the value a sort gives the axis by default (the
+  pack's `default`, `acquisition`) is among those counted, and the catalog
+  serves the whole clause as `ask_default_clause` beside `ask_default`, so
+  nobody works it out again. A clause a person writes without the option
+  keeps the stacks that hold one of its values and no others, as it always
+  did. It is
+  written once for the sets that share it, at the set the others are
+  drawn from, so they read it too; any clause on the axis, of any op and
+  at any depth, in a set or in a set it is drawn from turns it off for
+  that set. Where one set drawn from a shared set names the axis and
+  another does not, the shared set is left as written (a clause there
+  would cut the set that asked for another kind) and the other gets the
+  clause itself. A stack set a session set reads through `has`, and one
+  that is `of` another set, starts a chain of its own. Left as written: a
+  set at another grain, a group and the result of an algebra, a stack
+  set that starts from a list (`from` a handle, a selection, a role or
+  uploaded values) with the sets drawn from it, and a set that keeps the
+  main scans that were picked (`picked`) with the sets drawn from it: a
+  pick is a choice already made, of whatever kind, as a list is. It is read last, after
+  the words and the wider values. Its entry is `kind: default`, `wrote`
+  empty, `as_value` the values as one text and `as_values` the list, and
+  `what` says what was added, which kinds are left out, and the clause to
+  write for another kind. The catalog serves `ask_default` on the axis.
+  A move writes for a person what a draft writes from their words, so
+  `apply` (§10) reads the same way: a stack set a move adds (`AddSet`)
+  gets the default clause, itself, unless a set it is drawn from names
+  the axis or it starts from a list; and a set a move gives a clause that
+  keeps values of the axis (`AddAxisWhere` on `disposition`) loses the
+  default clause it held, since the person now says which kinds are
+  meant, while a clause that takes a kind away (`ExcludeScenario`) leaves
+  it. The sets touched are answered with their sentences, which say the
+  clause. No other door that writes a document writes a stack set of its
+  own: `POST /api/ask/start` opens from cohorts, a list or a stored
+  document, and those are taken as they are.
+
+A reading's entry carries `read` beside `path` and `what`: `{kind: word |
+wider | default, axis, wrote, as_axis, as_value}`, for `wider` also
+`exact`, the clause that keeps the fine value alone, as a document writes
+it, and for `default` also `as_values`. A
+structural repair carries no `read`. A document that arrives structured
+(`POST /api/ask/documents`, a stored document, strict validation, a run) is
+taken as written: a filter a person clicked on one value means that value.
+
+**How an acquisition family is filed** is the pack's to say as well. An
+acquisition often leaves several images in a session (a magnitude, a
+phase, a reconstruction made from both), each filed under values of its
+own, and what the values mean one by one does not say how the images of
+one family are found together. A pack may hold a `families` folder beside
+its manifest, one file a family, named by the family (`families/<id>.yml`):
+`family` (the file's name, lower case letters, digits and hyphens),
+`label`, `terms` (the words a person uses for it, at least one),
+`summary`, `products` (what one acquisition leaves, each with an `id`
+unique in the family, `what`, `acquired`: true where the scanner acquired
+it and false where it was computed or made from others, `where`: the
+clauses that find it, as a document writes them, and an optional `note`),
+`ask` (worked examples, each with `words`, `sets`: a fragment of a
+document as text, and an optional `note`) and an optional `raw` (header
+text fields for what the axes do not split, each a `field` and `what`).
+The files decide nothing: no rule and no sort reads them. The folder is
+found by its name and not through the manifest, so an engine that does
+not know it loads the pack as it did. A file is held to its shape and to
+the pack's own vocabulary when the pack loads (every key known, the names
+as above, a clause a clause in shape, an axis one the pack declares and a
+value a value of it by any of its names, and no clause with the option
+`exact`, which is a question's own: a family that wrote it would teach a
+first draft the one clause a draft is asked not to open with), and to the ask where a catalog
+is built and by `nils pack validate` (every clause parses and its op is
+the language's, a field is a field of its level and a derived field one
+the catalog lists, the `sets` of an example read as the sets of a
+document, `raw` names a text field of a stack); each refusal names the
+file and the path inside it, and nothing is run against a registry. The
+catalog serves the families whole, `families: [...]` in the order of the
+files' names, the clauses as arrays and the `sets` as text; the key is
+absent where a pack has none.
+
+**A text that is not among a field's most common values** is found by the
+value sampler: `GET /api/ask/catalog/{level}/{field}/values` takes
+`contains`, a text of three characters or more, and answers the values
+that hold it, letter case aside, with their counts, the most common
+first, under the same limit. It is how a niche word in a header text (a
+product name in a series description) is found where the axes do not
+split it. Only a field whose values are listed is searched: a field shown
+as shapes is not, since a search would say whether a value is there that
+the listing does not show, and neither is a stack's axis, whose values
+are the catalog's own list.
 
 **share** names its denominator. A denominator is an uncorrelated scalar count
 over a named set, legal only in a denominator position and only at count or
@@ -389,10 +550,12 @@ is a `min` over that event set.
     `ambiguous_parent`, `unknown_value`, `unknown_level`, `forbidden_field`,
     `federated_scope`, `scheme_mismatch`, `selection_outdated`,
     `binding_dropped`, `missing_order`, `not_releasable`, `truncated`,
-    `stale_options`, the warnings `sequence_before_where` and `sequence_inherited` (§5.4), and two
-    warnings only a diagnosis gives, `reversed_dates` and `narrow_value` (§10). Repair inserts a missing `{}`, wraps a lone clause and
+    `stale_options`, the warnings `sequence_before_where` and `sequence_inherited` (§5.4), and three
+    warnings only a diagnosis gives, `reversed_dates`, `narrow_value` and `emptied_by` (§10). Repair inserts a missing `{}`, wraps a lone clause and
     maps operator and unit aliases; it never rewrites a value and never guesses
-    among candidates.
+    among candidates. After it, where the text was authored, a value is read
+    from the pack's vocabulary and the reading said (§4.3, a question
+    authored as text): a lookup in what the pack declares, never a guess.
 15. Sensitivity is one policy evaluated in the catalog per (principal, role,
     purpose, scope) with no caller opt in. Identifying fields have no field
     record. Quasi-identifying fields (birth date, exact dates, subject code,
@@ -844,8 +1007,12 @@ must not guess them (C20, D36):
   drawn from) above a positive
   bound, keeps no row, and keeps rows with the two dates the other way
   round, counted only for a stage that kept nothing, and `narrow_value`
-  (below); a one line zero-row explanation in
-  domain words; per clause and per null drop counts, for the `where` clauses
+  and `emptied_by` (below); a one line zero-row explanation in
+  domain words, which names the first stage that kept no row wherever the
+  last stage of the answer's set kept none, at `count` as at `record`
+  (until 2026-11-27 it read the stage whose name sorts last, which is
+  `source` for a set that only reads others through `has`, and a count of
+  nothing over such a set said nothing); per clause and per null drop counts, for the `where` clauses
   of the answer's set and of each set it reads its rows through (the set it
   is drawn `from` or is `of`, each set a `has` of it reads, and theirs in
   turn), each drop naming its `set`, the answer's own first; ties per pick; unresolved
@@ -871,8 +1038,8 @@ must not guess them (C20, D36):
   siblings need not hold most of what is dropped, and a clause the set's
   other conditions already answer is left alone. The warning names the
   coarse axis and value as the wider choice: "flair: with the set's other
-  conditions, body_part = brain keeps 7 of 6,461 stacks; brain-neck holds
-  6,454 of the rest. If any head of body_region is meant, write
+  conditions, body_part = brain keeps 7 of 6,400 stacks; brain-neck holds
+  6,393 of the rest. If any head of body_region is meant, write
   body_region = head, which covers brain and brain-neck." (the first words
   are left out where the set has no other condition).
   `path` is the clause (`sets.<set>.where[i]`) and `next` holds the clause
@@ -895,6 +1062,70 @@ must not guess them (C20, D36):
   purpose: `next` never names a clause the set already has. It is not
   counted once the time for the counts is spent, and the document is valid
   either way.
+  A clause is measured where it bites: in its own set, and in each stack
+  set on the answer's path that is drawn `from` it, in one step or
+  several, with that set's other conditions applied and the one clause
+  left out. A set several items share often holds the value clause, and
+  there the fine value may keep most rows while one item drawn from it
+  loses nearly all. The warning is raised once a clause, for the first set
+  the rule holds in, the sets with the fewest rows first; `path` stays the
+  clause's own, and the message names the set the rule held in: "swi:
+  with the set's other conditions, body_part = brain (written in base,
+  which swi is drawn from) keeps ...". The three statements are the bound
+  for a document, whichever sets they measure in. A clause that carries
+  `exact: true` is on purpose and is never measured.
+  `emptied_by` is a stack set that came to nothing because two of its
+  clauses hold together on no stack, one of them often written in a set it
+  is drawn from and not on the item (`disposition = acquisition` in a
+  shared set, and a base contrast only scanner-derived stacks hold in the
+  item). For each stack set on the answer's path that holds rows before
+  its own `where` and none after it, the clause it came to nothing at is
+  the first of its own whose stage kept no row; the set is then counted
+  with one other clause left out at a time (each clause that keeps values
+  of an axis it writes out, of the sets it is drawn from, nearest first,
+  then of its own), and where exactly one of them leaves the set with rows
+  that clause is warned of, at its own path: "swi keeps no stack: with the
+  set's other conditions, disposition = acquisition (written in base,
+  which swi is drawn from) and base = SWI hold together on no stack.
+  Without disposition = acquisition, swi holds 212 stacks." `next` says to
+  draft the set on its own without that clause where the question's words
+  did not put it on the item, and that the answer stands where they did.
+  Where no clause left out frees the set, or more than one does, nothing
+  is said. It costs one statement a clause left out, four of a document at
+  most, under the same time and the same rule for held counts as
+  `narrow_value` (a count held back is said as rows whose number is held),
+  and is not given where the request asks for keys.
+  **A count of nothing is explained first.** The zero row explanation and
+  `emptied_by` were worked out last, from a funnel counted whole, and the
+  funnel of a session set that reads several stack sets through `has`
+  makes those sets again for each of its stages: at the size of a real
+  registry it does not end in the time a draft has, and the two things a
+  count of nothing most needs never came. So a diagnosis counts first the
+  stack sets the answer cannot do without: the stack sets among the
+  answer's set, the sets it is drawn `from` or is `of`, each set one of
+  those reads through `has` with a least of one or more, and theirs in
+  turn. They are counted by the passes the funnel runs for them (a set's
+  `where` stages in one statement, the sets of the same rows together),
+  each pass the one the funnel would run, and what it counted is kept:
+  the funnel reads it and runs no statement for those sets, so a
+  diagnosis that has the time for everything runs the statements it
+  always ran, these first, and answers what it always answered. Where one
+  of those sets holds rows before its `where` and none after it, the
+  answer is known to hold none: `zero_rows` names the first of its
+  clauses that kept no row, in the sentence the funnel gives, and
+  `emptied_by` is looked for at once, on the counts of the pass. Both are
+  served whether or not the funnel ends in time: a diagnosis may carry
+  `zero_rows` and an `emptied_by` warning beside `unavailable` and a
+  funnel that stops before the answer's set. Nothing is said early where
+  the pass cannot say it as the funnel would: of a `has` with a most
+  alone, a least of nought or no bound (the answer can do without the
+  set), of a group or an algebra, of a set no pass counts (one with no
+  `where`, or one whose `where` reads the rows around its own), of a set
+  that is empty before its `where` behind a relation of its own or
+  because the set it is drawn from is, of a set a quasi identifying field
+  chose the rows of, and where keys are asked. The funnel goes on as
+  before for those. The clauses left out before the funnel count within
+  the four of a document, and are not left out again after it.
 - **preview**: 10 rows or the count, by level.
 - **describe**: one deterministic sentence per set in deal breaker order
   (membership, then counts, then sameness), the conventions block (windows in

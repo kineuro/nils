@@ -44,7 +44,9 @@ mcp:
         Validate a document strictly and return its content hash, the
         selections it pins and the warnings that did not refuse it. Under mode
         repair the structural slips are fixed first (a missing options object,
-        a lone clause, an operator alias) and the repairs are reported.
+        a lone clause, an operator alias) and the repairs are reported; the
+        values the document names by another word are read as a draft reads
+        them, and each reading is reported with what was written.
       rules:
         - Validate every document before running it, and read the issues rather than guessing at a fix.
     - operation: describe
@@ -90,7 +92,12 @@ mcp:
         A whole document as text when no move reaches what you need: the
         structural repairs are applied and reported, the diagnosis says what
         is wrong in domain words, and a valid document is stored and answered
-        by handle. Prefer options and apply; draft is the fallback.
+        by handle. The values it names by another word are read too: another
+        name of a value or a word the pack lists for one value as the word a
+        row stores, and a fine value the pack reads as its wider one as that
+        value; the document stored is the one read, and each reading is in
+        repairs with what was written and what it was read as. Prefer options
+        and apply; draft is the fallback.
       rules:
         - Never write SQL here or anywhere; a draft is the document, in YAML or JSON.
     - operation: run

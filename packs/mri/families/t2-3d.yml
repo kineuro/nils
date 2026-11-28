@@ -1,0 +1,40 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+family: t2-3d
+label: '3D T2-weighted (SPACE T2, CUBE T2, CISS, FIESTA)'
+terms: ['3D T2', 'SPACE T2', 'CUBE T2', 'VISTA T2', '3D TSE T2', 'CISS', 'FIESTA', 'FIESTA-C', 'TrueFISP', 'balanced SSFP', 'DRIVE', 'heavily T2-weighted', 'cisternography', 'inner ear']
+summary: 'A 3D T2-weighted acquisition: a 3D turbo spin echo without fluid nulling, or a balanced steady state (CISS, FIESTA) for cisterns, nerves and the inner ear. One acquisition leaves the volume and its reformats.'
+products:
+  - id: tse-3d
+    what: 'A 3D turbo spin echo T2 without FLAIR. Technique SPACE.'
+    acquired: true
+    where:
+      - ['=', {}, ['axis', {}, 'base'], 'T2w']
+      - ['=', {}, ['axis', {}, 'technique'], 'SPACE']
+      - ['not', {}, ['has', {}, ['axis', {}, 'modifier'], 'FLAIR']]
+      - ['not', {}, ['has', {}, ['axis', {}, 'modifier'], 'DIR']]
+      - ['=', {}, ['axis', {}, 'disposition'], 'acquisition']
+  - id: balanced-ssfp
+    what: 'A balanced steady-state volume, phase cycled (CISS, FIESTA-C) or not (TrueFISP, FIESTA).'
+    acquired: true
+    where:
+      - ['in', {}, ['axis', {}, 'technique'], ['pcbSSFP', 'bSSFP']]
+      - ['=', {}, ['axis', {}, 'disposition'], 'acquisition']
+  - id: reformat
+    what: 'A plane resliced from a 3D T2 volume.'
+    acquired: false
+    where:
+      - ['=', {}, ['axis', {}, 'base'], 'T2w']
+      - ['in', {}, ['axis', {}, 'technique'], ['SPACE', 'pcbSSFP', 'bSSFP']]
+      - ['not', {}, ['has', {}, ['axis', {}, 'modifier'], 'FLAIR']]
+      - ['has', {}, ['axis', {}, 'construct'], 'MPR']
+      - ['=', {}, ['axis', {}, 'disposition'], 'reformat']
+ask:
+  - words: '3D T2 scans that are not FLAIR'
+    sets: |
+      t2_3d:
+        grain: stack
+        where:
+          - ['=', {}, ['axis', {}, 'base'], 'T2w']
+          - ['=', {}, ['derived', {}, 'acquisition_type'], '3D']
+          - ['not', {}, ['has', {}, ['axis', {}, 'modifier'], 'FLAIR']]
+          - ['not', {}, ['has', {}, ['axis', {}, 'modifier'], 'DIR']]

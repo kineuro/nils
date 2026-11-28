@@ -1651,6 +1651,7 @@ fn an_axis_value_is_named_by_any_of_its_names_and_held_in_any_form() {
         label: label.into(),
         aliases: aliases.iter().map(|a| a.to_string()).collect(),
         stored: None,
+        terms: Vec::new(),
     };
     let id_of = |a: &AxisNames, t: &str| a.named(t).map(|x| x.id.clone());
     let pair = |a: &str, b: &str| (a.to_string(), b.to_string());
@@ -1730,6 +1731,229 @@ fn an_axis_value_is_named_by_any_of_its_names_and_held_in_any_form() {
     assert!(!fixture.stores_label);
     assert_eq!(id_of(&fixture, "T1w").as_deref(), Some("T1w"));
     assert!(fixture.synonyms().is_empty());
+}
+
+/// A text that names a value by another spelling than the stored word is
+/// read as that word only where the vocabulary names exactly one value by
+/// it and the word read back names the same value: a name two values
+/// share is left as it was written, and read as it always was.
+#[test]
+fn another_spelling_is_read_as_the_stored_word_only_where_one_value_has_the_name() {
+    use nils_ask::validate::{AxisNames, AxisValueNames};
+    let v = |id: &str, label: &str, aliases: &[&str]| AxisValueNames {
+        id: id.into(),
+        label: label.into(),
+        aliases: aliases.iter().map(|a| a.to_string()).collect(),
+        stored: None,
+        terms: Vec::new(),
+    };
+    let read = |a: &AxisNames, t: &str| {
+        a.other_spelling(t)
+            .map(|(value, word)| (value.id.clone(), word.to_string()))
+    };
+    let pair = |a: &str, b: &str| Some((a.to_string(), b.to_string()));
+    // an axis that stores labels: the identity and an earlier name are
+    // read as the label, the label is the stored word already
+    let technique = AxisNames {
+        stores_label: true,
+        values: vec![
+            v("SP-GRE", "SPGRE", &["FLASH"]),
+            v("3D-TSE", "SPACE", &[]),
+            v("GRE", "GRE", &[]),
+        ],
+    };
+    assert_eq!(read(&technique, "FLASH"), pair("SP-GRE", "SPGRE"));
+    assert_eq!(read(&technique, "SP-GRE"), pair("SP-GRE", "SPGRE"));
+    assert_eq!(read(&technique, "3D-TSE"), pair("3D-TSE", "SPACE"));
+    assert_eq!(read(&technique, "SPGRE"), None);
+    assert_eq!(read(&technique, "GRE"), None);
+    assert_eq!(read(&technique, "SPGR"), None);
+    // an axis that stores identities: a label and an earlier name are
+    // read as the identity
+    let contrast = AxisNames {
+        stores_label: false,
+        values: vec![v("given", "1", &["yes"]), v("not_given", "0", &[])],
+    };
+    assert_eq!(read(&contrast, "1"), pair("given", "given"));
+    assert_eq!(read(&contrast, "yes"), pair("given", "given"));
+    assert_eq!(read(&contrast, "given"), None);
+    // rows keep a spelling the label has left: that spelling is the word
+    let kept = AxisNames {
+        stores_label: true,
+        values: vec![AxisValueNames {
+            stored: Some("FLASH".into()),
+            ..v("SP-GRE", "SPGRE", &[])
+        }],
+    };
+    assert_eq!(read(&kept, "SPGRE"), pair("SP-GRE", "FLASH"));
+    assert_eq!(read(&kept, "FLASH"), None);
+    // a label that is another value's identity is a name two values have
+    let clash = AxisNames {
+        stores_label: false,
+        values: vec![v("a", "b", &[]), v("b", "c", &[])],
+    };
+    assert_eq!(read(&clash, "b"), None);
+    assert_eq!(read(&clash, "c"), pair("b", "b"));
+    // and a stored word that read back would name another value first
+    let crossed = AxisNames {
+        stores_label: true,
+        values: vec![v("x", "y", &[]), v("y", "z", &[])],
+    };
+    assert_eq!(read(&crossed, "x"), None);
+    assert_eq!(read(&crossed, "y"), None);
+}
+
+/// A text that names no value exactly is looked up among the names and the
+/// words the pack lists for each value, letter case and surrounding space
+/// aside, and is read where exactly one value has it. An exact name is
+/// that value whatever another value lists, a word two values share is
+/// read as neither, and the validator names what such a text may mean.
+#[test]
+fn a_listed_word_is_read_as_the_one_value_that_has_it() {
+    use nils_ask::validate::{AxisNames, AxisValueNames, Spelling};
+    let v = |id: &str, label: &str, aliases: &[&str], terms: &[&str]| AxisValueNames {
+        id: id.into(),
+        label: label.into(),
+        aliases: aliases.iter().map(|a| a.to_string()).collect(),
+        stored: None,
+        terms: terms.iter().map(|t| t.to_string()).collect(),
+    };
+    let technique = AxisNames {
+        stores_label: true,
+        values: vec![
+            v(
+                "SP-GRE",
+                "SPGRE",
+                &["FLASH"],
+                &["FLASH", "SPGR", "spoiled GRE", "fast"],
+            ),
+            v(
+                "MPRAGE",
+                "MPRAGE",
+                &[],
+                &["MPRAGE", "BRAVO", "3D TFE", "fast"],
+            ),
+            v("MIP", "MIP", &[], &["maximum projection"]),
+            v("MinIP", "MinIP", &[], &["mIP", "minimum projection"]),
+        ],
+    };
+    let read = |t: &str| {
+        technique
+            .read_word(t)
+            .map(|(value, word, how)| (value.id.as_str(), word, how))
+    };
+    // a word one value lists, in any letter case and with space around it
+    assert_eq!(read("BRAVO"), Some(("MPRAGE", "MPRAGE", Spelling::Term)));
+    assert_eq!(read("bravo"), Some(("MPRAGE", "MPRAGE", Spelling::Term)));
+    assert_eq!(read(" 3d tfe "), Some(("MPRAGE", "MPRAGE", Spelling::Term)));
+    assert_eq!(read("SPGR"), Some(("SP-GRE", "SPGRE", Spelling::Term)));
+    // a name but for its letter case, an earlier name among them; a name
+    // comes before the same text listed as a word of the same value
+    assert_eq!(read("mprage"), Some(("MPRAGE", "MPRAGE", Spelling::Folded)));
+    assert_eq!(read("flash"), Some(("SP-GRE", "SPGRE", Spelling::Folded)));
+    assert_eq!(read(" SPGRE"), Some(("SP-GRE", "SPGRE", Spelling::Folded)));
+    // an exact name is read as it was: another spelling, or nothing
+    assert_eq!(read("FLASH"), Some(("SP-GRE", "SPGRE", Spelling::Name)));
+    assert_eq!(read("SP-GRE"), Some(("SP-GRE", "SPGRE", Spelling::Name)));
+    assert_eq!(read("SPGRE"), None);
+    assert_eq!(read("MPRAGE"), None);
+    // an exact name beats a word another value lists: MIP is MIP, though
+    // MinIP lists mIP
+    assert_eq!(read("MIP"), None);
+    assert_eq!(technique.named("MIP").map(|x| x.id.as_str()), Some("MIP"));
+    // a word two values have, as a listed word or as a name in another
+    // case, is read as neither; and a text no value has is read as none
+    assert_eq!(read("fast"), None);
+    assert_eq!(read("mip"), None);
+    assert_eq!(read("turbo"), None);
+    assert_eq!(read(""), None);
+    assert_eq!(read("  "), None);
+    // what such a text may mean, for the refusal
+    let meant = |t: &str| -> Vec<(&str, bool)> {
+        technique
+            .listed(t)
+            .into_iter()
+            .map(|(value, term)| (value.id.as_str(), term))
+            .collect()
+    };
+    assert_eq!(meant("fast"), [("SP-GRE", true), ("MPRAGE", true)]);
+    assert_eq!(meant("mip"), [("MIP", false), ("MinIP", true)]);
+    assert_eq!(meant("turbo"), []);
+    // a document may not write a listed word: the validator refuses it as
+    // it did, and a fixture that lists no words says nothing more
+    assert!(technique.named("BRAVO").is_none());
+    let issues = refused(json!({
+        "ast_version": 1,
+        "sets": {"t": {"grain": "stack", "where": [["=", {}, ["axis", {}, "technique"], "bravo"]]}},
+        "out": {"set": "t", "level": "count"}
+    }));
+    assert_eq!(issues[0].code, Code::UnknownValue);
+    assert_eq!(issues[0].message, "bravo is not a value of axis technique");
+    // but a name in another letter case is named in the refusal
+    let issues = refused(json!({
+        "ast_version": 1,
+        "sets": {"t": {"grain": "stack", "where": [["=", {}, ["axis", {}, "technique"], "mprage"]]}},
+        "out": {"set": "t", "level": "count"}
+    }));
+    assert_eq!(
+        issues[0].message,
+        "mprage is not a value of axis technique; the pack writes it MPRAGE"
+    );
+    assert!(
+        issues[0]
+            .next
+            .starts_with("write MPRAGE; or GET /api/ask/catalog")
+    );
+}
+
+/// A repair is `{path, what}` as it always was, and one that read a value
+/// carries `read`: its kind, the axis and the text written, and the axis
+/// and value it was read as, with the clause that keeps a fine value alone
+/// for a wider reading.
+#[test]
+fn a_repair_carries_what_was_read_only_where_a_value_was() {
+    use nils_ask::Repair;
+    use nils_ask::reading::Read;
+    let (_, repairs) = parse_repaired(
+        r#"{"ast_version": 1, "sets": {"t": {"grain": "stack", "where": ["==", ["field", "id"], 1]}}, "out": {"set": "t", "level": "count"}}"#,
+    )
+    .unwrap();
+    assert!(!repairs.is_empty());
+    for r in &repairs {
+        assert_eq!(r.read, None);
+        let v = serde_json::to_value(r).unwrap();
+        assert_eq!(
+            v.as_object().unwrap().keys().collect::<Vec<_>>(),
+            ["path", "what"]
+        );
+        // and a repair written before the field reads as it was
+        assert_eq!(&serde_json::from_value::<Repair>(v).unwrap(), r);
+    }
+    let word = Repair {
+        path: "sets.t1.where[0]".into(),
+        what: "said".into(),
+        read: Some(Read {
+            kind: "word".into(),
+            axis: "technique".into(),
+            wrote: "FLASH".into(),
+            as_axis: "technique".into(),
+            as_value: "SPGRE".into(),
+            exact: None,
+            as_values: None,
+        }),
+    };
+    assert_eq!(
+        serde_json::to_value(&word).unwrap(),
+        json!({"path": "sets.t1.where[0]", "what": "said", "read": {
+            "kind": "word", "axis": "technique", "wrote": "FLASH",
+            "as_axis": "technique", "as_value": "SPGRE"
+        }})
+    );
+    // a catalog that knows identities alone reads nothing
+    let text = r#"{"ast_version": 1, "sets": {"t": {"grain": "stack", "where": [["=", {}, ["axis", {}, "body_part"], "Brain"]]}}, "out": {"set": "t", "level": "count"}}"#;
+    let (ask, repairs) = nils_ask::parse_read(text, &Fixture).unwrap();
+    assert_eq!(repairs, []);
+    assert_eq!(ask, parse(text).unwrap());
 }
 
 /// 2026-10-11: the chat took the main scans for the pick clause and drafted

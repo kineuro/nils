@@ -19,6 +19,7 @@ pub mod hash;
 pub mod measure;
 pub mod moves;
 pub mod promote;
+pub mod reading;
 pub mod repair;
 pub mod run;
 pub mod schema;
@@ -162,11 +163,25 @@ pub fn parse(text: &str) -> Result<Ask, Error> {
     ask_of(read(text)?)
 }
 
-/// A document parsed after structural repair, with what was repaired.
+/// A document parsed after structural repair, with what was repaired. No
+/// value is read: [`parse_read`] is what a door calls.
 pub fn parse_repaired(text: &str) -> Result<(Ask, Vec<Repair>), Error> {
     let mut v = read(text)?;
     let repairs = repair::repair(&mut v);
     Ok((ask_of(v)?, repairs))
+}
+
+/// A document authored as text: parsed after structural repair, and its
+/// values read from the vocabulary ([`reading`]): another name of a value
+/// as the word the pack stores, and a fine value the pack reads as its
+/// wider one where it is written alone. The document answered is the one
+/// read, and each reading is an entry of the repairs, after the structural
+/// ones. Every door that repairs comes through here; a door that takes a
+/// document as it is written ([`parse`]) reads nothing.
+pub fn parse_read(text: &str, names: &dyn Names) -> Result<(Ask, Vec<Repair>), Error> {
+    let (mut ask, mut repairs) = parse_repaired(text)?;
+    repairs.extend(reading::read(&mut ask, names));
+    Ok((ask, repairs))
 }
 
 /// What a door or a runner holds once a document is accepted: the

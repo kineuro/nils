@@ -1,0 +1,28 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+family: perfusion-dce
+label: 'Dynamic contrast-enhanced perfusion (DCE)'
+terms: ['DCE', 'DCE-MRI', 'DCE perfusion', 'dynamic contrast enhanced', 'permeability', 'Ktrans', 'TWIST-VIBE', 'dynamic']
+summary: 'A T1-weighted 3D spoiled gradient echo repeated through a gadolinium bolus to measure leakage and permeability. One acquisition leaves the dynamic series, sometimes split into Dixon parts; permeability maps are made by software later and are not in the vocabulary.'
+products:
+  - id: run
+    what: 'The dynamic T1-weighted series as acquired. Base PWI, technique DCE.'
+    acquired: true
+    where:
+      - ['=', {}, ['axis', {}, 'technique'], 'DCE']
+      - ['=', {}, ['axis', {}, 'disposition'], 'acquisition']
+    note: 'Its base is PWI, not T1w: a question for T1-weighted images does not count it. A slow pituitary dynamic is not a DCE.'
+  - id: dixon-parts
+    what: 'The water and fat parts of a Dixon DCE.'
+    acquired: false
+    where:
+      - ['=', {}, ['axis', {}, 'technique'], 'DCE']
+      - ['has', {}, ['axis', {}, 'modifier'], 'Dixon']
+      - ['=', {}, ['axis', {}, 'disposition'], 'scanner_derived']
+ask:
+  - words: 'DCE perfusion scans'
+    sets: |
+      dce:
+        grain: stack
+        where:
+          - ['=', {}, ['axis', {}, 'technique'], 'DCE']
+    note: 'The default kinds keep the run and its Dixon parts; count visits to count acquisitions.'

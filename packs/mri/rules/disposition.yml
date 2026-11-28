@@ -19,6 +19,7 @@ decides: [disposition, convertible]
 tiers: {stated: 0.9}
 
 order:
+  - encrypted_symri_product
   - encrypted
   - not_an_image
   - ruled_out
@@ -43,6 +44,41 @@ order:
   - planning_tri_plane
 
 rules:
+
+  # MRI pack 1.5.1, the ruling of 2026-11-28: an encrypted SyMRI product
+  # (the set of maps in one series, MultiQmap, as GE and Philips write it
+  # for the vendor's own software to open) is still a map the scanner
+  # computed. The rule below decides only the conversion, so its disposition
+  # fell to the default, acquisition; it is scanner_derived, and like every
+  # encrypted stack it is not converted. The products are those
+  # symri_working_scan names.
+  encrypted_symri_product:
+    clauses:
+      - when:
+          all:
+            - {axis: quality, is: Encrypted}
+            - {axis: provenance, is: SyMRI}
+            - any:
+                - {axis: construct, is: SyntheticT1w}
+                - {axis: construct, is: SyntheticT2w}
+                - {axis: construct, is: SyntheticFLAIR}
+                - {axis: construct, is: SyntheticPDw}
+                - {axis: construct, is: SyntheticDIR}
+                - {axis: construct, is: SyntheticPSIR}
+                - {axis: construct, is: SyntheticSTIR}
+                - {axis: construct, is: T1map}
+                - {axis: construct, is: T2map}
+                - {axis: construct, is: R1map}
+                - {axis: construct, is: R2map}
+                - {axis: construct, is: R2starmap}
+                - {axis: construct, is: PDmap}
+                - {axis: construct, is: MyelinMap}
+                - {axis: construct, is: Qmap}
+                - {axis: construct, is: MultiQmap}
+                - {axis: construct, is: B1map}
+        cite: 'an encrypted SyMRI product'
+        source: quality
+    set: {disposition: scanner_derived, convertible: 'no'}
 
   # Pixels nothing downstream can read. It decides the conversion and nothing
   # else, so the rules below still say what the stack is for; it is first
@@ -114,6 +150,13 @@ rules:
   # scanner used to fit the maps, not an image of anything. v0 refuses to
   # convert every SyMRI stack, which is right here and wrong for the products
   # below it.
+  # MRI pack 1.5.1, the ruling of 2026-11-28: every product the SyMRI
+  # route writes is one. The list named only some of them, so a synthetic
+  # DIR, PSIR or STIR, a tissue map (Qmap), the set of maps in one series
+  # (MultiQmap) and a B1 map were working scans, and not converted: "all of
+  # these ... are true and usable which we use and nothing like mpr". They
+  # are scanner_derived below. What stays a working scan is the container
+  # itself and the MDME or QALAS images as acquired.
   symri_working_scan:
     clauses:
       - when:
@@ -132,6 +175,13 @@ rules:
                   - {axis: construct, is: R2starmap}
                   - {axis: construct, is: PDmap}
                   - {axis: construct, is: MyelinMap}
+                  # MRI pack 1.5.1
+                  - {axis: construct, is: SyntheticDIR}
+                  - {axis: construct, is: SyntheticPSIR}
+                  - {axis: construct, is: SyntheticSTIR}
+                  - {axis: construct, is: Qmap}
+                  - {axis: construct, is: MultiQmap}
+                  - {axis: construct, is: B1map}
         cite: 'SyMRI naming no product'
         source: provenance
       # Pack 0.9.0: the MDME or QALAS images as acquired are RawRecon, and
@@ -208,6 +258,13 @@ rules:
       - {when: {axis: construct, is: InPhase}, cite: InPhase, source: construct}
       - {when: {axis: construct, is: OutPhase}, cite: OutPhase, source: construct}
       - {when: {axis: construct, is: SWI}, cite: SWI, source: construct}
+      # MRI pack 1.5.1, the ruling of 2026-11-28: the ASL label-control
+      # difference is what the scanner subtracted, on every maker. Siemens
+      # writes it `SUB` (scanner_computed below) and was scanner_derived;
+      # Philips writes it ORIGINAL and GE as its PW pass, and both were
+      # acquisitions. The label and control images and the M0 scan are not
+      # DeltaM and stay acquisitions.
+      - {when: {axis: construct, is: DeltaM}, cite: DeltaM, source: construct}
     set: {disposition: scanner_derived, convertible: 'yes'}
 
   # And by provenance, for the reconstructions whose product has no construct
@@ -217,6 +274,16 @@ rules:
       - {when: {axis: provenance, is: SWIRecon}, cite: SWIRecon, source: provenance}
       - {when: {axis: provenance, is: STAGE}, cite: STAGE, source: provenance}
       - {when: {axis: provenance, is: SubtractionDerived}, cite: SubtractionDerived, source: provenance}
+      # MRI pack 1.5.1, the ruling of 2026-11-28: and the perfusion
+      # outputs, an ASL's and a DSC's, whose map has no construct of its own
+      # (a transit time, a leakage or a bolus arrival map). Both values are
+      # given only to what the scanner computed (axes/provenance.yml); the
+      # run as acquired is RawRecon. An M0 scan an ASL series wrote DERIVED
+      # is still the scan a CBF is divided by, and stays an acquisition.
+      - {when: {axis: provenance, is: PerfusionRecon}, cite: PerfusionRecon, source: provenance}
+      - when: {all: [{axis: provenance, is: ASLRecon}, {not: {axis: construct, is: M0}}]}
+        cite: 'ASLRecon and not M0'
+        source: provenance
     set: {disposition: scanner_derived, convertible: 'yes'}
 
   # What the scanner computed from images it had just taken and wrote with

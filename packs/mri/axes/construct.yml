@@ -121,6 +121,7 @@ values:
   # `3scan_trace` (Siemens `ep2d_diff_3scan_trace_ADC` was ADC and Trace).
   Trace:
     terms: ['trace weighted', 'TRACEW', 'isotropic DWI', 'combined b', 'DIFFUSION_ISO']
+    description: 'The trace-weighted (isotropic) diffusion image the scanner computes over the directions, read clinically as the DWI (Siemens TRACEW, Philips and GE isotropic). A Siemens trace series often holds its b0 images in the same stack, whose b value then reads 0.'
     # MRI pack 0.24.0: nor a b=0 image named for the trace its series makes
     # (flags.yml, section 22).
     # MRI pack 1.0.1 (Q3): nor a GE output whose ReceiveCoilName label names
@@ -240,6 +241,7 @@ values:
       exclusive: is_asl_m0_stated
   Water:
     terms: ['Dixon water', 'water only']
+    description: 'The water-only image of a Dixon separation (fat removed), usually the image read as fat suppressed. Scanner-derived; its modifiers hold Dixon.'
     # MRI pack 1.2.1: never from the words of a gradient-echo scout, whose
     # name is the series it plans (flags.yml, `gre_scout_readout`); a part
     # the header states (ImageType, the per-frame token, ScanOptions
@@ -253,6 +255,7 @@ values:
       exclusive: has_water
   Fat:
     terms: ['Dixon fat', 'fat only']
+    description: 'The fat-only image of a Dixon separation. Scanner-derived; its modifiers hold Dixon.'
     # MRI pack 1.2.1: never from the words of a gradient-echo scout, whose
     # name is the series it plans (flags.yml, `gre_scout_readout`); a part
     # the header states (ImageType, the per-frame token, ScanOptions
@@ -266,6 +269,7 @@ values:
       exclusive: has_fat
   InPhase:
     terms: ['in phase', 'in-phase', 'IP']
+    description: 'The in-phase echo of a Dixon or dual-echo gradient echo, where water and fat signal add: a magnitude image, not a phase image.'
     keywords:
       - in phase
       - inphase
@@ -277,6 +281,7 @@ values:
       combination: [siemens_in_phase_echo]
   OutPhase:
     terms: ['opposed phase', 'out of phase', 'out-phase', 'OP']
+    description: 'The opposed-phase echo of a Dixon or dual-echo gradient echo, where water and fat signal cancel: a magnitude image, not a phase image.'
     keywords:
       - opposed phase
       - out of phase
@@ -296,6 +301,7 @@ values:
   # none of the three.
   T1map:
     terms: ['T1 map', 'T1 mapping', 'T1 relaxometry']
+    description: 'A T1 relaxation map: from synthetic MRI, an MP2RAGE, an inline mapping sequence (MOLLI) or a variable flip angle fit. The provenance and technique say which; no base contrast.'
     group: QUANT_MAP
     priority: 1
     keywords:
@@ -353,6 +359,7 @@ values:
   # group, so it is what is left when no quantity was named.
   Qmap:
     terms: ['quantitative map', 'qMap']
+    description: 'A quantitative map whose file does not say of what, or a tissue map of synthetic MRI (CSF, white or grey matter fraction).'
     group: QUANT_MAP
     priority: 99
     detection:
@@ -391,6 +398,7 @@ values:
   # acquired one is no map (sealed-1 A11).
   MyelinMap:
     terms: ['myelin water fraction', 'MWF', 'myelin map', 'MyC']
+    description: 'A myelin water fraction or myelin correction map computed from quantitative data (synthetic MRI). A colour picture of it is DisplayComposite.'
     requires: {any: [has_myelin, is_derived, is_synthetic]}
     keywords:
       - myelin map
@@ -401,6 +409,7 @@ values:
       exclusive: has_myelin
   QSM:
     terms: ['quantitative susceptibility mapping', 'susceptibility map', 'QSM']
+    description: 'A quantitative susceptibility map computed from the phase of a gradient echo. A stack holding Phase beside QSM is the source phase of a QSM protocol, not the map.'
     keywords:
       - qsm
       - susceptibility map
@@ -411,6 +420,7 @@ values:
   # keyword `mip` (dev-1: three SWI minIPs were MIP and MinIP).
   MIP:
     terms: ['maximum intensity projection', 'MIP']
+    description: 'A maximum intensity projection, mostly of an angiogram (TOF, CE-MRA, phase contrast) or a post-contrast 3D T1. A projection, so disposition reformat, whether the scanner made it inline or a workstation did.'
     # MRI pack 0.18.0: nor a slice whose protocol, not its own name, says
     # MIP (sealed-1 A11).
     # MRI pack 0.21.0: nor a Siemens `CSA MPR` image, a reformat whatever
@@ -427,6 +437,7 @@ values:
       exclusive: is_mip
   MinIP:
     terms: ['minimum intensity projection', 'mIP', 'MinIP']
+    description: 'A minimum intensity projection through thick slabs, mostly of an SWI image (the venogram). A projection, so disposition reformat even when the scanner made it.'
     # MRI pack 0.21.0: nor a Siemens `CSA MPR` image (case 3).
     # MRI pack 0.25.0: nor a name's minIP where the image type states a MIP
     # (GE's ImageType first: `PJN\MIP`, round 3).
@@ -462,6 +473,7 @@ values:
   # reformat (flags.yml, `is_projection_plane`).
   MPR:
     terms: ['multiplanar reformat', 'MPR', 'reformat']
+    description: 'A plane resliced from a volume (multiplanar reformat) by the console or a workstation: another orientation of an image the visit already holds. Disposition reformat; left out unless the words ask for reformats.'
     # MRI pack 0.18.0: nor a standard deviation projection.
     # MRI pack 0.21.0: a projection's name does not keep a Siemens `CSA MPR`
     # image from being the reformat its image type says (case 3).
@@ -511,6 +523,7 @@ values:
   # is named (MRI pack 0.11.0).
   B0map:
     terms: ['B0 map', 'field map', 'fieldmap']
+    description: 'A B0 field map, or the phase difference of a dual-echo gradient echo that measures it, for distortion correction. Its magnitude echoes are images and carry no B0map.'
     # MRI pack 0.18.0: nor the magnitude echo of a field map (sealed-1 A11).
     requires: {all: [{not: is_epi_fieldmap_ref}, {not: fieldmap_magnitude}]}
     keywords:
@@ -524,6 +537,7 @@ values:
   # a B1 map in degrees, and BIDS gives the two one suffix.
   B1map:
     terms: ['B1 map', 'flip angle map']
+    description: 'A transmit field (B1) map or flip angle map, for correcting flip angle errors in quantitative imaging.'
     keywords:
       - b1 map
       - b1map
@@ -538,6 +552,7 @@ values:
   # was stitched from agree on every other axis there is.
   Composed:
     terms: ['composed', 'composite', 'composing', 'stitched']
+    description: 'One image stitched from several stations, mostly a whole spine (Siemens composing, Philips MobiView). A reformat made from the station images, which are the acquisitions and agree with it on every other axis.'
     # MRI pack 0.14.0: or Philips' MobiView (flags.yml).
     detection:
       exclusive: is_composite
@@ -549,6 +564,7 @@ values:
   # stacks.
   EchoCombined:
     terms: ['echo combined', 'combined echoes']
+    description: 'An image combined over the echoes of a multi-echo acquisition and written as a series of its own beside the per-echo images (ImageType MEAN): a combined SWI, minIP or magnitude. Counting it with the echoes counts one acquisition more than once.'
     detection:
       exclusive: is_mean
   # A statistic over a series rather than an image of the person. Its
@@ -559,6 +575,7 @@ values:
   # series' own image, and 249 of them were a t test map (record 41).
   TTestMap:
     terms: ['t-test map', 't map', 'statistical map']
+    description: 'A statistical map the console computed from a series (a t-test of a functional run), not an image of anatomy. An ASL subtraction that the scanner marks with a t-test token is DeltaM, not this.'
     # MRI pack 0.18.0: nor on any ASL output, the subtraction or a map, with
     # or without the `ASL` token (flags.yml, `ttest_on_asl`; sealed-1 A20).
     requires: {not: ttest_on_asl}
@@ -589,6 +606,7 @@ values:
       exclusive: pc_speed_image
   Magnitude:
     terms: ['magnitude', 'magnitude image']
+    description: 'The magnitude component, written where the header or a route names it: Siemens SWI, gradient-echo, MEDIC and ASL images, synthetic MRI raw images, Philips echo-combined GRE and phase contrast. Most makers write no component on a plain magnitude, so never require Magnitude to find a magnitude image.'
     keywords:
       - magnitude image
       - magnitude only
@@ -601,6 +619,7 @@ values:
       exclusive: pc_magnitude_image
   Real:
     terms: ['real', 'real part']
+    description: 'The real part of the complex signal: a phase-sensitive (PSIR) inversion recovery, the real image of a GE synthetic MRI raw acquisition, or a gradient-echo component. Not a word for an acquired image.'
     keywords:
       - real image
       - real component
@@ -613,6 +632,7 @@ values:
       exclusive: real_component
   Imaginary:
     terms: ['imaginary', 'imaginary part']
+    description: 'The imaginary part of the complex signal of a gradient or spin echo, written beside the real part; rarely an image to read.'
     keywords:
       - imaginary image
       - imaginary component
@@ -620,10 +640,12 @@ values:
       exclusive: has_imaginary
   ORIG:
     terms: ['original']
+    description: 'GE''s unfiltered original, exported beside a filtered copy of the same series (its name begins ORIG). An acquisition; not a sign of an original acquisition in general.'
     detection:
       exclusive: is_ge_orig
   Filtered:
     terms: ['filtered']
+    description: 'A copy of an image passed through an image filter on the console (GE FL: images, a Siemens Image Filter copy, Elscint enhanced). A display filter only: never the high-pass filtered phase of an SWI, which is construct Phase.'
     # MRI pack 0.13.0: or Elscint's enhancement filter and GE's `FL:`
     # prefix (flags.yml, `is_filtered_named`).
     detection:
@@ -631,10 +653,12 @@ values:
       combination: [is_filtered_named]
   ND:
     terms: ['no distortion correction', 'not distortion corrected']
+    description: 'The image was not distortion corrected (ImageType ND), often exported beside a corrected copy. A mark beside the other constructs, not an image type of its own.'
     detection:
       exclusive: has_nd
   INV1:
     terms: ['first inversion', 'MP2RAGE INV1']
+    description: 'The first, short-inversion image of an MP2RAGE as acquired. No base contrast and no anatomy image on its own; the UNI computed from both inversions is the T1-weighted image.'
     keywords:
       - inv1
       - inv 1
@@ -643,6 +667,7 @@ values:
       exclusive: is_mp2rage_inv1
   INV2:
     terms: ['second inversion', 'MP2RAGE INV2']
+    description: 'The second, long-inversion image of an MP2RAGE as acquired, close to a proton-density image. No base contrast.'
     keywords:
       - inv2
       - inv 2
@@ -654,6 +679,7 @@ values:
   # without Uniform on all three stacks that held both.
   Uniform:
     terms: ['UNI', 'uniform image', 'MP2RAGE UNI']
+    description: 'The MP2RAGE uniform image (UNI): the two inversions combined into a bias-free T1-weighted image, with a noisy background. Computed by the scanner; the denoised UNI is Denoised.'
     requires: {not: is_uniform_denoised}
     keywords:
       - uni image
@@ -664,6 +690,7 @@ values:
       exclusive: has_uniform
   UniformDenoised:
     terms: ['UNI-DEN', 'UNI denoised', 'MP2RAGE UNI-DEN']
+    description: 'The denoised MP2RAGE uniform image (UNI-DEN), stored as Denoised: the UNI with its background noise suppressed, the T1 most pipelines take from an MP2RAGE.'
     label: Denoised
     keywords:
       - uni - den
@@ -678,6 +705,7 @@ values:
   # a SWI construct or only a SWI base, the sources disagree [P4, P5, V1].
   SWI:
     terms: ['susceptibility weighted imaging', 'SWI', 'SWAN', 'SWIp', 'VenoBOLD', 'FSBB', 'eFSBB', 'BSI']
+    description: 'The processed susceptibility-weighted image (magnitude times a phase mask), the image of an SWI acquisition a reader looks at; also SWAN, SWIp, VenoBOLD. Its magnitude, phase and minIP carry other constructs (none or Magnitude, Phase, MinIP).'
     keywords:
       - swi processed
       - swi combined
@@ -693,6 +721,7 @@ values:
   # were Phase by the word).
   Phase:
     terms: ['phase', 'phase image']
+    description: 'A phase image of a gradient echo: the raw phase of an SWI or multi-echo acquisition, a GE SWI filtered phase, and the phase of a synthetic MRI acquisition (most of them, filed working_scan). The axes do not tell a filtered phase from a raw one. A phase-contrast velocity image is Velocity, not Phase.'
     # MRI pack 0.18.0: nor a phase contrast's velocity image (above).
     requires: {all: [{not: phase_not_an_image}, {not: velocity_image}]}
     keywords:
@@ -705,6 +734,7 @@ values:
   # R2* is 1/T2*, and a T2* map is a map of its own [P49, MQ15, V1]
   R2starmap:
     terms: ['R2* map', 'R2star map', 'R2* relaxation rate map']
+    description: 'An R2* map: the relaxation rate R2* (the reciprocal of T2*) fitted over the echoes of a multi-echo gradient echo. No base contrast.'
     keywords:
       - r2star
       - r2star map
@@ -717,18 +747,18 @@ values:
   # cascade tests for them, with nothing tying the two together. Three of them
   # are in the live corpus (SyntheticDIR 241, SyntheticPSIR 287,
   # SyntheticSTIR 28).
-  'SyntheticSTIR': {terms: ['synthetic STIR', 'SyMRI STIR']}
-  'SyntheticDIR': {terms: ['synthetic DIR', 'SyMRI DIR']}
-  'SyntheticPSIR': {terms: ['synthetic PSIR', 'SyMRI PSIR']}
+  'SyntheticSTIR': {terms: ['synthetic STIR', 'SyMRI STIR'], description: 'A STIR synthesised from the quantitative maps of a synthetic MRI exam, not acquired. Base T2w, modifier STIR.'}
+  'SyntheticDIR': {terms: ['synthetic DIR', 'SyMRI DIR'], description: 'A double inversion recovery synthesised from the quantitative maps of a synthetic MRI exam, not acquired. Base T2w, modifier DIR.'}
+  'SyntheticPSIR': {terms: ['synthetic PSIR', 'SyMRI PSIR'], description: 'A phase-sensitive inversion recovery synthesised from the quantitative maps of a synthetic MRI exam, not acquired. Base T1w, modifier PSIR.'}
   # No rule writes it, in v0 or here, and v0's intent cascade tested for it
   # twice where it could never be; those tests are gone (record 41). The
   # value stays, because a vocabulary is a contract and a question asked of
   # an earlier version may name it. `nils pack shape` reports it unreachable.
-  'FatFraction': {terms: ['fat fraction', 'PDFF', 'proton density fat fraction']}
+  'FatFraction': {terms: ['fat fraction', 'PDFF', 'proton density fat fraction'], description: 'A proton density fat fraction map. No rule writes it yet, so no stack carries it.'}
   # The SyMRI route writes it; v0 declares it nowhere and wrote it 170 times.
-  'MultiQmap': {terms: ['multiple quantitative maps', 'qmaps']}
+  'MultiQmap': {terms: ['multiple quantitative maps', 'qmaps'], description: 'One series holding the T1, T2 and proton density maps of a synthetic MRI exam together (GE MAGiC). Stored encrypted, so it cannot be converted; the single maps are T1map, T2map and PDmap.'}
   # The EPIMix route writes it; v0 declares it nowhere and wrote it 67 times.
-  'isoDWI': {terms: ['isotropic DWI', 'isoDWI']}
+  'isoDWI': {terms: ['isotropic DWI', 'isoDWI'], description: 'Another name for the trace-weighted (isotropic) diffusion image; the rules write Trace for it, so ask with Trace.'}
   # MRI pack 1.1.0 (record 55 C3): a picture made to be looked at, which
   # rules/display.yml writes on a SyMRI stack saved in colour. Its disposition
   # is `display_composite`, which a release leaves out unless asked for.

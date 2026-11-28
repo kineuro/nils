@@ -1,0 +1,24 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+family: spectroscopy
+label: 'MR spectroscopy (MRS, CSI)'
+terms: ['MR spectroscopy', 'MRS', 'spectroscopy', 'single voxel spectroscopy', 'SVS', 'PRESS', 'STEAM', 'chemical shift imaging', 'CSI', 'MRSI', 'PROBE', 'spectrum']
+summary: 'A spectrum of a voxel or a grid of voxels, with no image contrast. The registry holds no spectroscopy objects; what it holds are the few images some scanners write of a spectrum or its voxel placement.'
+products:
+  - id: spectrum-images
+    what: 'The images a scanner writes of a spectroscopy exam: the spectrum drawn as a picture, a metabolite map, or the voxel on an image. No base contrast.'
+    acquired: true
+    where:
+      - ['=', {}, ['axis', {}, 'technique'], 'MRS']
+    note: 'Filed acquisition or reformat by how the scanner marked them; ask with no disposition clause and say so.'
+ask:
+  - words: 'visits with spectroscopy'
+    sets: |
+      mrs:
+        grain: stack
+        where:
+          - ['=', {}, ['axis', {}, 'technique'], 'MRS']
+          - ['in', {}, ['axis', {}, 'disposition'], ['acquisition', 'scanner_derived', 'reformat']]
+      visits:
+        grain: session
+        has: [{set: mrs, min: 1}]
+    note: 'A visit whose spectra were never sent as images is not found: the answer says the registry holds the images of a spectrum, not the spectrum.'

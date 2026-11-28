@@ -1,0 +1,37 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+family: ce-mra
+label: 'Contrast-enhanced MR angiography (CE-MRA)'
+terms: ['CE-MRA', 'CEMRA', 'contrast-enhanced MRA', 'contrast-enhanced angiography', 'time-resolved MRA', 'TRICKS', 'TWIST', '4D-TRAK', 'bolus chase', 'Fluoro Triggered MRA', 'carotid MRA', 'subtraction angiography']
+summary: 'A T1-weighted 3D spoiled gradient echo timed to the arterial passage of a gadolinium bolus, single phase or time resolved. One acquisition leaves the source phases (a mask before contrast and one or more after), the subtractions the scanner makes from them, and maximum intensity projections.'
+products:
+  - id: source
+    what: 'The source volumes as acquired, the pre-contrast mask and the arterial or later phases. Base T1w, technique CEMRA.'
+    acquired: true
+    where:
+      - ['=', {}, ['axis', {}, 'technique'], 'CEMRA']
+      - ['=', {}, ['axis', {}, 'disposition'], 'acquisition']
+  - id: subtraction
+    what: 'A post-contrast phase minus the mask, computed by the scanner: the vessels without the background.'
+    acquired: false
+    where:
+      - ['=', {}, ['axis', {}, 'technique'], 'CEMRA']
+      - ['=', {}, ['axis', {}, 'provenance'], 'SubtractionDerived']
+      - ['=', {}, ['axis', {}, 'disposition'], 'scanner_derived']
+  - id: mip
+    what: 'A maximum intensity projection of a source or subtracted phase.'
+    acquired: false
+    where:
+      - ['=', {}, ['axis', {}, 'technique'], 'CEMRA']
+      - ['has', {}, ['axis', {}, 'construct'], 'MIP']
+      - ['=', {}, ['axis', {}, 'disposition'], 'reformat']
+ask:
+  - words: 'contrast-enhanced MRA subtractions'
+    sets: |
+      cemra_sub:
+        grain: stack
+        where:
+          - ['=', {}, ['axis', {}, 'technique'], 'CEMRA']
+          - ['=', {}, ['axis', {}, 'provenance'], 'SubtractionDerived']
+raw:
+  - field: text_series_description
+    what: 'Which phase of a time-resolved series a stack is (mask, arterial, venous, a frame number) is said only in the series name.'

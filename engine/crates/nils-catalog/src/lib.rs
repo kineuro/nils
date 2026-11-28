@@ -91,8 +91,59 @@ impl Default for Caps {
     }
 }
 
+/// The fields every catalog has, by (level, path): the catalogue's own
+/// columns of each level and the fixed fields a grain carries. A registry
+/// adds its measures to them, and a pack and a curation only change how a
+/// field is shown.
+pub fn level_fields() -> BTreeMap<(String, String), Field> {
+    let mut fields: BTreeMap<(String, String), Field> = BTreeMap::new();
+    // the catalogue's own columns, per level, with the pack's visibility
+    for level in CatalogueLevel::ALL {
+        let name = match level {
+            CatalogueLevel::SeriesMr | CatalogueLevel::SeriesCt | CatalogueLevel::SeriesPet => {
+                "series"
+            }
+            other => other.name(),
+        };
+        let table = match level {
+            CatalogueLevel::SeriesMr => "series_mr",
+            CatalogueLevel::SeriesCt => "series_ct",
+            CatalogueLevel::SeriesPet => "series_pet",
+            other => other.name(),
+        };
+        for (_, f) in catalogue::fields_of(level) {
+            let class = class_of(f.class);
+            if class == Class::Identifying {
+                continue;
+            }
+            let key = (name.to_string(), f.column.to_string());
+            fields.entry(key).or_insert(Field {
+                level: name.into(),
+                path: f.column.into(),
+                type_: type_name(Type::of(f.converter)).into(),
+                class,
+                dated: matches!(Type::of(f.converter), Type::Date),
+                federated: class == Class::Technical,
+                description: f.note.to_string(),
+                caveats: None,
+                ai_context: None,
+                curated: false,
+                provenance: "catalogue",
+                table: table.into(),
+                column: f.column.into(),
+            });
+        }
+    }
+    for f in fixed_fields() {
+        fields.insert((f.level.clone(), f.path.clone()), f);
+    }
+    fields
+}
+
 /// The window presets, by convention (§5.1).
 pub use nils_ask::moves::PRESETS;
+
+pub mod families;
 
 /// One field of one level, as the catalog serves it.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -134,6 +185,24 @@ pub struct AxisRecord {
     /// it covers (`covers`). Absent on every other axis.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub coarse_of: Option<String>,
+    /// The value the pack's rules give the axis where nothing else says,
+    /// by identity, where it is a value of the axis. Not served: what a
+    /// reader needs of it is in `ask_default_clause`.
+    #[serde(skip)]
+    pub default: Option<String>,
+    /// The values of the axis a question counts unless it says otherwise,
+    /// by identity (the pack's `ask_default`): a question authored as text
+    /// whose stack set names no value of the axis is read as keeping
+    /// these, and told so. Absent on every other axis.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ask_default: Vec<String>,
+    /// The clause that keeps them, as a reading adds it and a document
+    /// writes it: `["in", {unset: true}, ["axis", {}, "disposition"],
+    /// [...]]`, with `unset: true` where a stack that holds no value of
+    /// the axis yet is counted too (the value a sort gives by default is
+    /// among those counted). Served so that nobody works it out again.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ask_default_clause: Option<Value>,
     pub values: Vec<AxisValueRecord>,
 }
 
@@ -169,6 +238,17 @@ pub struct AxisValueRecord {
     /// it covers will do.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub within: Vec<WiderValue>,
+    /// On a value the pack reads as its wider value where a question
+    /// writes it alone (`read_for` on the coarse axis's value): that wider
+    /// value. A question authored as text that keeps this value by itself
+    /// is rewritten to it and told so; `exact: true` on the clause keeps
+    /// the value as written.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub read_as: Option<WiderValue>,
+    /// On a value of a coarse axis: the values it covers that a question
+    /// is read as this one for, as the pack lists them (`read_for`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub read_for: Vec<String>,
 }
 
 /// A value of a coarser axis that covers a value of a finer one.
@@ -272,6 +352,9 @@ pub struct Catalog {
     /// Every field, by (level, path).
     pub fields: BTreeMap<(String, String), Field>,
     pub axes: Vec<AxisRecord>,
+    /// How each acquisition family is filed, as the pack's `families`
+    /// files say it, in the order of the files' names.
+    pub families: Vec<nils_pack::families::Family>,
     pub kinds: Vec<KindRecord>,
     pub diseases: Vec<DiseaseRecord>,
     pub namespaces: Vec<String>,
@@ -1667,48 +1750,7 @@ impl Catalog {
             week_start: registry.meta().week_start.clone(),
         };
         let store = registry.store();
-        let mut fields: BTreeMap<(String, String), Field> = BTreeMap::new();
-
-        // the catalogue's own columns, per level, with the pack's visibility
-        for level in CatalogueLevel::ALL {
-            let name = match level {
-                CatalogueLevel::SeriesMr | CatalogueLevel::SeriesCt | CatalogueLevel::SeriesPet => {
-                    "series"
-                }
-                other => other.name(),
-            };
-            let table = match level {
-                CatalogueLevel::SeriesMr => "series_mr",
-                CatalogueLevel::SeriesCt => "series_ct",
-                CatalogueLevel::SeriesPet => "series_pet",
-                other => other.name(),
-            };
-            for (_, f) in catalogue::fields_of(level) {
-                let class = class_of(f.class);
-                if class == Class::Identifying {
-                    continue;
-                }
-                let key = (name.to_string(), f.column.to_string());
-                fields.entry(key).or_insert(Field {
-                    level: name.into(),
-                    path: f.column.into(),
-                    type_: type_name(Type::of(f.converter)).into(),
-                    class,
-                    dated: matches!(Type::of(f.converter), Type::Date),
-                    federated: class == Class::Technical,
-                    description: f.note.to_string(),
-                    caveats: None,
-                    ai_context: None,
-                    curated: false,
-                    provenance: "catalogue",
-                    table: table.into(),
-                    column: f.column.into(),
-                });
-            }
-        }
-        for f in fixed_fields() {
-            fields.insert((f.level.clone(), f.path.clone()), f);
-        }
+        let mut fields = level_fields();
         for f in measure_fields(store)? {
             fields.insert((f.level.clone(), f.path.clone()), f);
         }
@@ -1761,6 +1803,11 @@ impl Catalog {
             f.curated = true;
         }
 
+        // the pack's families, held to the language and to these fields: a
+        // family that names what a question may not write is refused here,
+        // with its file and the path inside it
+        families::held(pack, &fields).map_err(|e| Error::Message(e.to_string()))?;
+
         let axes = pack
             .axes
             .iter()
@@ -1769,6 +1816,13 @@ impl Catalog {
                 multi: a.multi,
                 stores: if a.stores_label { "label" } else { "id" }.to_string(),
                 coarse_of: a.coarse_of.clone(),
+                default: a
+                    .default
+                    .as_ref()
+                    .and_then(|d| a.id_of(d).map(str::to_string)),
+                ask_default: a.ask_default.clone(),
+                // filled once the catalog can be asked by name, below
+                ask_default_clause: None,
                 values: a
                     .values
                     .iter()
@@ -1792,6 +1846,20 @@ impl Catalog {
                                     })
                             })
                             .collect(),
+                        read_as: pack
+                            .axes
+                            .iter()
+                            .filter(|c| c.coarse_of.as_deref() == Some(a.name.as_str()))
+                            .find_map(|c| {
+                                c.values
+                                    .iter()
+                                    .find(|w| w.read_for.contains(&v.id))
+                                    .map(|w| WiderValue {
+                                        axis: c.name.clone(),
+                                        value: w.id.clone(),
+                                    })
+                            }),
+                        read_for: v.read_for.clone(),
                     })
                     .collect(),
             })
@@ -1955,7 +2023,7 @@ impl Catalog {
         let uploads = upload_ids(store)?;
         let datasets_stamp = place::dataset_stamp(store)?;
         let datasets = place::dataset_sources(store)?;
-        Ok(Catalog {
+        let mut catalog = Catalog {
             epoch,
             locale,
             pack: pack.name.clone(),
@@ -1964,6 +2032,7 @@ impl Catalog {
             edges: edges(),
             fields,
             axes,
+            families: pack.families.clone(),
             kinds,
             diseases,
             namespaces,
@@ -1981,7 +2050,20 @@ impl Catalog {
             datasets_stamp,
             caps: Caps::default(),
             schema_digest: nils_ask::schema::digest(),
-        })
+        };
+        // the default clause of each axis that has one, as a reading adds it
+        let clauses: Vec<Option<Value>> = catalog
+            .axes
+            .iter()
+            .map(|a| {
+                nils_ask::reading::default_clause_of(&a.name, &catalog)
+                    .and_then(|c| serde_json::to_value(c).ok())
+            })
+            .collect();
+        for (axis, clause) in catalog.axes.iter_mut().zip(clauses) {
+            axis.ask_default_clause = clause;
+        }
+        Ok(catalog)
     }
 
     /// Wave 7a: read the datasets again where a place or a source changed
@@ -2096,7 +2178,7 @@ impl Catalog {
                 json!({ "level": l, "fields": page.fields, "next": page.next, "total": page.total })
             })
             .collect();
-        json!({
+        let doc = json!({
             "epoch": self.epoch,
             "pack": { "name": self.pack, "version": self.pack_version },
             "schema_digest": self.schema_digest,
@@ -2120,7 +2202,13 @@ impl Catalog {
             "selections": self.selections,
             "moves": nils_ask::moves::CATALOG,
             "move_kinds_cap": nils_ask::moves::MOVE_KINDS_CAP,
-        })
+        });
+        // the pack's families, where it has any: each file whole
+        let mut doc = doc;
+        if !self.families.is_empty() {
+            doc["families"] = json!(self.families);
+        }
+        doc
     }
 }
 
@@ -2180,6 +2268,7 @@ impl Names for Catalog {
                         label: v.label.clone(),
                         aliases: v.aliases.clone(),
                         stored: v.stored.clone(),
+                        terms: v.terms.clone(),
                     })
                     .collect(),
             })
@@ -2192,6 +2281,8 @@ impl Names for Catalog {
         AxisKin {
             multi: a.multi,
             coarse_of: a.coarse_of.clone(),
+            ask_default: a.ask_default.clone(),
+            default: a.default.clone(),
             wider: self
                 .axes
                 .iter()
@@ -2203,6 +2294,12 @@ impl Names for Catalog {
                         .iter()
                         .filter(|v| !v.covers.is_empty())
                         .map(|v| (v.id.clone(), v.covers.clone()))
+                        .collect(),
+                    read_for: c
+                        .values
+                        .iter()
+                        .filter(|v| !v.read_for.is_empty())
+                        .map(|v| (v.id.clone(), v.read_for.clone()))
                         .collect(),
                 })
                 .collect(),

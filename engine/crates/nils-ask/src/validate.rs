@@ -98,6 +98,32 @@ pub struct AxisValueNames {
     /// after rows were written (record 55, ruling 23); none where a row
     /// stores the label.
     pub stored: Option<String>,
+    /// Other words a person knows the value by, as the pack lists them
+    /// (`terms`): a vendor's name for a sequence, a spelling, a
+    /// radiologist's word. They are no names of the value: a document
+    /// that writes one is refused, and only a question authored as text
+    /// has one read as the value, where one value of the axis alone has
+    /// it ([`AxisNames::read_word`]).
+    pub terms: Vec<String>,
+}
+
+/// How a text names a value that is not written in the word the pack
+/// stores ([`AxisNames::read_word`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Spelling {
+    /// Another name of the value, written exactly: its identity, an
+    /// earlier name, its label or the spelling rows keep.
+    Name,
+    /// A name of the value but for letter case or the space around it.
+    Folded,
+    /// A word the pack lists for the value (`terms`), in any letter case.
+    Term,
+}
+
+/// A text as it is compared where case and surrounding space do not
+/// count.
+fn folded(text: &str) -> String {
+    text.trim().to_lowercase()
 }
 
 /// What the pack says of an axis beside the names of its values: whether a
@@ -113,6 +139,17 @@ pub struct AxisKin {
     pub coarse_of: Option<String>,
     /// The axes that are this one's coarse form.
     pub wider: Vec<WiderAxis>,
+    /// The values of the axis a question counts unless it says otherwise
+    /// (the pack's `ask_default`), by identity: a stack set of a question
+    /// authored as text that names no value of the axis is read as
+    /// keeping these ([`crate::reading`]). Empty where the pack declares
+    /// none, and then nothing is added.
+    pub ask_default: Vec<String>,
+    /// The value the pack's rules give the axis where nothing else says
+    /// (`default`), by identity, where it is a value of the axis. A stack
+    /// nothing has sorted yet holds no value; where this one is among
+    /// `ask_default`, the clause added by default counts such a stack too.
+    pub default: Option<String>,
 }
 
 /// An axis that is the coarse form of another: each of its values that
@@ -121,6 +158,11 @@ pub struct AxisKin {
 pub struct WiderAxis {
     pub axis: String,
     pub values: Vec<(String, Vec<String>)>,
+    /// The pack's `read_for`: each value of this axis that a question is
+    /// read as where it writes, alone, one of the finer values listed with
+    /// it, by identity ([`crate::reading`]). Empty where the pack declares
+    /// none, and then nothing is read wider.
+    pub read_for: Vec<(String, Vec<String>)>,
 }
 
 /// A classification axis as a document names its values (Wave 7a). A
@@ -155,6 +197,88 @@ impl AxisNames {
                     .iter()
                     .find(|v| v.stored.as_deref() == Some(text))
             })
+    }
+
+    /// The one value a text names by another spelling than the word the
+    /// pack stores, with that word: what a question authored as text is
+    /// rewritten to ([`crate::reading`]). None where the text is the stored
+    /// word already or names no value, and none where the vocabulary does
+    /// not name exactly one value by it (a label of one value that is the
+    /// identity of another), or where the stored word read back would name
+    /// another value first: such a text is left as written and is read as
+    /// it always was ([`AxisNames::named`]).
+    pub fn other_spelling<'a>(&'a self, text: &str) -> Option<(&'a AxisValueNames, &'a str)> {
+        let mut named = self.values.iter().filter(|v| {
+            v.id == text
+                || v.label == text
+                || v.stored.as_deref() == Some(text)
+                || v.aliases.iter().any(|a| a == text)
+        });
+        let v = named.next()?;
+        if named.next().is_some() {
+            return None;
+        }
+        let stored = self.stored(v);
+        (stored != text && self.named(stored).is_some_and(|back| back.id == v.id))
+            .then_some((v, stored))
+    }
+
+    /// The values of the axis that have a text among their names or
+    /// among the words the pack lists for them (`terms`), letter case and
+    /// surrounding space aside, each with whether it is only a listed word
+    /// of that value. What a text that names no value exactly may mean.
+    pub fn listed(&self, text: &str) -> Vec<(&AxisValueNames, bool)> {
+        let text = folded(text);
+        if text.is_empty() {
+            return Vec::new();
+        }
+        let is = |name: &str| folded(name) == text;
+        self.values
+            .iter()
+            .filter_map(|v| {
+                let name = is(&v.id)
+                    || is(&v.label)
+                    || v.stored.as_deref().is_some_and(is)
+                    || v.aliases.iter().any(|a| is(a));
+                (name || v.terms.iter().any(|t| is(t))).then_some((v, !name))
+            })
+            .collect()
+    }
+
+    /// The one value a text of a question authored as text is read as,
+    /// with the word the pack stores for it and how the text names it
+    /// ([`crate::reading`]). A text that names a value exactly is that
+    /// value and nothing else ([`AxisNames::other_spelling`]), so nothing
+    /// a document may write today is read differently. A text that names
+    /// none exactly is looked up among the names and the listed words of
+    /// every value, letter case and surrounding space aside
+    /// ([`AxisNames::listed`]), and is read where exactly one value has
+    /// it. None where the text is the stored word, where two values share
+    /// it, where no value has it, and where the stored word read back
+    /// would name another value: the text is left as written, for the
+    /// validator to accept or refuse as it always did.
+    pub fn read_word<'a>(&'a self, text: &str) -> Option<(&'a AxisValueNames, &'a str, Spelling)> {
+        if self.named(text).is_some() {
+            return self
+                .other_spelling(text)
+                .map(|(v, stored)| (v, stored, Spelling::Name));
+        }
+        let found = self.listed(text);
+        let [(v, term)] = found.as_slice() else {
+            return None;
+        };
+        let stored = self.stored(v);
+        self.named(stored)
+            .is_some_and(|back| back.id == v.id)
+            .then_some((
+                *v,
+                stored,
+                if *term {
+                    Spelling::Term
+                } else {
+                    Spelling::Folded
+                },
+            ))
     }
 
     /// The name the pack stores for a value: the one form a group's key
@@ -248,6 +372,7 @@ pub trait Names {
                     id,
                     aliases: Vec::new(),
                     stored: None,
+                    terms: Vec::new(),
                 })
                 .collect(),
         })
@@ -378,6 +503,10 @@ pub enum Code {
     /// share of its rows, and sibling values of the axis hold most of the
     /// rest.
     NarrowValue,
+    /// A diagnosis's warning: a stack set keeps no row, and it keeps rows
+    /// with this one clause left out, so this clause and the clause the set
+    /// came to nothing at hold together on no stack.
+    EmptiedBy,
 }
 
 impl Code {
@@ -407,6 +536,7 @@ impl Code {
             Code::SequenceBeforeWhere => "sequence_before_where",
             Code::SequenceInherited => "sequence_inherited",
             Code::NarrowValue => "narrow_value",
+            Code::EmptiedBy => "emptied_by",
         }
     }
 
@@ -421,6 +551,7 @@ impl Code {
                 | Code::SequenceBeforeWhere
                 | Code::SequenceInherited
                 | Code::NarrowValue
+                | Code::EmptiedBy
         )
     }
 }
@@ -763,8 +894,17 @@ const NAME_OPTIONS: &[&str] = &["of", "over", "set"];
 /// The clause options that are booleans. Under the YAML 1.2 booleans a
 /// `yes`, `no`, `on` or `off` is text, so each is checked here rather than
 /// read as its default where it is used (`adjacent: no` meant adjacent).
-/// An axis's `each` is checked with the axis's other options.
-const BOOL_OPTIONS: &[&str] = &["adjacent", "strict", "key"];
+/// An axis's `each` is checked with the axis's other options. `exact` on a
+/// clause that keeps a value of an axis says the value is meant as written
+/// (`["=", {exact: true}, ["axis", {}, "body_part"], "brain"]`): it changes
+/// nothing a clause selects, and tells a reading of authored text
+/// ([`crate::reading`]) and the `narrow_value` warning to leave the clause
+/// alone. `unset` on `=` or `in` over an axis keeps the stacks that hold
+/// no value of the axis as well (`["in", {unset: true}, ["axis", {},
+/// "disposition"], ["acquisition", "scanner_derived"]]`): a stack nothing
+/// has sorted yet has no row on the axis, and the clause that counts the
+/// usual kinds of scan must not leave it out.
+const BOOL_OPTIONS: &[&str] = &["adjacent", "strict", "key", "exact", "unset"];
 
 /// A boolean option that holds something else.
 fn not_a_boolean(path: impl Into<String>, what: &str, key: &str, v: &Value) -> Issue {
@@ -1934,14 +2074,40 @@ fn check_clause(
             };
             for v in literals {
                 if values.named(&v).is_none() {
-                    issues.push(issue(
-                        Code::UnknownValue,
-                        path,
+                    // what the text may mean: the values that have it as a
+                    // name in another letter case or as a word the pack
+                    // lists for them. Nothing is read here: the refusal
+                    // names them, so whoever wrote it picks one
+                    let meant = values.listed(&v);
+                    let words: Vec<&str> = meant.iter().map(|(x, _)| values.stored(x)).collect();
+                    let (mut message, mut next) = (
                         format!("{v} is not a value of axis {axis}"),
                         format!(
                             "GET /api/ask/catalog for the values of {axis}, each named by its id or its label"
                         ),
-                    ));
+                    );
+                    match meant.as_slice() {
+                        [] => {}
+                        [(_, false)] => {
+                            message.push_str(&format!("; the pack writes it {}", words[0]));
+                            next = format!("write {}; or {next}", words[0]);
+                        }
+                        [_] => {
+                            message.push_str(&format!(
+                                "; the pack lists it as a word for {}",
+                                words[0]
+                            ));
+                            next = format!("write {}; or {next}", words[0]);
+                        }
+                        _ => {
+                            let any = either(&words);
+                            message.push_str(&format!(
+                                "; the pack has it as a word for more than one value: {any}"
+                            ));
+                            next = format!("write the one meant: {any}; or {next}");
+                        }
+                    }
+                    issues.push(issue(Code::UnknownValue, path, message, next));
                 }
             }
         }

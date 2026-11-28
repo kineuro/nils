@@ -37,6 +37,7 @@ order:
 values:
   SyMRI:
     terms: ['synthetic MRI', 'MAGiC', 'SyMRI', 'SyntAc']  # SyntAc: Philips [P23, MQ19]
+    description: 'Synthetic MRI software (SyMRI, GE MAGiC, Philips SyntAc): the quantitative maps and the contrasts it synthesised from them. The acquired MDME or QALAS images are RawRecon and working scans.'
     keywords:
       - symri
       - magic
@@ -68,6 +69,7 @@ values:
       combination: [neuromix_psd]
   EPIMix:
     terms: ['EPIMix']
+    description: 'GE EPIMix: a rapid multicontrast exam of echo-planar blocks, and each of its outputs (T1-FLAIR, T2-FLAIR, T2w, T2*w, diffusion with trace and ADC), each a stack of its own.'
     keywords:
       - epimix
       - ksepimix
@@ -80,6 +82,7 @@ values:
       combination: [epimix_psd]
   STAGE:
     terms: ['strategically acquired gradient echo']
+    description: 'What STAGE (strategically acquired gradient echo) computed from its echoes. The echoes as acquired are RawRecon.'
     # MRI pack 0.21.0: only STAGE's computed outputs; an echo it acquired,
     # written ORIGINAL, is RawRecon (dev-6's A8). Record 55: and the echoes
     # STAGE acquired, which its route enters on and makes RawRecon again, so
@@ -91,6 +94,7 @@ values:
   # `dsc_not_swi`; sealed-1 A2, the deep research, case 18).
   SWIRecon:
     terms: ['SWI reconstruction', 'SWAN', 'SWI']
+    description: 'What the scanner computed from a susceptibility acquisition: the SWI image, a QSM or R2* map. The magnitude and phase of the same acquisition are RawRecon and its minIP ProjectionDerived, so this value alone finds the processed images only.'
     # MRI pack 0.25.0: never a position display, the planning picture of the
     # SWI series it names (flags.yml, section 26a).
     requires: {all: [{not: dsc_not_swi}, {not: image_type.is_posdisp}]}
@@ -117,6 +121,7 @@ values:
   # `dADC` maps and a GE DTI acquisition were DTIRecon.
   DTIRecon:
     terms: ['diffusion reconstruction', 'tensor', 'DTI']
+    description: 'The outputs of a diffusion tensor fit: FA, colour FA, MD and the tensor''s ADC and trace. A plain diffusion run''s ADC and trace are RawRecon.'
     requires:
       all:
         - {not: is_plain_dwi_map}
@@ -140,6 +145,7 @@ values:
   # DSC and DCE maps are this value's and an ASL's are not.
   PerfusionRecon:
     terms: ['perfusion reconstruction', 'perfusion maps']
+    description: 'The maps computed from a DSC or DCE perfusion run: CBV, CBF, MTT, TTP, Tmax, PBP, K2. An ASL map is ASLRecon; the run itself, and its motion-corrected copy, are RawRecon.'
     requires: {not: is_asl}
     keywords:
       - cerebral blood flow
@@ -167,6 +173,7 @@ values:
   # the scanner computed it, so the DeltaM flag stands for derived.
   ASLRecon:
     terms: ['ASL reconstruction', 'CBF from ASL']
+    description: 'What the scanner computed from an arterial spin labelling acquisition: the difference (perfusion-weighted) image and the CBF map. The label and control images and the M0 are RawRecon.'
     requires: {any: [is_derived, has_cbf, is_subtraction, is_ttest, is_asl_difference]}
     keywords:
       - asl
@@ -185,6 +192,7 @@ values:
   # every one of them), so those are RawRecon.
   BOLDRecon:
     terms: ['BOLD reconstruction', 'fMRI maps']
+    description: 'A map a console computed from a BOLD run (a t-test or other statistical map). The run and its motion-corrected copy are RawRecon.'
     requires: {any: [is_derived, is_ttest]}
     keywords:
       - bold
@@ -215,6 +223,7 @@ values:
     # planning word is the sequence name `scout` (flags.yml, section 26e).
     requires: {all: [{not: ge_calibration}, {not: mobiview_not_survey}, {not: planning_word_too_many_slices}, {not: composite_not_survey}, {not: scout_sequence_name_only}]}
     terms: ['localizer', 'localiser', 'scout', 'survey', 'tri-pilot', '3-plane localizer', 'AAHead_Scout', 'pilot']
+    description: 'A planning scan by its words or its shape (localizer, scout, survey, position display). Its disposition is scout; a series named for planning with few slices can be a scout with provenance RawRecon too.'
     keywords:
       - localizer
       - scout
@@ -242,6 +251,7 @@ values:
       combination: [localizer_by_shape]
   ProjectionDerived:
     terms: ['projection', 'MIP', 'MinIP', 'MPR', 'reformat']
+    description: 'Made from other images by reslicing, projecting or stitching them: an MPR, a MIP or minIP, a composed whole-spine image. Its disposition is reformat; its base and technique are its source''s.'
     # MRI pack 0.13.0: not Philips' isotropic diffusion image, which it
     # writes as a `PROJECTION IMAGE` (flags.yml, `is_diffusion_projection`).
     keywords:
@@ -260,6 +270,7 @@ values:
     requires: {all: [{not: is_diffusion_projection}, {not: ge_pc_2d_collapse}, {not: subtraction_of_a_composite}]}
   SubtractionDerived:
     terms: ['subtraction', 'SUB', 'post minus pre']
+    description: 'One image minus another, computed by the scanner: a post-contrast minus pre-contrast subtraction, mostly of a contrast-enhanced angiography. Disposition scanner_derived.'
     keywords:
       - subtraction
       - subtracted
@@ -270,4 +281,4 @@ values:
     detection:
       exclusive: is_subtraction
       combination: [sub_named]
-  RawRecon: {terms: ['acquired', 'scanner reconstruction', 'original acquisition', 'raw']}
+  RawRecon: {terms: ['acquired', 'scanner reconstruction', 'original acquisition', 'raw'], description: 'The scanner''s ordinary reconstruction of what it acquired, and also the trace, ADC or Dixon part it computed from a plain acquisition. The magnitude and phase of an SWI or synthetic MRI acquisition are RawRecon too; the disposition says what a stack is for.'}

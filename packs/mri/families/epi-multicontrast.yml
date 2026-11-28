@@ -1,0 +1,64 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+family: epi-multicontrast
+label: 'Rapid multicontrast EPI exams (EPIMix, NeuroMix)'
+terms: ['EPIMix', 'NeuroMix', 'ksepimix', 'ksneuromix', 'rapid brain exam', 'one-minute brain', 'multicontrast EPI', 'fast brain']
+summary: 'One GE sequence that acquires a whole brain exam in one or two minutes: EPIMix in echo-planar blocks, NeuroMix in echo-planar and single-shot fast spin echo blocks. One acquisition leaves a T1-FLAIR, a T2-FLAIR, a T2w, a T2*w, diffusion with its trace and ADC, and in NeuroMix an SWI, each as its own stack with provenance EPIMix or NeuroMix.'
+products:
+  - id: t1-flair
+    what: 'The T1-weighted FLAIR block. Base T1w, modifier FLAIR.'
+    acquired: true
+    where:
+      - ['in', {}, ['axis', {}, 'provenance'], ['EPIMix', 'NeuroMix']]
+      - ['=', {}, ['axis', {}, 'base'], 'T1w']
+  - id: t2-flair
+    what: 'The T2-weighted FLAIR block: a spin-echo EPI in EPIMix, a single-shot fast spin echo in NeuroMix. Base T2w, modifier FLAIR.'
+    acquired: true
+    where:
+      - ['in', {}, ['axis', {}, 'provenance'], ['EPIMix', 'NeuroMix']]
+      - ['=', {}, ['axis', {}, 'base'], 'T2w']
+      - ['has', {}, ['axis', {}, 'modifier'], 'FLAIR']
+  - id: t2w
+    what: 'The T2-weighted block. Base T2w, no FLAIR.'
+    acquired: true
+    where:
+      - ['in', {}, ['axis', {}, 'provenance'], ['EPIMix', 'NeuroMix']]
+      - ['=', {}, ['axis', {}, 'base'], 'T2w']
+      - ['not', {}, ['has', {}, ['axis', {}, 'modifier'], 'FLAIR']]
+  - id: t2star
+    what: 'The T2*-weighted gradient-echo EPI block.'
+    acquired: true
+    where:
+      - ['in', {}, ['axis', {}, 'provenance'], ['EPIMix', 'NeuroMix']]
+      - ['=', {}, ['axis', {}, 'base'], 'T2starw']
+  - id: diffusion
+    what: 'The diffusion block as acquired, and the trace and ADC the scanner computes from it. Base DWI.'
+    acquired: true
+    where:
+      - ['in', {}, ['axis', {}, 'provenance'], ['EPIMix', 'NeuroMix']]
+      - ['=', {}, ['axis', {}, 'base'], 'DWI']
+    note: 'The trace and the ADC are scanner_derived and carry the constructs Trace and ADC.'
+  - id: swi
+    what: 'The SWI block of a NeuroMix exam. Base SWI.'
+    acquired: false
+    where:
+      - ['in', {}, ['axis', {}, 'provenance'], ['EPIMix', 'NeuroMix']]
+      - ['=', {}, ['axis', {}, 'base'], 'SWI']
+ask:
+  - words: 'how many EPIMix or NeuroMix exams'
+    sets: |
+      mix:
+        grain: stack
+        where:
+          - ['in', {}, ['axis', {}, 'provenance'], ['EPIMix', 'NeuroMix']]
+      visits:
+        grain: session
+        has: [{set: mix, min: 1}]
+    note: 'Every block is its own stack, and each may come with a motion-corrected copy (modifier MoCo): count visits, never stacks.'
+  - words: 'FLAIR images of every kind, the rapid exams included'
+    sets: |
+      flair:
+        grain: stack
+        where:
+          - ['has', {}, ['axis', {}, 'modifier'], 'FLAIR']
+          - ['=', {}, ['axis', {}, 'base'], 'T2w']
+    note: 'An EPIMix or NeuroMix FLAIR is a FLAIR on the axes like any other; leave the provenances out with a clause when only conventional FLAIR is wanted.'
