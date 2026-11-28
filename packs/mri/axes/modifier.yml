@@ -148,6 +148,7 @@ values:
   # rules gave IR.
   IR:
     terms: ['inversion recovery', 'inversion prepared', 'IR prepared']
+    description: 'An inversion recovery that is none of FLAIR, STIR, DIR or PSIR by its inversion time (a T1 inversion recovery, the magnitude of a real IR). Not every inversion: an MPRAGE''s inversion belongs to its technique.'
     group: IR_CONTRAST
     priority: 99
     # MRI pack 0.25.0: nor a Siemens real (R) inversion recovery (DR3: PSIR).
@@ -234,6 +235,7 @@ values:
   Dixon:
     # WFS is Canon's, WFOP and FatSep Hitachi's, FLEX GE's [V1, V2]
     terms: ['Dixon', 'mDIXON', 'IDEAL', 'LAVA-Flex', 'Flex', 'VIBE-Dixon', 'two-point Dixon', 'WFS', 'WFOP', 'FatSep', 'FLEX']
+    description: 'A Dixon (chemical-shift) separation: on its water, fat, in-phase and opposed-phase images. An in-phase and opposed-phase pair from a plain dual-echo gradient echo has no Dixon.'
     # MRI pack 1.2.1: never by the words of a gradient-echo scout, whose name
     # is that of the series it plans (flags.yml, `gre_scout_readout`: an
     # image typed LOCALIZER or SCOUT, or a Siemens position display, on a
@@ -254,6 +256,7 @@ values:
       combination: [has_in_phase, has_out_phase]
   MT:
     terms: ['magnetization transfer', 'MT pulse', 'MTC']
+    description: 'A magnetisation transfer pulse added to the sequence (often on a TOF angiogram). An MT-weighted image is base MTw; this modifier does not make one.'
     # MRI pack 0.14.0: not where the words switch it off (`utan MTC`).
     requires: {not: mt_negated}
     keywords:
@@ -291,6 +294,7 @@ values:
       - brightblood
   MoCo:
     terms: ['motion corrected', 'MoCo']
+    description: 'A motion-corrected or registered copy of a run the scanner wrote beside it (BOLD, DSC, DWI). Counting runs with it counts the run twice; leave MoCo out to count acquisitions.'
     keywords:
       - moco
       - mocoseries

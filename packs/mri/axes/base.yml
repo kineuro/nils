@@ -18,11 +18,11 @@ kind: single
 stores: label
 
 values:
-  'DWI': {terms: ['diffusion weighted', 'DWI', 'DTI']}
+  'DWI': {terms: ['diffusion weighted', 'DWI', 'DTI'], description: 'Diffusion-weighted: the acquired diffusion images and every map computed from them (trace, ADC, eADC, FA, MD), the reversed phase-encoding b0 too. The construct and the disposition tell them apart.'}
   # MRI pack 1.2.0: `ASL` is no longer a word for PWI. An ASL label or
   # control image is base ASL (below); only the label minus control
   # difference and the maps computed from it are perfusion-weighted.
-  'PWI': {terms: ['perfusion weighted', 'PWI', 'DSC', 'DCE', 'ASL difference']}
+  'PWI': {terms: ['perfusion weighted', 'PWI', 'DSC', 'DCE', 'ASL difference'], description: 'Perfusion-weighted: a DSC or DCE time series and the maps computed from it, and the ASL difference image and its maps. An ASL label or control image is base ASL, its M0 scan PDw. A DCE is PWI, not T1w.'}
   # MRI pack 1.2.0 (record 55, ruling 17, Q4): the label and control images
   # of an arterial spin labelling acquisition, as acquired. Neither is
   # perfusion-weighted on its own: the perfusion weighting is their
@@ -31,15 +31,16 @@ values:
   'ASL':
     terms: ['arterial spin labelling label', 'arterial spin labelling control', 'ASL label', 'ASL control', 'label and control']
     description: 'an arterial spin labelling label or control image as acquired; the difference of the two is PWI, the M0 scan PDw'
-  'SWI': {terms: ['susceptibility weighted', 'SWI', 'SWAN']}
+  'SWI': {terms: ['susceptibility weighted', 'SWI', 'SWAN'], description: 'The weighting of the processed SWI image and of its projections and reformats (minIP, MIP, MPR). The magnitude of the same acquisition is T2*w and its phase has no base, so base SWI alone never finds them.'}
   'T1rho': {terms: ['T1 rho', 'spin lock']}
   'T2rho': {terms: ['T2 rho']}
   'T2starw':
     terms: ['T2*', 'T2 star', 'T2star weighted', 'GRE T2*']
+    description: 'T2*-weighted: a gradient echo at a long echo time. Holds the magnitude of an SWI acquisition, multi-echo and combined echo gradient echoes (MEDIC), single-echo T2* scans and BOLD runs; nothing on this axis says which.'
     label: 'T2*w'
     stored: T2starw
   'T2w': {terms: ['T2', 'T2 weighted']}
   'PDw': {terms: ['PD', 'proton density weighted']}
   'T1w': {terms: ['T1', 'T1 weighted']}
   'MTw': {terms: ['MT weighted', 'magnetization transfer weighted']}
-  'Unknown': {terms: ['unknown']}
+  'Unknown': {terms: ['unknown'], description: 'An internal marker for a base nobody could decide; no stack stores it. A stack with no base (a phase image, a map, an MP2RAGE inversion) has no value on this axis.'}
