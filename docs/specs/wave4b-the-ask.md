@@ -945,8 +945,8 @@ must not guess them (C20, D36):
   siblings need not hold most of what is dropped, and a clause the set's
   other conditions already answer is left alone. The warning names the
   coarse axis and value as the wider choice: "flair: with the set's other
-  conditions, body_part = brain keeps 7 of 6,461 stacks; brain-neck holds
-  6,454 of the rest. If any head of body_region is meant, write
+  conditions, body_part = brain keeps 7 of 6,400 stacks; brain-neck holds
+  6,393 of the rest. If any head of body_region is meant, write
   body_region = head, which covers brain and brain-neck." (the first words
   are left out where the set has no other condition).
   `path` is the clause (`sets.<set>.where[i]`) and `next` holds the clause
