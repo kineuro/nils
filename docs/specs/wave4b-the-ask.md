@@ -1002,6 +1002,37 @@ must not guess them (C20, D36):
   most, under the same time and the same rule for held counts as
   `narrow_value` (a count held back is said as rows whose number is held),
   and is not given where the request asks for keys.
+  **A count of nothing is explained first.** The zero row explanation and
+  `emptied_by` were worked out last, from a funnel counted whole, and the
+  funnel of a session set that reads several stack sets through `has`
+  makes those sets again for each of its stages: at the size of a real
+  registry it does not end in the time a draft has, and the two things a
+  count of nothing most needs never came. So a diagnosis counts first the
+  stack sets the answer cannot do without: the stack sets among the
+  answer's set, the sets it is drawn `from` or is `of`, each set one of
+  those reads through `has` with a least of one or more, and theirs in
+  turn. They are counted by the passes the funnel runs for them (a set's
+  `where` stages in one statement, the sets of the same rows together),
+  each pass the one the funnel would run, and what it counted is kept:
+  the funnel reads it and runs no statement for those sets, so a
+  diagnosis that has the time for everything runs the statements it
+  always ran, these first, and answers what it always answered. Where one
+  of those sets holds rows before its `where` and none after it, the
+  answer is known to hold none: `zero_rows` names the first of its
+  clauses that kept no row, in the sentence the funnel gives, and
+  `emptied_by` is looked for at once, on the counts of the pass. Both are
+  served whether or not the funnel ends in time: a diagnosis may carry
+  `zero_rows` and an `emptied_by` warning beside `unavailable` and a
+  funnel that stops before the answer's set. Nothing is said early where
+  the pass cannot say it as the funnel would: of a `has` with a most
+  alone, a least of nought or no bound (the answer can do without the
+  set), of a group or an algebra, of a set no pass counts (one with no
+  `where`, or one whose `where` reads the rows around its own), of a set
+  that is empty before its `where` behind a relation of its own or
+  because the set it is drawn from is, of a set a quasi identifying field
+  chose the rows of, and where keys are asked. The funnel goes on as
+  before for those. The clauses left out before the funnel count within
+  the four of a document, and are not left out again after it.
 - **preview**: 10 rows or the count, by level.
 - **describe**: one deterministic sentence per set in deal breaker order
   (membership, then counts, then sameness), the conventions block (windows in
