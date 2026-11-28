@@ -287,16 +287,390 @@ fn every_name_but_the_stored_word_is_read_wherever_a_where_names_it() {
         );
         // a text that names no value is left to the validator, which
         // refuses it as it did
-        let d = draft(&mut l, &scans(json!([is("technique", "SPGR")])));
+        let d = draft(&mut l, &scans(json!([is("technique", "no such word")])));
         assert!(!d.diagnosis.valid && d.document.is_none(), "{}", l.name);
         assert_eq!(readings(&d), [] as [Value; 0], "{}", l.name);
+        assert_eq!(
+            d.diagnosis.issues[0].message, "no such word is not a value of axis technique",
+            "{}: {:?}",
+            l.name, d.diagnosis.issues
+        );
+    }
+}
+
+/// A word the pack lists for a value (`terms`) is no name of it: a
+/// document may not write one. A question authored as text has it read as
+/// the value where one value of the axis alone has the word, letter case
+/// and surrounding space aside, and so is a name in another letter case.
+#[test]
+fn a_word_the_pack_lists_for_one_value_is_read_as_that_value_and_said() {
+    for mut l in labs() {
+        let (_, _, spgre) = plant(&mut l);
+        let mprage = common::stacks_seen(&mut l).len() as i64 - spgre;
+        assert!(mprage > 0 && spgre > 0, "{}", l.name);
+        // a vendor's word for the sequence
+        let d = draft(&mut l, &scans(json!([is("technique", "BRAVO")])));
+        assert!(d.diagnosis.valid, "{}: {:?}", l.name, d.diagnosis.issues);
+        assert_eq!(
+            readings(&d),
+            [json!({
+                "path": "sets.scans.where[0]",
+                "what": "On technique, the pack lists BRAVO as a word for MPRAGE: it was read \
+                         as MPRAGE, the word the pack stores.",
+                "read": {
+                    "kind": "word", "axis": "technique", "wrote": "BRAVO",
+                    "as_axis": "technique", "as_value": "MPRAGE"
+                }
+            })],
+            "{}",
+            l.name
+        );
+        assert_eq!(d.diagnosis.repairs, d.repairs, "{}", l.name);
+        let doc = stored(&mut l, &d);
+        assert_eq!(
+            doc["sets"]["scans"]["where"],
+            json!([is("technique", "MPRAGE")]),
+            "{}",
+            l.name
+        );
+        assert_eq!(count(&mut l, &doc.to_string()), mprage, "{}", l.name);
+        // in any letter case, with space around it, in a list and negated;
+        // and a name in another letter case
+        let text = scans(json!([
+            [
+                "in",
+                {},
+                ["axis", {}, "technique"],
+                ["bravo", " spgr ", "MPRAGE"]
+            ],
+            ["<>", {}, ["axis", {}, "technique"], "3d tfe"],
+            is("technique", "mprage"),
+            ["not", {}, is("technique", "flash")]
+        ]));
+        let d = draft(&mut l, &text);
+        assert!(d.diagnosis.valid, "{}: {:?}", l.name, d.diagnosis.issues);
+        let said: Vec<(String, String, String, String)> = readings(&d)
+            .iter()
+            .map(|r| {
+                let t = |v: &Value| v.as_str().unwrap().to_string();
+                assert_eq!(r["read"]["kind"], "word", "{}", l.name);
+                assert_eq!(r["read"]["as_axis"], "technique", "{}", l.name);
+                (
+                    t(&r["path"]),
+                    t(&r["read"]["wrote"]),
+                    t(&r["read"]["as_value"]),
+                    t(&r["what"]),
+                )
+            })
+            .collect();
+        let term = |w: &str, v: &str| {
+            format!(
+                "On technique, the pack lists {w} as a word for {v}: it was read as {v}, the \
+                 word the pack stores."
+            )
+        };
+        let folded = |w: &str, v: &str| {
+            format!(
+                "On technique, {w} is a name of {v} but for letter case or surrounding space: \
+                 it was read as {v}, the word the pack stores."
+            )
+        };
+        let row = |p: &str, w: &str, v: &str, what: String| {
+            (p.to_string(), w.to_string(), v.to_string(), what)
+        };
+        assert_eq!(
+            said,
+            [
+                row(
+                    "sets.scans.where[0]",
+                    "bravo",
+                    "MPRAGE",
+                    term("bravo", "MPRAGE")
+                ),
+                row(
+                    "sets.scans.where[0]",
+                    " spgr ",
+                    "SPGRE",
+                    term(" spgr ", "SPGRE")
+                ),
+                row(
+                    "sets.scans.where[1]",
+                    "3d tfe",
+                    "MPRAGE",
+                    term("3d tfe", "MPRAGE")
+                ),
+                row(
+                    "sets.scans.where[2]",
+                    "mprage",
+                    "MPRAGE",
+                    folded("mprage", "MPRAGE")
+                ),
+                row(
+                    "sets.scans.where[3][2]",
+                    "flash",
+                    "SPGRE",
+                    folded("flash", "SPGRE")
+                ),
+            ],
+            "{}",
+            l.name
+        );
+        let doc = stored(&mut l, &d);
+        assert_eq!(
+            doc["sets"]["scans"]["where"],
+            json!([
+                ["in", {}, ["axis", {}, "technique"], ["MPRAGE", "SPGRE"]],
+                ["<>", {}, ["axis", {}, "technique"], "MPRAGE"],
+                is("technique", "MPRAGE"),
+                ["not", {}, is("technique", "SPGRE")]
+            ]),
+            "{}",
+            l.name
+        );
+        // an exact name is that value, whatever another value lists: MIP
+        // is a value, and the minimum projection lists mIP
+        let exact = scans(json!([["has", {}, ["axis", {}, "construct"], "MIP"]]));
+        let d = draft(&mut l, &exact);
+        assert!(d.diagnosis.valid, "{}: {:?}", l.name, d.diagnosis.issues);
+        assert_eq!(readings(&d), [] as [Value; 0], "{}", l.name);
+        let doc = stored(&mut l, &d);
+        assert_eq!(
+            doc["sets"]["scans"]["where"],
+            json!([["has", {}, ["axis", {}, "construct"], "MIP"]]),
+            "{}",
+            l.name
+        );
+    }
+}
+
+/// A word two values of an axis have is read as neither: the document is
+/// refused as it was, and the refusal names the values the word may mean.
+/// A document that arrives structured is refused for a word one value
+/// alone lists as well, and told the value.
+#[test]
+fn a_word_two_values_share_is_left_and_refused_and_a_structured_document_reads_none() {
+    for mut l in labs() {
+        plant(&mut l);
+        // two values list the word
+        let d = draft(
+            &mut l,
+            &scans(json!([[
+                "has",
+                {},
+                ["axis", {}, "construct"],
+                "isotropic DWI"
+            ]])),
+        );
+        assert!(!d.diagnosis.valid && d.document.is_none(), "{}", l.name);
+        assert_eq!(readings(&d), [] as [Value; 0], "{}", l.name);
+        assert_eq!(d.diagnosis.issues.len(), 1, "{}", l.name);
+        assert_eq!(
+            d.diagnosis.issues[0].path, "sets.scans.where[0]",
+            "{}",
+            l.name
+        );
+        assert_eq!(
+            d.diagnosis.issues[0].message,
+            "isotropic DWI is not a value of axis construct; the pack has it as a word for \
+             more than one value: Trace or isoDWI",
+            "{}",
+            l.name
+        );
         assert!(
             d.diagnosis.issues[0]
-                .message
-                .contains("SPGR is not a value of axis technique"),
-            "{}: {:?}",
+                .next
+                .starts_with("write the one meant: Trace or isoDWI; or GET /api/ask/catalog"),
+            "{}: {}",
             l.name,
-            d.diagnosis.issues
+            d.diagnosis.issues[0].next
+        );
+        // one value has it as a name in another case and another lists it
+        let d = draft(
+            &mut l,
+            &scans(json!([["has", {}, ["axis", {}, "construct"], "mip"]])),
+        );
+        assert!(!d.diagnosis.valid, "{}", l.name);
+        assert_eq!(readings(&d), [] as [Value; 0], "{}", l.name);
+        assert_eq!(
+            d.diagnosis.issues[0].message,
+            "mip is not a value of axis construct; the pack has it as a word for more than one \
+             value: MIP or MinIP",
+            "{}",
+            l.name
+        );
+        // the documents door takes a document as it is written: a word one
+        // value alone lists is refused there, as before, and told the value
+        let scope = quasi();
+        let scheme = Scheme::default();
+        let s = Setting {
+            names: &l.catalog,
+            scope: &scope,
+            scheme: &scheme,
+            principal: "desk",
+            bounds: bounds(),
+            values_cap: 50,
+        };
+        for (word, said) in [
+            (
+                "BRAVO",
+                "BRAVO is not a value of axis technique; the pack lists it as a word for MPRAGE",
+            ),
+            (
+                "mprage",
+                "mprage is not a value of axis technique; the pack writes it MPRAGE",
+            ),
+        ] {
+            let text = scans(json!([is("technique", word)]));
+            let ask = parse(&text).unwrap();
+            let refused = match affordance::post(&mut l.registry, &ask, &s, None) {
+                Err(affordance::AffordanceError::Ask(nils_ask::Error::Invalid(issues))) => issues,
+                other => panic!(
+                    "{}: {word} was not refused: {:?}",
+                    l.name,
+                    other.map(|d| d.id)
+                ),
+            };
+            assert_eq!(refused.len(), 1, "{}: {refused:?}", l.name);
+            assert_eq!(refused[0].code.name(), "unknown_value", "{}", l.name);
+            assert_eq!(refused[0].message, said, "{}", l.name);
+            // and strict validation of the same document says the same
+            let e = prepare(ask, &l.catalog, &scope).unwrap_err();
+            assert!(e.to_string().contains(said), "{}: {e}", l.name);
+        }
+    }
+}
+
+/// A word the pack lists for a value that is read wider when written alone
+/// is read wider as the value is: one reading, which says what was
+/// written. With `exact: true` the word is still read as the value's
+/// stored word, and only the wider reading is left out; and a clause that
+/// keeps the wider value by a word of its own is the narrowing on purpose
+/// it would be in the stored words.
+#[test]
+fn a_listed_word_of_a_fine_value_is_read_wider_in_one_reading() {
+    for mut l in labs() {
+        let (brain, brain_neck, _) = plant(&mut l);
+        let exact = "[\"=\", {exact: true}, [\"axis\", {}, \"body_part\"], \"brain\"]";
+        let d = draft(&mut l, &scans(json!([is("body_part", "Neuro")])));
+        assert!(d.diagnosis.valid, "{}: {:?}", l.name, d.diagnosis.issues);
+        assert_eq!(
+            readings(&d),
+            [json!({
+                "path": "sets.scans.where[0]",
+                "what": format!(
+                    "body_part = Neuro, a word the pack lists for brain, was read as \
+                     body_region = head, which covers brain and brain-neck: the pack reads \
+                     brain written alone as the wider head. To keep brain alone, write {exact}."
+                ),
+                "read": {
+                    "kind": "wider", "axis": "body_part", "wrote": "Neuro",
+                    "as_axis": "body_region", "as_value": "head", "exact": exact
+                }
+            })],
+            "{}",
+            l.name
+        );
+        let doc = stored(&mut l, &d);
+        assert_eq!(
+            doc["sets"]["scans"]["where"],
+            json!([is("body_region", "head")]),
+            "{}",
+            l.name
+        );
+        assert_eq!(
+            count(&mut l, &doc.to_string()),
+            brain + brain_neck,
+            "{}",
+            l.name
+        );
+        // meant as written: the word is read, the value kept alone
+        let kept = "ast_version: 1\nname: kept\nsets:\n  scans:\n    grain: stack\n    where:\n      \
+                    - [\"=\", {exact: true}, [\"axis\", {}, \"body_part\"], \"neuro\"]\n\
+                    out: {set: scans, level: count}\n";
+        let d = draft(&mut l, kept);
+        assert!(d.diagnosis.valid, "{}: {:?}", l.name, d.diagnosis.issues);
+        let r = readings(&d);
+        assert_eq!(r.len(), 1, "{}: {r:?}", l.name);
+        assert_eq!(
+            r[0]["read"],
+            json!({
+                "kind": "word", "axis": "body_part", "wrote": "neuro",
+                "as_axis": "body_part", "as_value": "brain"
+            }),
+            "{}",
+            l.name
+        );
+        let doc = stored(&mut l, &d);
+        assert_eq!(
+            doc["sets"]["scans"]["where"],
+            json!([["=", {"exact": true}, ["axis", {}, "body_part"], "brain"]]),
+            "{}",
+            l.name
+        );
+        assert_eq!(count(&mut l, &doc.to_string()), brain, "{}", l.name);
+        // the wider value kept by a word the pack lists for it, beside the
+        // fine one by a word of its own: two words read, nothing wider
+        let d = draft(
+            &mut l,
+            &scans(json!([
+                is("body_region", "skull"),
+                is("body_part", "neuro")
+            ])),
+        );
+        assert!(d.diagnosis.valid, "{}: {:?}", l.name, d.diagnosis.issues);
+        let kinds: Vec<(String, String, String)> = readings(&d)
+            .iter()
+            .map(|r| {
+                let t = |v: &Value| v.as_str().unwrap().to_string();
+                (
+                    t(&r["read"]["kind"]),
+                    t(&r["read"]["wrote"]),
+                    t(&r["read"]["as_value"]),
+                )
+            })
+            .collect();
+        let row = |k: &str, w: &str, v: &str| (k.to_string(), w.to_string(), v.to_string());
+        assert_eq!(
+            kinds,
+            [row("word", "skull", "head"), row("word", "neuro", "brain")],
+            "{}",
+            l.name
+        );
+        let doc = stored(&mut l, &d);
+        assert_eq!(
+            doc["sets"]["scans"]["where"],
+            json!([is("body_region", "head"), is("body_part", "brain")]),
+            "{}",
+            l.name
+        );
+        // and in an `or` beside another value of the axis named by a word
+        // of its own, both are meant as written
+        let d = draft(
+            &mut l,
+            &scans(json!([[
+                "or",
+                {},
+                is("body_part", "neuro"),
+                is("body_part", "head and neck")
+            ]])),
+        );
+        assert!(d.diagnosis.valid, "{}: {:?}", l.name, d.diagnosis.issues);
+        let doc = stored(&mut l, &d);
+        assert_eq!(
+            doc["sets"]["scans"]["where"],
+            json!([[
+                "or",
+                {},
+                is("body_part", "brain"),
+                is("body_part", "brain-neck")
+            ]]),
+            "{}",
+            l.name
+        );
+        assert!(
+            readings(&d).iter().all(|r| r["read"]["kind"] == "word"),
+            "{}",
+            l.name
         );
     }
 }

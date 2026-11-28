@@ -2205,6 +2205,7 @@ impl Names for Catalog {
                         label: v.label.clone(),
                         aliases: v.aliases.clone(),
                         stored: v.stored.clone(),
+                        terms: v.terms.clone(),
                     })
                     .collect(),
             })

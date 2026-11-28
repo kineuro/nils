@@ -5834,6 +5834,81 @@ out: {set: eligible, level: count}
     assert_eq!(status, 200, "{diagnosed}");
     assert_eq!(diagnosed["repairs"], serde_json::json!([]), "{diagnosed}");
 
+    // a word the pack lists for one value is read at the draft door, and
+    // refused where a document is taken as it is written, which names the
+    // value
+    let listed = |word: &str| {
+        serde_json::json!({
+            "ast_version": 1, "name": "listed",
+            "sets": {"t1": {"grain": "stack", "where": [is("technique", word)]}},
+            "out": {"set": "t1", "level": "count"}
+        })
+    };
+    let (status, drafted_word) = server.request(
+        "POST",
+        "/api/ask/draft",
+        Some(&body(
+            serde_json::json!({"text": listed("BRAVO").to_string()}),
+        )),
+        None,
+    );
+    assert_eq!(status, 200, "{drafted_word}");
+    assert_eq!(
+        drafted_word["repairs"],
+        serde_json::json!([{
+            "path": "sets.t1.where[0]",
+            "what": "On technique, the pack lists BRAVO as a word for MPRAGE: it was read as \
+                     MPRAGE, the word the pack stores.",
+            "read": {
+                "kind": "word", "axis": "technique", "wrote": "BRAVO",
+                "as_axis": "technique", "as_value": "MPRAGE"
+            }
+        }]),
+        "{drafted_word}"
+    );
+    assert!(
+        drafted_word["document"].as_i64().is_some(),
+        "{drafted_word}"
+    );
+    for door in ["/api/ask/documents", "/api/ask/validate", "/api/ask/run"] {
+        let (status, refused) = server.request(
+            "POST",
+            door,
+            Some(&body(serde_json::json!({"document": listed("BRAVO")}))),
+            None,
+        );
+        assert_eq!(status, 400, "{door}: {refused}");
+        assert_eq!(
+            refused["issues"][0]["code"], "unknown_value",
+            "{door}: {refused}"
+        );
+        assert_eq!(
+            refused["issues"][0]["message"],
+            "BRAVO is not a value of axis technique; the pack lists it as a word for MPRAGE",
+            "{door}: {refused}"
+        );
+    }
+    // a word two values share is refused at the draft door too, by name
+    let (status, shared) = server.request(
+        "POST",
+        "/api/ask/draft",
+        Some(&body(serde_json::json!({"text": serde_json::json!({
+            "ast_version": 1,
+            "sets": {"t": {"grain": "stack", "where": [["has", {}, ["axis", {}, "construct"], "isotropic DWI"]]}},
+            "out": {"set": "t", "level": "count"}
+        }).to_string()}))),
+        None,
+    );
+    assert_eq!(status, 200, "{shared}");
+    assert_eq!(shared["document"], serde_json::Value::Null, "{shared}");
+    assert_eq!(shared["repairs"], serde_json::json!([]), "{shared}");
+    assert_eq!(
+        shared["diagnosis"]["issues"][0]["message"],
+        "isotropic DWI is not a value of axis construct; the pack has it as a word for more \
+         than one value: Trace or isoDWI",
+        "{shared}"
+    );
+
     // the catalog says which value is read as which
     let (status, catalog) = server.request("GET", "/api/ask/catalog", None, None);
     assert_eq!(status, 200, "{catalog}");

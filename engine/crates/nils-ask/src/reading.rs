@@ -21,9 +21,14 @@
 //!   (`=`, `<>`, `has`, `in` and `not_in`, anywhere in a `where`) and names
 //!   the value by an identity, an earlier name or a label that is not the
 //!   word a row stores is rewritten to that word, where the vocabulary
-//!   names exactly one value by the text
-//!   ([`AxisNames::other_spelling`](crate::validate::AxisNames::other_spelling)).
-//!   The clause selects the same rows before and after.
+//!   names exactly one value by the text. The clause selects the same
+//!   rows before and after. A text that names no value exactly is looked
+//!   up among the names and among the words the pack lists for each value
+//!   (`terms`: `BRAVO` for the sequence stored as `MPRAGE`), letter case
+//!   and surrounding space aside, and is read as the one value that has
+//!   it; a word two values share is left, and the validator refuses it
+//!   and names them
+//!   ([`AxisNames::read_word`](crate::validate::AxisNames::read_word)).
 //! - **wider**: a clause that keeps exactly one value of an axis, a value
 //!   the pack says is read as its wider value where it is written alone
 //!   (`read_for` on the coarse axis's value), is rewritten to the clause
@@ -32,7 +37,9 @@
 //!   set it is drawn from, already keeps the wider value in a clause of
 //!   its own (the heads, and of those the brains), where the clause is
 //!   under a `not`, where it stands in an `or` beside another value of the
-//!   same axis, and where it lists several values.
+//!   same axis, and where it lists several values. The word is read first,
+//!   so a listed word of such a value (`neuro` for `brain`) is read wider
+//!   as the value itself is, in one reading that says what was written.
 //!
 //! A document that arrives structured (a stored one, a strict door) never
 //! comes here: it is taken as written.
@@ -46,7 +53,7 @@ use crate::ast::{Arg, Ask, Clause, Grain};
 use crate::describe::clause_text;
 use crate::diagnose::{narrowed_on_purpose, value_filter};
 use crate::repair::Repair;
-use crate::validate::Names;
+use crate::validate::{Names, Spelling};
 
 /// What a reading read: which kind, the axis and the text written, and the
 /// axis and the value it was read as, in the word a row stores.
@@ -101,7 +108,17 @@ pub fn read(ask: &mut Ask, names: &dyn Names) -> Vec<Repair> {
             .entry(stage_name(ask, i))
             .or_insert_with(|| format!("pipeline[{i}]"));
     }
-    let before = view.clone();
+    // the document the checks around a clause read: every value in the
+    // word the pack stores, so a clause that keeps the wider value by a
+    // listed word of it is the wider clause it will be read as
+    let mut before = view.clone();
+    for set in before.sets.values_mut() {
+        if set.grain == Grain::Stack {
+            for c in set.where_.iter_mut() {
+                *c = in_stored_words(c, names);
+            }
+        }
+    }
     let mut out = Vec::new();
     for (name, set) in view.sets.iter_mut() {
         let Some(at) = written.get(name).filter(|_| set.grain == Grain::Stack) else {
@@ -135,7 +152,17 @@ pub fn read(ask: &mut Ask, names: &dyn Names) -> Vec<Repair> {
     out
 }
 
-/// Where a clause stands: the document as it was written, and its set.
+/// A clause with each value it writes out in the word the pack stores,
+/// and nothing said: how the wider reading sees a clause, so that a text
+/// the word reading will read is read before it.
+fn in_stored_words(c: &Clause, names: &dyn Names) -> Clause {
+    let mut read = c.clone();
+    words(&mut read, "", names, &mut Vec::new());
+    read
+}
+
+/// Where a clause stands: the document as written, its values in the
+/// words the pack stores, and its set.
 struct Within<'a> {
     ask: &'a Ask,
     set: &'a str,
@@ -154,7 +181,7 @@ fn axes_kept(c: &Clause, names: &dyn Names, out: &mut BTreeSet<String>) {
             }
         }
         _ => {
-            if let Some((axis, _, _)) = value_filter(c, names) {
+            if let Some((axis, _, _)) = value_filter(&in_stored_words(c, names), names) {
                 out.insert(axis);
             }
         }
@@ -197,7 +224,8 @@ fn wider(
     if is_exact(c) {
         return;
     }
-    let Some((axis, of, kept)) = value_filter(c, within.names) else {
+    let Some((axis, of, kept)) = value_filter(&in_stored_words(c, within.names), within.names)
+    else {
         return;
     };
     let [fine] = kept.as_slice() else {
@@ -262,11 +290,20 @@ fn wider(
             Clause::new("axis").arg(Arg::Text(coarse_axis.axis.clone())),
         ))
         .arg(Arg::Text(as_value.clone()));
+    // how the text names the fine value, where it is not its stored word
+    let named = match of.read_word(&wrote) {
+        Some((_, _, Spelling::Name)) => format!(", another name of {fine_word},"),
+        Some((_, _, Spelling::Folded)) => {
+            format!(", a name of {fine_word} but for letter case or surrounding space,")
+        }
+        Some((_, _, Spelling::Term)) => format!(", a word the pack lists for {fine_word},"),
+        None => String::new(),
+    };
     out.push(Repair {
         path: path.to_string(),
         what: format!(
-            "{} was read as {}, which covers {}: the pack reads {fine_word} written alone as the \
-             wider {as_value}. To keep {fine_word} alone, write {exact}.",
+            "{}{named} was read as {}, which covers {}: the pack reads {fine_word} written alone \
+             as the wider {as_value}. To keep {fine_word} alone, write {exact}.",
             clause_text(c),
             clause_text(&read),
             listed(&covers),
@@ -285,7 +322,8 @@ fn wider(
 
 /// The word reading of one `where` clause and of every clause inside it:
 /// each value of an axis it writes out by another name than the stored
-/// word, rewritten to that word.
+/// word, or by a word the pack lists for one value alone, rewritten to
+/// the stored word.
 fn words(c: &mut Clause, path: &str, names: &dyn Names, out: &mut Vec<Repair>) {
     let axis = match (c.op.as_str(), c.args.first()) {
         ("=" | "<>" | "in" | "not_in" | "has", Some(Arg::Clause(l)))
@@ -302,15 +340,25 @@ fn words(c: &mut Clause, path: &str, names: &dyn Names, out: &mut Vec<Repair>) {
             let Some(wrote) = literal_text(a) else {
                 return;
             };
-            let Some((_, stored)) = of.other_spelling(&wrote) else {
+            let Some((_, stored, spelling)) = of.read_word(&wrote) else {
                 return;
             };
             out.push(Repair {
                 path: path.to_string(),
-                what: format!(
-                    "On {axis}, {wrote} is another name of {stored}, the word the pack stores: \
-                     it was read as {stored}."
-                ),
+                what: match spelling {
+                    Spelling::Name => format!(
+                        "On {axis}, {wrote} is another name of {stored}, the word the pack \
+                         stores: it was read as {stored}."
+                    ),
+                    Spelling::Folded => format!(
+                        "On {axis}, {wrote} is a name of {stored} but for letter case or \
+                         surrounding space: it was read as {stored}, the word the pack stores."
+                    ),
+                    Spelling::Term => format!(
+                        "On {axis}, the pack lists {wrote} as a word for {stored}: it was read \
+                         as {stored}, the word the pack stores."
+                    ),
+                },
                 read: Some(Read {
                     kind: "word".to_string(),
                     axis: axis.clone(),

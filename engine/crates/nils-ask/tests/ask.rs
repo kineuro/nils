@@ -1651,6 +1651,7 @@ fn an_axis_value_is_named_by_any_of_its_names_and_held_in_any_form() {
         label: label.into(),
         aliases: aliases.iter().map(|a| a.to_string()).collect(),
         stored: None,
+        terms: Vec::new(),
     };
     let id_of = |a: &AxisNames, t: &str| a.named(t).map(|x| x.id.clone());
     let pair = |a: &str, b: &str| (a.to_string(), b.to_string());
@@ -1744,6 +1745,7 @@ fn another_spelling_is_read_as_the_stored_word_only_where_one_value_has_the_name
         label: label.into(),
         aliases: aliases.iter().map(|a| a.to_string()).collect(),
         stored: None,
+        terms: Vec::new(),
     };
     let read = |a: &AxisNames, t: &str| {
         a.other_spelling(t)
@@ -1799,6 +1801,109 @@ fn another_spelling_is_read_as_the_stored_word_only_where_one_value_has_the_name
     };
     assert_eq!(read(&crossed, "x"), None);
     assert_eq!(read(&crossed, "y"), None);
+}
+
+/// A text that names no value exactly is looked up among the names and the
+/// words the pack lists for each value, letter case and surrounding space
+/// aside, and is read where exactly one value has it. An exact name is
+/// that value whatever another value lists, a word two values share is
+/// read as neither, and the validator names what such a text may mean.
+#[test]
+fn a_listed_word_is_read_as_the_one_value_that_has_it() {
+    use nils_ask::validate::{AxisNames, AxisValueNames, Spelling};
+    let v = |id: &str, label: &str, aliases: &[&str], terms: &[&str]| AxisValueNames {
+        id: id.into(),
+        label: label.into(),
+        aliases: aliases.iter().map(|a| a.to_string()).collect(),
+        stored: None,
+        terms: terms.iter().map(|t| t.to_string()).collect(),
+    };
+    let technique = AxisNames {
+        stores_label: true,
+        values: vec![
+            v(
+                "SP-GRE",
+                "SPGRE",
+                &["FLASH"],
+                &["FLASH", "SPGR", "spoiled GRE", "fast"],
+            ),
+            v(
+                "MPRAGE",
+                "MPRAGE",
+                &[],
+                &["MPRAGE", "BRAVO", "3D TFE", "fast"],
+            ),
+            v("MIP", "MIP", &[], &["maximum projection"]),
+            v("MinIP", "MinIP", &[], &["mIP", "minimum projection"]),
+        ],
+    };
+    let read = |t: &str| {
+        technique
+            .read_word(t)
+            .map(|(value, word, how)| (value.id.as_str(), word, how))
+    };
+    // a word one value lists, in any letter case and with space around it
+    assert_eq!(read("BRAVO"), Some(("MPRAGE", "MPRAGE", Spelling::Term)));
+    assert_eq!(read("bravo"), Some(("MPRAGE", "MPRAGE", Spelling::Term)));
+    assert_eq!(read(" 3d tfe "), Some(("MPRAGE", "MPRAGE", Spelling::Term)));
+    assert_eq!(read("SPGR"), Some(("SP-GRE", "SPGRE", Spelling::Term)));
+    // a name but for its letter case, an earlier name among them; a name
+    // comes before the same text listed as a word of the same value
+    assert_eq!(read("mprage"), Some(("MPRAGE", "MPRAGE", Spelling::Folded)));
+    assert_eq!(read("flash"), Some(("SP-GRE", "SPGRE", Spelling::Folded)));
+    assert_eq!(read(" SPGRE"), Some(("SP-GRE", "SPGRE", Spelling::Folded)));
+    // an exact name is read as it was: another spelling, or nothing
+    assert_eq!(read("FLASH"), Some(("SP-GRE", "SPGRE", Spelling::Name)));
+    assert_eq!(read("SP-GRE"), Some(("SP-GRE", "SPGRE", Spelling::Name)));
+    assert_eq!(read("SPGRE"), None);
+    assert_eq!(read("MPRAGE"), None);
+    // an exact name beats a word another value lists: MIP is MIP, though
+    // MinIP lists mIP
+    assert_eq!(read("MIP"), None);
+    assert_eq!(technique.named("MIP").map(|x| x.id.as_str()), Some("MIP"));
+    // a word two values have, as a listed word or as a name in another
+    // case, is read as neither; and a text no value has is read as none
+    assert_eq!(read("fast"), None);
+    assert_eq!(read("mip"), None);
+    assert_eq!(read("turbo"), None);
+    assert_eq!(read(""), None);
+    assert_eq!(read("  "), None);
+    // what such a text may mean, for the refusal
+    let meant = |t: &str| -> Vec<(&str, bool)> {
+        technique
+            .listed(t)
+            .into_iter()
+            .map(|(value, term)| (value.id.as_str(), term))
+            .collect()
+    };
+    assert_eq!(meant("fast"), [("SP-GRE", true), ("MPRAGE", true)]);
+    assert_eq!(meant("mip"), [("MIP", false), ("MinIP", true)]);
+    assert_eq!(meant("turbo"), []);
+    // a document may not write a listed word: the validator refuses it as
+    // it did, and a fixture that lists no words says nothing more
+    assert!(technique.named("BRAVO").is_none());
+    let issues = refused(json!({
+        "ast_version": 1,
+        "sets": {"t": {"grain": "stack", "where": [["=", {}, ["axis", {}, "technique"], "bravo"]]}},
+        "out": {"set": "t", "level": "count"}
+    }));
+    assert_eq!(issues[0].code, Code::UnknownValue);
+    assert_eq!(issues[0].message, "bravo is not a value of axis technique");
+    // but a name in another letter case is named in the refusal
+    let issues = refused(json!({
+        "ast_version": 1,
+        "sets": {"t": {"grain": "stack", "where": [["=", {}, ["axis", {}, "technique"], "mprage"]]}},
+        "out": {"set": "t", "level": "count"}
+    }));
+    assert_eq!(
+        issues[0].message,
+        "mprage is not a value of axis technique; the pack writes it MPRAGE"
+    );
+    assert!(
+        issues[0]
+            .next
+            .starts_with("write MPRAGE; or GET /api/ask/catalog")
+    );
 }
 
 /// A repair is `{path, what}` as it always was, and one that read a value
