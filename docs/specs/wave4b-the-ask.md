@@ -355,12 +355,103 @@ declares.
   stored word as well: the wider value kept by a term of its own beside
   the fine one is the narrowing on purpose it would be.
 
+- **default**: an axis may say which of its values a question counts
+  unless it says otherwise: `ask_default: [<values>]` in the axis's file,
+  values of that axis, at least one. The MR pack's `disposition` counts
+  `acquisition` and `scanner_derived`: a scanner-derived image can be the
+  very image a question means, a reformat is another view of an
+  acquisition the session already holds, and a scout or a working scan is
+  not what a question usually wants. A stack set that names no value of
+  that axis in a `where` clause, neither itself nor a stack set it is
+  drawn `from`, gets the clause that keeps those values, `["in", {unset:
+  true}, ["axis", {}, "disposition"], ["acquisition", "scanner_derived"]]`.
+  The option `unset: true` on `=` or `in` over an axis keeps the stacks
+  that hold no value of the axis as well: a stack nothing has sorted yet
+  has no disposition, and a clause that counts the usual kinds must not
+  leave a site that has not sorted yet with no scan at all. The reading
+  writes the option where the value a sort gives the axis by default (the
+  pack's `default`, `acquisition`) is among those counted, and the catalog
+  serves the whole clause as `ask_default_clause` beside `ask_default`, so
+  nobody works it out again. A clause a person writes without the option
+  keeps the stacks that hold one of its values and no others, as it always
+  did. It is
+  written once for the sets that share it, at the set the others are
+  drawn from, so they read it too; any clause on the axis, of any op and
+  at any depth, in a set or in a set it is drawn from turns it off for
+  that set. Where one set drawn from a shared set names the axis and
+  another does not, the shared set is left as written (a clause there
+  would cut the set that asked for another kind) and the other gets the
+  clause itself. A stack set a session set reads through `has`, and one
+  that is `of` another set, starts a chain of its own. Left as written: a
+  set at another grain, a group and the result of an algebra, and a stack
+  set that starts from a list (`from` a handle, a selection, a role or
+  uploaded values) with the sets drawn from it. It is read last, after
+  the words and the wider values. Its entry is `kind: default`, `wrote`
+  empty, `as_value` the values as one text and `as_values` the list, and
+  `what` says what was added, which kinds are left out, and the clause to
+  write for another kind. The catalog serves `ask_default` on the axis.
+  A move writes for a person what a draft writes from their words, so
+  `apply` (§10) reads the same way: a stack set a move adds (`AddSet`)
+  gets the default clause, itself, unless a set it is drawn from names
+  the axis or it starts from a list; and a set a move gives a clause that
+  keeps values of the axis (`AddAxisWhere` on `disposition`) loses the
+  default clause it held, since the person now says which kinds are
+  meant, while a clause that takes a kind away (`ExcludeScenario`) leaves
+  it. The sets touched are answered with their sentences, which say the
+  clause. No other door that writes a document writes a stack set of its
+  own: `POST /api/ask/start` opens from cohorts, a list or a stored
+  document, and those are taken as they are.
+
 A reading's entry carries `read` beside `path` and `what`: `{kind: word |
-wider, axis, wrote, as_axis, as_value}`, and for `wider` also `exact`, the
-clause that keeps the fine value alone, as a document writes it. A
+wider | default, axis, wrote, as_axis, as_value}`, for `wider` also
+`exact`, the clause that keeps the fine value alone, as a document writes
+it, and for `default` also `as_values`. A
 structural repair carries no `read`. A document that arrives structured
 (`POST /api/ask/documents`, a stored document, strict validation, a run) is
 taken as written: a filter a person clicked on one value means that value.
+
+**How an acquisition family is filed** is the pack's to say as well. An
+acquisition often leaves several images in a session (a magnitude, a
+phase, a reconstruction made from both), each filed under values of its
+own, and what the values mean one by one does not say how the images of
+one family are found together. A pack may hold a `families` folder beside
+its manifest, one file a family, named by the family (`families/<id>.yml`):
+`family` (the file's name, lower case letters, digits and hyphens),
+`label`, `terms` (the words a person uses for it, at least one),
+`summary`, `products` (what one acquisition leaves, each with an `id`
+unique in the family, `what`, `acquired`: true where the scanner acquired
+it and false where it was computed or made from others, `where`: the
+clauses that find it, as a document writes them, and an optional `note`),
+`ask` (worked examples, each with `words`, `sets`: a fragment of a
+document as text, and an optional `note`) and an optional `raw` (header
+text fields for what the axes do not split, each a `field` and `what`).
+The files decide nothing: no rule and no sort reads them. The folder is
+found by its name and not through the manifest, so an engine that does
+not know it loads the pack as it did. A file is held to its shape and to
+the pack's own vocabulary when the pack loads (every key known, the names
+as above, a clause a clause in shape, an axis one the pack declares and a
+value a value of it by any of its names, and no clause with the option
+`exact`, which is a question's own: a family that wrote it would teach a
+first draft the one clause a draft is asked not to open with), and to the ask where a catalog
+is built and by `nils pack validate` (every clause parses and its op is
+the language's, a field is a field of its level and a derived field one
+the catalog lists, the `sets` of an example read as the sets of a
+document, `raw` names a text field of a stack); each refusal names the
+file and the path inside it, and nothing is run against a registry. The
+catalog serves the families whole, `families: [...]` in the order of the
+files' names, the clauses as arrays and the `sets` as text; the key is
+absent where a pack has none.
+
+**A text that is not among a field's most common values** is found by the
+value sampler: `GET /api/ask/catalog/{level}/{field}/values` takes
+`contains`, a text of three characters or more, and answers the values
+that hold it, letter case aside, with their counts, the most common
+first, under the same limit. It is how a niche word in a header text (a
+product name in a series description) is found where the axes do not
+split it. Only a field whose values are listed is searched: a field shown
+as shapes is not, since a search would say whether a value is there that
+the listing does not show, and neither is a stack's axis, whose values
+are the catalog's own list.
 
 **share** names its denominator. A denominator is an uncorrelated scalar count
 over a named set, legal only in a denominator position and only at count or
