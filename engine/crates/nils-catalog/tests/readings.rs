@@ -1475,6 +1475,38 @@ fn the_default_is_one_clause_a_chain_and_is_turned_off_by_a_clause_on_the_axis()
             l.name
         );
         assert!(doc["sets"]["visits"].get("where").is_none(), "{}", l.name);
+        // a set that keeps the main scans that were picked is a choice
+        // already made, as a list is: it gets no clause, and neither does
+        // a set drawn from it; a set it is drawn from is left as written
+        // too, and another set drawn from that one gets the clause itself
+        let picked = json!(["picked", {"role": "t1w"}]);
+        let (paths, doc) = drafted(
+            &mut l,
+            json!({
+                "mains": {"grain": "stack", "where": [picked]},
+                "sharp": {"grain": "stack", "from": "mains", "where": [mprage]}
+            }),
+            "sharp",
+        );
+        assert_eq!(paths, none, "{}", l.name);
+        assert_eq!(doc["sets"]["mains"]["where"], json!([picked]), "{}", l.name);
+        let (paths, doc) = drafted(
+            &mut l,
+            json!({
+                "base": {"grain": "stack", "where": [is("body_region", "head")]},
+                "mains": {"grain": "stack", "from": "base", "where": [picked]},
+                "plain": {"grain": "stack", "from": "base", "where": [mprage]}
+            }),
+            "plain",
+        );
+        assert_eq!(paths, ["sets.plain.where[1]"], "{}", l.name);
+        assert_eq!(
+            doc["sets"]["base"]["where"],
+            json!([is("body_region", "head")]),
+            "{}",
+            l.name
+        );
+        assert_eq!(doc["sets"]["mains"]["where"], json!([picked]), "{}", l.name);
         // the result of an algebra is other sets' rows: they get it, it
         // does not
         let (paths, doc) = drafted(

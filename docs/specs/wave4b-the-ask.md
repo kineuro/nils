@@ -383,9 +383,11 @@ declares.
   would cut the set that asked for another kind) and the other gets the
   clause itself. A stack set a session set reads through `has`, and one
   that is `of` another set, starts a chain of its own. Left as written: a
-  set at another grain, a group and the result of an algebra, and a stack
+  set at another grain, a group and the result of an algebra, a stack
   set that starts from a list (`from` a handle, a selection, a role or
-  uploaded values) with the sets drawn from it. It is read last, after
+  uploaded values) with the sets drawn from it, and a set that keeps the
+  main scans that were picked (`picked`) with the sets drawn from it: a
+  pick is a choice already made, of whatever kind, as a list is. It is read last, after
   the words and the wider values. Its entry is `kind: default`, `wrote`
   empty, `as_value` the values as one text and `as_values` the list, and
   `what` says what was added, which kinds are left out, and the clause to

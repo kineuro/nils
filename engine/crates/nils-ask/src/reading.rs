@@ -170,12 +170,14 @@ pub fn read(ask: &mut Ask, names: &dyn Names) -> Vec<Repair> {
     out
 }
 
-/// Whether a clause names an axis anywhere in it.
+/// Whether a clause says which stacks of an axis's values are meant: it
+/// names the axis anywhere in it, or it keeps the main scans that were
+/// picked (`picked`), which is a choice already made, as a list is.
 fn names_axis(c: &Clause, axis: &str) -> bool {
     let mut all = Vec::new();
     c.walk(&mut all);
     all.iter()
-        .any(|x| x.op == "axis" && x.ref_name() == Some(axis))
+        .any(|x| x.op == "picked" || (x.op == "axis" && x.ref_name() == Some(axis)))
 }
 
 /// The default reading: for each axis that says which of its values a
@@ -193,9 +195,12 @@ fn names_axis(c: &Clause, axis: &str) -> bool {
 /// clause at its own top.
 ///
 /// Left as written: a set at another grain; a group and the result of an
-/// algebra, whose rows are other sets'; and a stack set that starts from a
+/// algebra, whose rows are other sets'; a stack set that starts from a
 /// list (`from` a handle, a selection, a role or uploaded values), with
-/// the sets drawn from it: the list is what someone chose. A stack set
+/// the sets drawn from it: the list is what someone chose; and a set that
+/// keeps the main scans that were picked (`picked`), with the sets drawn
+/// from it: a pick is a choice already made, and it may be of any kind.
+/// Such a set counts as one that names the axis. A stack set
 /// that is `of` another set starts a tree of its own.
 fn defaults(
     view: &mut Ask,
