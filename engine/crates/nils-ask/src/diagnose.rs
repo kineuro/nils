@@ -7,6 +7,12 @@
 //! class, and the funnel (Q1): the subjects surviving each stage of each
 //! named set, so an author sees where subjects fall out. The leave one out
 //! variant is a job's.
+//!
+//! A count of nothing is explained first (`explain_first`): the stack sets
+//! the answer cannot do without are counted before the funnel, by the
+//! passes the funnel would run for them, and where one holds no row the
+//! zero row explanation and the clause that emptied it are worked out at
+//! once. They are served with a funnel the time cut short.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::time::Instant;
@@ -120,7 +126,14 @@ pub struct Diagnosis {
     pub valid: bool,
     pub issues: Vec<Issue>,
     pub repairs: Vec<Repair>,
+    /// The warnings. `emptied_by` is worked out before the funnel where a
+    /// set the answer cannot do without holds no row, and is served with a
+    /// funnel the time cut short (`unavailable`).
     pub warnings: Vec<Issue>,
+    /// Why the answer holds no row, in a line: the first stage that kept
+    /// none. Worked out before the funnel where a set the answer cannot do
+    /// without holds no row, so it may come with a funnel the time cut
+    /// short; from the whole funnel otherwise.
     pub zero_rows: Option<String>,
     pub drops: Vec<Drop>,
     /// A picked set and how many of its rows tied; null where held back.
@@ -568,6 +581,7 @@ fn lean(ask: &Ask) -> Option<Ask> {
 /// What one pass counted of a set: the stage before its first `where` and
 /// the stage after each clause, and, for the answer's set, the rows each
 /// clause's field is unknown on among the rows the clause met.
+#[derive(Clone)]
 struct Pass {
     stages: Vec<Count>,
     /// By `where` clause: none where the pass did not count it.
@@ -1639,6 +1653,63 @@ fn diagnose_as(
     // the session cache is brought up to date once for the question, by
     // whichever pass first compiles a statement that reads it
     let sessions_fresh = std::cell::Cell::new(false);
+    // A count of nothing is explained first ([`explain_first`]): the stack
+    // sets the answer cannot do without are counted before the funnel, by
+    // the passes the funnel would run for them, which it then does not run
+    // again. With connections beside the reader's own those passes are
+    // listed and run at the same time, as the funnel's statements are.
+    let mut early = Early::default();
+    if in_one_pass && !with_keys {
+        let mut ahead = Ahead::None;
+        if !beside.is_empty() {
+            let mut listed = Ahead::Listed(Vec::new());
+            // what the listing comes to is not the early pass: it read
+            // noughts
+            let _ = explain_first(
+                registry,
+                &ask,
+                &validated,
+                names,
+                scope,
+                scheme,
+                bounds,
+                lend(&mut reader),
+                None,
+                &mut listed,
+                &sessions_fresh,
+                &mut Early::default(),
+            );
+            if let Ahead::Listed(jobs) = listed
+                && !jobs.is_empty()
+            {
+                let own: &mut Store = match lend(&mut reader) {
+                    Some(r) => r,
+                    None => registry.store(),
+                };
+                ahead = Ahead::Had(run_ahead(
+                    jobs,
+                    own,
+                    beside,
+                    bounds,
+                    budget_ms.map(|ms| (started, ms)),
+                ));
+            }
+        }
+        explain_first(
+            registry,
+            &ask,
+            &validated,
+            names,
+            scope,
+            scheme,
+            bounds,
+            lend(&mut reader),
+            budget_ms.map(|ms| (started, ms)),
+            &mut ahead,
+            &sessions_fresh,
+            &mut early,
+        )?;
+    }
     let mut ahead = Ahead::None;
     if in_one_pass && !with_keys && !beside.is_empty() {
         let mut listed = Ahead::Listed(Vec::new());
@@ -1660,6 +1731,7 @@ fn diagnose_as(
             in_one_pass,
             &mut listed,
             &sessions_fresh,
+            &early,
         );
         if let Ahead::Listed(jobs) = listed {
             let own: &mut Store = match lend(&mut reader) {
@@ -1692,7 +1764,356 @@ fn diagnose_as(
         in_one_pass,
         &mut ahead,
         &sessions_fresh,
+        &early,
     )
+}
+
+/// What the passes counted of the sets of a document.
+#[derive(Clone, Default)]
+struct Passes {
+    /// By set: what a pass counted of it, none where it counted nothing.
+    passed: BTreeMap<String, Option<Pass>>,
+    /// Whether sets of the same rows are no longer counted together: a
+    /// pass over several did not answer.
+    alone: bool,
+    /// By set the answer reads its rows through: the rows each of its
+    /// clauses' fields is unknown on.
+    path_nulls: BTreeMap<String, Vec<Option<Option<i64>>>>,
+}
+
+/// The rows a set holds with one clause left out, as [`emptied_by`]
+/// counted them: by the set, the set the clause is written in and the
+/// clause's place there. None is a count held back, of a set with rows.
+type LeftOut = BTreeMap<(String, String, usize), Option<i64>>;
+
+/// What a diagnosis found out before its funnel ([`explain_first`]).
+#[derive(Default)]
+struct Early {
+    /// The passes of the stack sets the answer cannot do without, which
+    /// the funnel reads and does not run again.
+    passes: Passes,
+    /// The zero row explanation, where one of those sets holds no row.
+    zero_rows: Option<String>,
+    /// The clause that emptied it, where one did.
+    warnings: Vec<Issue>,
+    /// The counts those warnings came from.
+    left_out: LeftOut,
+}
+
+/// The sets one pass counts with `name`: itself, and, where it reads the
+/// rows of its grain as they are ([`plain`]), every other set of the same
+/// rows that no pass has counted and none of `taken` holds. The pass
+/// answers a row for each mix of depths its subjects have, at most the
+/// product of the sets' stages: sets are added while that stays a short
+/// answer, and the rest are counted by a later pass.
+fn counted_together(
+    ask: &Ask,
+    order: &[String],
+    name: &str,
+    set: &Set,
+    passes: &Passes,
+    taken: &BTreeSet<String>,
+) -> Vec<String> {
+    let mut together = vec![name.to_string()];
+    if !passes.alone && plain(set) {
+        let mut mixes = set.where_.len() + 1;
+        for other in order {
+            let Some(o) = ask.sets.get(other) else {
+                continue;
+            };
+            if other == name
+                || other.contains("__")
+                || passes.passed.contains_key(other)
+                || taken.contains(other)
+                || o.grain != set.grain
+                || !plain(o)
+                || !one_pass(o)
+                || mixes * (o.where_.len() + 1) > TOGETHER
+            {
+                continue;
+            }
+            mixes *= o.where_.len() + 1;
+            together.push(other.clone());
+        }
+    }
+    together
+}
+
+/// One pass over the sets given, the first of them the set it is run for,
+/// and what it counted kept by set. Sets that do not count together are
+/// counted each by itself from then on.
+fn run_pass(
+    counter: &mut Counter<'_>,
+    registry: &mut Registry,
+    ask: &Ask,
+    path: &[String],
+    mut together: Vec<String>,
+    passes: &mut Passes,
+) -> Result<(), RunError> {
+    let Some(name) = together.first().cloned() else {
+        return Ok(());
+    };
+    let mut counted = counter.pass(registry, ask, &together)?;
+    if counted.is_none() && together.len() > 1 && !counter.spent() {
+        // the sets do not count together: each by itself
+        passes.alone = true;
+        together.truncate(1);
+        counted = counter.pass(registry, ask, &together)?;
+    }
+    passes.passed.insert(name, None);
+    let counted = counted.unwrap_or_default();
+    let (sets, shared) = PASSED.get();
+    PASSED.set((
+        sets + counted.len(),
+        shared + if counted.len() > 1 { counted.len() } else { 0 },
+    ));
+    for (of, pass) in counted {
+        if path.contains(&of) {
+            passes.path_nulls.insert(of.clone(), pass.nulls.clone());
+        }
+        passes.passed.insert(of, Some(pass));
+    }
+    Ok(())
+}
+
+/// The stack sets the answer cannot do without: where one of them holds
+/// no row, the answer holds none. They are the stack sets among the
+/// answer's set, the sets it is drawn `from` or is `of`, each set one of
+/// those reads through `has` with a least of one or more, and theirs in
+/// turn. A `has` with a most alone, with a least of nought or with a
+/// least no number says, or one that only counts (`as`), asks for no row,
+/// and a group or the result of an algebra is not followed: of those
+/// nothing is said.
+fn needed_sets(ask: &Ask) -> BTreeSet<String> {
+    let mut seen = vec![ask.out.set.clone()];
+    let mut at = 0;
+    while at < seen.len() {
+        if let Some(set) = ask
+            .sets
+            .get(&seen[at])
+            .filter(|s| s.algebra.is_none() && s.group.is_none())
+        {
+            let from = match &set.from {
+                Some(Src::Set(s)) => Some(s.clone()),
+                _ => None,
+            };
+            let asked = set.has.iter().filter(|h| {
+                let least = match &h.min {
+                    Some(crate::ast::IntSpec::Literal(n)) => Some(*n),
+                    Some(crate::ast::IntSpec::Param(p)) => p
+                        .ref_name()
+                        .and_then(|n| ask.params.get(n))
+                        .and_then(|d| d.value.as_ref())
+                        .and_then(Value::as_i64),
+                    None => None,
+                };
+                least.is_some_and(|n| n >= 1)
+            });
+            let read = from
+                .into_iter()
+                .chain(set.of.clone())
+                .chain(asked.map(|h| h.set.clone()));
+            for r in read {
+                if !seen.contains(&r) && ask.sets.contains_key(&r) {
+                    seen.push(r);
+                }
+            }
+        }
+        at += 1;
+    }
+    seen.into_iter()
+        .filter(|n| !n.contains("__") && ask.sets.get(n).is_some_and(|s| s.grain == Grain::Stack))
+        .collect()
+}
+
+/// A count of nothing, explained before the funnel.
+///
+/// The zero row explanation and [`emptied_by`] were worked out last, from
+/// a funnel counted whole, and the funnel of a session set that reads
+/// several stack sets through `has` makes those sets again for every one
+/// of its stages: at the size of a real registry it does not end in the
+/// time a draft has, and the two things a count of nothing most needs
+/// never came.
+///
+/// So the stack sets the answer cannot do without ([`needed_sets`]) are
+/// counted first, by the passes the funnel runs for them: each pass is the
+/// one the funnel would run, for the sets it would count together, in the
+/// order it would reach them, and what it counted is kept
+/// ([`Early::passes`]), so the funnel reads it and runs no statement for
+/// those sets. A diagnosis that has the time for everything runs the
+/// statements it always ran, these first.
+///
+/// Where one of those sets holds rows before its `where` and none after
+/// it, the answer is known to hold none: the zero row explanation names
+/// the first of its clauses that kept no row, in the sentence the funnel
+/// gives, and [`emptied_by`] is run for it at once, on the counts of the
+/// pass. Both are served whether or not the funnel ends in time: the
+/// funnel is cut as it always was, and says so.
+///
+/// Nothing is said where the pass cannot say it as the funnel would: of a
+/// set no pass counts (one with no `where`, or one whose `where` reads
+/// the rows around its own), of a set that is empty before its `where`
+/// and has a relation of its own (the stage that emptied it is one the
+/// pass does not count), and of a set a quasi identifying field chose the
+/// rows of, whose counts the funnel may hold back. The funnel goes on as
+/// before for those, and so it does where keys are asked or every stage
+/// is counted by its own statement, which have no pass to read.
+#[allow(clippy::too_many_arguments)]
+fn explain_first(
+    registry: &mut Registry,
+    ask: &Ask,
+    validated: &Validated,
+    names: &dyn Names,
+    scope: &Scope,
+    scheme: &Scheme,
+    bounds: Bounds,
+    reader: Option<&mut Store>,
+    budget: Option<(Instant, u64)>,
+    ahead: &mut Ahead,
+    sessions_fresh: &std::cell::Cell<bool>,
+    early: &mut Early,
+) -> Result<(), RunError> {
+    let needed = needed_sets(ask);
+    if needed.is_empty() {
+        return Ok(());
+    }
+    let mut counter = Counter {
+        runner: Runner {
+            names,
+            scheme,
+            bounds,
+            reader,
+            unsealed: scope.unsealed,
+            sessions_fresh,
+        },
+        names,
+        scope,
+        lean: true,
+        ahead,
+        budget: budget.map(|(started, ms)| Budget {
+            started,
+            ms,
+            statement_ms: bounds.timeout_ms,
+            part: 0,
+            spent_in: None,
+        }),
+    };
+    let path = answer_path(ask);
+    // The passes, in the order the funnel reaches them. A pass that counts
+    // none of the sets needed is left to the funnel, and the sets it will
+    // count there are kept out of the passes run here (`later`), so every
+    // pass counts the sets it would have counted.
+    let mut later: BTreeSet<String> = BTreeSet::new();
+    for name in &validated.order {
+        if needed
+            .iter()
+            .all(|n| early.passes.passed.contains_key(n) || later.contains(n))
+        {
+            break;
+        }
+        let Some(set) = ask.sets.get(name) else {
+            continue;
+        };
+        if name.contains("__")
+            || set.grain != Grain::Stack
+            || early.passes.passed.contains_key(name)
+            || later.contains(name)
+        {
+            continue;
+        }
+        let together = counted_together(ask, &validated.order, name, set, &early.passes, &later);
+        if !together.iter().any(|n| needed.contains(n)) {
+            later.extend(together);
+            continue;
+        }
+        run_pass(
+            &mut counter,
+            registry,
+            ask,
+            &path,
+            together,
+            &mut early.passes,
+        )?;
+        if counter.spent() {
+            return Ok(());
+        }
+    }
+    if matches!(counter.ahead, Ahead::Listed(_)) {
+        return Ok(());
+    }
+    // the stages the passes counted, as the funnel keys them, of the sets
+    // needed whose counts the funnel shows as the pass has them
+    let mut stage_counts = StageCounts::new();
+    let mut empty: Vec<&String> = Vec::new();
+    for name in &validated.order {
+        let (Some(set), Some(Some(pass))) = (ask.sets.get(name), early.passes.passed.get(name))
+        else {
+            continue;
+        };
+        if !needed.contains(name)
+            || pass.stages.len() != set.where_.len() + 1
+            || pass.stages.iter().any(|c| c.quasi || c.rows.is_none())
+        {
+            continue;
+        }
+        let Some((_, before)) = steps(set)
+            .into_iter()
+            .find(|(s, _)| *s == before_where(set))
+        else {
+            continue;
+        };
+        let labels = std::iter::once(before).chain(
+            set.where_
+                .iter()
+                .map(|c| format!("where {}", clause_text(c))),
+        );
+        let stages: Vec<(String, Count)> = labels.zip(pass.stages.iter().copied()).collect();
+        for (label, count) in &stages {
+            stage_counts.insert((name.clone(), label.clone()), (count.rows, count.subjects));
+        }
+        // the first stage that kept no row
+        let Some(at) = stages
+            .iter()
+            .position(|(_, c)| c.rows == Some(0) && c.subjects == Some(0))
+        else {
+            continue;
+        };
+        // a set empty before its `where` came to nothing somewhere the
+        // pass did not count: at a relation of its own, or in the set it
+        // is drawn from or is of, which says so itself where it can. Only
+        // a set that reads the rows of its grain as they are is empty at
+        // its source, the stage the funnel names too
+        if at == 0
+            && (before_where(set) != Step::Source
+                || matches!(&set.from, Some(Src::Set(_)))
+                || set.of.is_some())
+        {
+            continue;
+        }
+        empty.push(name);
+        if early.zero_rows.is_none() {
+            early.zero_rows = Some(format!(
+                "no {} of {} survives {}; everything after it is empty",
+                set.grain.name(),
+                name,
+                stages[at].0
+            ));
+        }
+    }
+    // the clause that emptied a set, for the sets found empty, in the
+    // order the answer reads them
+    if !empty.is_empty() {
+        let sets: Vec<String> = path.iter().filter(|p| empty.contains(p)).cloned().collect();
+        early.warnings = emptied_by(
+            &mut counter,
+            registry,
+            ask,
+            &sets,
+            &stage_counts,
+            &mut early.left_out,
+        );
+    }
+    Ok(())
 }
 
 /// A reborrow of the door's reader for one more use.
@@ -1721,6 +2142,7 @@ fn counted(
     in_one_pass: bool,
     ahead: &mut Ahead,
     sessions_fresh: &std::cell::Cell<bool>,
+    early: &Early,
 ) -> Result<Diagnosis, RunError> {
     let mut counter = Counter {
         runner: Runner {
@@ -1752,11 +2174,9 @@ fn counted(
     // what a pass over a set the answer reads its rows through counted of
     // the rows each of its clauses' fields is unknown on, by set and clause
     let path = answer_path(ask);
-    let mut path_nulls: BTreeMap<String, Vec<Option<Option<i64>>>> = BTreeMap::new();
-    // what a pass counted of each set, none where it counted nothing; and
-    // whether sets of the same rows are still counted together
-    let mut passed: BTreeMap<String, Option<Pass>> = BTreeMap::new();
-    let mut alone = false;
+    // what a pass counted of each set: to begin with, the sets counted
+    // ahead of the funnel ([`explain_first`]), which are not counted again
+    let mut passes = early.passes.clone();
     for name in &validated.order {
         if name.contains("__") {
             continue;
@@ -1777,54 +2197,13 @@ fn counted(
             // is reached, so the stages before it are counted first; with
             // them the stages of every later set of the same rows
             let stage = stage_of(set, &step).filter(|_| in_one_pass && !with_keys);
-            if stage.is_some() && !passed.contains_key(name) {
-                let mut together = vec![name.clone()];
-                if !alone && plain(set) {
-                    // the pass answers a row for each mix of depths its
-                    // subjects have, at most the product of the sets'
-                    // stages: sets are added while that stays a short
-                    // answer, and the rest are counted by a later pass
-                    let mut mixes = set.where_.len() + 1;
-                    for other in &validated.order {
-                        let Some(o) = ask.sets.get(other) else {
-                            continue;
-                        };
-                        if other == name
-                            || other.contains("__")
-                            || passed.contains_key(other)
-                            || o.grain != set.grain
-                            || !plain(o)
-                            || !one_pass(o)
-                            || mixes * (o.where_.len() + 1) > TOGETHER
-                        {
-                            continue;
-                        }
-                        mixes *= o.where_.len() + 1;
-                        together.push(other.clone());
-                    }
-                }
-                let mut counted = counter.pass(registry, ask, &together)?;
-                if counted.is_none() && together.len() > 1 && !counter.spent() {
-                    // the sets do not count together: each by itself
-                    alone = true;
-                    together.truncate(1);
-                    counted = counter.pass(registry, ask, &together)?;
-                }
-                passed.insert(name.clone(), None);
-                let counted = counted.unwrap_or_default();
-                let (sets, shared) = PASSED.get();
-                PASSED.set((
-                    sets + counted.len(),
-                    shared + if counted.len() > 1 { counted.len() } else { 0 },
-                ));
-                for (of, pass) in counted {
-                    if path.contains(&of) {
-                        path_nulls.insert(of.clone(), pass.nulls.clone());
-                    }
-                    passed.insert(of, Some(pass));
-                }
+            if stage.is_some() && !passes.passed.contains_key(name) {
+                let together =
+                    counted_together(ask, &validated.order, name, set, &passes, &BTreeSet::new());
+                run_pass(&mut counter, registry, ask, &path, together, &mut passes)?;
             }
-            let counted = stage.and_then(|j| passed.get(name)?.as_ref()?.stages.get(j).copied());
+            let counted =
+                stage.and_then(|j| passes.passed.get(name)?.as_ref()?.stages.get(j).copied());
             let (mut count, mut keys) = if let Some(count) = counted {
                 (count, Vec::new())
             } else if with_keys {
@@ -1883,7 +2262,7 @@ fn counted(
             continue;
         }
         let no_nulls = Vec::new();
-        let nulls_of = path_nulls.get(on).unwrap_or(&no_nulls);
+        let nulls_of = passes.path_nulls.get(on).unwrap_or(&no_nulls);
         let all = steps(set);
         for (w, c) in set.where_.iter().enumerate() {
             let this = format!("where {}", clause_text(c));
@@ -1999,8 +2378,26 @@ fn counted(
             &stage_counts,
         ));
         // a stack set two of its clauses emptied, one of them often
-        // written in a set it is drawn from
-        warnings.extend(emptied_by(&mut counter, registry, ask, &stage_counts));
+        // written in a set it is drawn from. The counts the early pass
+        // made for it are read and not made again; and what the early
+        // pass found is served where the time did not reach this far
+        let mut left_out = early.left_out.clone();
+        let found = emptied_by(
+            &mut counter,
+            registry,
+            ask,
+            &path,
+            &stage_counts,
+            &mut left_out,
+        );
+        let first: Vec<Issue> = early
+            .warnings
+            .iter()
+            .filter(|w| !found.contains(w))
+            .cloned()
+            .collect();
+        warnings.extend(found);
+        warnings.extend(first);
     }
     // unresolved values
     let mut unresolved = Vec::new();
@@ -2032,7 +2429,11 @@ fn counted(
                 )
             })
             .or_else(|| Some(format!("{} answers with no rows", ask.out.set))),
-        _ => None,
+        // the answer has rows, and nothing is said of a zero
+        Some(Some(_)) => None,
+        // the funnel did not reach the answer's set, or its count is held:
+        // what the early pass found is what is known
+        _ => early.zero_rows.clone(),
     };
     let mut next = Vec::new();
     if zero_rows.is_some() {
@@ -2821,7 +3222,9 @@ fn drawn_from<'a>(ask: &'a Ask, name: &'a str) -> Vec<&'a str> {
 /// the zero row explanation names the clause the set came to nothing at,
 /// and nothing said that the other clause, written somewhere else, is why.
 ///
-/// For each stack set on the answer's path that holds rows before its own
+/// For each of the sets given (the stack sets on the answer's path, or,
+/// before the funnel, the sets the answer cannot do without that a pass
+/// found empty, [`explain_first`]) that holds rows before its own
 /// `where` and none after it, the clause it came to nothing at is the
 /// first of its own clauses whose stage kept no row. The set is then
 /// counted with one other clause left out at a time: each clause that
@@ -2847,18 +3250,27 @@ fn drawn_from<'a>(ask: &'a Ask, name: &'a str) -> Vec<&'a str> {
 /// them, a set whose own count the funnel holds back is not looked at,
 /// and a count that comes back held is a set with rows whose number is
 /// not said.
+///
+/// The stages are read from `stage_counts`, the funnel's or a pass's, so
+/// the warning does not wait for the funnel to reach the set. Each count
+/// made is kept in `counted`, and one found there is read and not made
+/// again: the counts made before the funnel are the ones the look over
+/// the whole path reads after it, which then costs no statement for them
+/// and says what it always said.
 fn emptied_by(
     counter: &mut Counter<'_>,
     registry: &mut Registry,
     ask: &Ask,
+    sets: &[String],
     stage_counts: &StageCounts,
+    counted: &mut LeftOut,
 ) -> Vec<Issue> {
     let mut found = Vec::new();
     if counter.spent() || matches!(counter.ahead, Ahead::Listed(_)) {
         return found;
     }
     let mut left_out = 0;
-    'sets: for name in answer_path(ask) {
+    'sets: for name in sets.iter().cloned() {
         let Some(set) = ask.sets.get(&name) else {
             continue;
         };
@@ -2924,15 +3336,24 @@ fn emptied_by(
                 continue;
             };
             left_out += 1;
-            let v = variant(&without, &name, &step, Level::Count);
-            let Ok(count) = counter.count(registry, &v) else {
-                continue;
+            // a count the early pass made is read, and not made again
+            let key = (name.clone(), owner.to_string(), i);
+            let rows = match counted.get(&key) {
+                Some(rows) => *rows,
+                None => {
+                    let v = variant(&without, &name, &step, Level::Count);
+                    let Ok(count) = counter.count(registry, &v) else {
+                        continue;
+                    };
+                    if counter.spent() {
+                        break 'sets;
+                    }
+                    counted.insert(key, count.rows);
+                    count.rows
+                }
             };
-            if counter.spent() {
-                break 'sets;
-            }
-            if count.rows != Some(0) {
-                frees.push((owner, i, count.rows));
+            if rows != Some(0) {
+                frees.push((owner, i, rows));
             }
         }
         let [(owner, i, rows)] = frees.as_slice() else {
