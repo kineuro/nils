@@ -5990,3 +5990,88 @@ out: {set: eligible, level: count}
     assert_eq!(strict_file["repairs"], serde_json::json!([]), "{printed}");
     assert_eq!(strict_file["hash"], strict["hash"], "{printed}");
 }
+
+/// The values door searches a text field: `contains` answers the values
+/// that hold a text, letter case aside, under the same limit, and refuses
+/// a text too short and a field whose values are not listed.
+#[test]
+fn the_values_door_finds_the_values_that_hold_a_text() {
+    let home = synthetic();
+    let server = Server::start(&home, 1000, &[]);
+    let door = "/api/ask/catalog/stack/text_series_description/values";
+    let (status, listed) = server.request("GET", &format!("{door}?limit=50"), None, None);
+    assert_eq!(status, 200, "{listed}");
+    let value = listed["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|i| i[0].as_str())
+        .find(|v| {
+            *v != "null"
+                && v.chars().count() > 4
+                && v.chars().take(4).all(|c| c.is_ascii_alphanumeric())
+        })
+        .unwrap()
+        .to_string();
+    let needle: String = value.chars().take(4).collect::<String>().to_uppercase();
+    let (status, found) = server.request("GET", &format!("{door}?contains={needle}"), None, None);
+    assert_eq!(status, 200, "{found}");
+    assert_eq!(found["kind"], "values", "{found}");
+    let items = found["items"].as_array().unwrap();
+    assert!(!items.is_empty(), "{found}");
+    let plain = needle.to_lowercase();
+    assert!(
+        items
+            .iter()
+            .all(|i| i[0].as_str().unwrap().to_lowercase().contains(&plain)),
+        "{found}"
+    );
+    assert!(
+        items.iter().any(|i| i[0].as_str() == Some(value.as_str())),
+        "{found}"
+    );
+    assert_eq!(found["distinct"], items.len(), "{found}");
+    // under the limit
+    let (status, one) = server.request(
+        "GET",
+        &format!("{door}?contains={needle}&limit=1"),
+        None,
+        None,
+    );
+    assert_eq!(status, 200, "{one}");
+    assert_eq!(one["items"].as_array().unwrap().len(), 1, "{one}");
+    // no value holds the text
+    let (status, none) = server.request(
+        "GET",
+        &format!("{door}?contains=zzqqxx-no-such"),
+        None,
+        None,
+    );
+    assert_eq!(status, 200, "{none}");
+    assert_eq!(none["items"], serde_json::json!([]), "{none}");
+    assert_eq!(none["distinct"], 0, "{none}");
+    // too short: refused, with the least and what to do
+    let (status, short) = server.request("GET", &format!("{door}?contains=ab"), None, None);
+    assert_eq!(status, 400, "{short}");
+    assert!(
+        short["error"]
+            .as_str()
+            .is_some_and(|e| e.starts_with("contains takes at least 3 characters")),
+        "{short}"
+    );
+    assert!(short["next"].is_string(), "{short}");
+    // a field shown as shapes is not searched
+    let (status, shaped) = server.request(
+        "GET",
+        "/api/ask/catalog/stack/station_name/values?contains=station",
+        None,
+        None,
+    );
+    assert_eq!(status, 400, "{shaped}");
+    assert!(
+        shaped["error"]
+            .as_str()
+            .is_some_and(|e| e.contains("shown as shapes")),
+        "{shaped}"
+    );
+}

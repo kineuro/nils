@@ -44,6 +44,13 @@ pub enum AffordanceError {
         field: String,
         next: String,
     },
+    /// The value sampler was asked to search in a way it does not (a text
+    /// too short, a field whose values are not listed): the caller's to
+    /// change, with what to do next.
+    NoSearch {
+        message: String,
+        next: String,
+    },
     Message(String),
 }
 
@@ -59,6 +66,7 @@ impl fmt::Display for AffordanceError {
             AffordanceError::NoField { level, field, .. } => {
                 write!(f, "no field {field} at {level} in this scope")
             }
+            AffordanceError::NoSearch { message, .. } => f.write_str(message),
             AffordanceError::Message(m) => f.write_str(m),
         }
     }
@@ -516,6 +524,73 @@ pub fn values(
     cap: usize,
     reader: Option<&mut Store>,
 ) -> Result<Sample, AffordanceError> {
+    values_containing(registry, level, field, s, cap, reader, None)
+}
+
+/// The fewest characters a search of a field's values takes.
+pub const CONTAINS_MIN: usize = 3;
+
+/// [`values`], of the values that contain a text, letter case aside: how a
+/// word that is not among a field's most common values is found (a niche
+/// product name in a series description). The values that match, with
+/// their counts, the most common first, under the same cap; `distinct` is
+/// how many values match.
+///
+/// Only a text field whose values are listed is searched. A field shown
+/// as shapes (quasi identifying, sensitive) is not: a search would say
+/// whether a value is there that the listing does not show. A stack's
+/// axis is not either, since its values are the catalog's own list. The
+/// text is [`CONTAINS_MIN`] characters or more, so a search is a word and
+/// not a walk through the alphabet.
+pub fn values_containing(
+    registry: &mut Registry,
+    level: &str,
+    field: &str,
+    s: &Setting<'_>,
+    cap: usize,
+    reader: Option<&mut Store>,
+    contains: Option<&str>,
+) -> Result<Sample, AffordanceError> {
+    let contains = contains.map(str::trim);
+    if let Some(text) = contains {
+        let listing =
+            format!("GET /api/ask/catalog/{level}/{field}/values lists the most common values");
+        if text.chars().count() < CONTAINS_MIN {
+            return Err(AffordanceError::NoSearch {
+                message: format!(
+                    "contains takes at least {CONTAINS_MIN} characters, and {text:?} has {}",
+                    text.chars().count()
+                ),
+                next: format!("search for a longer text; without contains, {listing}"),
+            });
+        }
+        let searched = s.names.field(level, field).filter(|info| {
+            !matches!(
+                info.class,
+                Class::QuasiIdentifying | Class::Sensitive | Class::Identifying
+            )
+        });
+        if s.names.field(level, field).is_some() && searched.is_none() {
+            return Err(AffordanceError::NoSearch {
+                message: format!(
+                    "the values of {level}.{field} are shown as shapes, and a field whose values are not listed is not searched"
+                ),
+                next: format!("without contains, {listing} as shapes"),
+            });
+        }
+        if s.names.field(level, field).is_none()
+            && level == "stack"
+            && s.names.axis_names(field).is_some()
+        {
+            return Err(AffordanceError::NoSearch {
+                message: format!(
+                    "{field} is an axis, and contains searches a text field: an axis's values are the catalog's own list"
+                ),
+                next: "GET /api/ask/catalog lists every value of the axis with its terms"
+                    .to_string(),
+            });
+        }
+    }
     // Wave 7a: a stack's axis is sampled as a field is, each value once in
     // the form the pack stores, a stack of several values under each
     let axis = level == "stack"
@@ -543,11 +618,20 @@ pub fn values(
     } else {
         cap.saturating_add(1)
     };
+    // the rows searched: every row of the level, or those whose value
+    // contains the text
+    let rows_of = || match contains {
+        Some(text) => serde_json::json!({
+            "grain": level,
+            "where": [["contains", {}, ["field", {}, field], text]]
+        }),
+        None => serde_json::json!({"grain": level}),
+    };
     let text = serde_json::json!({
         "ast_version": 1,
         "name": format!("values of {level}.{field}"),
         "sets": {
-            "v": {"grain": level},
+            "v": rows_of(),
             "g": {"grain": "group", "group": {"of": "v", "by": [key.clone()]}}
         },
         "keep": ["g"],
@@ -564,7 +648,7 @@ pub fn values(
         "ast_version": 1,
         "name": format!("distinct of {level}.{field}"),
         "sets": {
-            "v": {"grain": level},
+            "v": rows_of(),
             "g": {"grain": "group", "group": {"of": "v", "by": [key]}}
         },
         "keep": ["g"],

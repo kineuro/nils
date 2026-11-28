@@ -497,6 +497,15 @@ fn affordance_err(e: AffordanceError) -> Reply {
             }
             reply
         }
+        // the value sampler asked to search what it does not: the caller's
+        // to change
+        e @ AffordanceError::NoSearch { .. } => {
+            let mut reply = Reply::error(400, e.to_string());
+            if let AffordanceError::NoSearch { next, .. } = e {
+                reply.body["next"] = json!(next);
+            }
+            reply
+        }
         other => Reply::error(500, other.to_string()),
     }
 }
@@ -1095,8 +1104,18 @@ fn answer(
                 .and_then(|l| l.parse::<usize>().ok())
                 .unwrap_or(caps.options_values as usize)
                 .clamp(1, caps.options_values as usize);
-            let sample = affordance::values(registry, level, field, &s, cap, Some(reader))
-                .map_err(affordance_err)?;
+            // `contains`: the values that hold a text, letter case aside,
+            // for a word that is not among the most common values
+            let sample = affordance::values_containing(
+                registry,
+                level,
+                field,
+                &s,
+                cap,
+                Some(reader),
+                query.get("contains").map(String::as_str),
+            )
+            .map_err(affordance_err)?;
             Ok(Reply::ok(
                 serde_json::to_value(sample).unwrap_or(Value::Null),
             ))
