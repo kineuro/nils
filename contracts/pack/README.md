@@ -73,6 +73,25 @@ ask reads it at the doors that repair authored text, says each reading, and
 its catalog serves it. An engine that does not know the key loads the pack as
 it did and reads nothing wider. The manifest is unchanged.
 
+Added in place to version 11, additively, two things an older engine does not
+read and an older pack never writes. An axis file may carry `ask_default`,
+the values of the axis a question counts unless it says otherwise (the MRI
+pack's `disposition`: `acquisition` and `scanner_derived`); the loader holds
+it to the axis's own values, at least one, each once, and the ask adds the
+clause to a question authored as text whose stack sets name no value of the
+axis, and says so; where the axis's `default` is among them, the clause also
+counts a stack that holds no value of the axis yet. And a pack may hold a `families` folder beside its
+manifest, one file a family (`families/<id>.yml`: `family`, `label`,
+`terms`, `summary`, `products`, `ask` and an optional `raw`), which says how
+the images one acquisition leaves are filed; the loader holds each file to
+its keys, its names and the pack's own axes and values (and refuses a clause
+that carries the option `exact`, which is a question's own), the ask's catalog
+holds its clauses to the language and serves it whole, and no rule and no
+sort reads it. The folder is found by its name and is not in the manifest:
+an engine that does not know it reads no folder the manifest does not name
+and loads the pack as it did, and an axis key it does not know it does not
+read. The manifest is unchanged.
+
 The engine's own copy of the version is `nils_pack::CONTRACT`; a test keeps
 the two the same and keeps every manifest key the loader reads on the schema.
 
